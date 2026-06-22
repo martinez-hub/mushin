@@ -1,7 +1,7 @@
 """Flagship example: run a sweep, get a labeled xarray dataset back.
 
 Trains a tiny logistic-regression classifier on a fixed synthetic 2-class
-dataset across a grid of learning rates and seeds, records validation accuracy,
+dataset across a grid of learning rates and seeds, records training accuracy,
 and returns the results as an ``xarray.Dataset`` with dims ``(lr, seed)``.
 
 Run as a script to also print the dataset and save a plot::
@@ -12,7 +12,6 @@ Run as a script to also print the dataset and save a plot::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import torch as tr
 
@@ -21,9 +20,10 @@ from mushin.workflows import MultiRunMetricsWorkflow
 
 LEARNING_RATES = [0.01, 0.1, 1.0]
 SEEDS = [0, 1, 2]
+POINTS_PER_CLASS = 256
 
 
-def _make_data(seed: int, n: int = 256) -> tuple[tr.Tensor, tr.Tensor]:
+def _make_data(seed: int, n: int = POINTS_PER_CLASS) -> tuple[tr.Tensor, tr.Tensor]:
     g = tr.Generator().manual_seed(seed)
     x0 = tr.randn(n, 2, generator=g) + tr.tensor([2.0, 2.0])
     x1 = tr.randn(n, 2, generator=g) + tr.tensor([-2.0, -2.0])
@@ -54,7 +54,7 @@ class LRSweep(MultiRunMetricsWorkflow):
         return result
 
 
-def build_dataset(working_dir: Optional[Path] = None):
+def build_dataset(working_dir: Path | None = None):
     """Run the learning-rate x seed sweep and return an ``xarray.Dataset``."""
     wf = LRSweep()
     wf.run(

@@ -1,10 +1,4 @@
-import sys
-from pathlib import Path
-
 import pytest
-
-EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
-sys.path.insert(0, str(EXAMPLES_DIR))
 
 
 @pytest.mark.usefixtures("cleandir")

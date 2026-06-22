@@ -65,6 +65,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["examples"]
 filterwarnings = [
     # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read
     # results back; this deprecation is about that behavior changing upstream.
