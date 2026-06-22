@@ -1,4 +1,11 @@
-# mushin
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logos/mushin-dark.png">
+    <img src="logos/mushin-light.png" alt="mushin logo" width="200">
+  </picture>
+</p>
+
+<h1 align="center">mushin</h1>
 
 [![CI](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml/badge.svg)](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mushin.svg)](https://pypi.org/project/mushin/)
