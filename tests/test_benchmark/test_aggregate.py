@@ -12,4 +12,4 @@ def test_to_dataset_shape_and_values():
     assert ds.sizes == {"method": 2, "seed": 2}
     assert set(ds.data_vars) == {"accuracy", "f1"}
     assert list(ds["method"].values) == ["ours", "base"]
-    assert float(ds["accuracy"].sel(method="ours").isel(seed=0)) == 0.9
+    assert float(ds["accuracy"].sel({"method": "ours"}).isel(seed=0)) == 0.9
