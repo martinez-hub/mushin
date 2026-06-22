@@ -57,7 +57,9 @@ def load_from_checkpoint(
         ckpt = Path.home() / ".torch" / "models" / ckpt
     log.info(f"Loading model checkpoint from {ckpt}")
 
-    ckpt_data: dict[str, Any] = torch.load(ckpt, map_location="cpu")
+    # weights_only=False: these are trusted, self-produced checkpoints that may
+    # hold more than tensors. torch 2.6 flipped this default to True.
+    ckpt_data: dict[str, Any] = torch.load(ckpt, map_location="cpu", weights_only=False)
 
     if weights_key is not None:
         assert weights_key in ckpt_data
@@ -129,7 +131,7 @@ def load_experiment(
         metrics = dict()
         for f in files:
             name = f.name
-            metrics[name[:-3]] = torch.load(f)
+            metrics[name[:-3]] = torch.load(f, weights_only=False)
 
         # Load path to checkpoints
         ckpts = [str(ckpt.resolve()) for ckpt in path.parent.glob("**/*.ckpt")]

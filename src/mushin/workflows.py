@@ -560,7 +560,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         >>> wf.load_metrics("metrics.pkl")
         >>> wf.metrics
         dict(a=[1, 2, 3], b=[False, False, False])"""
-        return tr.load(file_path)
+        # weights_only=False: workflow-produced metrics files are trusted and
+        # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
+        return tr.load(file_path, weights_only=False)
 
     def run(
         self,

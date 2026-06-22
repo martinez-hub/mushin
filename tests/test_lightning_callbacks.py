@@ -28,7 +28,7 @@ def test_metrics_callback(testing):
         metric_files = list(Path(".").glob("**/fit_metrics.pt"))
 
     assert len(metric_files) == 1
-    metrics = torch.load(metric_files[0])
+    metrics = torch.load(metric_files[0], weights_only=False)
     assert isinstance(metrics, dict)
 
     if testing:

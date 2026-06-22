@@ -29,8 +29,8 @@ dependencies = [
     "hydra-core >= 1.2.0",
     # torch dropped Intel-macOS (x86_64) wheels after 2.2.x, so cap there on that
     # platform only; everywhere else take any modern torch.
-    "torch >= 1.10.0,<2.3 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "torch >= 1.10.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "torch >= 1.13.0,<2.3 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch >= 1.13.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     # torch 2.2.x (the Intel-macOS cap above) is built against NumPy 1.x; that
     # platform is inherently Python <=3.11. Everywhere else take NumPy 2.x.
     "numpy >= 1.24,<2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",

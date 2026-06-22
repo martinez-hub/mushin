@@ -373,7 +373,7 @@ class ScndMultiRun(MultiRunMetricsWorkflow):
     # loads test metrics, multiplies each by `val` and saves
     @staticmethod
     def task(job_dir, val):
-        result = tr.load(f"{job_dir}/test_metrics.pt")
+        result = tr.load(f"{job_dir}/test_metrics.pt", weights_only=False)
 
         # val multiplies each metric
         result = {k: v * val for k, v in result.items()}
