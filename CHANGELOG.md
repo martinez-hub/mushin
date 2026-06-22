@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-06-22
+## [0.1.0] - 2026-06-22
 
 First release of `mushin` as a standalone package — a fork of the
 `rai_toolbox.mushin` workflow layer from MIT Lincoln Laboratory's
@@ -36,5 +36,5 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/martinez-hub/mushin/releases/tag/v0.4.0
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/martinez-hub/mushin/releases/tag/v0.1.0
