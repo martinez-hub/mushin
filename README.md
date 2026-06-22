@@ -8,8 +8,8 @@
 <h1 align="center">mushin</h1>
 
 [![CI](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml/badge.svg)](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/mushin.svg)](https://pypi.org/project/mushin/)
-[![Python versions](https://img.shields.io/pypi/pyversions/mushin.svg)](https://pypi.org/project/mushin/)
+[![PyPI](https://img.shields.io/pypi/v/mushin-py.svg)](https://pypi.org/project/mushin-py/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mushin-py.svg)](https://pypi.org/project/mushin-py/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 
 Boilerplate-free, reproducible machine-learning experiment workflows built on
@@ -68,21 +68,21 @@ uv run python examples/sweep_to_dataset.py
 
 ## Install
 
-This project uses [uv](https://docs.astral.sh/uv/). For a development
-environment (runtime deps + dev tooling):
+From PyPI (the distribution is named `mushin-py`; you still `import mushin`):
+
+```bash
+pip install mushin-py
+```
+
+For a development environment (runtime deps + dev tooling), this project uses
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync
 ```
 
-Runtime-only install with plain pip also works:
-
-```bash
-pip install .
-```
-
 Optional runtime extras: `viz` (matplotlib, for `RobustnessCurve` plotting) and
-`netcdf` (netCDF4).
+`netcdf` (netCDF4) — e.g. `pip install "mushin-py[viz]"`.
 
 ## Develop
 
