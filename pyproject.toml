@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools >= 61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mushin"
+version = "0.4.0"
+description = "Boilerplate-free, reproducible ML experiment workflows built on PyTorch Lightning and hydra-zen. Carved out of MIT-LL's responsible-ai-toolbox."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Massachusetts Institute of Technology (original rai_toolbox.mushin authors)" },
+]
+keywords = ["machine learning", "reproducibility", "pytorch-lightning", "hydra", "hydra-zen"]
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pytorch-lightning >= 1.5.0",
+    "hydra-zen >= 0.9.0",
+    "hydra-core >= 1.2.0",
+    "torch >= 1.10.0",
+    "numpy",
+    "omegaconf >= 2.1.1",
+    "xarray >= 0.19.0",
+    "typing-extensions >= 4.1.0",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib >= 3.3"]
+netcdf = ["netCDF4 >= 1.5.8"]
+tests = [
+    "pytest >= 7.0.0",
+    "hypothesis >= 6.28.0",
+    "pytest-xdist",
+    "matplotlib >= 3.3",
+    "netCDF4 >= 1.5.8",
+]
+
+[project.urls]
+"Upstream (origin)" = "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
