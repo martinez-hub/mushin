@@ -60,3 +60,23 @@ def test_compare_default_wilcoxon_survives_identical_methods():
     row = df[df["metric"] == "accuracy"].iloc[0]
     assert row["p_value"] == 1.0
     assert not row["significant"]
+
+
+def test_holm_correction_is_nan_safe():
+    # a NaN p-value must stay NaN and not corrupt the other corrected values
+    corrected = holm_correction([0.01, float("nan"), 0.04])
+    assert np.isnan(corrected[1])
+    assert not np.isnan(corrected[0])
+    assert not np.isnan(corrected[2])
+    assert all(0.0 <= c <= 1.0 for c in corrected if not np.isnan(c))
+
+
+def test_compare_single_seed_parametric_is_nan_not_significant():
+    # one seed + a parametric test -> scipy returns a NaN p-value; it must be
+    # surfaced as NaN and flagged not-significant rather than crashing or lying
+    results = {"a": [{"accuracy": 0.9}], "b": [{"accuracy": 0.7}]}
+    ds = to_dataset(results)
+    df = compare_methods(ds, test="welch", alpha=0.05)
+    row = df.iloc[0]
+    assert np.isnan(row["p_value"])
+    assert not row["significant"]

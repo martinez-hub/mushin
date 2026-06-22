@@ -1,3 +1,5 @@
+import pytest
+
 from mushin.benchmark._aggregate import to_dataset
 
 
@@ -13,3 +15,15 @@ def test_to_dataset_shape_and_values():
     assert set(ds.data_vars) == {"accuracy", "f1"}
     assert list(ds["method"].values) == ["ours", "base"]
     assert float(ds["accuracy"].sel({"method": "ours"}).isel(seed=0)) == 0.9
+
+
+def test_to_dataset_rejects_ragged_seed_counts():
+    results = {"a": [{"acc": 0.9}, {"acc": 0.8}], "b": [{"acc": 0.7}]}
+    with pytest.raises(ValueError, match="ragged"):
+        to_dataset(results)
+
+
+def test_to_dataset_rejects_mismatched_metric_keys():
+    results = {"a": [{"acc": 0.9}], "b": [{"f1": 0.7}]}
+    with pytest.raises(ValueError, match="ragged"):
+        to_dataset(results)
