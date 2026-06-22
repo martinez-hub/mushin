@@ -49,14 +49,22 @@ def cohens_d(a, b) -> float:
 
 
 def holm_correction(pvalues) -> list[float]:
-    """Holm-Bonferroni step-down correction, returned in original order."""
+    """Holm-Bonferroni step-down correction, returned in original order.
+
+    NaN p-values (e.g. a scipy test on a single seed) stay NaN and are excluded
+    from the family so they cannot corrupt the correction of the valid ones."""
     pvalues = np.asarray(pvalues, dtype=float)
     m = len(pvalues)
-    order = np.argsort(pvalues)
+    order = np.argsort(pvalues)  # NaNs sort to the end
+    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
     corrected = np.empty(m)
     running = 0.0
     for rank, idx in enumerate(order):
-        running = max(running, (m - rank) * pvalues[idx])
+        p = pvalues[idx]
+        if np.isnan(p):
+            corrected[idx] = np.nan
+            continue
+        running = max(running, (n_valid - rank) * p)
         corrected[idx] = min(running, 1.0)
     return [float(c) for c in corrected]
 
@@ -96,7 +104,7 @@ def compare_methods(
         corrected = holm_correction(pvals) if len(pvals) > 1 else pvals
         for rec, pc in zip(recs, corrected):
             rec["p_corrected"] = float(pc)
-            rec["significant"] = bool(pc < alpha)
+            rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)
             rows.append(rec)
 
     return pd.DataFrame(

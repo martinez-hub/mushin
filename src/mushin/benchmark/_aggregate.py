@@ -23,6 +23,22 @@ def to_dataset(results: dict[str, list[dict[str, float]]]) -> xr.Dataset:
 
     n_seeds = len(results[methods[0]])
     metric_names = list(results[methods[0]][0])
+    metric_keys = set(metric_names)
+
+    # All methods must share the same seed count and metric keys, or the stacked
+    # array would be ragged. Fail with a legible error naming the offender.
+    for m in methods:
+        if len(results[m]) != n_seeds:
+            raise ValueError(
+                f"ragged `results`: method {m!r} has {len(results[m])} seed(s), "
+                f"but method {methods[0]!r} has {n_seeds}"
+            )
+        for s, metric_dict in enumerate(results[m]):
+            if set(metric_dict) != metric_keys:
+                raise ValueError(
+                    f"ragged `results`: method {m!r} seed {s} has metric keys "
+                    f"{sorted(metric_dict)}, expected {sorted(metric_keys)}"
+                )
 
     data_vars = {}
     for metric in metric_names:
