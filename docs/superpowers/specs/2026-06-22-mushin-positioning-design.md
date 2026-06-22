@@ -45,11 +45,64 @@ The strategy uses three framings at different layers rather than betting on one:
   reproducible configs, no YAML hand-wrangling. Coordinate with the (active)
   hydra-zen maintainers so mushin reads as a legitimate ecosystem layer, not
   abandonware under a new name.
-- **North star (grow into this):** "array-native experimentation" — define your
-  experiment as a function, get your results as arrays. The standard-sized
-  ambition, claimed only once the depth backs it.
+- **North star (grow into this):** a unified API for **defining, executing,
+  evaluating, and reporting** scientific experiments across heterogeneous
+  tooling — with mushin **owning the evaluate + report spine** and inheriting or
+  delegating the rest. See "North star & architecture constraint" below. Claimed
+  only once the depth backs it.
 
 In one line: **sell the wedge, build on the ecosystem, aim at the category.**
+
+## North star & architecture constraint
+
+**Mission (the destination):** *mushin provides a unified API for defining,
+executing, evaluating, and reporting scientific experiments across heterogeneous
+tooling.*
+
+This is the MLOps-framework category (ZenML, Metaflow, Kedro, MLflow). What kills
+projects here — and what killed the original mushin — is the **integration
+treadmill**: a layer that wraps every backend must chase all of them forever. The
+only solo-sustainable path depends on one rule: **own a single object; inherit or
+delegate everything else.**
+
+**The owned vs. inherited vs. seam boundary:**
+
+- **Define** — *inherited.* hydra-zen already turns Python into reproducible
+  configs.
+- **Execute across heterogeneous backends** — *inherited.* Hydra's launcher
+  plugins already run the same experiment on local / Slurm / Ray / Joblib /
+  cloud. mushin does not build this.
+- **Evaluate + Report** — *owned.* This is mushin's territory and its moat. The
+  results dataset is the substrate; the value is what is built on it.
+- **Trackers, evaluators, exporters** — *thin, optional, ideally
+  community-maintained seams* around the core dataset. Never god-abstractions
+  mushin must maintain.
+
+**The owned territory, bounded** (so "evaluate + report" does not itself balloon
+back into a dashboard/storage product):
+
+- *In:* aggregate results across seeds/runs **with statistics** (e.g. mean ± CI);
+  **compare** methods/configs and answer "is the difference real?"
+  (significance); emit **reproducible, publication-grade artifacts** (LaTeX /
+  markdown tables, paper figures) that regenerate from the dataset.
+- *Out:* live training dashboards, hosted run history, orchestration, data/model
+  versioning. Those stay W&B's / Hydra's / DVC's job.
+
+**One-liner for the owned spine:** *from sweep to publication-ready comparison,
+reproducibly.* The public lead message is unchanged — "run a sweep, get a
+dataset" is the on-ramp and substrate; evaluate + report is where the depth and
+the moat accrue.
+
+**The core unifying object:** "an experiment is a function; its results are a
+labeled dataset," made portable across *where* it ran and *what* logged it. The
+litmus test for any addition: does it make that object more useful, or does it
+drag mushin into owning a seam? If the latter, it belongs in a plugin, not the
+core.
+
+**How the first evaluate + report feature gets chosen:** not from this document.
+It comes from dogfooding — running a real experiment through mushin and noticing
+the first moment work drops into a notebook to hand-compute a comparison or build
+a figure. That friction is the first feature, because it is real.
 
 ## What mushin is explicitly NOT
 
