@@ -65,6 +65,24 @@ def build_dataset(working_dir: Path | None = None):
     return wf.to_xarray()
 
 
-if __name__ == "__main__":
+def main() -> None:
     ds = build_dataset()
     print(ds)
+
+    # mean accuracy across seeds, as a function of learning rate
+    mean_acc = ds["accuracy"].mean("seed")
+    print("\nmean accuracy by learning rate:")
+    print(mean_acc)
+
+    import matplotlib.pyplot as plt
+
+    mean_acc.plot.line(x="lr", marker="o")
+    plt.xscale("log")
+    plt.xlabel("learning rate")
+    plt.ylabel("mean accuracy")
+    plt.savefig("sweep_accuracy.png", dpi=120, bbox_inches="tight")
+    print("\nsaved plot to sweep_accuracy.png")
+
+
+if __name__ == "__main__":
+    main()
