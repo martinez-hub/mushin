@@ -1,5 +1,10 @@
 # mushin
 
+[![CI](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml/badge.svg)](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mushin.svg)](https://pypi.org/project/mushin/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mushin.svg)](https://pypi.org/project/mushin/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
+
 Boilerplate-free, reproducible machine-learning experiment workflows built on
 [PyTorch Lightning](https://lightning.ai/) and
 [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen).
