@@ -3,6 +3,10 @@
 import logging
 import os
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless backend for all tests; set before pyplot import
+
 import pytest
 from hypothesis import Verbosity, settings
 

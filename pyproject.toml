@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mushin"
-version = "0.4.0"
+version = "0.1.0"
 description = "Boilerplate-free, reproducible ML experiment workflows built on PyTorch Lightning and hydra-zen. Carved out of MIT-LL's responsible-ai-toolbox."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -65,6 +65,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["examples"]
 filterwarnings = [
     # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read
     # results back; this deprecation is about that behavior changing upstream.

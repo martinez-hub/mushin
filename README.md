@@ -17,6 +17,39 @@ The upstream toolbox is no longer maintained (last release May 2023), but the
 dependencies. This package extracts just that layer so it can be maintained and
 used on its own.
 
+## Quickstart: run a sweep, get a dataset
+
+Define your experiment as a function, sweep over parameters, and get the results
+back as a labeled `xarray.Dataset` — not rows in a dashboard you have to export.
+
+```python
+import torch as tr
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+class LRSweep(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr: float, seed: int) -> dict:
+        tr.manual_seed(seed)
+        # ... train a model with this lr/seed ...
+        return dict(accuracy=acc)  # whatever you return becomes a data variable
+
+wf = LRSweep()
+wf.run(lr=multirun([0.01, 0.1, 1.0]), seed=multirun([0, 1, 2]))  # 9 runs
+
+ds = wf.to_xarray()
+# <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
+#   Data variables: accuracy (lr, seed)
+
+ds["accuracy"].mean("seed")   # average over seeds, per learning rate
+```
+
+The full runnable version is in [`examples/sweep_to_dataset.py`](examples/sweep_to_dataset.py):
+
+```bash
+uv run python examples/sweep_to_dataset.py
+```
+
 ## What it provides
 
 - `BaseWorkflow`, `MultiRunMetricsWorkflow`, `RobustnessCurve` — declarative,
