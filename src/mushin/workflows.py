@@ -3,20 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from inspect import getattr_static
 from pathlib import Path
 from typing import (
     Any,
     Callable,
-    DefaultDict,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
     Optional,
-    Sequence,
-    Tuple,
-    Type,
     TypeVar,
     Union,
 )
@@ -32,7 +25,7 @@ from typing_extensions import Self, TypeAlias, TypeGuard
 
 from ._validate import value_check
 
-LoadedValue: TypeAlias = Union[str, int, float, bool, List[Any], Dict[str, Any]]
+LoadedValue: TypeAlias = Union[str, int, float, bool, list[Any], dict[str, Any]]
 
 __all__ = [
     "BaseWorkflow",
@@ -41,7 +34,7 @@ __all__ = [
 ]
 
 
-T = TypeVar("T", List[Any], Tuple[Any])
+T = TypeVar("T", list[Any], tuple[Any])
 T1 = TypeVar("T1")
 
 
@@ -94,10 +87,10 @@ class BaseWorkflow:
 
     _REQUIRED_STATIC_METHODS = ("task", "pre_task")
 
-    cfgs: List[Any]
-    metrics: Dict[str, List[Any]]
-    workflow_overrides: Dict[str, Any]
-    jobs: Union[List[JobReturn], List[Any], JobReturn]
+    cfgs: list[Any]
+    metrics: dict[str, list[Any]]
+    workflow_overrides: dict[str, Any]
+    jobs: Union[list[JobReturn], list[Any], JobReturn]
 
     def __init__(self, eval_task_cfg=None) -> None:
         """Workflows and experiments using Hydra.
@@ -145,7 +138,7 @@ class BaseWorkflow:
     @staticmethod
     def _parse_overrides(
         overrides,
-    ) -> Dict[str, Union[LoadedValue, Sequence[LoadedValue]]]:
+    ) -> dict[str, Union[LoadedValue, Sequence[LoadedValue]]]:
         parser = OverridesParser.create()
         parsed_overrides = parser.parse_overrides(overrides=overrides)
 
@@ -165,7 +158,7 @@ class BaseWorkflow:
     @property
     def multirun_task_overrides(
         self,
-    ) -> Dict[str, Union[LoadedValue, Sequence[LoadedValue]]]:
+    ) -> dict[str, Union[LoadedValue, Sequence[LoadedValue]]]:
         """Returns override param-name -> value.
 
         A sequence of overrides associated with a multirun will
@@ -259,14 +252,14 @@ class BaseWorkflow:
         working_dir: Optional[str] = None,
         sweeper: Optional[str] = None,
         launcher: Optional[str] = None,
-        overrides: Optional[List[str]] = None,
+        overrides: Optional[list[str]] = None,
         task_fn_wrapper: Union[
             Callable[[Callable[..., T1]], Callable[[Any], T1]], None
         ] = zen,
         pre_task_fn_wrapper: Union[
             Callable[[Callable[..., None]], Callable[[Any], None]], None
         ] = zen,
-        version_base: Optional[Union[str, Type[_NotSet]]] = _VERSION_BASE_DEFAULT,
+        version_base: Optional[Union[str, type[_NotSet]]] = _VERSION_BASE_DEFAULT,
         to_dictconfig: bool = False,
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",
@@ -311,7 +304,7 @@ class BaseWorkflow:
 
         to_dictconfig: bool (default: False)
             If ``True``, convert a ``dataclasses.dataclass`` to a ``omegaconf.DictConfig``. Note, this
-            will remove Hydra's cabability for validation with structured configurations.
+            will remove Hydra's capability for validation with structured configurations.
 
         config_name : str (default: "rai_workflow")
             Name of the stored configuration in Hydra's ConfigStore API.
@@ -391,7 +384,7 @@ class BaseWorkflow:
             with_log_configuration=with_log_configuration,
         )
 
-        if isinstance(jobs, List) and len(jobs) == 1:
+        if isinstance(jobs, list) and len(jobs) == 1:
             # hydra returns [jobs]
             jobs = jobs[0]
             _job_nums = [j.hydra_cfg.hydra.job.num for j in jobs]
@@ -418,7 +411,7 @@ def _non_str_sequence(x: Any) -> TypeGuard[Sequence[Any]]:
     return isinstance(x, Sequence) and not isinstance(x, str)
 
 
-def _coerce_list_of_arraylikes(v: List[Any]):
+def _coerce_list_of_arraylikes(v: list[Any]):
     if v and hasattr(v[0], "__array__"):
         return [np.asarray(i) for i in v]
     return v
@@ -515,11 +508,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     #      for re-indexing based on overrides values
 
     _JOBDIR_NAME: str = "job_dir"
-    _target_dir_multirun_overrides: Optional[DefaultDict[str, List[Any]]] = None
+    _target_dir_multirun_overrides: Optional[defaultdict[str, list[Any]]] = None
     output_subdir: Optional[str] = None
 
     # List of all the dirs that the multirun writes to; sorted by job-num
-    multirun_working_dirs: Optional[List[Path]] = None
+    multirun_working_dirs: Optional[list[Path]] = None
 
     @staticmethod
     def task(*args: Any, **kwargs: Any) -> Mapping[str, Any]:  # pragma: no cover
@@ -581,8 +574,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         working_dir: Optional[str] = None,
         sweeper: Optional[str] = None,
         launcher: Optional[str] = None,
-        overrides: Optional[List[str]] = None,
-        version_base: Optional[Union[str, Type[_NotSet]]] = _VERSION_BASE_DEFAULT,
+        overrides: Optional[list[str]] = None,
+        version_base: Optional[Union[str, type[_NotSet]]] = _VERSION_BASE_DEFAULT,
         target_job_dirs: Optional[Sequence[Union[str, Path]]] = None,
         to_dictconfig: bool = False,
         config_name: str = "rai_workflow",
@@ -624,7 +617,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         )
 
     @property
-    def target_dir_multirun_overrides(self) -> Dict[str, List[Any]]:
+    def target_dir_multirun_overrides(self) -> dict[str, list[Any]]:
         """
         For a multirun that sweeps over the target directories of a
         previous multirun, `target_dir_multirun_overrides` provides
@@ -682,7 +675,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 break
 
         for d in dirs:
-            overrides: List[str] = list(
+            overrides: list[str] = list(
                 load_from_yaml(Path(d) / f"{self.output_subdir}/overrides.yaml")
             )
             output = self._parse_overrides(overrides)
@@ -695,7 +688,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         assert len(self.jobs) > 0
         # TODO: Make protocol type for JobReturn
         assert isinstance(self.jobs[0], JobReturn)
-        self.jobs: List[JobReturn]
+        self.jobs: list[JobReturn]
 
         self.multirun_working_dirs = []
 
@@ -720,7 +713,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self.metrics = self._process_metrics(job_metrics)
 
     @staticmethod
-    def _process_metrics(job_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _process_metrics(job_metrics: list[dict[str, Any]]) -> dict[str, Any]:
         metrics = defaultdict(list)
         for task_metrics in job_metrics:
             if task_metrics is None:
@@ -762,7 +755,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         ).hydra.output_subdir
 
         self.multirun_working_dirs = list(
-            (x.parent for x in self.working_dir.glob(f"**/*/{self.output_subdir}"))
+            x.parent for x in self.working_dir.glob(f"**/*/{self.output_subdir}")
         )
 
         # ensure working dirs are sorted by job num
@@ -787,7 +780,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
     def load_metrics(
         self, metrics_filename: Union[str, Sequence[str]]
-    ) -> Dict[str, List[Any]]:
+    ) -> dict[str, list[Any]]:
         """Loads and aggregates across all multirun working dirs, and stores
         the metrics in `self.metrics`.
 
@@ -844,7 +837,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 files = sorted(dir_.glob(name))
                 if not files:
                     raise FileNotFoundError(
-                        f"No files with the path/pattern {dir_/name} were found"
+                        f"No files with the path/pattern {dir_ / name} were found"
                     )
 
                 for f_ in files:
@@ -857,8 +850,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
     @staticmethod
     def _sanitize_coordinate_for_xarray(
-        value: Union[LoadedValue, Sequence[LoadedValue]]
-    ) -> Union[str, int, float, bool, List[Union[str, int, float, bool]]]:
+        value: Union[LoadedValue, Sequence[LoadedValue]],
+    ) -> Union[str, int, float, bool, list[Union[str, int, float, bool]]]:
         """Nested sequences are not permitted for xarray coordinates. This
         Returns a list of scalars when `value` is a multi-run or a scalar.
 
@@ -950,7 +943,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         attrs = {k: v for k, v in cast_overrides.items() if not _non_str_sequence(v)}
 
         # we will add additional coordinates as-needed for multi-dim metrics
-        coords: Dict[str, Any] = orig_coords.copy()
+        coords: dict[str, Any] = orig_coords.copy()
         shape = tuple(len(v) for v in coords.values())
 
         metrics_to_add = self.metrics.copy()
@@ -1029,11 +1022,11 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             Callable[[Callable[..., None]], Callable[[Any], None]], None
         ] = zen,
         target_job_dirs: Optional[Sequence[Union[str, Path]]] = None,  # TODO: add docs
-        version_base: Optional[Union[str, Type[_NotSet]]] = _VERSION_BASE_DEFAULT,
+        version_base: Optional[Union[str, type[_NotSet]]] = _VERSION_BASE_DEFAULT,
         working_dir: Optional[str] = None,
         sweeper: Optional[str] = None,
         launcher: Optional[str] = None,
-        overrides: Optional[List[str]] = None,
+        overrides: Optional[list[str]] = None,
         to_dictconfig: bool = False,
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",

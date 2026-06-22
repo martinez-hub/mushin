@@ -23,22 +23,32 @@ used on its own.
 
 ## Install
 
+This project uses [uv](https://docs.astral.sh/uv/). For a development
+environment (runtime deps + dev tooling):
+
 ```bash
-pip install -e ".[tests]"   # for development / running the test suite
-# or, runtime only:
-pip install -e .
+uv sync
 ```
 
-Optional extras: `viz` (matplotlib, for `RobustnessCurve` plotting) and
+Runtime-only install with plain pip also works:
+
+```bash
+pip install .
+```
+
+Optional runtime extras: `viz` (matplotlib, for `RobustnessCurve` plotting) and
 `netcdf` (netCDF4).
 
-## Test
+## Develop
 
 ```bash
-pytest tests/ --hypothesis-profile fast
+uv run pytest tests/ --hypothesis-profile fast   # tests (DDP test needs >=2 GPUs)
+uv run ruff check .                              # lint
+uv run ruff format .                             # format
+uv run codespell src tests                       # spell check
 ```
 
-The DDP test is skipped unless at least 2 GPUs are available.
+Supported Python versions: 3.9 – 3.14.
 
 ## Relationship to upstream
 

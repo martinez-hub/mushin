@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 import pytest
 import torch
@@ -199,7 +199,11 @@ def test_ddp_with_hydra_runjob(num_jobs):
     module = builds(SimpleLightningModule)
     Config = make_config(trainer=TrainerConfig, module=module, devices=2)
     launch_job = launch(
-        Config, task_fn, overrides, multirun=multirun, version_base="1.1"  # type: ignore
+        Config,
+        task_fn,
+        overrides,
+        multirun=multirun,
+        version_base="1.1",  # type: ignore
     )
 
     if multirun:
@@ -207,10 +211,10 @@ def test_ddp_with_hydra_runjob(num_jobs):
         assert len(launch_job) == 1
         assert isinstance(launch_job[0], list)
         assert isinstance(launch_job[0][0], JobReturn)
-        jobs: List[JobReturn] = launch_job[0]
+        jobs: list[JobReturn] = launch_job[0]
     else:
         assert isinstance(launch_job, JobReturn)
-        jobs: List[JobReturn] = [launch_job]
+        jobs: list[JobReturn] = [launch_job]
 
     # Make sure the parameter was set and used
     for job in jobs:

@@ -17,6 +17,9 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -24,8 +27,14 @@ dependencies = [
     "pytorch-lightning >= 1.5.0",
     "hydra-zen >= 0.9.0",
     "hydra-core >= 1.2.0",
-    "torch >= 1.10.0",
-    "numpy",
+    # torch dropped Intel-macOS (x86_64) wheels after 2.2.x, so cap there on that
+    # platform only; everywhere else take any modern torch.
+    "torch >= 1.10.0,<2.3 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch >= 1.10.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # torch 2.2.x (the Intel-macOS cap above) is built against NumPy 1.x; that
+    # platform is inherently Python <=3.11. Everywhere else take NumPy 2.x.
+    "numpy >= 1.24,<2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy >= 2 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "omegaconf >= 2.1.1",
     "xarray >= 0.19.0",
     "typing-extensions >= 4.1.0",
@@ -34,7 +43,15 @@ dependencies = [
 [project.optional-dependencies]
 viz = ["matplotlib >= 3.3"]
 netcdf = ["netCDF4 >= 1.5.8"]
-tests = [
+
+[project.urls]
+"Upstream (origin)" = "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
+
+# Dev tooling, installed by `uv sync` (PEP 735 dependency group).
+[dependency-groups]
+dev = [
+    "ruff >= 0.6",
+    "codespell >= 2.3",
     "pytest >= 7.0.0",
     "hypothesis >= 6.28.0",
     "pytest-xdist",
@@ -42,11 +59,35 @@ tests = [
     "netCDF4 >= 1.5.8",
 ]
 
-[project.urls]
-"Upstream (origin)" = "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read
+    # results back; this deprecation is about that behavior changing upstream.
+    "ignore:Future Hydra versions will no longer change working directory:UserWarning",
+    # matplotlib internals call deprecated pyparsing APIs; not fixable from here.
+    "ignore:.* deprecated - use .*",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, UP: pyupgrade, B: bugbear
+select = ["E", "W", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B"]  # bugbear is noisy for test fixtures/assertions
+
+[tool.codespell]
+skip = "*.lock,*.ckpt,*.pt,.git,.venv,*.egg-info"
+# "mushin" (無心) and a few ML terms trip the default dictionary.
+ignore-words-list = "mushin,nin,tha"

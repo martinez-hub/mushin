@@ -5,7 +5,7 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from hydra_zen import load_from_yaml
@@ -57,7 +57,7 @@ def load_from_checkpoint(
         ckpt = Path.home() / ".torch" / "models" / ckpt
     log.info(f"Loading model checkpoint from {ckpt}")
 
-    ckpt_data: Dict[str, Any] = torch.load(ckpt, map_location="cpu")
+    ckpt_data: dict[str, Any] = torch.load(ckpt, map_location="cpu")
 
     if weights_key is not None:
         assert weights_key in ckpt_data
@@ -87,14 +87,14 @@ def load_from_checkpoint(
 @dataclass
 class Experiment:
     working_dir: str
-    cfg: Optional[Union[Dict, ListConfig, DictConfig]]
-    ckpts: List[str]
-    metrics: Dict
+    cfg: Optional[Union[dict, ListConfig, DictConfig]]
+    ckpts: list[str]
+    metrics: dict
 
 
 def load_experiment(
     exp_path: Union[str, Path], search_path: Optional[Union[str, Path]] = None
-) -> Union[Experiment, List[Experiment]]:
+) -> Union[Experiment, list[Experiment]]:
     """Loads all configuration and metrics outputs in an experiment directory.
 
     Parameters

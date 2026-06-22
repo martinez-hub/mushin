@@ -2,8 +2,9 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 import string
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import hypothesis.strategies as st
 import matplotlib.pyplot as plt
@@ -415,8 +416,8 @@ def test_multirun_over_jobdir(load_from_working_dir):
     xr1 = wf.to_xarray()
     xr2 = snd_wf.to_xarray()
 
-    assert xr1.dims == {"acc": 2, "epsilon": 3, "images_dim0": 4, "images_dim1": 1}
-    assert xr2.dims == {"val": 2, "job_dir": 6, "images_dim0": 4, "images_dim1": 1}
+    assert xr1.sizes == {"acc": 2, "epsilon": 3, "images_dim0": 4, "images_dim1": 1}
+    assert xr2.sizes == {"val": 2, "job_dir": 6, "images_dim0": 4, "images_dim1": 1}
 
     xr2 = xr2.set_index(job_dir=["epsilon", "acc", "list_vals"]).unstack("job_dir")
     xr2 = xr2.transpose(
@@ -453,7 +454,7 @@ def test_multirun_metrics_workflow_no_metrics(load_from_working_dir):
         wf = NoMetrics().load_from_dir(wf.working_dir, metrics_filename=None)
 
     xdata = wf.to_xarray()
-    assert xdata.dims == {"x": 3, "y": 2}
+    assert xdata.sizes == {"x": 3, "y": 2}
     assert_allclose(xdata.coords["x"].data, [-1, 0, 1])
     assert_allclose(xdata.coords["y"].data, [-10, 10])
     assert len(xdata.data_vars) == 0
@@ -582,8 +583,10 @@ def test_raises_on_non_static_method():
     bool_=st.booleans(),
     float_=st.floats(-10, 10),
     list_=st.lists(st.integers()),
+    # Exclude tokens that Hydra's override parser reinterprets as non-strings
+    # (e.g. "null" -> None, "inf"/"nan" -> float), which can't round-trip as str.
     str_=st.text(alphabet=string.ascii_lowercase).filter(
-        lambda x: x != "true" and x != "false"
+        lambda x: x not in {"true", "false", "null", "none", "nan", "inf"}
     ),
     mrun=st.lists(
         st.booleans() | st.lists(st.integers()),

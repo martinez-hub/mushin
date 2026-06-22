@@ -7,32 +7,43 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dev environment
+        run: uv sync
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Spell check
+        run: uv run codespell src tests README.md pyproject.toml
+
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        experimental: [false]
+        include:
+          # torch / Lightning may not ship 3.14 wheels yet; don't fail CI on it.
+          - python-version: "3.14"
+            experimental: true
+    continue-on-error: ${{ matrix.experimental }}
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install package + test deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[tests]"
-          # TODO: drop once the pinned torch wheels ship with NumPy 2 support.
-          # torch wheels for py3.9 are built against NumPy 1; avoids a binary mismatch.
-          pip install "numpy<2"
-
+          enable-cache: true
+      - name: Sync environment (Python ${{ matrix.python-version }})
+        run: uv sync --python ${{ matrix.python-version }}
       - name: Show resolved environment
-        run: pip list
-
+        run: uv pip list
       - name: Run tests
-        run: pytest tests/ --hypothesis-profile fast -p no:cacheprovider
+        run: uv run pytest tests/ --hypothesis-profile fast -p no:cacheprovider

@@ -4,7 +4,7 @@
 # Only `value_check` and its helpers are needed by mushin; they are vendored here
 # so that this package does not depend on the (unmaintained) rai_toolbox package.
 from numbers import Real
-from typing import Any, Optional, Tuple, TypeVar, Union, cast
+from typing import Any, Optional, TypeVar, Union, cast
 
 T = TypeVar("T", bound=Any)
 
@@ -21,7 +21,7 @@ def value_check(
     name: str,
     value: T,
     *,
-    type_: Union[type, Tuple[type, ...]] = Real,
+    type_: Union[type, tuple[type, ...]] = Real,
     min_: Optional[Union[int, float]] = None,
     max_: Optional[Union[int, float]] = None,
     incl_min: bool = True,

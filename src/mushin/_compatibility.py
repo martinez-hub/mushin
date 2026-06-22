@@ -2,10 +2,9 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 import pytorch_lightning
-from typing_extensions import Final
 
 
 class Version(NamedTuple):
