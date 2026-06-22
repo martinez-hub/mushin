@@ -20,7 +20,7 @@ def compare(
     data: Iterable,
     task: str = "classification",
     *,
-    num_classes: int,
+    num_classes: int | None = None,
     predict_fn: PredictFn | None = None,
     metrics: dict | None = None,
     test: str = "wilcoxon",
@@ -37,8 +37,9 @@ def compare(
         A dataloader yielding ``(x, y)`` batches.
     task : str
         Only ``"classification"`` is supported in this version.
-    num_classes : int
-        Number of classes (keyword-only).
+    num_classes : int or None
+        Number of classes (keyword-only). Required when ``metrics`` is not
+        provided; ignored otherwise.
     test : str
         Significance test key (default ``"wilcoxon"``). See
         ``mushin.benchmark._stats.available_tests``.
@@ -52,7 +53,12 @@ def compare(
             f"task={task!r} is not supported; only 'classification' in this version"
         )
 
-    battery = metrics if metrics is not None else classification_battery(num_classes)
+    if metrics is not None:
+        battery = metrics
+    else:
+        if num_classes is None:
+            raise ValueError("`num_classes` is required when `metrics` is not provided")
+        battery = classification_battery(num_classes)
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, models in methods.items():

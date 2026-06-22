@@ -47,3 +47,16 @@ def test_welch_test_runs():
     ds = to_dataset(results)
     df = compare_methods(ds, test="welch", alpha=0.05)
     assert "p_value" in df.columns and len(df) == 1
+
+
+def test_compare_default_wilcoxon_survives_identical_methods():
+    # identical per-seed values must not crash the default wilcoxon test
+    results = {
+        "a": [{"accuracy": 1.0}, {"accuracy": 1.0}, {"accuracy": 1.0}],
+        "b": [{"accuracy": 1.0}, {"accuracy": 1.0}, {"accuracy": 1.0}],
+    }
+    ds = to_dataset(results)
+    df = compare_methods(ds, test="wilcoxon", alpha=0.05)
+    row = df[df["metric"] == "accuracy"].iloc[0]
+    assert row["p_value"] == 1.0
+    assert not row["significant"]

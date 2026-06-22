@@ -78,7 +78,10 @@ def compare_methods(
         for a, b in itertools.combinations(methods, 2):
             va = ds[metric].sel({"method": a}).values
             vb = ds[metric].sel({"method": b}).values
-            _, p = func(va, vb)
+            if np.allclose(va, vb):
+                p = 1.0
+            else:
+                _, p = func(va, vb)
             recs.append(
                 {
                     "metric": str(metric),

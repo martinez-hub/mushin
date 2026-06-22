@@ -52,3 +52,14 @@ def test_compare_rejects_unknown_task():
 
     with pytest.raises(NotImplementedError):
         compare(methods={"a": []}, data=[], task="regression", num_classes=2)
+
+
+def test_compare_default_test_with_tied_methods():
+    # two perfect methods => identical metrics => default wilcoxon must not crash
+    data = _loader(seed=0)
+    a = [_Perfect(data) for _ in range(3)]
+    b = [_Perfect(data) for _ in range(3)]
+    result = compare(methods={"a": a, "b": b}, data=data, num_classes=3)
+    assert isinstance(result, BenchmarkResult)
+    # all comparisons are between identical methods -> none significant
+    assert not result.comparisons["significant"].any()
