@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Python dependencies (reads uv.lock + pyproject.toml)
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # Bundle minor + patch bumps into one PR to avoid PR sprawl;
+      # major bumps still arrive as individual PRs for careful review.
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions used in CI
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]

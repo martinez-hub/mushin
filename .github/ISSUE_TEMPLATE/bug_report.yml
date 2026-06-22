@@ -1,0 +1,41 @@
+name: Bug report
+description: Report something that isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please search existing issues
+        first to avoid duplicates.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I run ..., I expected ... but got ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest code snippet or steps that reproduce the issue.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: "Output of: `uv run python -c \"import sys, torch, numpy, pytorch_lightning as pl, hydra_zen; print(sys.version); print('torch', torch.__version__); print('numpy', numpy.__version__); print('lightning', pl.__version__); print('hydra-zen', hydra_zen.__version__)\"`"
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Traceback / logs
+      description: Paste the full error output, if any.
+      render: shell
+    validations:
+      required: false

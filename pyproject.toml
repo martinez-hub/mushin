@@ -52,6 +52,7 @@ netcdf = ["netCDF4 >= 1.5.8"]
 dev = [
     "ruff >= 0.6",
     "codespell >= 2.3",
+    "pre-commit >= 3.5",
     "pytest >= 7.0.0",
     "hypothesis >= 6.28.0",
     "pytest-xdist",
