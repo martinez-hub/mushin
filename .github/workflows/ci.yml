@@ -21,7 +21,7 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
       - name: Spell check
-        run: uv run codespell src tests README.md pyproject.toml
+        run: uv run codespell src tests examples README.md CHANGELOG.md pyproject.toml
 
   test:
     runs-on: ubuntu-latest

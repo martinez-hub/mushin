@@ -20,9 +20,6 @@ def test_build_dataset_returns_labeled_grid():
 
 @pytest.mark.usefixtures("cleandir")
 def test_main_writes_plot():
-    import matplotlib
-
-    matplotlib.use("Agg")  # headless backend for CI
     import sweep_to_dataset as ex
 
     ex.main()
