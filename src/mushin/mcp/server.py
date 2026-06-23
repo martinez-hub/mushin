@@ -32,10 +32,20 @@ def _as_list(exps: Any) -> list:
     return [exps] if isinstance(exps, Experiment) else list(exps)
 
 
+def _load_runs(p: Path) -> list:
+    """Load experiment runs at ``p``, or raise if the path has no experiment."""
+    if not p.exists():
+        raise FileNotFoundError(f"{p} not found")
+    exps = _as_list(load_experiment(p))
+    if not exps:
+        raise FileNotFoundError(f"no experiment found at {p} (no .hydra directory)")
+    return exps
+
+
 def _describe_experiment(path: str | Path, root: str | Path | None = None) -> dict:
     """Summarize swept params, metric keys, and run/checkpoint counts."""
     p = _resolve(path, root)
-    exps = _as_list(load_experiment(p))
+    exps = _load_runs(p)
     metric_keys = sorted({k for e in exps for k in (e.metrics or {})})
     flats = [_flatten(_to_jsonable(e.cfg)) for e in exps if e.cfg is not None]
     swept: dict[str, list] = {}
@@ -86,7 +96,7 @@ def _get_metrics(
 ) -> dict:
     """Return per-run metrics, optionally filtered and reduced across runs."""
     p = _resolve(path, root)
-    exps = _as_list(load_experiment(p))
+    exps = _load_runs(p)
     per_run = []
     for e in exps:
         m = _to_jsonable(e.metrics or {})
@@ -106,8 +116,12 @@ def _get_config(
 ) -> dict:
     """Return the resolved Hydra config for one run (``job``) or all runs."""
     p = _resolve(path, root)
-    cfgs = [_to_jsonable(e.cfg) for e in _as_list(load_experiment(p))]
+    cfgs = [_to_jsonable(e.cfg) for e in _load_runs(p)]
     if job is not None:
+        if not 0 <= job < len(cfgs):
+            raise ValueError(
+                f"job {job} out of range; experiment has {len(cfgs)} run(s) at {p}"
+            )
         return {"path": str(p), "job": job, "config": cfgs[job]}
     if len(cfgs) == 1:
         return {"path": str(p), "config": cfgs[0]}
@@ -154,7 +168,7 @@ def create_server(root: str | Path | None = None):
     @mcp.tool()
     def list_experiments(root_dir: str | None = None) -> dict:
         """List experiment run directories (those containing a .hydra/ child)."""
-        return _list_experiments(root_dir if root_dir else rootp)
+        return _list_experiments(root_dir, rootp)
 
     @mcp.tool()
     def describe_experiment(path: str) -> dict:
@@ -219,10 +233,16 @@ def _resolve(path: str | Path, root: str | Path | None) -> Path:
     return p
 
 
-def _list_experiments(root: str | Path | None = None) -> dict:
-    """List run directories (those containing a ``.hydra/`` child) under ``root``."""
-    base = _resolve(root if root is not None else Path.cwd(), root)
-    if not base.exists():
-        raise FileNotFoundError(f"{base} not found")
-    runs = sorted(str(p.parent) for p in base.glob("**/.hydra"))
-    return {"root": str(base), "runs": runs, "count": len(runs)}
+def _list_experiments(
+    base: str | Path | None = None, root: str | Path | None = None
+) -> dict:
+    """List run directories (those containing a ``.hydra/`` child) under ``base``.
+
+    ``root``, when set, confines ``base``: a ``base`` outside ``root`` is rejected.
+    """
+    target = base if base is not None else (root if root is not None else Path.cwd())
+    p = _resolve(target, root)
+    if not p.exists():
+        raise FileNotFoundError(f"{p} not found")
+    runs = sorted(str(d.parent) for d in p.glob("**/.hydra"))
+    return {"root": str(p), "runs": runs, "count": len(runs)}

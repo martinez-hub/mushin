@@ -168,3 +168,58 @@ def test_main_builds_server_without_running(monkeypatch):
     monkeypatch.setattr(cli, "create_server", lambda root: _FakeServer())
     cli.main(["--root", "."])
     assert captured["ran"] is True
+
+
+# Fix A tests
+def test_list_experiments_outside_root_raises(tmp_path):
+    from mushin.mcp.server import RootError, _list_experiments
+
+    _make_experiment(tmp_path / "allowed" / "exp")
+    with pytest.raises(RootError):
+        _list_experiments(tmp_path / "elsewhere", root=tmp_path / "allowed")
+
+
+def test_list_experiments_defaults_base_to_root(tmp_path):
+    from mushin.mcp.server import _list_experiments
+
+    _make_experiment(tmp_path / "exp")
+    out = _list_experiments(None, root=tmp_path)
+    assert out["count"] == 2
+
+
+# Fix B test
+def test_describe_missing_experiment_raises(tmp_path):
+    from mushin.mcp.server import _describe_experiment
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        _describe_experiment(empty)
+
+
+# Fix C test
+def test_get_config_job_out_of_range_raises(tmp_path):
+    from mushin.mcp.server import _get_config
+
+    base = _make_experiment(tmp_path / "exp")
+    with pytest.raises(ValueError):
+        _get_config(base, job=5)
+
+
+# Fix D tests
+def test_get_metrics_reduce_std(tmp_path):
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _get_metrics(base, reduce="std")
+    # population std of [0.8, 0.9]
+    assert out["reduced"]["metrics.accuracy"] == pytest.approx(0.05, abs=1e-4)
+
+
+def test_get_config_single_run(tmp_path):
+    from mushin.mcp.server import _get_config
+
+    base = _make_experiment(tmp_path / "exp", lrs=(0.3,))
+    out = _get_config(base)
+    assert out["config"]["lr"] == 0.3
+    assert "configs" not in out
