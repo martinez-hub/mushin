@@ -56,10 +56,28 @@ container or CI is the reliable way to test newer torch there.
 1. Fork the repo and create a topic branch from `main`.
 2. Make your change, with tests. We use `pytest` + `hypothesis`.
 3. Ensure `make check` passes.
-4. Open a pull request against `main`, filling out the PR template and linking
+4. Add a news fragment under `changes/` (see [Changelog](#changelog) below).
+5. Open a pull request against `main`, filling out the PR template and linking
    any related issue.
-5. CI (lint + the Python test matrix) must pass. `main` is protected and merges
+6. CI (lint + the Python test matrix) must pass. `main` is protected and merges
    require a passing CI run.
+
+### Changelog
+
+Every PR with a user-facing change must add a **news fragment** under
+[`changes/`](changes/README.md): a file named `changes/<PR-or-issue>.<type>.md`
+(types: `added`, `changed`, `fixed`, `removed`, `deprecated`). One line of
+Markdown, written for users. Example:
+
+```
+changes/123.fixed.md
+```
+```
+`Study.from_checkpoints` now validates that the checkpoint list is non-empty.
+```
+
+CI enforces this. For CI-only, refactor, or typo PRs with nothing user-facing,
+add an empty `misc` fragment instead (e.g. `changes/+refactor.misc.md`).
 
 ## Style
 

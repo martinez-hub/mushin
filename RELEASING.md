@@ -1,45 +1,29 @@
-# Releasing
+# Releasing mushin
 
-mushin publishes to PyPI via **Trusted Publishing** (OIDC) — there are no API
-tokens to manage. Releases are triggered by publishing a GitHub Release.
+Releases are published to PyPI by `.github/workflows/publish.yml` when a GitHub
+Release is published whose tag matches the project version.
 
-## One-time PyPI setup (maintainer)
+## Steps
 
-Because the `mushin` project does not exist on PyPI yet, register a **pending
-publisher** before the first release:
-
-1. Sign in to https://pypi.org and go to **Your account → Publishing**.
-2. Under "Add a new pending publisher", fill in:
-   - **PyPI Project Name:** `mushin`
-   - **Owner:** `martinez-hub`
-   - **Repository name:** `mushin`
-   - **Workflow name:** `publish.yml`
-   - **Environment name:** `pypi`
-3. Save. (After the first successful publish, this becomes a normal publisher.)
-
-Optionally, on GitHub add protection rules to the `pypi`
-[environment](https://github.com/martinez-hub/mushin/settings/environments)
-(e.g. required reviewers) for an extra gate before publishing.
-
-## Cutting a release
-
-1. Update the version in `pyproject.toml` (e.g. `0.4.0` → `0.5.0`).
-2. Move the `## [Unreleased]` notes in `CHANGELOG.md` under a new version
-   heading with today's date, and update the compare links at the bottom.
-3. Open a PR with those changes; merge once CI is green.
-4. Tag and push, then create the GitHub Release:
+1. Choose the next version `X.Y.Z` (SemVer; `0.x` keeps breaking changes in the
+   minor slot).
+2. Assemble the changelog from news fragments:
    ```bash
-   git tag v0.5.0          # tag must equal the pyproject version, prefixed "v"
-   git push origin v0.5.0
-   gh release create v0.5.0 --title v0.5.0 --notes-from-tag
+   make changelog VERSION=X.Y.Z
    ```
-   (Or create the release from the GitHub UI.)
-5. Publishing the release triggers `.github/workflows/publish.yml`, which
-   verifies the tag matches the package version, builds the sdist + wheel, and
-   publishes to PyPI.
+   This rewrites `CHANGELOG.md` (a new `## [X.Y.Z] - <today>` section under the
+   towncrier marker) and deletes the consumed fragments. Review the diff;
+   tidy wording if needed.
+3. Bump the version in `pyproject.toml` to `X.Y.Z`, then `uv sync` to update
+   `uv.lock`.
+4. Update the `[Unreleased]`/version link-reference footer at the bottom of
+   `CHANGELOG.md`.
+5. Commit on a branch, open a PR, merge once CI is green.
+6. Tag and publish a GitHub Release `vX.Y.Z` on the merge commit. `publish.yml`
+   verifies `tag == version` and publishes via Trusted Publishing.
 
-## Versioning
+Preview the changelog section any time without consuming fragments:
 
-This project follows [Semantic Versioning](https://semver.org/). The release
-workflow fails fast if the tag (without the `v`) does not match
-`project.version` in `pyproject.toml`.
+```bash
+make changelog-draft VERSION=X.Y.Z
+```
