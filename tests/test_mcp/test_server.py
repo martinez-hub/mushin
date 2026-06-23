@@ -71,7 +71,7 @@ def _make_experiment(base: Path, lrs=(0.1, 0.2)) -> Path:
             OmegaConf.create({"lr": lr, "seed": 0}),
             run / ".hydra" / "config.yaml",
         )
-        torch.save({"accuracy": torch.tensor(0.8 + 0.1 * i)}, run / "metrics.pt")
+        torch.save({"accuracy": 0.8 + 0.1 * i}, run / "metrics.pt")
     return base
 
 
@@ -234,20 +234,24 @@ def test_get_config_single_run(tmp_path):
     assert "configs" not in out
 
 
-def test_metrics_loaded_weights_only(tmp_path, monkeypatch):
-    from mushin.mcp.server import _get_metrics
+def test_weights_only_used_only_when_safe(tmp_path, monkeypatch):
+    """torch.load(weights_only) is used only on torch >= 2.6 (CVE-2025-32434)."""
+    from mushin.mcp import server
 
     base = _make_experiment(tmp_path / "exp")
-    seen = {}
+    seen = []
     real_load = torch.load
 
     def spy(*args, **kwargs):
-        seen["weights_only"] = kwargs.get("weights_only")
+        seen.append(kwargs.get("weights_only"))
         return real_load(*args, **kwargs)
 
     monkeypatch.setattr(torch, "load", spy)
-    _get_metrics(base)
-    assert seen["weights_only"] is True
+    server._get_metrics(base)
+    if server._TORCH_WEIGHTS_ONLY_SAFE:
+        assert seen and all(w is True for w in seen)  # only ever weights_only=True
+    else:
+        assert seen == []  # never invoke torch.load on CVE-affected torch
 
 
 def test_unreadable_metrics_skipped(tmp_path):
@@ -301,7 +305,7 @@ def test_malicious_metrics_not_executed(tmp_path):
     base = tmp_path / "exp" / "0"
     (base / ".hydra").mkdir(parents=True)
     OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
-    torch.save({"accuracy": torch.tensor(0.8)}, base / "metrics.pt")  # good file
+    torch.save({"accuracy": 0.8}, base / "metrics.pt")  # good file
     torch.save({"x": _Evil()}, base / "evil.pt")  # malicious file
 
     out = _get_metrics(tmp_path / "exp")  # must not raise, must not execute
@@ -342,7 +346,7 @@ def test_metric_symlink_outside_root_skipped(tmp_path):
     exp = root / "exp" / "0"
     (exp / ".hydra").mkdir(parents=True)
     OmegaConf.save(OmegaConf.create({"lr": 0.1}), exp / ".hydra" / "config.yaml")
-    torch.save({"accuracy": torch.tensor(0.8)}, exp / "metrics.pt")  # in-root
+    torch.save({"accuracy": 0.8}, exp / "metrics.pt")  # in-root
     secret = tmp_path / "outside.pt"
     torch.save({"secret": torch.tensor(42.0)}, secret)
     (exp / "leak.pt").symlink_to(secret)  # symlink escaping root
@@ -350,3 +354,19 @@ def test_metric_symlink_outside_root_skipped(tmp_path):
     out = _get_metrics(root / "exp", root=root)
     assert "metrics" in out["per_run"][0]  # in-root metric still read
     assert "leak" not in out["per_run"][0]  # escaping symlink refused
+
+
+def test_tensor_metrics_skipped_on_unsafe_torch(tmp_path):
+    """A raw-tensor metrics file is skipped (never unsafely loaded) on old torch."""
+    from mushin.mcp import server
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    torch.save({"w": torch.tensor([1.0, 2.0])}, base / "tensor_metrics.pt")
+
+    out = server._get_metrics(tmp_path / "exp")  # must not raise
+    if server._TORCH_WEIGHTS_ONLY_SAFE:
+        assert out["per_run"][0]["tensor_metrics"]["w"] == [1.0, 2.0]
+    else:
+        assert "tensor_metrics" not in out["per_run"][0]  # safely skipped

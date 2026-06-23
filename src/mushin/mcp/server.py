@@ -79,18 +79,34 @@ def _data_only_load(path: Path):
     return _DataOnlyUnpickler(io.BytesIO(raw)).load()
 
 
+def _torch_at_least(major: int, minor: int) -> bool:
+    parts = torch.__version__.split("+")[0].split(".")
+    try:
+        return (int(parts[0]), int(parts[1])) >= (major, minor)
+    except (IndexError, ValueError):
+        return False
+
+
+# torch's weights_only loader only became a real security boundary in 2.6
+# (CVE-2025-32434); on older torch it can still execute pickles, so we never use
+# it on untrusted files there — the data-only unpickler handles those safely.
+_TORCH_WEIGHTS_ONLY_SAFE = _torch_at_least(2, 6)
+
+
 def _safe_load_pt(path: Path):
     """Best-effort safe load of a torch ``*.pt`` file.
 
-    Tries torch's ``weights_only`` loader first (safely handles tensors on any
-    torch version), then a data-only unpickler for pure-data payloads such as
-    ``MetricsCallback``'s ``defaultdict`` metrics. Never executes pickled code;
-    raises if neither safe path can read the file.
+    On torch >= 2.6, tries ``weights_only`` first (safe there) for tensor files;
+    on older torch that loader is unsafe (CVE-2025-32434), so we skip it and use
+    only the data-only unpickler. Never executes pickled code on any version;
+    raises if no safe path can read the file.
     """
-    try:
-        return torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
-        return _data_only_load(path)
+    if _TORCH_WEIGHTS_ONLY_SAFE:
+        try:
+            return torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            pass
+    return _data_only_load(path)
 
 
 def _flatten(value: Any, prefix: str = "") -> dict:
