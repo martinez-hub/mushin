@@ -2465,7 +2465,7 @@ dev = [
     { name = "netcdf4", specifier = ">=1.5.8" },
     { name = "pre-commit", specifier = ">=3.5" },
     { name = "pytest", specifier = ">=7.0.0" },
-    { name = "pytest-xdist" },
+    { name = "pytest-xdist", specifier = ">=3.0" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "towncrier", specifier = ">=23.11" },
 ]
