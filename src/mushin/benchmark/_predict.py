@@ -19,3 +19,18 @@ def default_classification_predict_fn(
     probs = torch.softmax(logits, dim=-1)
     preds = probs.argmax(dim=-1)
     return preds, probs
+
+
+def default_segmentation_predict_fn(
+    model: torch.nn.Module, x: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run a segmentation model on ``x`` and return ``(preds, probs)``.
+
+    Assumes ``model(x)`` returns per-pixel logits of shape ``(N, C, H, W)``.
+    ``probs`` is the softmax over the channel dim; ``preds`` is its argmax,
+    shape ``(N, H, W)``.
+    """
+    logits = model(x)
+    probs = torch.softmax(logits, dim=1)
+    preds = probs.argmax(dim=1)
+    return preds, probs
