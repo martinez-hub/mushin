@@ -142,8 +142,7 @@ def test_read_dataset_summarizes(tmp_path):
 def test_describe_outside_root_raises(tmp_path):
     from mushin.mcp.server import RootError, _describe_experiment
 
-    base = _make_experiment(tmp_path / "allowed" / "exp")
-    (tmp_path / "allowed").mkdir(exist_ok=True)
+    _make_experiment(tmp_path / "allowed" / "exp")
     with pytest.raises(RootError):
         _describe_experiment(tmp_path / "elsewhere", root=tmp_path / "allowed")
 
