@@ -257,3 +257,62 @@ def test_get_metrics_filter_by_leaf(tmp_path):
     base = _make_experiment(tmp_path / "exp")
     out = _get_metrics(base, metrics=["accuracy"])
     assert out["per_run"][0] == {"metrics.accuracy": pytest.approx(0.8, abs=1e-5)}
+
+
+def test_metrics_defaultdict_loaded(tmp_path):
+    """MetricsCallback saves defaultdict(list); the safe loader must read it."""
+    import collections
+
+    from mushin.mcp.server import _get_metrics
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    metrics = collections.defaultdict(list)
+    metrics["accuracy"] = [0.8, 0.9]
+    metrics["per_class"] = [np.array([0.1, 0.2])]
+    torch.save(metrics, base / "fit_metrics.pt")
+
+    out = _get_metrics(tmp_path / "exp")
+    assert out["per_run"][0]["fit_metrics"]["accuracy"] == [0.8, 0.9]
+
+
+def test_malicious_metrics_not_executed(tmp_path):
+    """A metrics file whose unpickling would run code must be skipped, not run."""
+    import os
+
+    from mushin.mcp.server import _get_metrics
+
+    marker = tmp_path / "pwned"
+
+    class _Evil:
+        def __reduce__(self):
+            return (os.system, (f"touch {marker}",))
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    torch.save({"accuracy": torch.tensor(0.8)}, base / "metrics.pt")  # good file
+    torch.save({"x": _Evil()}, base / "evil.pt")  # malicious file
+
+    out = _get_metrics(tmp_path / "exp")  # must not raise, must not execute
+    assert not marker.exists()  # code never ran
+    assert "metrics" in out["per_run"][0]  # good file still loaded
+    assert "evil" not in out["per_run"][0]  # malicious file skipped
+
+
+def test_ddp_config_loaded(tmp_path):
+    """A run with both .hydra and .pl_hydra_rank_* configs must load .hydra one."""
+    from mushin.mcp.server import _get_config
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    (base / ".pl_hydra_rank_1").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    OmegaConf.save(
+        OmegaConf.create({"pl_testing": True}),
+        base / ".pl_hydra_rank_1" / "config.yaml",
+    )
+
+    out = _get_config(tmp_path / "exp")
+    assert out["config"]["lr"] == 0.1  # not None, and the .hydra config

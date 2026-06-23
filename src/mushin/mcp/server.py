@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import io
 import math
+import pickle
 import statistics
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,78 @@ from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
 from mushin._utils import Experiment
+
+# Globals an MCP-loaded metrics file may legitimately reference. Everything here
+# is a pure-data container or numpy array/scalar constructor — no callable that
+# could run code. Anything outside this set is refused, so a malicious *.pt under
+# --root cannot execute arbitrary pickle.
+_SAFE_GLOBALS = {("collections", "OrderedDict"), ("collections", "defaultdict")}
+_BUILTIN_MODULES = {"builtins", "__builtin__"}
+_SAFE_BUILTINS = {"list", "dict", "tuple", "set", "frozenset", "bytearray", "complex"}
+_SAFE_NUMPY_NAMES = {
+    "ndarray", "dtype",
+    "float16", "float32", "float64",
+    "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64",
+    "bool_", "complex64", "complex128", "intc", "intp", "longlong",
+}
+
+
+def _is_safe_global(module: str, name: str) -> bool:
+    if (module, name) in _SAFE_GLOBALS:
+        return True
+    if module in _BUILTIN_MODULES and name in _SAFE_BUILTINS:
+        return True
+    if module == "numpy" and name in _SAFE_NUMPY_NAMES:
+        return True
+    # numpy array/scalar reconstruction (data constructors, numpy 1.x and 2.x paths)
+    if name in {"_reconstruct", "scalar"} and module.endswith("multiarray"):
+        return True
+    # numpy stores raw array bytes via codecs.encode(bytes, "latin1")
+    if (module, name) == ("_codecs", "encode"):
+        return True
+    return False
+
+
+class _DataOnlyUnpickler(pickle.Unpickler):
+    """Unpickler that reconstructs only pure data (safe containers + numpy)."""
+
+    def find_class(self, module: str, name: str):
+        if _is_safe_global(module, name):
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"blocked unsafe global {module}.{name}")
+
+    def persistent_load(self, pid):
+        # Persistent ids appear only for torch storages (tensors); refuse them so
+        # tensor payloads are handled by the weights_only path, never here.
+        raise pickle.UnpicklingError("persistent storage not allowed in data-only load")
+
+
+def _data_only_load(path: Path):
+    """Load a ``torch.save`` file allowing only safe, pure-data objects."""
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            names = [n for n in archive.namelist() if n.endswith("data.pkl")]
+            if not names:
+                raise pickle.UnpicklingError("no data.pkl in archive")
+            raw = archive.read(names[0])
+    else:  # legacy (non-zip) torch.save format
+        raw = Path(path).read_bytes()
+    return _DataOnlyUnpickler(io.BytesIO(raw)).load()
+
+
+def _safe_load_pt(path: Path):
+    """Best-effort safe load of a torch ``*.pt`` file.
+
+    Tries torch's ``weights_only`` loader first (safely handles tensors on any
+    torch version), then a data-only unpickler for pure-data payloads such as
+    ``MetricsCallback``'s ``defaultdict`` metrics. Never executes pickled code;
+    raises if neither safe path can read the file.
+    """
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        return _data_only_load(path)
 
 
 def _flatten(value: Any, prefix: str = "") -> dict:
@@ -41,14 +116,12 @@ def _load_runs(p: Path) -> list[Experiment]:
     runs: list[Experiment] = []
     for hydra_dir in sorted(p.glob("**/.hydra")):
         run_dir = hydra_dir.parent
-        cfg_files = list(run_dir.glob("**/config.yaml"))
-        cfg = load_from_yaml(cfg_files[0]) if len(cfg_files) == 1 else None
+        cfg_file = hydra_dir / "config.yaml"
+        cfg = load_from_yaml(cfg_file) if cfg_file.exists() else None
         metrics: dict = {}
         for f in sorted(run_dir.glob("*.pt")):
             try:
-                metrics[f.stem] = torch.load(
-                    f, map_location="cpu", weights_only=True
-                )
+                metrics[f.stem] = _safe_load_pt(f)
             except Exception:
                 # Fail closed: never fall back to unsafe (pickle-executing)
                 # loading; just skip metrics we cannot safely read.
