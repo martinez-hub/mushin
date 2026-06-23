@@ -1,8 +1,11 @@
+import warnings
+
+import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from mushin.benchmark import BenchmarkResult
-from mushin.study._load import evaluate_checkpoints
+from mushin.study._load import evaluate_checkpoints, warn_if_underpowered
 
 
 def _loader(n=40, d=4, num_classes=3):
@@ -40,3 +43,14 @@ def test_evaluate_checkpoints_returns_benchmark_result(tmp_path):
     assert set(result.data.dims) == {"method", "seed"}
     assert result.data.sizes == {"method": 2, "seed": 2}
     assert "accuracy" in result.data.data_vars
+
+
+def test_warn_if_underpowered_fires_for_small_n_wilcoxon():
+    with pytest.warns(UserWarning, match="cannot reach"):
+        warn_if_underpowered("wilcoxon", n_seeds=3, alpha=0.05)
+
+
+def test_warn_if_underpowered_silent_for_welch_small_n():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning -> failure
+        warn_if_underpowered("welch", n_seeds=3, alpha=0.05)
