@@ -137,3 +137,20 @@ def test_read_dataset_summarizes(tmp_path):
     assert out["dims"] == {"lr": 2}
     assert out["coords"]["lr"] == [0.1, 0.2]
     assert out["data_vars"]["accuracy"]["max"] == pytest.approx(0.9)
+
+
+def test_describe_outside_root_raises(tmp_path):
+    from mushin.mcp.server import RootError, _describe_experiment
+
+    base = _make_experiment(tmp_path / "allowed" / "exp")
+    (tmp_path / "allowed").mkdir(exist_ok=True)
+    with pytest.raises(RootError):
+        _describe_experiment(tmp_path / "elsewhere", root=tmp_path / "allowed")
+
+
+def test_create_server_registers_tools():
+    pytest.importorskip("mcp")  # mcp requires Python >= 3.10
+    from mushin.mcp.server import create_server
+
+    server = create_server(root=None)
+    assert server.name == "mushin"

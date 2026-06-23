@@ -144,9 +144,43 @@ def _read_dataset(path: str | Path, root: str | Path | None = None) -> dict:
         }
 
 
-def create_server() -> None:  # pragma: no cover
-    """Placeholder — full implementation in a later task."""
-    raise NotImplementedError("create_server is not yet implemented")
+def create_server(root: str | Path | None = None):
+    """Build the FastMCP stdio server. Importing ``mcp`` requires Python >= 3.10."""
+    from mcp.server.fastmcp import FastMCP
+
+    rootp = Path(root).expanduser().resolve() if root is not None else None
+    mcp = FastMCP("mushin")
+
+    @mcp.tool()
+    def list_experiments(root_dir: str | None = None) -> dict:
+        """List experiment run directories (those containing a .hydra/ child)."""
+        return _list_experiments(root_dir if root_dir else rootp)
+
+    @mcp.tool()
+    def describe_experiment(path: str) -> dict:
+        """Summarize an experiment: swept params, metric keys, run/ckpt counts."""
+        return _describe_experiment(path, rootp)
+
+    @mcp.tool()
+    def get_metrics(
+        path: str,
+        metrics: list[str] | None = None,
+        reduce: str | None = None,
+    ) -> dict:
+        """Per-run metrics, optionally reduced ('mean'/'std') across runs."""
+        return _get_metrics(path, metrics, reduce, rootp)
+
+    @mcp.tool()
+    def get_config(path: str, job: int | None = None) -> dict:
+        """Resolved Hydra config for one run (job index) or all runs."""
+        return _get_config(path, job, rootp)
+
+    @mcp.tool()
+    def read_dataset(path: str) -> dict:
+        """Summarize a saved netCDF dataset: dims, coords, data_vars, stats."""
+        return _read_dataset(path, rootp)
+
+    return mcp
 
 
 def _to_jsonable(obj: Any) -> Any:
