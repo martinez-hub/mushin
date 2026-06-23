@@ -36,6 +36,48 @@ def test_evaluate_with_dict_output_model_and_custom_predict_fn():
     assert out["accuracy"] == 1.0
 
 
+def test_evaluate_segmentation_ignores_void_across_batches():
+    # ignore_index must exclude void pixels through the *streaming* evaluate path
+    # (the existing test only covers the one-shot compute_battery). Model is
+    # correct on every non-void pixel; its arbitrary void prediction must not
+    # count because the void label is excluded.
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark._inference import evaluate
+    from mushin.benchmark._metrics import segmentation_battery
+    from mushin.benchmark._predict import default_segmentation_predict_fn
+
+    g = torch.Generator().manual_seed(0)
+    N, C, H, W = 8, 3, 6, 6
+    x = torch.randn(N, 1, H, W, generator=g)
+    true = torch.randint(0, C, (N, H, W), generator=g)  # the real classes
+    target = true.clone()
+    target[:, 0, 0] = 255  # one void pixel per image
+    loader = DataLoader(TensorDataset(x, target), batch_size=4)  # 2 batches
+    mapping = {tuple(xi.flatten().tolist()): t for xi, t in zip(x, true)}
+
+    class PerfectSeg(torch.nn.Module):
+        def forward(self, xb):
+            outs = []
+            for xi in xb:
+                t = mapping[tuple(xi.flatten().tolist())]  # predict the true class
+                outs.append(
+                    torch.nn.functional.one_hot(t, C).permute(2, 0, 1).float() * 10
+                )
+            return torch.stack(outs)
+
+    res = evaluate(
+        PerfectSeg(),
+        loader,
+        segmentation_battery(C, ignore_index=255),
+        default_segmentation_predict_fn,
+        prob_metrics=frozenset(),
+    )
+    assert res["pixel_acc"] == 1.0
+    assert res["miou"] == 1.0
+
+
 def test_evaluate_streams_and_matches_one_shot():
     import torch
     from torch.utils.data import DataLoader, TensorDataset
