@@ -24,16 +24,17 @@ jobs:
         run: uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
         experimental: [false]
         include:
           # torch / Lightning may not ship 3.14 wheels yet; don't fail CI on it.
-          - python-version: "3.14"
-            experimental: true
+          - { os: ubuntu-latest, python-version: "3.14", experimental: true }
+          - { os: windows-latest, python-version: "3.14", experimental: true }
     continue-on-error: ${{ matrix.experimental }}
 
     steps:
