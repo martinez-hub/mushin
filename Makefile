@@ -5,7 +5,7 @@ HYPOTHESIS_PROFILE ?= fast
 PYTHON ?= 3.11
 
 .DEFAULT_GOAL := help
-.PHONY: help sync test test-fast test-py lint format format-check spell check all changelog changelog-draft
+.PHONY: help sync test test-fast test-py test-lowest lint format format-check spell check all changelog changelog-draft
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -22,6 +22,12 @@ test-fast: ## Run tests with the fast hypothesis profile (alias of default)
 
 test-py: ## Run tests on a specific Python version, e.g. `make test-py PYTHON=3.12`
 	uv run --python $(PYTHON) pytest tests/ --hypothesis-profile $(HYPOTHESIS_PROFILE) -p no:cacheprovider
+
+test-lowest: ## Run the suite against the LOWEST declared dep versions (x86_64 Linux via Docker; mirrors the min-versions CI job)
+	docker run --rm --platform linux/amd64 -v "$(PWD)":/app -w /app \
+		-e UV_PROJECT_ENVIRONMENT=/opt/venv -e UV_LINK_MODE=copy \
+		ghcr.io/astral-sh/uv:python3.9-bookworm-slim \
+		bash -c "uv sync --resolution lowest-direct && uv run pytest tests/ --hypothesis-profile fast"
 
 lint: ## Lint with ruff
 	uv run ruff check .
