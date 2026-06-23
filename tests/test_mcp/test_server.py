@@ -451,3 +451,18 @@ def test_server_root_defaults_to_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert _server_root(None) == tmp_path.resolve()
     assert _server_root(tmp_path / "x") == (tmp_path / "x").resolve()
+
+
+def test_job_sort_key_ignores_out_of_root_hydra_yaml(tmp_path):
+    """A symlinked .hydra/hydra.yaml pointing outside --root must not be read."""
+    from mushin.mcp.server import _job_sort_key
+
+    root = tmp_path / "allowed"
+    run = root / "exp" / "7"  # numeric dir name -> fallback key (0, 7, "")
+    (run / ".hydra").mkdir(parents=True)
+    outside = tmp_path / "evil_hydra.yaml"
+    OmegaConf.save(OmegaConf.create({"hydra": {"job": {"num": 0}}}), outside)
+    (run / ".hydra" / "hydra.yaml").symlink_to(outside)
+
+    # If the outside file were read, the key would be (0, 0, "") (job.num 0).
+    assert _job_sort_key(run / ".hydra", root.resolve()) == (0, 7, "")

@@ -120,19 +120,22 @@ def _flatten(value: Any, prefix: str = "") -> dict:
     return out
 
 
-def _job_sort_key(hydra_dir: Path):
+def _job_sort_key(hydra_dir: Path, root: Path | None = None):
     """Order runs by Hydra's recorded job number when available.
 
     Mirrors mushin's own reload path, which sorts by ``.hydra/hydra.yaml``'s
     ``hydra.job.num``. Falls back to a numeric directory name, then to the
     lexicographic name, so custom ``hydra.sweep.subdir`` layouts still order
-    deterministically.
+    deterministically. ``hydra.yaml`` is only read when it stays within ``root``
+    (resolving symlinks), so a symlinked metadata file cannot escape ``--root``.
     """
-    try:
-        num = load_from_yaml(hydra_dir / "hydra.yaml").hydra.job.num
-        return (0, int(num), "")
-    except Exception:
-        pass
+    hydra_yaml = hydra_dir / "hydra.yaml"
+    if _within_root(hydra_yaml, root):
+        try:
+            num = load_from_yaml(hydra_yaml).hydra.job.num
+            return (0, int(num), "")
+        except Exception:
+            pass
     name = hydra_dir.parent.name
     if name.isdigit():
         return (0, int(name), "")
@@ -159,7 +162,9 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
         raise FileNotFoundError(f"{p} not found")
     rootp = Path(root).expanduser().resolve() if root is not None else None
     runs: list[Experiment] = []
-    for hydra_dir in sorted(p.glob("**/.hydra"), key=_job_sort_key):
+    for hydra_dir in sorted(
+        p.glob("**/.hydra"), key=lambda h: _job_sort_key(h, rootp)
+    ):
         run_dir = hydra_dir.parent
         cfg_file = hydra_dir / "config.yaml"
         cfg = (
