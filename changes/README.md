@@ -18,17 +18,19 @@ Create a file named `<id>.<type>.md`, where `<id>` is your PR or issue number
 | `deprecated` | Deprecated | soon-to-be-removed features |
 | `misc` | Misc | CI/refactor/typo PRs with nothing user-facing |
 
-The file holds one line of Markdown describing the change, written for users:
+The file holds one line of Markdown describing the change, written for users.
+For example, `changes/123.fixed.md` containing:
 
-```
-changes/123.fixed.md
-```
 ```
 `compare` no longer crashes on single-seed inputs.
 ```
 
-A `misc` fragment can be empty — it only records that a PR happened (e.g.
-`changes/+ci.misc.md`), satisfying the CI gate without adding a changelog line.
+renders as a bullet under **Fixed** at release time, tagged `(#123)`.
+
+A `misc` fragment satisfies the CI gate without adding a changelog line — use it
+for CI/refactor/typo PRs with nothing user-facing (e.g. `changes/+ci.misc.md`).
+A numbered misc fragment (`changes/42.misc.md`) leaves a terse `- #42` under a
+Misc section; an orphan one (`changes/+slug.misc.md`) renders nothing at all.
 
 ## Preview
 

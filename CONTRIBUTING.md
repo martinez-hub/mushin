@@ -59,25 +59,24 @@ container or CI is the reliable way to test newer torch there.
 4. Add a news fragment under `changes/` (see [Changelog](#changelog) below).
 5. Open a pull request against `main`, filling out the PR template and linking
    any related issue.
-6. CI (lint + the Python test matrix) must pass. `main` is protected and merges
-   require a passing CI run.
+6. CI (lint, the Python test matrix, and the changelog gate) must pass. `main`
+   is protected and merges require a passing CI run.
 
 ### Changelog
 
 Every PR with a user-facing change must add a **news fragment** under
 [`changes/`](changes/README.md): a file named `changes/<PR-or-issue>.<type>.md`
 (types: `added`, `changed`, `fixed`, `removed`, `deprecated`). One line of
-Markdown, written for users. Example:
+Markdown, written for users. For example, `changes/123.fixed.md` containing:
 
-```
-changes/123.fixed.md
-```
 ```
 `Study.from_checkpoints` now validates that the checkpoint list is non-empty.
 ```
 
 CI enforces this. For CI-only, refactor, or typo PRs with nothing user-facing,
-add an empty `misc` fragment instead (e.g. `changes/+refactor.misc.md`).
+add a `misc` fragment instead (e.g. `changes/+refactor.misc.md`) — it satisfies
+the gate without adding a changelog line. See [`changes/README.md`](changes/README.md)
+for details.
 
 ## Style
 
