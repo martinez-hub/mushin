@@ -89,6 +89,12 @@ jobs:
           enable-cache: true
       - name: Sync lowest-direct dependency versions (Python 3.9)
         run: uv sync --resolution lowest-direct --python 3.9
+      # Some deps at their floor still `import pkg_resources` at import time; uv's
+      # minimal venv omits setuptools, which typical user environments include.
+      # Provide it so this job tests dependency-version compatibility, not
+      # setuptools presence.
+      - name: Provide setuptools (pkg_resources) for old floors
+        run: uv pip install setuptools
       - name: Show resolved environment
         run: uv pip list
       - name: Run tests
