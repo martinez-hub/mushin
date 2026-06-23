@@ -84,3 +84,22 @@ def test_describe_experiment_reports_sweep(tmp_path):
     assert "metrics" in out["metric_keys"]
     assert out["swept_params"]["lr"] == [0.1, 0.2]
     assert "seed" not in out["swept_params"]  # constant across runs
+
+
+def test_get_metrics_per_run_and_reduce(tmp_path):
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _get_metrics(base, reduce="mean")
+    assert out["num_runs"] == 2
+    # metrics saved as metrics.pt -> {"metrics": {"accuracy": ...}}
+    assert out["per_run"][0]["metrics"]["accuracy"] == pytest.approx(0.8, abs=1e-5)
+    assert out["reduced"]["metrics.accuracy"] == pytest.approx(0.85, abs=1e-5)
+
+
+def test_get_metrics_filter(tmp_path):
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _get_metrics(base, metrics=["does-not-exist"])
+    assert out["per_run"][0] == {}

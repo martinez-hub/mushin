@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,48 @@ def _describe_experiment(path: str | Path, root: str | Path | None = None) -> di
         "swept_params": swept,
         "num_checkpoints": [len(e.ckpts) for e in exps],
     }
+
+
+def _reduce_metrics(per_run: list[dict], how: str) -> dict:
+    """Reduce numeric metric leaves across runs by 'mean' or 'std'."""
+    if how not in {"mean", "std"}:
+        raise ValueError(f"unknown reduce '{how}'; use 'mean' or 'std'")
+    flats = [_flatten(r) for r in per_run]
+    out: dict[str, float] = {}
+    for k in sorted(set().union(*(set(f) for f in flats))) if flats else []:
+        vals = [
+            f[k]
+            for f in flats
+            if isinstance(f.get(k), (int, float)) and not isinstance(f.get(k), bool)
+        ]
+        if not vals:
+            continue
+        if how == "mean":
+            out[k] = sum(vals) / len(vals)
+        else:
+            out[k] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
+    return out
+
+
+def _get_metrics(
+    path: str | Path,
+    metrics: list[str] | None = None,
+    reduce: str | None = None,
+    root: str | Path | None = None,
+) -> dict:
+    """Return per-run metrics, optionally filtered and reduced across runs."""
+    p = _resolve(path, root)
+    exps = _as_list(load_experiment(p))
+    per_run = []
+    for e in exps:
+        m = _to_jsonable(e.metrics or {})
+        if metrics is not None:
+            m = {k: v for k, v in m.items() if k in metrics}
+        per_run.append(m)
+    result = {"path": str(p), "num_runs": len(exps), "per_run": per_run}
+    if reduce is not None:
+        result["reduced"] = _reduce_metrics(per_run, reduce)
+    return result
 
 
 def create_server() -> None:  # pragma: no cover
