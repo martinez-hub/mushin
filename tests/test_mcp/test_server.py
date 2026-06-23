@@ -409,3 +409,36 @@ def test_read_dataset_non_finite_stats(tmp_path):
 
     out = _read_dataset(nc)
     assert out["data_vars"]["m"]["mean"] == "nan"  # non-finite normalized to string
+
+
+def test_env_interpolation_not_resolved(tmp_path, monkeypatch):
+    """A ${oc.env:...} interpolation in a config must NOT be resolved/leaked."""
+    from mushin.mcp.server import _get_config
+
+    monkeypatch.setenv("MUSHIN_TEST_SECRET", "topsecret")
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    (base / ".hydra" / "config.yaml").write_text("token: ${oc.env:MUSHIN_TEST_SECRET}\n")
+
+    out = _get_config(base)
+    assert "topsecret" not in str(out)  # secret never resolved
+    assert out["config"]["token"] == "${oc.env:MUSHIN_TEST_SECRET}"  # kept raw
+
+
+def test_job_order_uses_hydra_job_num(tmp_path):
+    """Non-numeric run dir names must still order by recorded hydra.job.num."""
+    from mushin.mcp.server import _get_config
+
+    base = tmp_path / "exp"
+    # name "zzz" is job 0, "aaa" is job 1 — lexicographic name order would swap them
+    for name, num, lr in [("zzz", 0, 0.1), ("aaa", 1, 0.2)]:
+        run = base / name
+        (run / ".hydra").mkdir(parents=True)
+        OmegaConf.save(OmegaConf.create({"lr": lr}), run / ".hydra" / "config.yaml")
+        OmegaConf.save(
+            OmegaConf.create({"hydra": {"job": {"num": num}}}),
+            run / ".hydra" / "hydra.yaml",
+        )
+
+    assert _get_config(base, job=0)["config"]["lr"] == 0.1  # job.num 0 -> "zzz"
+    assert _get_config(base, job=1)["config"]["lr"] == 0.2  # job.num 1 -> "aaa"

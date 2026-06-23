@@ -121,9 +121,22 @@ def _flatten(value: Any, prefix: str = "") -> dict:
 
 
 def _job_sort_key(hydra_dir: Path):
-    """Sort key so numeric Hydra job dirs (0,1,2,...,10) order numerically."""
+    """Order runs by Hydra's recorded job number when available.
+
+    Mirrors mushin's own reload path, which sorts by ``.hydra/hydra.yaml``'s
+    ``hydra.job.num``. Falls back to a numeric directory name, then to the
+    lexicographic name, so custom ``hydra.sweep.subdir`` layouts still order
+    deterministically.
+    """
+    try:
+        num = load_from_yaml(hydra_dir / "hydra.yaml").hydra.job.num
+        return (0, int(num), "")
+    except Exception:
+        pass
     name = hydra_dir.parent.name
-    return (0, int(name)) if name.isdigit() else (1, name)
+    if name.isdigit():
+        return (0, int(name), "")
+    return (1, 0, name)
 
 
 def _within_root(target: Path, root: Path | None) -> bool:
@@ -353,7 +366,9 @@ def _to_jsonable(obj: Any) -> Any:
     if isinstance(obj, np.ndarray):
         return _to_jsonable(obj.tolist())
     if OmegaConf.is_config(obj):
-        return _to_jsonable(OmegaConf.to_container(obj, resolve=True))
+        # resolve=False: never evaluate interpolations (e.g. ${oc.env:SECRET})
+        # in the server process — that could leak secrets across the MCP boundary.
+        return _to_jsonable(OmegaConf.to_container(obj, resolve=False))
     if isinstance(obj, dict):
         return {str(k): _to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
