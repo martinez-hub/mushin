@@ -53,3 +53,12 @@ def _resolve(path: str | Path, root: str | Path | None) -> Path:
         if p != root and root not in p.parents:
             raise RootError(f"{p} is outside the configured root {root}")
     return p
+
+
+def _list_experiments(root: str | Path | None = None) -> dict:
+    """List run directories (those containing a ``.hydra/`` child) under ``root``."""
+    base = _resolve(root if root is not None else Path.cwd(), root)
+    if not base.exists():
+        raise FileNotFoundError(f"{base} not found")
+    runs = sorted(str(p.parent) for p in base.glob("**/.hydra"))
+    return {"root": str(base), "runs": runs, "count": len(runs)}
