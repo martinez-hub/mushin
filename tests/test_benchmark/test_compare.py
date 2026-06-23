@@ -152,6 +152,7 @@ def test_compare_flags_significant_difference_end_to_end():
     # the correct sign. (Only ever asserted on synthetic dicts at the
     # compare_methods level before.)
     data = _loader(seed=0)
+    torch.manual_seed(0)  # make the bad models' random init deterministic
     result = compare(
         methods={
             "good": [_Perfect(data) for _ in range(6)],
