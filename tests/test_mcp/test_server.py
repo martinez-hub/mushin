@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MIT
 import numpy as np
+import pytest
 import torch
 from omegaconf import OmegaConf
 
-from mushin.mcp.server import _to_jsonable
+from mushin.mcp.server import RootError, _resolve, _to_jsonable
 
 
 def test_to_jsonable_scalar_tensor():
@@ -26,3 +27,25 @@ def test_to_jsonable_omegaconf():
 
 def test_to_jsonable_non_finite_float_becomes_string():
     assert _to_jsonable(float("inf")) == "inf"
+
+
+def test_resolve_no_root_returns_absolute(tmp_path):
+    target = tmp_path / "exp"
+    target.mkdir()
+    assert _resolve(target, None) == target.resolve()
+
+
+def test_resolve_inside_root_ok(tmp_path):
+    root = tmp_path
+    target = tmp_path / "exp"
+    target.mkdir()
+    assert _resolve(target, root) == target.resolve()
+
+
+def test_resolve_outside_root_raises(tmp_path):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "other"
+    outside.mkdir()
+    with pytest.raises(RootError):
+        _resolve(outside, root)

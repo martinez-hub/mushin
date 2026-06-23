@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -38,3 +39,17 @@ def _to_jsonable(obj: Any) -> Any:
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else str(obj)
     return str(obj)
+
+
+class RootError(ValueError):
+    """Raised when a requested path escapes the configured --root."""
+
+
+def _resolve(path: str | Path, root: str | Path | None) -> Path:
+    """Resolve ``path`` to an absolute Path, enforcing ``root`` containment."""
+    p = Path(path).expanduser().resolve()
+    if root is not None:
+        root = Path(root).expanduser().resolve()
+        if p != root and root not in p.parents:
+            raise RootError(f"{p} is outside the configured root {root}")
+    return p
