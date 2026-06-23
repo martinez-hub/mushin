@@ -317,11 +317,24 @@ def _read_dataset(path: str | Path, root: str | Path | None = None) -> dict:
         }
 
 
+def _server_root(root: str | Path | None) -> Path:
+    """Resolve the server's confinement root, defaulting to the current dir.
+
+    A missing ``--root`` confines the server to the current working directory
+    (the documented behavior), never the whole filesystem.
+    """
+    return (
+        Path(root).expanduser().resolve()
+        if root is not None
+        else Path.cwd().resolve()
+    )
+
+
 def create_server(root: str | Path | None = None):
     """Build the FastMCP stdio server. Importing ``mcp`` requires Python >= 3.10."""
     from mcp.server.fastmcp import FastMCP
 
-    rootp = Path(root).expanduser().resolve() if root is not None else None
+    rootp = _server_root(root)
     mcp = FastMCP("mushin")
 
     @mcp.tool()

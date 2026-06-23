@@ -442,3 +442,12 @@ def test_job_order_uses_hydra_job_num(tmp_path):
 
     assert _get_config(base, job=0)["config"]["lr"] == 0.1  # job.num 0 -> "zzz"
     assert _get_config(base, job=1)["config"]["lr"] == 0.2  # job.num 1 -> "aaa"
+
+
+def test_server_root_defaults_to_cwd(tmp_path, monkeypatch):
+    """No --root confines the server to the current directory, not the whole FS."""
+    from mushin.mcp.server import _server_root
+
+    monkeypatch.chdir(tmp_path)
+    assert _server_root(None) == tmp_path.resolve()
+    assert _server_root(tmp_path / "x") == (tmp_path / "x").resolve()
