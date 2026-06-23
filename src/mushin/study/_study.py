@@ -21,13 +21,14 @@ class Study:
     ``Study.from_checkpoints`` to compare already-trained checkpoints.
     """
 
-    def _init_common(self, load_fn, data, num_classes, task, test, alpha):
+    def _init_common(self, load_fn, data, num_classes, task, test, alpha, ignore_index):
         self._load_fn = load_fn
         self._data = data
         self._num_classes = num_classes
         self._task = task
         self._test = test
         self._alpha = alpha
+        self._ignore_index = ignore_index
 
     def __init__(
         self,
@@ -40,9 +41,10 @@ class Study:
         task: str = "classification",
         test: str = "wilcoxon",
         alpha: float = 0.05,
+        ignore_index: int | None = None,
         working_dir: str | None = None,
     ):
-        self._init_common(load_fn, data, num_classes, task, test, alpha)
+        self._init_common(load_fn, data, num_classes, task, test, alpha, ignore_index)
         self._methods = methods
         self._seeds = list(seeds)
         self.working_dir = working_dir
@@ -59,12 +61,13 @@ class Study:
         task: str = "classification",
         test: str = "wilcoxon",
         alpha: float = 0.05,
+        ignore_index: int | None = None,
     ) -> Study:
         """Build a Study that compares already-trained checkpoints (no training)."""
         if not checkpoints:
             raise ValueError("checkpoints must not be empty")
         study = cls.__new__(cls)
-        study._init_common(load_fn, data, num_classes, task, test, alpha)
+        study._init_common(load_fn, data, num_classes, task, test, alpha, ignore_index)
         study._methods = None
         study._seeds = None
         study.working_dir = None
@@ -93,4 +96,5 @@ class Study:
             self._num_classes,
             self._test,
             self._alpha,
+            ignore_index=self._ignore_index,
         )

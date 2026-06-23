@@ -18,6 +18,7 @@ def evaluate_checkpoints(
     num_classes: int,
     test: str = "wilcoxon",
     alpha: float = 0.05,
+    ignore_index: int | None = None,
 ) -> BenchmarkResult:
     """Load each checkpoint via ``load_fn``, regroup into ``{method: [models]}``,
     and run ``compare`` (which warns if the test is underpowered for the seed
@@ -34,4 +35,5 @@ def evaluate_checkpoints(
         num_classes=num_classes,
         test=test,
         alpha=alpha,
+        ignore_index=ignore_index,
     )
