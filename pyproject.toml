@@ -29,9 +29,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # Lightning floor is 2.0: the 2.0 rewrite changed enough that the pre-2.0
-    # API (1.5) does not run this package. Verified by the min-version CI job.
-    "pytorch-lightning >= 2.0.0",
+    # Lightning floor is 2.2: the pre-2.0 API (1.5) doesn't run this package, and
+    # 2.0/2.1's lightning_fabric still does `pkg_resources.declare_namespace` at
+    # import, which fails in modern (setuptools-less) envs. Verified by min-version CI.
+    "pytorch-lightning >= 2.2.0",
     "hydra-zen >= 0.9.0",
     "hydra-core >= 1.2.0",
     # torch floors are split by platform. Non-Intel uses NumPy 2 (below), which
