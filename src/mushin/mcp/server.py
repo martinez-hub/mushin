@@ -67,15 +67,22 @@ class _DataOnlyUnpickler(pickle.Unpickler):
 
 
 def _data_only_load(path: Path):
-    """Load a ``torch.save`` file allowing only safe, pure-data objects."""
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as archive:
-            names = [n for n in archive.namelist() if n.endswith("data.pkl")]
-            if not names:
-                raise pickle.UnpicklingError("no data.pkl in archive")
-            raw = archive.read(names[0])
-    else:  # legacy (non-zip) torch.save format
-        raw = Path(path).read_bytes()
+    """Load a zip-format ``torch.save`` file allowing only safe, pure-data objects.
+
+    Only the modern zip serialization is supported. A legacy (non-zip) file
+    starts with torch's magic/protocol headers, so unpickling it at byte 0 would
+    return that header garbage instead of the saved object — so we fail closed
+    for non-zip files and let the caller skip them. On torch >= 2.6 such files
+    are already read safely by ``torch.load(weights_only=True)`` before this
+    fallback runs.
+    """
+    if not zipfile.is_zipfile(path):
+        raise pickle.UnpicklingError(f"{path} is not a zip-format torch.save file")
+    with zipfile.ZipFile(path) as archive:
+        names = [n for n in archive.namelist() if n.endswith("data.pkl")]
+        if not names:
+            raise pickle.UnpicklingError("no data.pkl in archive")
+        raw = archive.read(names[0])
     return _DataOnlyUnpickler(io.BytesIO(raw)).load()
 
 

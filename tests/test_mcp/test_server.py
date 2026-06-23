@@ -466,3 +466,27 @@ def test_job_sort_key_ignores_out_of_root_hydra_yaml(tmp_path):
 
     # If the outside file were read, the key would be (0, 0, "") (job.num 0).
     assert _job_sort_key(run / ".hydra", root.resolve()) == (0, 7, "")
+
+
+def test_legacy_nonzip_metrics_not_misread(tmp_path):
+    """A legacy non-zip torch.save file must be skipped, never read as garbage."""
+    import zipfile
+
+    from mushin.mcp import server
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    torch.save({"accuracy": 0.8}, base / "metrics.pt")  # modern zip format
+    legacy = base / "legacy_metrics.pt"
+    torch.save({"accuracy": 0.9}, legacy, _use_new_zipfile_serialization=False)
+    assert not zipfile.is_zipfile(legacy)  # sanity: it really is non-zip
+
+    out = server._get_metrics(tmp_path / "exp")  # must not raise
+    assert out["per_run"][0]["metrics"]["accuracy"] == 0.8  # zip metric loads
+    if server._TORCH_WEIGHTS_ONLY_SAFE:
+        # torch >= 2.6 reads the legacy file safely via weights_only
+        assert out["per_run"][0]["legacy_metrics"]["accuracy"] == 0.9
+    else:
+        # older torch: data-only loader fails closed — skipped, not header garbage
+        assert "legacy_metrics" not in out["per_run"][0]
