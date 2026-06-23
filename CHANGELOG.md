@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.2.1] - 2026-06-23
+
+### Added
+
+- Adopted towncrier news fragments with a CI gate — each PR now adds a `changes/` fragment, assembled into the changelog at release.
+
+### Fixed
+
+- Point PyPI project links at the mushin repo (Homepage/Repository/Issues/Changelog) instead of only the upstream toolbox.
+- Synced `uv.lock`'s recorded project version to 0.2.0.
+
 ## [0.2.0] - 2026-06-23
 
 ### Added
@@ -68,6 +79,7 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/martinez-hub/mushin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/martinez-hub/mushin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/martinez-hub/mushin/releases/tag/v0.1.0
