@@ -28,20 +28,28 @@ def run_training_sweep(
     """Run ``methods[name](seed)`` for every (name, seed) via a Hydra sweep.
 
     Each call returns the path to a saved checkpoint; the job relocates it to
-    ``ckpt_dir/{method}__seed{seed}.ckpt`` so paths are recoverable without
-    relying on Hydra job ordering. Returns ``{method: [path_per_seed]}``.
+    ``ckpt_dir/m{method_index}__seed{seed}.ckpt`` so paths are recoverable
+    without relying on Hydra job ordering. Returns ``{method: [path_per_seed]}``.
+
+    The sweep is run over integer method *indices* rather than the method names
+    themselves: a name that Hydra would parse as another scalar (e.g. ``"1"`` or
+    ``"true"``) or that contains a comma would otherwise be reinterpreted or
+    split as a Hydra override. Indices are unambiguous and are mapped back to
+    names here.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     seeds = list(seeds)
+    names = list(methods)
 
-    def task(method, seed):
-        src = methods[method](seed)
+    def task(method_index, seed):
+        name = names[method_index]
+        src = methods[name](seed)
         if src is None:
             raise ValueError(
-                f"train_fn for method={method!r} seed={seed} returned no checkpoint path"
+                f"train_fn for method={name!r} seed={seed} returned no checkpoint path"
             )
-        dest = ckpt_dir / f"{method}__seed{seed}.ckpt"
+        dest = ckpt_dir / f"m{method_index}__seed{seed}.ckpt"
         os.replace(src, dest)
         return {"checkpoint": str(dest)}
 
@@ -50,7 +58,12 @@ def run_training_sweep(
     )
     wf = sweep_cls()
     wf.run(
-        method=multirun(list(methods)), seed=multirun(seeds), working_dir=working_dir
+        method_index=multirun(list(range(len(names)))),
+        seed=multirun(seeds),
+        working_dir=working_dir,
     )
 
-    return {m: [str(ckpt_dir / f"{m}__seed{s}.ckpt") for s in seeds] for m in methods}
+    return {
+        names[i]: [str(ckpt_dir / f"m{i}__seed{s}.ckpt") for s in seeds]
+        for i in range(len(names))
+    }

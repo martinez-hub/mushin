@@ -32,3 +32,17 @@ def test_run_training_sweep_rejects_none_path(tmp_path):
     methods = {"a": lambda seed: None}  # train_fn that returns no path
     with pytest.raises(ValueError, match="returned no checkpoint path"):
         run_training_sweep(methods, seeds=[0], ckpt_dir=tmp_path / "ck")
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_run_training_sweep_handles_hydra_scalar_method_names(tmp_path):
+    # names that Hydra would otherwise parse as scalars or split on commas
+    names = ["1", "true", "a,b"]
+    methods = {n: _make_train(n.replace(",", "_")) for n in names}
+    ckpts = run_training_sweep(methods, seeds=[0, 1], ckpt_dir=tmp_path / "ck")
+
+    assert set(ckpts) == set(names)
+    for n in names:
+        assert len(ckpts[n]) == 2
+        for p in ckpts[n]:
+            assert Path(p).exists()
