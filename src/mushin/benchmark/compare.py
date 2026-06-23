@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 
 import torch
 
@@ -23,6 +23,7 @@ def compare(
     num_classes: int | None = None,
     predict_fn: PredictFn | None = None,
     metrics: dict | None = None,
+    prob_metrics: frozenset[str] | None = None,
     test: str = "wilcoxon",
     alpha: float = 0.05,
     ignore_index: int | None = None,
@@ -38,8 +39,16 @@ def compare(
         Required when ``metrics`` is not provided.
     ignore_index : int or None
         Label to exclude from segmentation metrics (e.g. a void/boundary class).
+    prob_metrics : frozenset[str] or None
+        Metrics whose names need probabilities; defaults to the task's set.
     """
     spec = get_task_spec(task)
+
+    if isinstance(data, Iterator):
+        raise TypeError(
+            "`data` must be re-iterable (e.g. a DataLoader), not a one-shot "
+            "iterator/generator — it is iterated once per model."
+        )
 
     if metrics is not None:
         battery = metrics
@@ -49,12 +58,12 @@ def compare(
         battery = spec.battery(num_classes, ignore_index=ignore_index)
 
     fn = predict_fn or spec.predict_fn
+    pm = spec.prob_metrics if prob_metrics is None else prob_metrics
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, models in methods.items():
         results[name] = [
-            evaluate(model, data, battery, fn, spec.prob_metrics, device)
-            for model in models
+            evaluate(model, data, battery, fn, pm, device) for model in models
         ]
 
     ds = to_dataset(results)

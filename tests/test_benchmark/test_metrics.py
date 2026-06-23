@@ -29,3 +29,12 @@ def test_segmentation_battery_ignore_index():
     tgt[0, 0, 0] = 255  # one void pixel, excluded
     out = compute_battery(battery, pred, tgt, prob_metrics=frozenset())
     assert out["pixel_acc"] == 1.0
+
+
+def test_classification_battery_warns_on_ignore_index():
+    import pytest
+
+    from mushin.benchmark._metrics import classification_battery
+
+    with pytest.warns(UserWarning, match="ignore_index"):
+        classification_battery(3, ignore_index=0)

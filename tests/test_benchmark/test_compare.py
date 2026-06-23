@@ -110,3 +110,19 @@ def test_compare_rejects_unknown_task():
 
     with pytest.raises(NotImplementedError, match="not supported"):
         compare(methods={"a": []}, data=[], task="detection", num_classes=2)
+
+
+def test_compare_rejects_one_shot_iterator():
+    import pytest
+    import torch
+
+    from mushin.benchmark import compare
+
+    one_shot = iter([(torch.randn(4, 4), torch.randint(0, 3, (4,)))])
+    with pytest.raises(TypeError, match="re-iterable"):
+        compare(
+            methods={"a": [torch.nn.Linear(4, 3)]},
+            data=one_shot,
+            task="classification",
+            num_classes=3,
+        )

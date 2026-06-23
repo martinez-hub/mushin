@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Collection
 
 import torch
@@ -25,6 +26,13 @@ def classification_battery(
     """The standard multiclass classification battery. ``ignore_index`` is
     accepted for a uniform task interface but is not applied here (the battery's
     AUROC/ECE do not support it)."""
+    if ignore_index is not None:
+        warnings.warn(
+            "ignore_index is not applied to the classification battery "
+            "(its AUROC/ECE do not support it); it is ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
     return {
         "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro"),
         "f1": MulticlassF1Score(num_classes=num_classes, average="macro"),
