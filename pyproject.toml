@@ -12,7 +12,10 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-    { name = "Massachusetts Institute of Technology (original rai_toolbox.mushin authors)" },
+    { name = "Josue Martinez-Martinez" },
+]
+maintainers = [
+    { name = "Josue Martinez-Martinez" },
 ]
 keywords = ["machine learning", "reproducibility", "pytorch-lightning", "hydra", "hydra-zen"]
 classifiers = [
