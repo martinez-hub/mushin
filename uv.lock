@@ -2440,7 +2440,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "hydra-core", specifier = ">=1.2.0" },
-    { name = "hydra-zen", specifier = ">=0.9.0" },
+    { name = "hydra-zen", specifier = ">=0.10.0" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.3" },
     { name = "netcdf4", marker = "extra == 'netcdf'", specifier = ">=1.5.8" },
     { name = "numpy", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2" },
