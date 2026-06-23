@@ -1,3 +1,4 @@
+import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -126,3 +127,44 @@ def test_compare_rejects_one_shot_iterator():
             task="classification",
             num_classes=3,
         )
+
+
+def test_compare_single_seed_warns_underpowered_and_no_significance():
+    # n=1: the underpowered warning (from the default wilcoxon) must propagate
+    # through the public compare() API, and nothing may be flagged significant.
+    # (The stats engine's n=1 NaN handling is covered separately in test_stats.)
+    data = _loader(seed=0)
+    with pytest.warns(UserWarning, match="cannot reach alpha"):
+        result = compare(
+            methods={"a": [_Perfect(data)], "b": [torch.nn.Linear(4, 3)]},
+            data=data,
+            task="classification",
+            num_classes=3,
+        )  # default test == wilcoxon
+    assert result.data.sizes["seed"] == 1
+    assert "accuracy" in result.data.data_vars
+    assert not result.comparisons["significant"].any()
+
+
+def test_compare_flags_significant_difference_end_to_end():
+    # positive significance through the public compare(): clearly-better models
+    # across several seeds -> the accuracy comparison is flagged significant with
+    # the correct sign. (Only ever asserted on synthetic dicts at the
+    # compare_methods level before.)
+    data = _loader(seed=0)
+    torch.manual_seed(0)  # make the bad models' random init deterministic
+    result = compare(
+        methods={
+            "good": [_Perfect(data) for _ in range(6)],
+            "bad": [torch.nn.Linear(4, 3) for _ in range(6)],
+        },
+        data=data,
+        task="classification",
+        num_classes=3,
+        test="welch",  # wilcoxon is underpowered at small n; welch can reach alpha
+    )
+    row = result.comparisons[result.comparisons["metric"] == "accuracy"].iloc[0]
+    assert row["significant"]
+    # mean_diff is method_a - method_b; identify the better method sign-robustly.
+    better = row["method_a"] if row["mean_diff"] > 0 else row["method_b"]
+    assert better == "good"
