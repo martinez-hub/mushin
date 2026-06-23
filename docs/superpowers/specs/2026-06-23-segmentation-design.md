@@ -8,15 +8,16 @@ Extend `mushin.benchmark.compare` (and therefore `Study`) to semantic
 segmentation via `task="segmentation"`, proving the `task=` seam the
 classification version was built around. Along the way, refactor the shared
 evaluation step to **stream** (update metrics per batch) so per-pixel
-segmentation outputs don't blow up memory — a change that also lets
-classification scale to large datasets.
+segmentation outputs don't blow up memory. (Streaming also avoids materializing
+the whole test set for classification's confusion-matrix metrics; its
+`auroc`/`ece` still accumulate per-sample internally, as before.)
 
 ## Design decisions
 
 | Element | Decision |
 | --- | --- |
 | Battery | `miou` (mean IoU / Jaccard), `dice`, `pixel_acc`, `precision` (macro), `recall` (macro) — 5 scalars. |
-| Eval loop | **Streaming, unified for all tasks.** Replace collect-then-compute with a per-batch `metric.update(...)` then `metric.compute()`. torchmetrics accumulates a confusion matrix → `O(C²)` memory. |
+| Eval loop | **Streaming, unified for all tasks.** Replace collect-then-compute with a per-batch `metric.update(...)` then `metric.compute()`. The segmentation battery is entirely confusion-matrix metrics → `O(C²)` memory regardless of dataset size. (Classification's `auroc`/`ece` accumulate per-sample data internally, so streaming does not reduce *their* memory — streaming primarily makes segmentation feasible.) |
 | Dispatch | A **task registry** maps each task to its battery factory, predict_fn, and the set of metric names that consume probabilities. |
 | Void/ignore pixels | `compare` gains an optional `ignore_index: int | None = None`, passed to the segmentation battery (e.g. Pascal-VOC 255); ignored by classification. |
 | Scope | **Semantic** segmentation only. |
@@ -97,14 +98,18 @@ step and makes the owned evaluation loop stream.
 
   New keyword: `ignore_index: int | None = None`.
 
-- **`Study`** — no change needed; it already forwards `task` to `compare`.
+- **`Study`** — gains an `ignore_index: int | None = None` keyword (on both the
+  constructor and `from_checkpoints`) that `evaluate_checkpoints` forwards to
+  `compare`, so a segmentation study with void labels works end-to-end. `task`
+  is already forwarded; this adds the matching `ignore_index` pass-through.
 
 ## Data flow
 
 For each `(method, seed)` model: stream the dataloader → per-batch predict →
 update the battery → compute 5 scalar metrics → one row in the
-`(method × seed)` `xarray.Dataset` → `compare_methods` for significance. Memory
-stays `O(C²)` regardless of image size or dataset length.
+`(method × seed)` `xarray.Dataset` → `compare_methods` for significance. For
+segmentation, memory stays `O(C²)` regardless of image size or dataset length;
+classification keeps its existing per-sample `auroc`/`ece` accumulation.
 
 ## Error handling
 
