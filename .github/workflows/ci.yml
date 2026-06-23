@@ -92,9 +92,9 @@ jobs:
       # Some deps at their floor still `import pkg_resources` at import time; uv's
       # minimal venv omits setuptools, which typical user environments include.
       # Provide it so this job tests dependency-version compatibility, not
-      # setuptools presence.
+      # setuptools presence. Pin < 81: setuptools 81 removed pkg_resources.
       - name: Provide setuptools (pkg_resources) for old floors
-        run: uv pip install setuptools
+        run: uv pip install "setuptools<81"
       - name: Show resolved environment
         run: uv pip list
       - name: Run tests
