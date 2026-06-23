@@ -2449,7 +2449,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=1.5" },
     { name = "pytorch-lightning", specifier = ">=2.0.0" },
     { name = "scipy", specifier = ">=1.10" },
-    { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2.2.0" },
+    { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2.4.0" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=2.2.0,<2.3" },
     { name = "torchmetrics", specifier = ">=1.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },

@@ -34,12 +34,13 @@ dependencies = [
     "pytorch-lightning >= 2.0.0",
     "hydra-zen >= 0.9.0",
     "hydra-core >= 1.2.0",
-    # torch floor is 2.2: NumPy 2 (the non-Intel floor below) is ABI-incompatible
-    # with torch < ~2.2 (built against NumPy 1.x). Intel-macOS additionally has no
-    # torch wheels past 2.2.x, so it is pinned to exactly 2.2.x. Verified by the
-    # min-version CI job.
+    # torch floors are split by platform. Non-Intel uses NumPy 2 (below), which
+    # is ABI-incompatible with torch built against NumPy 1.x; PyTorch first ships
+    # NumPy-2-compatible wheels in 2.4.0 ("Numpy is not available" below that).
+    # Intel-macOS has no torch wheels past 2.2.x and uses NumPy 1.x, so it is
+    # pinned to exactly 2.2.x. Both verified by the min-version CI job.
     "torch >= 2.2.0,<2.3 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "torch >= 2.2.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "torch >= 2.4.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     # Intel-macOS (torch 2.2.x) is built against NumPy 1.x and is inherently
     # Python <=3.11. Everywhere else take NumPy 2.x.
     "numpy >= 1.24,<2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
