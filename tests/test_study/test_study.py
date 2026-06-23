@@ -75,3 +75,7 @@ def test_full_motion_trains_then_compares(tmp_path):
     assert result.data.sizes == {"method": 2, "seed": 3}
     assert set(study.checkpoints) == {"m1", "m2"}
     assert all(len(v) == 3 for v in study.checkpoints.values())
+    # full-motion run records the resolved working directory (not left as the input)
+    from pathlib import Path
+
+    assert study.working_dir == str((tmp_path / "run").resolve())

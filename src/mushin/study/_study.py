@@ -73,10 +73,13 @@ class Study:
 
     def run(self) -> BenchmarkResult:
         if self._methods is not None:
-            ckpt_dir = Path(self.working_dir or ".").resolve() / "study_checkpoints"
+            base = Path(self.working_dir or ".").resolve()
+            ckpt_dir = base / "study_checkpoints"
             self.checkpoints = run_training_sweep(
                 self._methods, self._seeds, ckpt_dir, self.working_dir
             )
+            # reflect the resolved directory the sweep ran in (was possibly None)
+            self.working_dir = str(base)
         if self.checkpoints is None:
             raise RuntimeError(
                 "no checkpoints to evaluate; provide `methods` or use "
