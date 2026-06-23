@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `mushin-mcp` — an optional, read-only [MCP](https://modelcontextprotocol.io)
+  server (`pip install "mushin-py[mcp]"`, Python >= 3.10) that lets Claude Code
+  and other MCP clients list experiments, summarize swept params and metrics,
+  read configs, and inspect saved datasets. No training or sweep launching.
+
 ## [0.2.0] - 2026-06-23
 
 ### Added

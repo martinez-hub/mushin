@@ -112,6 +112,20 @@ Study.from_checkpoints(
 - `HydraDDP` — a Hydra/Lightning strategy for multi-GPU (DDP) launches.
 - `multirun`, `hydra_list`, `load_experiment`, `load_from_checkpoint` — helpers.
 
+## Analyze experiments from Claude Code (MCP)
+
+`mushin` ships an optional read-only [MCP](https://modelcontextprotocol.io)
+server so Claude Code (or any MCP client) can load and analyze your completed
+runs — list experiments, summarize swept parameters and metrics, and inspect
+saved datasets — without launching anything.
+
+```bash
+pip install "mushin-py[mcp]"          # requires Python >= 3.10
+claude mcp add mushin -- mushin-mcp --root ./outputs
+```
+
+See [docs/mcp.md](docs/mcp.md) for the full tool list and example prompts.
+
 ## Install
 
 ```bash
