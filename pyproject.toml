@@ -51,6 +51,11 @@ dependencies = [
 [project.optional-dependencies]
 viz = ["matplotlib >= 3.3"]
 netcdf = ["netCDF4 >= 1.5.8"]
+# The MCP SDK requires Python >= 3.10; mushin still supports 3.9, so gate it.
+mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
+
+[project.scripts]
+mushin-mcp = "mushin.mcp.__main__:main"
 
 [project.urls]
 "Upstream (origin)" = "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
@@ -66,6 +71,7 @@ dev = [
     "pytest-xdist",
     "matplotlib >= 3.3",
     "netCDF4 >= 1.5.8",
+    "mcp >= 1.2 ; python_version >= '3.10'",
 ]
 
 [tool.setuptools.packages.find]
