@@ -1,9 +1,11 @@
 # Releasing mushin
 
-Releases are published to PyPI by `.github/workflows/publish.yml` when a GitHub
-Release is published whose tag matches the project version.
+mushin (`mushin-py` on PyPI) publishes via **Trusted Publishing** (OIDC) — there
+are no API tokens to manage. A release is triggered by publishing a GitHub
+Release whose tag matches the project version; `.github/workflows/publish.yml`
+verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 
-## Steps
+## Cutting a release
 
 1. Choose the next version `X.Y.Z` (SemVer; `0.x` keeps breaking changes in the
    minor slot).
@@ -12,18 +14,36 @@ Release is published whose tag matches the project version.
    make changelog VERSION=X.Y.Z
    ```
    This rewrites `CHANGELOG.md` (a new `## [X.Y.Z] - <today>` section under the
-   towncrier marker) and deletes the consumed fragments. Review the diff;
-   tidy wording if needed.
+   towncrier marker) and deletes the consumed fragments. Review the diff and
+   tidy wording if needed. Preview any time without consuming fragments:
+   ```bash
+   make changelog-draft VERSION=X.Y.Z
+   ```
 3. Bump the version in `pyproject.toml` to `X.Y.Z`, then `uv sync` to update
    `uv.lock`.
 4. Update the `[Unreleased]`/version link-reference footer at the bottom of
    `CHANGELOG.md`.
 5. Commit on a branch, open a PR, merge once CI is green.
-6. Tag and publish a GitHub Release `vX.Y.Z` on the merge commit. `publish.yml`
-   verifies `tag == version` and publishes via Trusted Publishing.
+6. Tag and publish a GitHub Release `vX.Y.Z` on the merge commit (the tag must
+   equal the `pyproject` version, prefixed `v`):
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --title vX.Y.Z --notes-from-tag
+   ```
+   Publishing the release triggers `publish.yml`.
 
-Preview the changelog section any time without consuming fragments:
+## Trusted Publishing setup (one-time, already configured)
 
-```bash
-make changelog-draft VERSION=X.Y.Z
-```
+The PyPI publisher is registered against the `pypi` GitHub Environment. For
+reference (or to re-register), the publisher is:
+
+- **PyPI Project Name:** `mushin-py`
+- **Owner:** `martinez-hub`
+- **Repository name:** `mushin`
+- **Workflow name:** `publish.yml`
+- **Environment name:** `pypi`
+
+Optionally add protection rules to the `pypi`
+[environment](https://github.com/martinez-hub/mushin/settings/environments)
+(e.g. required reviewers) for an extra gate before publishing.
