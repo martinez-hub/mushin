@@ -155,7 +155,9 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
             else None
         )
         metrics: dict = {}
-        for f in sorted(run_dir.glob("*.pt")):
+        # Only MetricsCallback-style metric files; never model weights (model.pt,
+        # state_dict.pt, ...), which the server must not load.
+        for f in sorted(run_dir.glob("*metrics*.pt")):
             if not _within_root(f, rootp):
                 continue
             try:
@@ -288,9 +290,9 @@ def _read_dataset(path: str | Path, root: str | Path | None = None) -> dict:
                 "dtype": str(da.dtype),
             }
             try:
-                entry["mean"] = float(da.mean().item())
-                entry["min"] = float(da.min().item())
-                entry["max"] = float(da.max().item())
+                entry["mean"] = _to_jsonable(float(da.mean().item()))
+                entry["min"] = _to_jsonable(float(da.min().item()))
+                entry["max"] = _to_jsonable(float(da.max().item()))
             except (TypeError, ValueError):
                 pass
             data_vars[str(name)] = entry
@@ -345,11 +347,11 @@ def _to_jsonable(obj: Any) -> Any:
     """Convert torch/numpy/omegaconf values into JSON-serializable Python."""
     if isinstance(obj, torch.Tensor):
         obj = obj.detach().cpu()
-        return obj.item() if obj.ndim == 0 else obj.tolist()
+        return _to_jsonable(obj.item() if obj.ndim == 0 else obj.tolist())
     if isinstance(obj, np.generic):
-        return obj.item()
+        return _to_jsonable(obj.item())
     if isinstance(obj, np.ndarray):
-        return obj.tolist()
+        return _to_jsonable(obj.tolist())
     if OmegaConf.is_config(obj):
         return _to_jsonable(OmegaConf.to_container(obj, resolve=True))
     if isinstance(obj, dict):

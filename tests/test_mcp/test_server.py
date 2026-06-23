@@ -258,10 +258,10 @@ def test_unreadable_metrics_skipped(tmp_path):
     from mushin.mcp.server import _get_metrics
 
     base = _make_experiment(tmp_path / "exp")
-    (base / "0" / "bad.pt").write_bytes(b"not a real torch file")
+    (base / "0" / "bad_metrics.pt").write_bytes(b"not a real torch file")
     out = _get_metrics(base)  # must not raise
     assert "metrics" in out["per_run"][0]  # good file still loaded
-    assert "bad" not in out["per_run"][0]  # unreadable file skipped, not executed
+    assert "bad_metrics" not in out["per_run"][0]  # unreadable file skipped, not executed
 
 
 def test_get_metrics_filter_by_leaf(tmp_path):
@@ -306,12 +306,12 @@ def test_malicious_metrics_not_executed(tmp_path):
     (base / ".hydra").mkdir(parents=True)
     OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
     torch.save({"accuracy": 0.8}, base / "metrics.pt")  # good file
-    torch.save({"x": _Evil()}, base / "evil.pt")  # malicious file
+    torch.save({"x": _Evil()}, base / "evil_metrics.pt")  # malicious file
 
     out = _get_metrics(tmp_path / "exp")  # must not raise, must not execute
     assert not marker.exists()  # code never ran
     assert "metrics" in out["per_run"][0]  # good file still loaded
-    assert "evil" not in out["per_run"][0]  # malicious file skipped
+    assert "evil_metrics" not in out["per_run"][0]  # malicious file skipped
 
 
 def test_ddp_config_loaded(tmp_path):
@@ -349,11 +349,11 @@ def test_metric_symlink_outside_root_skipped(tmp_path):
     torch.save({"accuracy": 0.8}, exp / "metrics.pt")  # in-root
     secret = tmp_path / "outside.pt"
     torch.save({"secret": torch.tensor(42.0)}, secret)
-    (exp / "leak.pt").symlink_to(secret)  # symlink escaping root
+    (exp / "leak_metrics.pt").symlink_to(secret)  # symlink escaping root
 
     out = _get_metrics(root / "exp", root=root)
     assert "metrics" in out["per_run"][0]  # in-root metric still read
-    assert "leak" not in out["per_run"][0]  # escaping symlink refused
+    assert "leak_metrics" not in out["per_run"][0]  # escaping symlink refused
 
 
 def test_tensor_metrics_skipped_on_unsafe_torch(tmp_path):
@@ -370,3 +370,42 @@ def test_tensor_metrics_skipped_on_unsafe_torch(tmp_path):
         assert out["per_run"][0]["tensor_metrics"]["w"] == [1.0, 2.0]
     else:
         assert "tensor_metrics" not in out["per_run"][0]  # safely skipped
+
+
+def test_non_metric_pt_files_ignored(tmp_path):
+    """model.pt / state_dict.pt must NOT be loaded as metrics."""
+    from mushin.mcp.server import _get_metrics
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    torch.save({"accuracy": 0.8}, base / "fit_metrics.pt")  # a metric file
+    torch.save({"layers": [1, 2, 3]}, base / "model.pt")  # model weights
+
+    out = _get_metrics(tmp_path / "exp")
+    assert "fit_metrics" in out["per_run"][0]
+    assert "model" not in out["per_run"][0]
+
+
+def test_to_jsonable_non_finite_in_array():
+    out = _to_jsonable(np.array([1.0, np.inf, np.nan]))
+    assert out == [1.0, "inf", "nan"]
+
+
+def test_to_jsonable_non_finite_in_tensor():
+    out = _to_jsonable(torch.tensor([1.0, float("inf")]))
+    assert out == [1.0, "inf"]
+
+
+def test_read_dataset_non_finite_stats(tmp_path):
+    import xarray as xr
+
+    from mushin.mcp.server import _read_dataset
+
+    # All-NaN so xarray's skipna mean is also NaN (not skipped-to-finite).
+    ds = xr.Dataset({"m": ("x", [float("nan"), float("nan")])}, coords={"x": [0, 1]})
+    nc = tmp_path / "d.nc"
+    ds.to_netcdf(nc, engine="scipy")
+
+    out = _read_dataset(nc)
+    assert out["data_vars"]["m"]["mean"] == "nan"  # non-finite normalized to string
