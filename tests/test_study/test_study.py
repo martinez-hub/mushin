@@ -46,3 +46,32 @@ def test_from_checkpoints_rejects_empty():
 
     with pytest.raises(ValueError, match="must not be empty"):
         Study.from_checkpoints({}, load_fn=lambda p: p, data=None, num_classes=2)
+
+
+def test_full_motion_trains_then_compares(tmp_path):
+    # train_fn just instantiates and saves a tiny model (no real training needed
+    # to exercise the plumbing) and returns its checkpoint path.
+    def make_train(name):
+        def train(seed):
+            torch.manual_seed(hash((name, seed)) % 1000)
+            p = tmp_path / f"{name}_seed{seed}_raw.pt"
+            torch.save(torch.nn.Linear(4, 3), p)
+            return str(p)
+
+        return train
+
+    study = Study(
+        methods={"m1": make_train("m1"), "m2": make_train("m2")},
+        load_fn=lambda p: torch.load(p, weights_only=False),
+        seeds=[0, 1, 2],
+        data=_loader(),
+        num_classes=3,
+        test="welch",
+        working_dir=str(tmp_path / "run"),
+    )
+    result = study.run()
+
+    assert isinstance(result, BenchmarkResult)
+    assert result.data.sizes == {"method": 2, "seed": 3}
+    assert set(study.checkpoints) == {"m1", "m2"}
+    assert all(len(v) == 3 for v in study.checkpoints.values())
