@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import itertools
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -76,14 +77,41 @@ def holm_correction(pvalues) -> list[float]:
     return [float(c) for c in corrected]
 
 
+def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
+    """Warn if ``test`` cannot reach ``alpha`` at ``n_seeds`` seeds.
+
+    Determined empirically: run the test on maximally-separated samples of size
+    ``n_seeds`` and check whether the best-case p-value clears ``alpha``. (A
+    paired Wilcoxon over 3 seeds, for example, can never go below p=0.25.)"""
+    if test not in _TESTS:
+        return
+    func, _ = _TESTS[test]
+    a = np.arange(n_seeds, dtype=float) + 1000.0
+    b = np.arange(n_seeds, dtype=float)
+    try:
+        _, p = func(a, b)
+    except ValueError:
+        return  # test could not even run at this n; nothing useful to say
+    if float(p) > alpha:
+        warnings.warn(
+            f"test={test!r} cannot reach alpha={alpha} with {n_seeds} seeds "
+            f"(best-case p={float(p):.4g}); use more seeds or a parametric test "
+            f"such as test='welch'.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def compare_methods(
     ds: xr.Dataset, test: str = "wilcoxon", alpha: float = 0.05
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
-    Holm correction is applied per metric across the method pairs."""
+    Holm correction is applied per metric across the method pairs. Emits a
+    warning when ``test`` cannot reach ``alpha`` at the dataset's seed count."""
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    warn_if_underpowered(test, int(ds.sizes["seed"]), alpha)
     func, _ = _TESTS[test]
     methods = [str(m) for m in ds["method"].values]
 
