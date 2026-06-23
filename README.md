@@ -58,8 +58,53 @@ The full runnable version is in [`examples/sweep_to_dataset.py`](examples/sweep_
 uv run python examples/sweep_to_dataset.py
 ```
 
+## Compare methods, with statistics
+
+Evaluate trained models on a standard battery and get a labeled dataset *plus*
+significance — metrics delegated to torchmetrics, statistics to scipy:
+
+```python
+from mushin.benchmark import compare
+
+result = compare(
+    methods={"ours": [m0, m1, m2], "baseline": [b0, b1, b2]},  # one trained model per seed
+    data=test_loader, task="classification", num_classes=10, test="welch",
+)
+
+result.summary()       # mean ± CI per method, with significance markers — paper-ready
+result.comparisons     # tidy DataFrame: pairwise p-values + effect sizes
+result.data            # the labeled xarray (method × seed) to slice and plot
+```
+
+Don't have the trained models in memory yet? `Study` runs the multi-seed training
+sweep (via Hydra) and feeds the results straight into `compare` — define → train →
+evaluate → report in one call:
+
+```python
+from mushin import Study
+
+study = Study(
+    methods={"cnn": train_cnn, "mlp": train_mlp},   # train_fn(seed) -> checkpoint path
+    load_fn=LitClassifier.load_from_checkpoint,       # path -> model
+    seeds=[0, 1, 2], data=test_loader, num_classes=10, test="welch",
+)
+result = study.run()                                  # -> BenchmarkResult
+
+# ...or compare checkpoints you already have, no training:
+Study.from_checkpoints(
+    checkpoints={"cnn": ["cnn_0.ckpt", ...], "mlp": ["mlp_0.ckpt", ...]},
+    load_fn=LitClassifier.load_from_checkpoint,
+    data=test_loader, num_classes=10, test="welch",
+).run()
+```
+
 ## What it provides
 
+- `benchmark.compare` — run a standard metric battery (torchmetrics) across
+  trained seeds and get a labeled dataset + significance (scipy): `BenchmarkResult`
+  with `.summary()`, `.comparisons`, and `.data`.
+- `Study` — orchestrate a multi-seed training sweep and route the trained models
+  into `compare`, in one call; `Study.from_checkpoints(...)` for eval-only.
 - `BaseWorkflow`, `MultiRunMetricsWorkflow`, `RobustnessCurve` — declarative,
   reproducible experiment workflows that record configs, checkpoints, and
   metrics, and load results back as labeled `xarray` datasets.
@@ -69,21 +114,21 @@ uv run python examples/sweep_to_dataset.py
 
 ## Install
 
-From PyPI (the distribution is named `mushin-py`; you still `import mushin`):
-
 ```bash
 pip install mushin-py
 ```
 
-For a development environment (runtime deps + dev tooling), this project uses
-[uv](https://docs.astral.sh/uv/):
+Already use [uv](https://docs.astral.sh/uv/)? `uv pip install mushin-py` (or
+`uv add mushin-py` inside a project) is faster.
 
-```bash
-uv sync
-```
+> **Install name vs. import name:** the PyPI distribution is **`mushin-py`**, but
+> you `import mushin` (same pattern as `scikit-learn` → `sklearn`).
 
 Optional runtime extras: `viz` (matplotlib, for `RobustnessCurve` plotting) and
 `netcdf` (netCDF4) — e.g. `pip install "mushin-py[viz]"`.
+
+For a development environment (runtime deps + dev tooling), this project uses
+[uv](https://docs.astral.sh/uv/): `uv sync`.
 
 ## Develop
 
