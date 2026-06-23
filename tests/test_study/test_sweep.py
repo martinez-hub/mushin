@@ -25,3 +25,10 @@ def test_run_training_sweep_recovers_paths(tmp_path):
         for s, p in enumerate(paths):
             assert Path(p).exists()
             assert Path(p).read_text() == f"{m}-{s}"
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_run_training_sweep_rejects_none_path(tmp_path):
+    methods = {"a": lambda seed: None}  # train_fn that returns no path
+    with pytest.raises(ValueError, match="returned no checkpoint path"):
+        run_training_sweep(methods, seeds=[0], ckpt_dir=tmp_path / "ck")

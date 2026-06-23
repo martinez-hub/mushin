@@ -37,6 +37,10 @@ def run_training_sweep(
 
     def task(method, seed):
         src = methods[method](seed)
+        if src is None:
+            raise ValueError(
+                f"train_fn for method={method!r} seed={seed} returned no checkpoint path"
+            )
         dest = ckpt_dir / f"{method}__seed{seed}.ckpt"
         os.replace(src, dest)
         return {"checkpoint": str(dest)}
