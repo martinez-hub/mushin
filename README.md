@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="logos/mushin-dark.png">
-    <img src="logos/mushin-light.png" alt="mushin logo" width="200">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/martinez-hub/mushin/main/logos/mushin-dark.png">
+    <img src="https://raw.githubusercontent.com/martinez-hub/mushin/main/logos/mushin-light.png" alt="mushin logo" width="200">
   </picture>
 </p>
 
@@ -38,7 +38,8 @@ class LRSweep(MultiRunMetricsWorkflow):
     @staticmethod
     def task(lr: float, seed: int) -> dict:
         tr.manual_seed(seed)
-        # ... train a model with this lr/seed ...
+        # ... train a model with this lr/seed, then evaluate it ...
+        acc = ...  # your validation accuracy
         return dict(accuracy=acc)  # whatever you return becomes a data variable
 
 wf = LRSweep()

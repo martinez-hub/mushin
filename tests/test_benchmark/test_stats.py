@@ -19,6 +19,16 @@ def test_cohens_d_zero_for_identical():
     assert cohens_d([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 0.0
 
 
+def test_cohens_d_zero_variance_same_means_is_zero():
+    assert cohens_d([1.0, 1.0, 1.0], [1.0, 1.0, 1.0]) == 0.0
+
+
+def test_cohens_d_zero_variance_different_means_is_infinite():
+    # perfectly separated constant groups -> effect is infinite, not zero
+    assert cohens_d([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]) == float("inf")
+    assert cohens_d([0.0, 0.0], [1.0, 1.0]) == float("-inf")
+
+
 def test_holm_is_monotone_and_capped():
     corrected = holm_correction([0.01, 0.04, 0.03])
     assert all(0.0 <= c <= 1.0 for c in corrected)
