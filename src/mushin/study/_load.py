@@ -49,6 +49,8 @@ def evaluate_checkpoints(
 ) -> BenchmarkResult:
     """Load each checkpoint via ``load_fn``, regroup into ``{method: [models]}``,
     and run ``compare``."""
+    if not checkpoints:
+        raise ValueError("`checkpoints` must not be empty")
     models = {
         method: [load_fn(p) for p in paths] for method, paths in checkpoints.items()
     }

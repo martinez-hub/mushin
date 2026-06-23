@@ -54,3 +54,10 @@ def test_warn_if_underpowered_silent_for_welch_small_n():
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning -> failure
         warn_if_underpowered("welch", n_seeds=3, alpha=0.05)
+
+
+def test_evaluate_checkpoints_rejects_empty():
+    with pytest.raises(ValueError, match="must not be empty"):
+        evaluate_checkpoints(
+            {}, load_fn=lambda p: p, data=None, task="classification", num_classes=2
+        )

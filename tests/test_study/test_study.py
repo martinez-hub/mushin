@@ -39,3 +39,10 @@ def test_from_checkpoints_runs_and_compares(tmp_path):
     assert result.data.sizes == {"method": 2, "seed": 2}
     assert study.checkpoints == ckpts
     assert study.working_dir is None
+
+
+def test_from_checkpoints_rejects_empty():
+    import pytest
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        Study.from_checkpoints({}, load_fn=lambda p: p, data=None, num_classes=2)

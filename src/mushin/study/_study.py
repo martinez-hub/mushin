@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from mushin.benchmark import BenchmarkResult
@@ -20,6 +21,14 @@ class Study:
     ``Study.from_checkpoints`` to compare already-trained checkpoints.
     """
 
+    def _init_common(self, load_fn, data, num_classes, task, test, alpha):
+        self._load_fn = load_fn
+        self._data = data
+        self._num_classes = num_classes
+        self._task = task
+        self._test = test
+        self._alpha = alpha
+
     def __init__(
         self,
         methods: dict[str, TrainFn],
@@ -33,14 +42,9 @@ class Study:
         alpha: float = 0.05,
         working_dir: str | None = None,
     ):
+        self._init_common(load_fn, data, num_classes, task, test, alpha)
         self._methods = methods
-        self._load_fn = load_fn
         self._seeds = list(seeds)
-        self._data = data
-        self._num_classes = num_classes
-        self._task = task
-        self._test = test
-        self._alpha = alpha
         self.working_dir = working_dir
         self.checkpoints: dict[str, list[str]] | None = None
 
@@ -57,28 +61,27 @@ class Study:
         alpha: float = 0.05,
     ) -> Study:
         """Build a Study that compares already-trained checkpoints (no training)."""
+        if not checkpoints:
+            raise ValueError("checkpoints must not be empty")
         study = cls.__new__(cls)
+        study._init_common(load_fn, data, num_classes, task, test, alpha)
         study._methods = None
-        study._load_fn = load_fn
         study._seeds = None
-        study._data = data
-        study._num_classes = num_classes
-        study._task = task
-        study._test = test
-        study._alpha = alpha
         study.working_dir = None
         study.checkpoints = {m: list(p) for m, p in checkpoints.items()}
         return study
 
     def run(self) -> BenchmarkResult:
         if self._methods is not None:
-            from pathlib import Path
-
             ckpt_dir = Path(self.working_dir or ".").resolve() / "study_checkpoints"
             self.checkpoints = run_training_sweep(
                 self._methods, self._seeds, ckpt_dir, self.working_dir
             )
-        assert self.checkpoints is not None
+        if self.checkpoints is None:
+            raise RuntimeError(
+                "no checkpoints to evaluate; provide `methods` or use "
+                "Study.from_checkpoints(...)"
+            )
         return evaluate_checkpoints(
             self.checkpoints,
             self._load_fn,
