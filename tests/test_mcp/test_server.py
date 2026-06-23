@@ -73,3 +73,14 @@ def test_list_experiments_finds_runs(tmp_path):
     out = _list_experiments(base)
     assert out["count"] == 2
     assert sorted(Path(r).name for r in out["runs"]) == ["0", "1"]
+
+
+def test_describe_experiment_reports_sweep(tmp_path):
+    from mushin.mcp.server import _describe_experiment
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _describe_experiment(base)
+    assert out["num_runs"] == 2
+    assert "metrics" in out["metric_keys"]
+    assert out["swept_params"]["lr"] == [0.1, 0.2]
+    assert "seed" not in out["swept_params"]  # constant across runs

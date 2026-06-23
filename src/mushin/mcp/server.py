@@ -13,6 +13,48 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from mushin._utils import Experiment, load_experiment
+
+
+def _flatten(value: Any, prefix: str = "") -> dict:
+    """Flatten a nested (already JSON-able) dict into dotted keys."""
+    out: dict[str, Any] = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out.update(_flatten(v, f"{prefix}{k}."))
+    else:
+        out[prefix.rstrip(".")] = value
+    return out
+
+
+def _as_list(exps: Any) -> list:
+    return [exps] if isinstance(exps, Experiment) else list(exps)
+
+
+def _describe_experiment(path: str | Path, root: str | Path | None = None) -> dict:
+    """Summarize swept params, metric keys, and run/checkpoint counts."""
+    p = _resolve(path, root)
+    exps = _as_list(load_experiment(p))
+    metric_keys = sorted({k for e in exps for k in (e.metrics or {})})
+    flats = [_flatten(_to_jsonable(e.cfg)) for e in exps if e.cfg is not None]
+    swept: dict[str, list] = {}
+    if flats:
+        for k in sorted(set().union(*(set(f) for f in flats))):
+            uniq: list = []
+            for f in flats:
+                v = f.get(k)
+                if v not in uniq:
+                    uniq.append(v)
+            if len(uniq) > 1:
+                swept[k] = uniq
+    return {
+        "path": str(p),
+        "num_runs": len(exps),
+        "metric_keys": metric_keys,
+        "swept_params": swept,
+        "num_checkpoints": [len(e.ckpts) for e in exps],
+    }
+
 
 def create_server() -> None:  # pragma: no cover
     """Placeholder — full implementation in a later task."""
