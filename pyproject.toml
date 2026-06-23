@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # Distribution name on PyPI is "mushin-py" (the "mushin" name was taken);
 # the import package is still `import mushin` (see src/mushin/).
 name = "mushin-py"
-version = "0.2.0"
+version = "0.2.1"
 description = "Boilerplate-free, reproducible ML experiment workflows built on PyTorch Lightning and hydra-zen. Carved out of MIT-LL's responsible-ai-toolbox."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -58,6 +58,11 @@ mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
 mushin-mcp = "mushin.mcp.__main__:main"
 
 [project.urls]
+Homepage = "https://github.com/martinez-hub/mushin"
+Repository = "https://github.com/martinez-hub/mushin"
+Issues = "https://github.com/martinez-hub/mushin/issues"
+Changelog = "https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md"
+# Attribution to the project mushin was carved out of (also in LICENSE/README).
 "Upstream (origin)" = "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
 
 # Dev tooling, installed by `uv sync` (PEP 735 dependency group).
@@ -69,6 +74,7 @@ dev = [
     "pytest >= 7.0.0",
     "hypothesis >= 6.28.0",
     "pytest-xdist",
+    "towncrier >= 23.11",
     "matplotlib >= 3.3",
     "netCDF4 >= 1.5.8",
     "mcp >= 1.2 ; python_version >= '3.10'",
@@ -107,3 +113,43 @@ ignore = [
 skip = "*.lock,*.ckpt,*.pt,.git,.venv,*.egg-info"
 # "mushin" (無心) and a few ML terms trip the default dictionary.
 ignore-words-list = "mushin,nin,tha"
+
+[tool.towncrier]
+# News fragments live in changes/<id>.<type>.md and are assembled into
+# CHANGELOG.md at release time by `make changelog VERSION=X.Y.Z`.
+directory = "changes"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+underlines = ["", "", ""]            # Markdown headings, not RST underlines
+title_format = "## [{version}] - {project_date}"
+issue_format = "#{issue}"
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "misc"
+name = "Misc"
+showcontent = false

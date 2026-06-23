@@ -5,7 +5,7 @@ HYPOTHESIS_PROFILE ?= fast
 PYTHON ?= 3.11
 
 .DEFAULT_GOAL := help
-.PHONY: help sync test test-fast test-py lint format format-check spell check all
+.PHONY: help sync test test-fast test-py lint format format-check spell check all changelog changelog-draft
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -33,8 +33,14 @@ format-check: ## Check formatting without modifying files
 	uv run ruff format --check .
 
 spell: ## Spell-check with codespell
-	uv run codespell src tests README.md pyproject.toml
+	uv run codespell src tests README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
 
 check: lint format-check spell test ## Run all checks (what CI runs)
 
 all: check ## Alias for `check`
+
+changelog:  ## Assemble news fragments into CHANGELOG.md (VERSION=X.Y.Z)
+	uv run towncrier build --version $(VERSION)
+
+changelog-draft:  ## Preview the next changelog section without consuming fragments (VERSION=X.Y.Z)
+	uv run towncrier build --draft --version $(VERSION)
