@@ -12,9 +12,10 @@ from typing import Any
 
 import numpy as np
 import torch
+from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
-from mushin._utils import Experiment, load_experiment
+from mushin._utils import Experiment
 
 
 def _flatten(value: Any, prefix: str = "") -> dict:
@@ -28,18 +29,35 @@ def _flatten(value: Any, prefix: str = "") -> dict:
     return out
 
 
-def _as_list(exps: Any) -> list:
-    return [exps] if isinstance(exps, Experiment) else list(exps)
+def _load_runs(p: Path) -> list[Experiment]:
+    """Load experiment runs at ``p`` without executing pickled code.
 
-
-def _load_runs(p: Path) -> list:
-    """Load experiment runs at ``p``, or raise if the path has no experiment."""
+    Mirrors ``mushin._utils.load_experiment`` but loads metrics with
+    ``weights_only=True`` and skips any file that cannot be safely loaded, so
+    a malicious ``*.pt`` under ``--root`` can never execute arbitrary code.
+    """
     if not p.exists():
         raise FileNotFoundError(f"{p} not found")
-    exps = _as_list(load_experiment(p))
-    if not exps:
+    runs: list[Experiment] = []
+    for hydra_dir in sorted(p.glob("**/.hydra")):
+        run_dir = hydra_dir.parent
+        cfg_files = list(run_dir.glob("**/config.yaml"))
+        cfg = load_from_yaml(cfg_files[0]) if len(cfg_files) == 1 else None
+        metrics: dict = {}
+        for f in sorted(run_dir.glob("*.pt")):
+            try:
+                metrics[f.stem] = torch.load(
+                    f, map_location="cpu", weights_only=True
+                )
+            except Exception:
+                # Fail closed: never fall back to unsafe (pickle-executing)
+                # loading; just skip metrics we cannot safely read.
+                continue
+        ckpts = [str(c.resolve()) for c in run_dir.glob("**/*.ckpt")]
+        runs.append(Experiment(str(run_dir.parent), cfg, ckpts, metrics))
+    if not runs:
         raise FileNotFoundError(f"no experiment found at {p} (no .hydra directory)")
-    return exps
+    return runs
 
 
 def _describe_experiment(path: str | Path, root: str | Path | None = None) -> dict:
@@ -94,14 +112,25 @@ def _get_metrics(
     reduce: str | None = None,
     root: str | Path | None = None,
 ) -> dict:
-    """Return per-run metrics, optionally filtered and reduced across runs."""
+    """Return per-run metrics, optionally filtered and reduced across runs.
+
+    ``metrics``, when provided, matches flattened metric leaves by full dotted
+    path (e.g. ``"metrics.accuracy"``) or trailing leaf name (e.g.
+    ``"accuracy"``), not by ``.pt`` filename stems.
+    """
     p = _resolve(path, root)
     exps = _load_runs(p)
     per_run = []
+    wanted = set(metrics) if metrics is not None else None
     for e in exps:
         m = _to_jsonable(e.metrics or {})
-        if metrics is not None:
-            m = {k: v for k, v in m.items() if k in metrics}
+        if wanted is not None:
+            flat = _flatten(m)
+            m = {
+                k: v
+                for k, v in flat.items()
+                if k in wanted or k.rsplit(".", 1)[-1] in wanted
+            }
         per_run.append(m)
     result = {"path": str(p), "num_runs": len(exps), "per_run": per_run}
     if reduce is not None:

@@ -223,3 +223,37 @@ def test_get_config_single_run(tmp_path):
     out = _get_config(base)
     assert out["config"]["lr"] == 0.3
     assert "configs" not in out
+
+
+def test_metrics_loaded_weights_only(tmp_path, monkeypatch):
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    seen = {}
+    real_load = torch.load
+
+    def spy(*args, **kwargs):
+        seen["weights_only"] = kwargs.get("weights_only")
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", spy)
+    _get_metrics(base)
+    assert seen["weights_only"] is True
+
+
+def test_unreadable_metrics_skipped(tmp_path):
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    (base / "0" / "bad.pt").write_bytes(b"not a real torch file")
+    out = _get_metrics(base)  # must not raise
+    assert "metrics" in out["per_run"][0]  # good file still loaded
+    assert "bad" not in out["per_run"][0]  # unreadable file skipped, not executed
+
+
+def test_get_metrics_filter_by_leaf(tmp_path):
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _get_metrics(base, metrics=["accuracy"])
+    assert out["per_run"][0] == {"metrics.accuracy": pytest.approx(0.8, abs=1e-5)}
