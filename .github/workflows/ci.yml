@@ -64,14 +64,14 @@ jobs:
         run: uv sync
       # `towncrier check` auto-passes when CHANGELOG.md itself is edited, so a
       # PR that hand-edits the changelog (the old workflow) would bypass the
-      # fragment gate. Reject direct CHANGELOG.md edits on normal PRs; release
-      # PRs legitimately rewrite it via `make changelog` and carry a `release`
-      # label to opt out.
+      # fragment gate. Reject direct CHANGELOG.md edits unless the PR carries the
+      # `changelog-exempt` label — used by release PRs (which rewrite it via
+      # `make changelog`) and the one-time bootstrap PR that adds the marker.
       - name: Disallow direct CHANGELOG.md edits (use a changes/ fragment)
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'release') }}
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-exempt') }}
         run: |
           if git diff --name-only origin/${{ github.base_ref }}...HEAD -- CHANGELOG.md | grep -q .; then
-            echo "::error::CHANGELOG.md is assembled from changes/ fragments at release time — don't edit it directly. Add a changes/<id>.<type>.md fragment instead (see changes/README.md). Maintainers cutting a release: apply the 'release' label."
+            echo "::error::CHANGELOG.md is assembled from changes/ fragments at release time — don't edit it directly. Add a changes/<id>.<type>.md fragment instead (see changes/README.md). Release PRs (or the towncrier bootstrap): apply the 'changelog-exempt' label."
             exit 1
           fi
       - name: Changelog fragment check

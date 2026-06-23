@@ -24,8 +24,8 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 4. Update the `[Unreleased]`/version link-reference footer at the bottom of
    `CHANGELOG.md`.
 5. Commit on a branch and open a PR. Because this PR rewrites `CHANGELOG.md`
-   directly, apply the **`release`** label so the changelog gate allows it
-   (normal PRs must use `changes/` fragments instead). Merge once CI is green.
+   directly, apply the **`changelog-exempt`** label so the changelog gate allows
+   it (normal PRs must use `changes/` fragments instead). Merge once CI is green.
 6. Tag and publish a GitHub Release `vX.Y.Z` on the merge commit (the tag must
    equal the `pyproject` version, prefixed `v`):
    ```bash
