@@ -46,9 +46,10 @@ def cohens_d(a, b) -> float:
     diff = float(a.mean() - b.mean())
     if pooled_sd == 0.0:
         # zero within-group variance: the effect is 0 only if the means also
-        # match; otherwise the groups are perfectly separated (d is undefined /
-        # infinite) and reporting 0.0 would hide a real difference.
-        if diff == 0.0:
+        # match (up to floating-point roundoff); otherwise the groups are
+        # perfectly separated (d is undefined / infinite) and reporting 0.0
+        # would hide a real difference.
+        if np.isclose(a.mean(), b.mean()):
             return 0.0
         return float("inf") if diff > 0 else float("-inf")
     return diff / pooled_sd

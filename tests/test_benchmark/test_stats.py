@@ -29,6 +29,11 @@ def test_cohens_d_zero_variance_different_means_is_infinite():
     assert cohens_d([0.0, 0.0], [1.0, 1.0]) == float("-inf")
 
 
+def test_cohens_d_zero_variance_means_equal_within_roundoff_is_zero():
+    # constant groups whose means differ only by float roundoff -> no effect
+    assert cohens_d([1.0, 1.0], [1.0 + 1e-13, 1.0 + 1e-13]) == 0.0
+
+
 def test_holm_is_monotone_and_capped():
     corrected = holm_correction([0.01, 0.04, 0.03])
     assert all(0.0 <= c <= 1.0 for c in corrected)
