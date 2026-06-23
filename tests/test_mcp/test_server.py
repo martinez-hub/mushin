@@ -154,3 +154,18 @@ def test_create_server_registers_tools():
 
     server = create_server(root=None)
     assert server.name == "mushin"
+
+
+def test_main_builds_server_without_running(monkeypatch):
+    pytest.importorskip("mcp")
+    import mushin.mcp.__main__ as cli
+
+    captured = {}
+
+    class _FakeServer:
+        def run(self):
+            captured["ran"] = True
+
+    monkeypatch.setattr(cli, "create_server", lambda root: _FakeServer())
+    cli.main(["--root", "."])
+    assert captured["ran"] is True
