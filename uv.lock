@@ -2453,7 +2453,7 @@ requires-dist = [
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=2.2.0,<2.3" },
     { name = "torchmetrics", specifier = ">=1.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
-    { name = "xarray", specifier = ">=0.19.0" },
+    { name = "xarray", specifier = ">=2024.6.0" },
 ]
 provides-extras = ["viz", "netcdf"]
 
