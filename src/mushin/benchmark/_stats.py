@@ -43,9 +43,16 @@ def cohens_d(a, b) -> float:
     na, nb = len(a), len(b)
     pooled_var = ((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1)) / (na + nb - 2)
     pooled_sd = float(np.sqrt(pooled_var))
+    diff = float(a.mean() - b.mean())
     if pooled_sd == 0.0:
-        return 0.0
-    return float((a.mean() - b.mean()) / pooled_sd)
+        # zero within-group variance: the effect is 0 only if the means also
+        # match (up to floating-point roundoff); otherwise the groups are
+        # perfectly separated (d is undefined / infinite) and reporting 0.0
+        # would hide a real difference.
+        if np.isclose(a.mean(), b.mean()):
+            return 0.0
+        return float("inf") if diff > 0 else float("-inf")
+    return diff / pooled_sd
 
 
 def holm_correction(pvalues) -> list[float]:
