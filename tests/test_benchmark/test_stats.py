@@ -1,4 +1,7 @@
+import warnings
+
 import numpy as np
+import pytest
 
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._stats import (
@@ -6,6 +9,7 @@ from mushin.benchmark._stats import (
     compare_methods,
     confidence_interval,
     holm_correction,
+    warn_if_underpowered,
 )
 
 
@@ -95,3 +99,25 @@ def test_compare_single_seed_parametric_is_nan_not_significant():
     row = df.iloc[0]
     assert np.isnan(row["p_value"])
     assert not row["significant"]
+
+
+def test_warn_if_underpowered_fires_for_small_n_wilcoxon():
+    with pytest.warns(UserWarning, match="cannot reach"):
+        warn_if_underpowered("wilcoxon", n_seeds=3, alpha=0.05)
+
+
+def test_warn_if_underpowered_silent_for_welch_small_n():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning -> failure
+        warn_if_underpowered("welch", n_seeds=3, alpha=0.05)
+
+
+def test_compare_methods_warns_when_test_underpowered():
+    # default wilcoxon over 3 seeds can never reach alpha=0.05 -> compare warns
+    results = {
+        "a": [{"accuracy": v} for v in (0.90, 0.91, 0.92)],
+        "b": [{"accuracy": v} for v in (0.70, 0.71, 0.72)],
+    }
+    ds = to_dataset(results)
+    with pytest.warns(UserWarning, match="cannot reach"):
+        compare_methods(ds, test="wilcoxon", alpha=0.05)
