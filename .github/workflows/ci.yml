@@ -76,3 +76,20 @@ jobs:
           fi
       - name: Changelog fragment check
         run: uv run towncrier check --compare-with origin/${{ github.base_ref }}
+
+  min-versions:
+    # Resolves the *lowest* declared dependency versions and runs the suite, so
+    # the floors in pyproject.toml stay honest. Runs on the oldest supported
+    # Python (3.9). Reproduce locally with `make test-lowest` (amd64 Docker).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Sync lowest-direct dependency versions (Python 3.9)
+        run: uv sync --resolution lowest-direct --python 3.9
+      - name: Show resolved environment
+        run: uv pip list
+      - name: Run tests
+        run: uv run pytest tests/ --hypothesis-profile fast -p no:cacheprovider

@@ -1,0 +1,1 @@
+Raised minimum dependency floors to a tested minimum (pytorch-lightning >= 2.0, torch >= 2.2) and added a CI job that runs the suite against the lowest declared versions, so the floors stay honest. The previous floors (Lightning 1.5, torch 1.13) did not actually work — NumPy 2 is ABI-incompatible with torch < 2.2, and Lightning's 2.0 rewrite dropped the 1.5 API.
