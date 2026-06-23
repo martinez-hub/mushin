@@ -132,12 +132,30 @@ def test_evaluate_explicit_device_and_resets_between_calls():
     pm = frozenset({"auroc", "ece"})
 
     battery = classification_battery(3)
-    evaluate(model, loader(1), battery, default_classification_predict_fn,
-             prob_metrics=pm, device=cpu)  # first call dirties the metric state
-    reused = evaluate(model, loader(2), battery, default_classification_predict_fn,
-                      prob_metrics=pm, device=cpu)  # same battery, different data
-    fresh = evaluate(model, loader(2), classification_battery(3),
-                     default_classification_predict_fn, prob_metrics=pm, device=cpu)
+    evaluate(
+        model,
+        loader(1),
+        battery,
+        default_classification_predict_fn,
+        prob_metrics=pm,
+        device=cpu,
+    )  # first call dirties the metric state
+    reused = evaluate(
+        model,
+        loader(2),
+        battery,
+        default_classification_predict_fn,
+        prob_metrics=pm,
+        device=cpu,
+    )  # same battery, different data
+    fresh = evaluate(
+        model,
+        loader(2),
+        classification_battery(3),
+        default_classification_predict_fn,
+        prob_metrics=pm,
+        device=cpu,
+    )
 
     assert reused.keys() == fresh.keys()
     for k in reused:
