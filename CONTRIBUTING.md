@@ -74,9 +74,9 @@ Markdown, written for users. For example, `changes/123.fixed.md` containing:
 ```
 
 CI enforces this. For CI-only, refactor, or typo PRs with nothing user-facing,
-add a `misc` fragment instead (e.g. `changes/+refactor.misc.md`) — it satisfies
-the gate without adding a changelog line. See [`changes/README.md`](changes/README.md)
-for details.
+add a `misc` fragment instead (e.g. `changes/42.misc.md`) — it satisfies the gate
+and adds only a terse `- #42` under a "Misc" section. See
+[`changes/README.md`](changes/README.md) for details.
 
 ## Style
 

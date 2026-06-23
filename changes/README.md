@@ -27,10 +27,14 @@ For example, `changes/123.fixed.md` containing:
 
 renders as a bullet under **Fixed** at release time, tagged `(#123)`.
 
-A `misc` fragment satisfies the CI gate without adding a changelog line — use it
-for CI/refactor/typo PRs with nothing user-facing (e.g. `changes/+ci.misc.md`).
-A numbered misc fragment (`changes/42.misc.md`) leaves a terse `- #42` under a
-Misc section; an orphan one (`changes/+slug.misc.md`) renders nothing at all.
+A `misc` fragment is the escape hatch for PRs with nothing user-facing (CI,
+refactors, typos): it satisfies the gate but adds no substantive entry. At
+release it renders only a terse line under a **Misc** section — prefer a numbered
+`changes/42.misc.md`, which renders `- #42`. (An orphan `changes/+slug.misc.md`
+has no number, so towncrier shows its *text* instead, even though `misc` is
+configured `showcontent = false` — keep orphan misc fragments empty, or just use
+the numbered form. The maintainer can drop the Misc section when cutting the
+release.)
 
 ## Preview
 
