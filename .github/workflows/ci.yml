@@ -21,7 +21,7 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
       - name: Spell check
-        run: uv run codespell src tests examples README.md CHANGELOG.md pyproject.toml
+        run: uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
 
   test:
     runs-on: ubuntu-latest
@@ -47,3 +47,32 @@ jobs:
         run: uv pip list
       - name: Run tests
         run: uv run pytest tests/ --hypothesis-profile fast -p no:cacheprovider
+
+  changelog:
+    runs-on: ubuntu-latest
+    # PRs only (the check diffs the base branch); never on push to main, and
+    # exempt Dependabot (lockfile/deps PRs carry no user-facing fragment).
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0          # towncrier check diffs against the base branch
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Sync dev environment
+        run: uv sync
+      # `towncrier check` auto-passes when CHANGELOG.md itself is edited, so a
+      # PR that hand-edits the changelog (the old workflow) would bypass the
+      # fragment gate. Reject direct CHANGELOG.md edits unless the PR carries the
+      # `changelog-exempt` label — used by release PRs (which rewrite it via
+      # `make changelog`) and the one-time bootstrap PR that adds the marker.
+      - name: Disallow direct CHANGELOG.md edits (use a changes/ fragment)
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-exempt') }}
+        run: |
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD -- CHANGELOG.md | grep -q .; then
+            echo "::error::CHANGELOG.md is assembled from changes/ fragments at release time — don't edit it directly. Add a changes/<id>.<type>.md fragment instead (see changes/README.md). Release PRs (or the towncrier bootstrap): apply the 'changelog-exempt' label."
+            exit 1
+          fi
+      - name: Changelog fragment check
+        run: uv run towncrier check --compare-with origin/${{ github.base_ref }}

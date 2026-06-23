@@ -1,45 +1,51 @@
-# Releasing
+# Releasing mushin
 
-mushin publishes to PyPI via **Trusted Publishing** (OIDC) — there are no API
-tokens to manage. Releases are triggered by publishing a GitHub Release.
-
-## One-time PyPI setup (maintainer)
-
-Because the `mushin` project does not exist on PyPI yet, register a **pending
-publisher** before the first release:
-
-1. Sign in to https://pypi.org and go to **Your account → Publishing**.
-2. Under "Add a new pending publisher", fill in:
-   - **PyPI Project Name:** `mushin`
-   - **Owner:** `martinez-hub`
-   - **Repository name:** `mushin`
-   - **Workflow name:** `publish.yml`
-   - **Environment name:** `pypi`
-3. Save. (After the first successful publish, this becomes a normal publisher.)
-
-Optionally, on GitHub add protection rules to the `pypi`
-[environment](https://github.com/martinez-hub/mushin/settings/environments)
-(e.g. required reviewers) for an extra gate before publishing.
+mushin (`mushin-py` on PyPI) publishes via **Trusted Publishing** (OIDC) — there
+are no API tokens to manage. A release is triggered by publishing a GitHub
+Release whose tag matches the project version; `.github/workflows/publish.yml`
+verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 
 ## Cutting a release
 
-1. Update the version in `pyproject.toml` (e.g. `0.4.0` → `0.5.0`).
-2. Move the `## [Unreleased]` notes in `CHANGELOG.md` under a new version
-   heading with today's date, and update the compare links at the bottom.
-3. Open a PR with those changes; merge once CI is green.
-4. Tag and push, then create the GitHub Release:
+1. Choose the next version `X.Y.Z` (SemVer; `0.x` keeps breaking changes in the
+   minor slot).
+2. Assemble the changelog from news fragments:
    ```bash
-   git tag v0.5.0          # tag must equal the pyproject version, prefixed "v"
-   git push origin v0.5.0
-   gh release create v0.5.0 --title v0.5.0 --notes-from-tag
+   make changelog VERSION=X.Y.Z
    ```
-   (Or create the release from the GitHub UI.)
-5. Publishing the release triggers `.github/workflows/publish.yml`, which
-   verifies the tag matches the package version, builds the sdist + wheel, and
-   publishes to PyPI.
+   This rewrites `CHANGELOG.md` (a new `## [X.Y.Z] - <today>` section under the
+   towncrier marker) and deletes the consumed fragments. Review the diff and
+   tidy wording if needed. Preview any time without consuming fragments:
+   ```bash
+   make changelog-draft VERSION=X.Y.Z
+   ```
+3. Bump the version in `pyproject.toml` to `X.Y.Z`, then `uv sync` to update
+   `uv.lock`.
+4. Update the `[Unreleased]`/version link-reference footer at the bottom of
+   `CHANGELOG.md`.
+5. Commit on a branch and open a PR. Because this PR rewrites `CHANGELOG.md`
+   directly, apply the **`changelog-exempt`** label so the changelog gate allows
+   it (normal PRs must use `changes/` fragments instead). Merge once CI is green.
+6. Tag and publish a GitHub Release `vX.Y.Z` on the merge commit (the tag must
+   equal the `pyproject` version, prefixed `v`):
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --title vX.Y.Z --notes-from-tag
+   ```
+   Publishing the release triggers `publish.yml`.
 
-## Versioning
+## Trusted Publishing setup (one-time, already configured)
 
-This project follows [Semantic Versioning](https://semver.org/). The release
-workflow fails fast if the tag (without the `v`) does not match
-`project.version` in `pyproject.toml`.
+The PyPI publisher is registered against the `pypi` GitHub Environment. For
+reference (or to re-register), the publisher is:
+
+- **PyPI Project Name:** `mushin-py`
+- **Owner:** `martinez-hub`
+- **Repository name:** `mushin`
+- **Workflow name:** `publish.yml`
+- **Environment name:** `pypi`
+
+Optionally add protection rules to the `pypi`
+[environment](https://github.com/martinez-hub/mushin/settings/environments)
+(e.g. required reviewers) for an extra gate before publishing.

@@ -53,6 +53,11 @@ viz = ["matplotlib >= 3.3"]
 netcdf = ["netCDF4 >= 1.5.8"]
 
 [project.urls]
+Homepage = "https://github.com/martinez-hub/mushin"
+Repository = "https://github.com/martinez-hub/mushin"
+Issues = "https://github.com/martinez-hub/mushin/issues"
+Changelog = "https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md"
+# Attribution to the project mushin was carved out of (also in LICENSE/README).
 "Upstream (origin)" = "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
 
 # Dev tooling, installed by `uv sync` (PEP 735 dependency group).
@@ -64,6 +69,7 @@ dev = [
     "pytest >= 7.0.0",
     "hypothesis >= 6.28.0",
     "pytest-xdist",
+    "towncrier >= 23.11",
     "matplotlib >= 3.3",
     "netCDF4 >= 1.5.8",
 ]
@@ -101,3 +107,43 @@ ignore = [
 skip = "*.lock,*.ckpt,*.pt,.git,.venv,*.egg-info"
 # "mushin" (無心) and a few ML terms trip the default dictionary.
 ignore-words-list = "mushin,nin,tha"
+
+[tool.towncrier]
+# News fragments live in changes/<id>.<type>.md and are assembled into
+# CHANGELOG.md at release time by `make changelog VERSION=X.Y.Z`.
+directory = "changes"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+underlines = ["", "", ""]            # Markdown headings, not RST underlines
+title_format = "## [{version}] - {project_date}"
+issue_format = "#{issue}"
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "misc"
+name = "Misc"
+showcontent = false
