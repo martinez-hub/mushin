@@ -108,3 +108,37 @@ def test_evaluate_streams_and_matches_one_shot():
     assert streamed.keys() == one_shot.keys()
     for k in streamed:
         assert abs(streamed[k] - one_shot[k]) < 1e-5
+
+
+def test_evaluate_explicit_device_and_resets_between_calls():
+    # evaluate(device=...) must run on the given device, and reusing the same
+    # battery dict across calls must NOT leak metric state (evaluate resets each
+    # metric before the batch loop).
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark._inference import evaluate
+    from mushin.benchmark._metrics import classification_battery
+    from mushin.benchmark._predict import default_classification_predict_fn
+
+    def loader(seed):
+        g = torch.Generator().manual_seed(seed)
+        x = torch.randn(16, 4, generator=g)
+        y = torch.randint(0, 3, (16,), generator=g)
+        return DataLoader(TensorDataset(x, y), batch_size=8)
+
+    model = torch.nn.Linear(4, 3)
+    cpu = torch.device("cpu")
+    pm = frozenset({"auroc", "ece"})
+
+    battery = classification_battery(3)
+    evaluate(model, loader(1), battery, default_classification_predict_fn,
+             prob_metrics=pm, device=cpu)  # first call dirties the metric state
+    reused = evaluate(model, loader(2), battery, default_classification_predict_fn,
+                      prob_metrics=pm, device=cpu)  # same battery, different data
+    fresh = evaluate(model, loader(2), classification_battery(3),
+                     default_classification_predict_fn, prob_metrics=pm, device=cpu)
+
+    assert reused.keys() == fresh.keys()
+    for k in reused:
+        assert abs(reused[k] - fresh[k]) < 1e-6  # no carryover from the first call
