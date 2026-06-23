@@ -50,7 +50,10 @@ dependencies = [
     "typing-extensions >= 4.1.0",
     "torchmetrics >= 1.0",
     "scipy >= 1.10",
-    "pandas >= 1.5",
+    # pandas 2.2.2 is the first release officially compatible with NumPy 2 (the
+    # non-Intel floor); older pandas imports under NumPy 2 only by luck (ABI
+    # "size changed" warning). Verified by the min-version CI job.
+    "pandas >= 2.2.2",
 ]
 
 [project.optional-dependencies]
