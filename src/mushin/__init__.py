@@ -4,6 +4,7 @@
 
 from ._utils import load_experiment, load_from_checkpoint
 from .lightning import HydraDDP, MetricsCallback
+from .study import Study  # keep last: avoids a circular import via .study -> _sweep
 from .workflows import (
     BaseWorkflow,
     MultiRunMetricsWorkflow,
@@ -22,4 +23,5 @@ __all__ = [
     "BaseWorkflow",
     "multirun",
     "hydra_list",
+    "Study",
 ]
