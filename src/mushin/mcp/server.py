@@ -99,6 +99,51 @@ def _get_metrics(
     return result
 
 
+def _get_config(
+    path: str | Path,
+    job: int | None = None,
+    root: str | Path | None = None,
+) -> dict:
+    """Return the resolved Hydra config for one run (``job``) or all runs."""
+    p = _resolve(path, root)
+    cfgs = [_to_jsonable(e.cfg) for e in _as_list(load_experiment(p))]
+    if job is not None:
+        return {"path": str(p), "job": job, "config": cfgs[job]}
+    if len(cfgs) == 1:
+        return {"path": str(p), "config": cfgs[0]}
+    return {"path": str(p), "configs": cfgs}
+
+
+def _read_dataset(path: str | Path, root: str | Path | None = None) -> dict:
+    """Summarize a saved netCDF dataset: dims, coords, data_vars, basic stats."""
+    import xarray as xr
+
+    p = _resolve(path, root)
+    if not p.exists():
+        raise FileNotFoundError(f"{p} not found")
+    with xr.open_dataset(p) as ds:
+        data_vars = {}
+        for name, da in ds.data_vars.items():
+            entry = {
+                "dims": list(da.dims),
+                "shape": list(da.shape),
+                "dtype": str(da.dtype),
+            }
+            try:
+                entry["mean"] = float(da.mean().item())
+                entry["min"] = float(da.min().item())
+                entry["max"] = float(da.max().item())
+            except (TypeError, ValueError):
+                pass
+            data_vars[str(name)] = entry
+        return {
+            "path": str(p),
+            "dims": {str(k): int(v) for k, v in ds.sizes.items()},
+            "coords": {str(k): _to_jsonable(v.values) for k, v in ds.coords.items()},
+            "data_vars": data_vars,
+        }
+
+
 def create_server() -> None:  # pragma: no cover
     """Placeholder — full implementation in a later task."""
     raise NotImplementedError("create_server is not yet implemented")

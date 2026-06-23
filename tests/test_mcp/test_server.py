@@ -103,3 +103,37 @@ def test_get_metrics_filter(tmp_path):
     base = _make_experiment(tmp_path / "exp")
     out = _get_metrics(base, metrics=["does-not-exist"])
     assert out["per_run"][0] == {}
+
+
+def test_get_config_returns_configs(tmp_path):
+    from mushin.mcp.server import _get_config
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _get_config(base)
+    assert [c["lr"] for c in out["configs"]] == [0.1, 0.2]
+
+
+def test_get_config_single_job(tmp_path):
+    from mushin.mcp.server import _get_config
+
+    base = _make_experiment(tmp_path / "exp")
+    out = _get_config(base, job=1)
+    assert out["config"]["lr"] == 0.2
+
+
+def test_read_dataset_summarizes(tmp_path):
+    import xarray as xr
+
+    from mushin.mcp.server import _read_dataset
+
+    ds = xr.Dataset(
+        {"accuracy": ("lr", [0.8, 0.9])},
+        coords={"lr": [0.1, 0.2]},
+    )
+    nc = tmp_path / "result.nc"
+    ds.to_netcdf(nc, engine="scipy")
+
+    out = _read_dataset(nc)
+    assert out["dims"] == {"lr": 2}
+    assert out["coords"]["lr"] == [0.1, 0.2]
+    assert out["data_vars"]["accuracy"]["max"] == pytest.approx(0.9)
