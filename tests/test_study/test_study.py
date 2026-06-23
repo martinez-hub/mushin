@@ -77,3 +77,46 @@ def test_full_motion_trains_then_compares(tmp_path):
     assert all(len(v) == 3 for v in study.checkpoints.values())
     # full-motion run records the resolved working directory (not left as the input)
     assert study.working_dir == str((tmp_path / "run").resolve())
+
+
+class _PerfectSegmenter(torch.nn.Module):
+    """Returns logits that perfectly reproduce the provided mask (clamped to num_classes)."""
+
+    def __init__(self, x_ref, masks_ref):
+        super().__init__()
+        self._m = {tuple(xi.flatten().tolist()): mi for xi, mi in zip(x_ref, masks_ref)}
+
+    def forward(self, xb):
+        out = []
+        for xi in xb:
+            m = self._m[tuple(xi.flatten().tolist())].clamp(max=2)
+            out.append(torch.nn.functional.one_hot(m, 3).permute(2, 0, 1).float() * 10)
+        return torch.stack(out)
+
+
+def test_study_forwards_ignore_index_for_segmentation(tmp_path):
+    x = torch.randn(8, 1, 8, 8)
+    masks = torch.randint(0, 3, (8, 8, 8))
+    masks[:, 0, 0] = 255  # void pixels at (0,0)
+    loader = DataLoader(TensorDataset(x, masks), batch_size=4)
+
+    ckpts = {}
+    for name in ("a", "b"):
+        paths = []
+        for s in range(2):
+            p = tmp_path / f"{name}_{s}.pt"
+            torch.save(_PerfectSegmenter(x, masks), p)
+            paths.append(str(p))
+        ckpts[name] = paths
+
+    study = Study.from_checkpoints(
+        checkpoints=ckpts,
+        load_fn=lambda p: torch.load(p, weights_only=False),
+        data=loader,
+        task="segmentation",
+        num_classes=3,
+        test="welch",
+        ignore_index=255,
+    )
+    result = study.run()
+    assert float(result.data["pixel_acc"].mean()) == 1.0

@@ -1,18 +1,18 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""The ``compare`` facade: run a benchmark across methods and seeds."""
+"""The ``compare`` facade: evaluate methods on a task battery and report significance."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 
 import torch
 
 from ._aggregate import to_dataset
-from ._inference import PredictFn, run_inference
-from ._metrics import classification_battery, compute_metrics
+from ._inference import PredictFn, evaluate
 from ._result import BenchmarkResult
 from ._stats import compare_methods
+from ._tasks import get_task_spec
 
 
 def compare(
@@ -23,34 +23,31 @@ def compare(
     num_classes: int | None = None,
     predict_fn: PredictFn | None = None,
     metrics: dict | None = None,
+    prob_metrics: frozenset[str] | None = None,
     test: str = "wilcoxon",
     alpha: float = 0.05,
+    ignore_index: int | None = None,
     device: torch.device | None = None,
 ) -> BenchmarkResult:
-    """Compare methods on a standard benchmark and report significance.
+    """Compare methods on a standard battery and report significance.
 
     Parameters
     ----------
-    methods : dict[str, Sequence[Module]]
-        Method name -> one trained model per seed.
-    data : Iterable
-        A dataloader yielding ``(x, y)`` batches.
     task : str
-        Only ``"classification"`` is supported in this version.
+        ``"classification"`` or ``"segmentation"``.
     num_classes : int or None
-        Number of classes (keyword-only). Required when ``metrics`` is not
-        provided; ignored otherwise.
-    test : str
-        Significance test key (default ``"wilcoxon"``). See
-        ``mushin.benchmark._stats.available_tests``.
-
-    Returns
-    -------
-    BenchmarkResult
+        Required when ``metrics`` is not provided.
+    ignore_index : int or None
+        Label to exclude from segmentation metrics (e.g. a void/boundary class).
+    prob_metrics : frozenset[str] or None
+        Metrics whose names need probabilities; defaults to the task's set.
     """
-    if task != "classification":
-        raise NotImplementedError(
-            f"task={task!r} is not supported; only 'classification' in this version"
+    spec = get_task_spec(task)
+
+    if isinstance(data, Iterator):
+        raise TypeError(
+            "`data` must be re-iterable (e.g. a DataLoader), not a one-shot "
+            "iterator/generator — it is iterated once per model."
         )
 
     if metrics is not None:
@@ -58,15 +55,16 @@ def compare(
     else:
         if num_classes is None:
             raise ValueError("`num_classes` is required when `metrics` is not provided")
-        battery = classification_battery(num_classes)
+        battery = spec.battery(num_classes, ignore_index=ignore_index)
+
+    fn = predict_fn or spec.predict_fn
+    pm = spec.prob_metrics if prob_metrics is None else prob_metrics
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, models in methods.items():
-        per_seed = []
-        for model in models:
-            preds, probs, targets = run_inference(model, data, predict_fn, device)
-            per_seed.append(compute_metrics(preds, probs, targets, battery))
-        results[name] = per_seed
+        results[name] = [
+            evaluate(model, data, battery, fn, pm, device) for model in models
+        ]
 
     ds = to_dataset(results)
     comparisons = compare_methods(ds, test=test, alpha=alpha)
