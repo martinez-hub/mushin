@@ -104,29 +104,55 @@ def _flatten(value: Any, prefix: str = "") -> dict:
     return out
 
 
-def _load_runs(p: Path) -> list[Experiment]:
+def _job_sort_key(hydra_dir: Path):
+    """Sort key so numeric Hydra job dirs (0,1,2,...,10) order numerically."""
+    name = hydra_dir.parent.name
+    return (0, int(name)) if name.isdigit() else (1, name)
+
+
+def _within_root(target: Path, root: Path | None) -> bool:
+    """True if ``target`` (after resolving symlinks) is inside ``root``."""
+    if root is None:
+        return True
+    resolved = target.resolve()
+    return resolved == root or root in resolved.parents
+
+
+def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
     """Load experiment runs at ``p`` without executing pickled code.
 
-    Mirrors ``mushin._utils.load_experiment`` but loads metrics with
-    ``weights_only=True`` and skips any file that cannot be safely loaded, so
-    a malicious ``*.pt`` under ``--root`` can never execute arbitrary code.
+    Job directories are ordered numerically so the ``job`` index matches Hydra
+    job numbers. When ``root`` is set, each discovered config/metric/checkpoint
+    is re-checked for containment (resolving symlinks) so artifacts escaping
+    ``root`` are refused.
     """
     if not p.exists():
         raise FileNotFoundError(f"{p} not found")
+    rootp = Path(root).expanduser().resolve() if root is not None else None
     runs: list[Experiment] = []
-    for hydra_dir in sorted(p.glob("**/.hydra")):
+    for hydra_dir in sorted(p.glob("**/.hydra"), key=_job_sort_key):
         run_dir = hydra_dir.parent
         cfg_file = hydra_dir / "config.yaml"
-        cfg = load_from_yaml(cfg_file) if cfg_file.exists() else None
+        cfg = (
+            load_from_yaml(cfg_file)
+            if cfg_file.exists() and _within_root(cfg_file, rootp)
+            else None
+        )
         metrics: dict = {}
         for f in sorted(run_dir.glob("*.pt")):
+            if not _within_root(f, rootp):
+                continue
             try:
                 metrics[f.stem] = _safe_load_pt(f)
             except Exception:
                 # Fail closed: never fall back to unsafe (pickle-executing)
                 # loading; just skip metrics we cannot safely read.
                 continue
-        ckpts = [str(c.resolve()) for c in run_dir.glob("**/*.ckpt")]
+        ckpts = [
+            str(c.resolve())
+            for c in run_dir.glob("**/*.ckpt")
+            if _within_root(c, rootp)
+        ]
         runs.append(Experiment(str(run_dir.parent), cfg, ckpts, metrics))
     if not runs:
         raise FileNotFoundError(f"no experiment found at {p} (no .hydra directory)")
@@ -136,7 +162,7 @@ def _load_runs(p: Path) -> list[Experiment]:
 def _describe_experiment(path: str | Path, root: str | Path | None = None) -> dict:
     """Summarize swept params, metric keys, and run/checkpoint counts."""
     p = _resolve(path, root)
-    exps = _load_runs(p)
+    exps = _load_runs(p, root)
     metric_keys = sorted({k for e in exps for k in (e.metrics or {})})
     flats = [_flatten(_to_jsonable(e.cfg)) for e in exps if e.cfg is not None]
     swept: dict[str, list] = {}
@@ -192,7 +218,7 @@ def _get_metrics(
     ``"accuracy"``), not by ``.pt`` filename stems.
     """
     p = _resolve(path, root)
-    exps = _load_runs(p)
+    exps = _load_runs(p, root)
     per_run = []
     wanted = set(metrics) if metrics is not None else None
     for e in exps:
@@ -218,7 +244,7 @@ def _get_config(
 ) -> dict:
     """Return the resolved Hydra config for one run (``job``) or all runs."""
     p = _resolve(path, root)
-    cfgs = [_to_jsonable(e.cfg) for e in _load_runs(p)]
+    cfgs = [_to_jsonable(e.cfg) for e in _load_runs(p, root)]
     if job is not None:
         if not 0 <= job < len(cfgs):
             raise ValueError(

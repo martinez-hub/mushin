@@ -53,6 +53,15 @@ def test_resolve_outside_root_raises(tmp_path):
         _resolve(outside, root)
 
 
+def _make_jobs(base: Path, n: int) -> Path:
+    """Build ``n`` Hydra job dirs named 0..n-1, each with config lr=float(i)."""
+    for i in range(n):
+        run = base / str(i)
+        (run / ".hydra").mkdir(parents=True)
+        OmegaConf.save(OmegaConf.create({"lr": float(i)}), run / ".hydra" / "config.yaml")
+    return base
+
+
 def _make_experiment(base: Path, lrs=(0.1, 0.2)) -> Path:
     """Build a minimal 2-run Hydra multirun layout under ``base``."""
     for i, lr in enumerate(lrs):
@@ -316,3 +325,28 @@ def test_ddp_config_loaded(tmp_path):
 
     out = _get_config(tmp_path / "exp")
     assert out["config"]["lr"] == 0.1  # not None, and the .hydra config
+
+
+def test_job_dirs_sorted_numerically(tmp_path):
+    from mushin.mcp.server import _get_config
+
+    base = _make_jobs(tmp_path / "exp", 11)  # jobs 0..10
+    assert _get_config(base, job=10)["config"]["lr"] == 10.0
+    assert _get_config(base, job=2)["config"]["lr"] == 2.0
+
+
+def test_metric_symlink_outside_root_skipped(tmp_path):
+    from mushin.mcp.server import _get_metrics
+
+    root = tmp_path / "allowed"
+    exp = root / "exp" / "0"
+    (exp / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), exp / ".hydra" / "config.yaml")
+    torch.save({"accuracy": torch.tensor(0.8)}, exp / "metrics.pt")  # in-root
+    secret = tmp_path / "outside.pt"
+    torch.save({"secret": torch.tensor(42.0)}, secret)
+    (exp / "leak.pt").symlink_to(secret)  # symlink escaping root
+
+    out = _get_metrics(root / "exp", root=root)
+    assert "metrics" in out["per_run"][0]  # in-root metric still read
+    assert "leak" not in out["per_run"][0]  # escaping symlink refused
