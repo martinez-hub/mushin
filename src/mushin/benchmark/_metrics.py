@@ -18,10 +18,6 @@ from torchmetrics.classification import (
     MulticlassRecall,
 )
 
-# Metrics that require probabilities rather than hard class predictions.
-# (Used by the legacy compute_metrics; removed in a later task once compare streams.)
-_PROB_METRICS = frozenset({"auroc", "ece"})
-
 
 def classification_battery(
     num_classes: int, ignore_index: int | None = None
@@ -75,20 +71,5 @@ def compute_battery(
     for name, metric in battery.items():
         metric.reset()
         inp = probs if name in prob_metrics else preds
-        out[name] = float(metric(inp, targets))
-    return out
-
-
-def compute_metrics(
-    preds: torch.Tensor,
-    probs: torch.Tensor,
-    targets: torch.Tensor,
-    battery: dict[str, Metric],
-) -> dict[str, float]:
-    """Legacy one-shot helper (removed in a later task). Resets every metric first."""
-    out: dict[str, float] = {}
-    for name, metric in battery.items():
-        metric.reset()
-        inp = probs if name in _PROB_METRICS else preds
         out[name] = float(metric(inp, targets))
     return out
