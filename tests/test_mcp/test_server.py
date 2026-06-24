@@ -102,7 +102,7 @@ def test_describe_experiment_reports_sweep(tmp_path):
     base = _make_experiment(tmp_path / "exp")
     out = _describe_experiment(base)
     assert out["num_runs"] == 2
-    assert "metrics" in out["metric_keys"]
+    assert "metrics.accuracy" in out["metric_keys"]
     assert out["swept_params"]["lr"] == [0.1, 0.2]
     assert "seed" not in out["swept_params"]  # constant across runs
 
@@ -520,3 +520,36 @@ def test_tool_relative_path_resolved_under_root(tmp_path, monkeypatch):
 
     out = _get_metrics("exp", root=root)  # relative to root, despite the CWD
     assert out["num_runs"] == 2
+
+
+def test_describe_reports_flattened_metric_leaves(tmp_path):
+    """metric_keys must be the flattened leaves get_metrics accepts, not stems."""
+    from mushin.mcp.server import _describe_experiment
+
+    base = tmp_path / "exp" / "0"
+    (base / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), base / ".hydra" / "config.yaml")
+    torch.save({"accuracy": [0.8, 0.9], "loss": [0.5, 0.4]}, base / "fit_metrics.pt")
+
+    out = _describe_experiment(tmp_path / "exp")
+    assert "fit_metrics.accuracy" in out["metric_keys"]
+    assert "fit_metrics.loss" in out["metric_keys"]
+    assert "fit_metrics" not in out["metric_keys"]  # bare stem no longer reported
+
+
+def test_reduce_metrics_summarizes_list_metrics(tmp_path):
+    """List-valued (per-epoch) metrics reduce by final value across runs."""
+    from mushin.mcp.server import _get_metrics
+
+    base = tmp_path / "exp"
+    for i, accs in enumerate([[0.7, 0.8], [0.9, 1.0]]):  # final values 0.8, 1.0
+        run = base / str(i)
+        (run / ".hydra").mkdir(parents=True)
+        OmegaConf.save(
+            OmegaConf.create({"lr": 0.1 * (i + 1)}), run / ".hydra" / "config.yaml"
+        )
+        torch.save({"accuracy": accs}, run / "fit_metrics.pt")
+
+    out = _get_metrics(base, reduce="mean")
+    # mean of final-epoch accuracy across runs: mean(0.8, 1.0) == 0.9
+    assert out["reduced"]["fit_metrics.accuracy"] == pytest.approx(0.9, abs=1e-6)

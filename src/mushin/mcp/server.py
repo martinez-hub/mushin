@@ -218,7 +218,9 @@ def _describe_experiment(path: str | Path, root: str | Path | None = None) -> di
     """Summarize swept params, metric keys, and run/checkpoint counts."""
     p = _resolve(path, root)
     exps = _load_runs(p, root)
-    metric_keys = sorted({k for e in exps for k in (e.metrics or {})})
+    metric_keys = sorted(
+        {k for e in exps for k in _flatten(_to_jsonable(e.metrics or {}))}
+    )
     flats = [_flatten(_to_jsonable(e.cfg)) for e in exps if e.cfg is not None]
     swept: dict[str, list] = {}
     if flats:
@@ -239,18 +241,36 @@ def _describe_experiment(path: str | Path, root: str | Path | None = None) -> di
     }
 
 
+def _as_scalar(value: Any):
+    """Coerce a metric leaf to one number for cross-run reduction.
+
+    Scalars pass through; a non-empty list of numbers is summarized by its last
+    element (the final-epoch value for MetricsCallback sequences). Returns None
+    for anything non-numeric, so it is skipped.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, list) and value:
+        last = value[-1]
+        if isinstance(last, (int, float)) and not isinstance(last, bool):
+            return last
+    return None
+
+
 def _reduce_metrics(per_run: list[dict], how: str) -> dict:
-    """Reduce numeric metric leaves across runs by 'mean' or 'std'."""
+    """Reduce numeric metric leaves across runs by 'mean' or 'std'.
+
+    List-valued leaves (per-epoch sequences from MetricsCallback) are summarized
+    by their final element before reducing across runs.
+    """
     if how not in {"mean", "std"}:
         raise ValueError(f"unknown reduce '{how}'; use 'mean' or 'std'")
     flats = [_flatten(r) for r in per_run]
     out: dict[str, float] = {}
     for k in sorted(set().union(*(set(f) for f in flats))) if flats else []:
-        vals = [
-            f[k]
-            for f in flats
-            if isinstance(f.get(k), (int, float)) and not isinstance(f.get(k), bool)
-        ]
+        vals = [s for f in flats if (s := _as_scalar(f.get(k))) is not None]
         if not vals:
             continue
         if how == "mean":
