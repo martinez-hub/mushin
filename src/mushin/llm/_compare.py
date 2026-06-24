@@ -133,6 +133,8 @@ def compare_llms(
         # Validate up front so a typo'd test name fails before any (possibly
         # token-spending) system calls or cache writes.
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    if isinstance(metric, dict) and not metric:
+        raise ValueError("`metric` battery is empty; provide at least one metric")
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")

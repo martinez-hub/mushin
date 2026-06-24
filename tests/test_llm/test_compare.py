@@ -257,3 +257,15 @@ def test_unknown_test_rejected_before_running_systems():
     with pytest.raises(ValueError, match="unknown test"):
         compare_llms({"s": sys}, _data(2), metric=exact, test="bogus")
     assert calls["n"] == 0  # validated before any (token-spending) system call
+
+
+def test_empty_metric_battery_rejected():
+    calls = {"n": 0}
+
+    def sys(inputs, seed):
+        calls["n"] += 1
+        return ["yes"] * len(inputs)
+
+    with pytest.raises(ValueError, match="metric.*empty"):
+        compare_llms({"s": sys}, _data(2), metric={})
+    assert calls["n"] == 0  # rejected before any system call
