@@ -24,3 +24,58 @@ def test_main_writes_plot():
 
     ex.main()
     assert Path("sweep_accuracy.png").exists()
+
+
+def test_compare_classifiers_example_runs_on_synthetic():
+    import torch
+    from compare_classifiers import run
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark import BenchmarkResult
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(32, 1, 28, 28, generator=g)
+    y = torch.randint(0, 10, (32,), generator=g)
+    loader = DataLoader(TensorDataset(x, y), batch_size=16)
+
+    result = run(loader, loader, seeds=(0, 1))
+    assert isinstance(result, BenchmarkResult)
+    assert result.data.sizes["seed"] == 2
+    assert "accuracy" in result.data.data_vars
+
+
+def test_study_mnist_example_runs_on_synthetic(tmp_path):
+    import torch
+    from study_mnist import run
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark import BenchmarkResult
+
+    g = torch.Generator().manual_seed(1)
+    x = torch.randn(32, 1, 28, 28, generator=g)
+    y = torch.randint(0, 10, (32,), generator=g)
+    loader = DataLoader(TensorDataset(x, y), batch_size=16)
+
+    result = run(loader, seeds=(0, 1), working_dir=tmp_path)
+    assert isinstance(result, BenchmarkResult)
+    assert result.data.sizes["seed"] == 2
+    assert "accuracy" in result.data.data_vars
+
+
+def test_segmentation_demo_example_runs_on_synthetic():
+    import torch
+    from segmentation_demo import run
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark import BenchmarkResult
+
+    g = torch.Generator().manual_seed(2)
+    N, C, H, W, num_classes = 8, 3, 8, 8, 4
+    x = torch.randn(N, C, H, W, generator=g)
+    masks = torch.randint(0, num_classes, (N, H, W), generator=g)
+    loader = DataLoader(TensorDataset(x, masks), batch_size=4)
+
+    result = run(loader, in_channels=C, num_classes=num_classes, seeds=(0, 1))
+    assert isinstance(result, BenchmarkResult)
+    assert result.data.sizes["seed"] == 2
+    assert "miou" in result.data.data_vars

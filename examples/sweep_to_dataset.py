@@ -32,6 +32,7 @@ def _make_data(seed: int, n: int = POINTS_PER_CLASS) -> tuple[tr.Tensor, tr.Tens
     return x, y
 
 
+# --8<-- [start:workflow]
 class LRSweep(MultiRunMetricsWorkflow):
     @staticmethod
     def task(lr: float, seed: int) -> dict:
@@ -63,6 +64,9 @@ def build_dataset(working_dir: Path | None = None):
         working_dir=str(working_dir) if working_dir is not None else None,
     )
     return wf.to_xarray()
+
+
+# --8<-- [end:workflow]
 
 
 def main() -> None:
