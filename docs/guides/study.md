@@ -72,7 +72,7 @@ Study.from_checkpoints(
         "mlp": ["mlp_seed0.pt", "mlp_seed1.pt", "mlp_seed2.pt"],
     },
     load_fn=lambda p: torch.load(p, weights_only=False),
-    data=test_loader,
+    data=val_loader,
     num_classes=10,
     test="welch",
 ).run()

@@ -33,9 +33,10 @@ mark void or boundary pixels. Pass `ignore_index` to exclude these from all
 metrics:
 
 ```python
+# fcn_models and deeplab_models are each a list of trained nn.Module (one per seed)
 result = compare(
-    methods={"fcn": [m0, m1]},
-    data=test_loader,
+    methods={"fcn": fcn_models, "deeplab": deeplab_models},
+    data=val_loader,
     task="segmentation",
     num_classes=21,
     ignore_index=255,
@@ -55,8 +56,8 @@ Pass it to `compare`:
 
 ```python
 compare(
-    {"fcn": [m0, m1]},
-    data=test_loader,
+    {"fcn": fcn_models, "deeplab": deeplab_models},
+    data=val_loader,
     task="segmentation",
     num_classes=21,
     ignore_index=255,
@@ -83,7 +84,7 @@ study = Study(
     methods={"fcn": train_fcn, "deeplab": train_deeplab},
     load_fn=lambda p: torch.load(p, weights_only=False),
     seeds=[0, 1, 2],
-    data=test_loader,
+    data=val_loader,
     task="segmentation",
     num_classes=21,
     ignore_index=255,

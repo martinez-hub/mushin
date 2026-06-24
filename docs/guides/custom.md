@@ -11,9 +11,10 @@ Pass a `metrics` dict to `compare` or `Study` to replace the default battery:
 ```python
 from torchmetrics.classification import MulticlassF1Score, MulticlassAccuracy
 
+# cnn_models is a list of trained nn.Module (one per seed)
 compare(
-    methods={"cnn": [m0, m1, m2]},
-    data=test_loader,
+    methods={"cnn": cnn_models},
+    data=val_loader,
     task="classification",     # still sets the default predict_fn
     metrics={
         "accuracy": MulticlassAccuracy(num_classes=10, average="micro"),
@@ -37,9 +38,10 @@ when you add probability-based custom metrics:
 ```python
 from torchmetrics.classification import MulticlassAUROC, MulticlassAccuracy
 
+# cnn_models is a list of trained nn.Module (one per seed)
 compare(
-    methods={"cnn": [m0, m1]},
-    data=test_loader,
+    methods={"cnn": cnn_models},
+    data=val_loader,
     task="classification",
     metrics={
         "accuracy": MulticlassAccuracy(num_classes=10, average="micro"),
@@ -68,9 +70,10 @@ the adapter from the segmentation example:
 Pass it to `compare`:
 
 ```python
+# fcn_models is a list of trained nn.Module (one per seed)
 compare(
-    {"fcn": [m0, m1]},
-    data=test_loader,
+    {"fcn": fcn_models},
+    data=val_loader,
     task="segmentation",
     num_classes=21,
     ignore_index=255,
