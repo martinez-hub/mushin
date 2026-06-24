@@ -81,6 +81,10 @@ Changelog = "https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md"
 
 # Dev tooling, installed by `uv sync` (PEP 735 dependency group).
 [dependency-groups]
+docs = [
+    "mkdocs-material >= 9.5, < 10",
+    "mkdocstrings[python] >= 0.26, < 1",
+]
 dev = [
     "ruff >= 0.6",
     "codespell >= 2.3",

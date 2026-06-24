@@ -1,0 +1,44 @@
+# Install
+
+## Basic install
+
+```bash
+pip install mushin-py
+```
+
+Already use [uv](https://docs.astral.sh/uv/)?
+
+```bash
+uv pip install mushin-py
+# or, inside a uv project:
+uv add mushin-py
+```
+
+!!! note "Install name vs. import name"
+    The PyPI distribution is **`mushin-py`**, but you `import mushin` —
+    the same pattern as `scikit-learn` → `sklearn`.
+
+## Optional extras
+
+| Extra | What it adds | Install |
+|---|---|---|
+| `viz` | matplotlib (for `RobustnessCurve` plots) | `pip install "mushin-py[viz]"` |
+| `netcdf` | netCDF4 (save/load datasets as `.nc` files) | `pip install "mushin-py[netcdf]"` |
+| `mcp` | MCP server (`mushin-mcp`) for Claude Code integration | `pip install "mushin-py[mcp]"` |
+
+## Support matrix
+
+| Platform | Python | torch | NumPy |
+|---|---|---|---|
+| Linux / Windows / non-Intel macOS | 3.9 – 3.14 | ≥ 2.4 | ≥ 2 |
+| Intel macOS (x86_64) | 3.9 – 3.11 | 2.2.x | 1.x |
+
+A few notes:
+
+- **pytorch-lightning ≥ 2.4** is required on all platforms.
+- **Intel macOS**: Apple has not shipped PyTorch wheels past 2.2.x for the
+  x86_64 architecture. `mushin` supports this platform at torch 2.2.x and
+  NumPy 1.x, but Python 3.12+ is not available there because NumPy 2 is
+  required for Python 3.12 wheels and is ABI-incompatible with torch 2.2.x.
+- The **`mcp` extra** requires Python ≥ 3.10 (the MCP SDK does not support 3.9).
+- These floors are enforced by the `min-versions` CI job on every pull request.

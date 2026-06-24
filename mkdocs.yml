@@ -1,0 +1,70 @@
+site_name: mushin
+site_url: https://martinez-hub.github.io/mushin/
+site_description: Boilerplate-free, reproducible ML experiment workflows on PyTorch Lightning and hydra-zen.
+repo_url: https://github.com/martinez-hub/mushin
+repo_name: martinez-hub/mushin
+
+# Internal design docs live under docs/superpowers/ — never publish them.
+exclude_docs: |
+  superpowers/
+
+theme:
+  name: material
+  logo: assets/mushin-light.png
+  favicon: assets/mushin-light.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            separate_signature: true
+            heading_level: 2
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.highlight: { anchor_linenums: true }
+  - pymdownx.superfences
+  - toc: { permalink: true }
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Quickstart: quickstart.md
+  - Guides:
+      - Workflows & sweeps: guides/workflows.md
+      - Comparing methods: guides/compare.md
+      - Studies: guides/study.md
+      - Segmentation: guides/segmentation.md
+      - Analyzing from Claude Code: guides/mcp.md
+  - API Reference:
+      - benchmark: reference/benchmark.md
+      - study: reference/study.md
+      - workflows: reference/workflows.md
+      - lightning: reference/lightning.md
+      - utils: reference/utils.md
+  - Contributing: contributing.md

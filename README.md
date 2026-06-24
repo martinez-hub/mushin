@@ -12,6 +12,8 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/mushin-py.svg)](https://pypi.org/project/mushin-py/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 
+**Docs:** https://martinez-hub.github.io/mushin/
+
 Boilerplate-free, reproducible machine-learning experiment workflows built on
 [PyTorch Lightning](https://lightning.ai/) and
 [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen).
@@ -124,7 +126,7 @@ pip install "mushin-py[mcp]"          # requires Python >= 3.10
 claude mcp add mushin -- mushin-mcp --root ./outputs
 ```
 
-See [docs/mcp.md](docs/mcp.md) for the full tool list and example prompts.
+See the [MCP guide](https://martinez-hub.github.io/mushin/guides/mcp/) for the full tool list and example prompts.
 
 ## Install
 

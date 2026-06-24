@@ -5,7 +5,7 @@ HYPOTHESIS_PROFILE ?= fast
 PYTHON ?= 3.11
 
 .DEFAULT_GOAL := help
-.PHONY: help sync test test-fast test-py test-lowest lint format format-check spell check all changelog changelog-draft
+.PHONY: help sync test test-fast test-py test-lowest lint format format-check spell check all changelog changelog-draft docs docs-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -50,3 +50,9 @@ changelog:  ## Assemble news fragments into CHANGELOG.md (VERSION=X.Y.Z)
 
 changelog-draft:  ## Preview the next changelog section without consuming fragments (VERSION=X.Y.Z)
 	uv run towncrier build --draft --version $(VERSION)
+
+docs: ## Serve the docs site locally with live reload
+	uv run --group docs mkdocs serve
+
+docs-build: ## Build the docs site with strict checking (what CI runs)
+	uv run --group docs mkdocs build --strict

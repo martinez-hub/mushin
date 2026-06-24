@@ -27,3 +27,6 @@ htmlcov/
 # Hydra run outputs
 outputs/
 multirun/
+
+# MkDocs build output
+site/
