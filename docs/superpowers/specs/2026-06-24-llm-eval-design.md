@@ -169,11 +169,14 @@ An optional on-disk cache (`cache=<dir>`) keyed by
 `(system, seed)` mushin partitions the inputs into cached vs missing, calls
 `system(missing_inputs, seed)` on **only the missing ones**, writes those
 outputs through to the cache, and merges cached + fresh outputs back into the
-original example order before scoring. (So the system must map any subset of
-inputs → outputs in order — which the batch contract already guarantees.) This
-makes reruns, resumes, and partial-failure recovery free — essential given LLM
-cost — and reinforces reproducibility (a fully-cached run replays exactly with
-no calls).
+original example order before scoring. This requires the system to produce
+`output[i]` as a function of `input[i]` and the seed **only** (not of the other
+inputs sharing the batch) — the usual one-prompt-one-completion case; the guide
+documents that batch-dependent systems should not use the cache. Caching makes
+reruns, resumes, and partial-failure recovery free — essential given LLM cost —
+and reinforces reproducibility (a fully-cached run replays exactly with no
+calls). Cached outputs must be JSON-serializable (a clear `TypeError` is raised
+otherwise).
 
 - Storage: one JSON-lines file per `(system, seed)` under the cache dir, or a
   small SQLite db (decided in the plan after a quick check; JSONL is the default

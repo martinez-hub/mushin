@@ -155,3 +155,35 @@ def test_actual_seed_values_preserved():
 
     result = compare_llms({"A": sysA}, data, metric=exact, seeds=[13, 21])
     assert result.data.coords["seed"].values.tolist() == [13, 21]
+
+
+def test_zero_variance_masked_per_metric():
+    """Masking is per-metric: a metric that's constant across seeds is masked,
+    while a metric that varies in the same run is left as a real test."""
+    import warnings
+
+    data = _data(6)
+
+    def A(inputs, seed):
+        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
+        out[seed % len(out)] = "no"  # varies with seed
+        return out
+
+    def B(inputs, seed):
+        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
+        out[(seed + 1) % len(out)] = "yes"  # varies differently
+        return out
+
+    def const(o, r):
+        return 1.0  # constant for every example/seed -> zero variance
+
+    metric = {"const": const, "acc": exact}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = compare_llms({"A": A, "B": B}, data, metric=metric, seeds=range(4))
+
+    comps = result.comparisons
+    const_row = comps[comps["metric"] == "const"].iloc[0]
+    acc_row = comps[comps["metric"] == "acc"].iloc[0]
+    assert const_row["p_value"] != const_row["p_value"]  # NaN -> masked
+    assert acc_row["p_value"] == acc_row["p_value"]  # real p-value -> not masked

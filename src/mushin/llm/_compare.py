@@ -91,6 +91,9 @@ def _run(system, inputs, seed, cache, name) -> list[Any]:
         return list(system(inputs, seed))
     cached, missing = cache.partition(name, seed, inputs)
     if missing:
+        # Call the system on ONLY the missing inputs. This assumes output[i]
+        # depends only on input[i] and the seed (not on batch composition) — the
+        # usual one-prompt-one-completion case. Documented in the guide.
         fresh = list(system([inp for _, inp in missing], seed))
         if len(fresh) != len(missing):
             raise ValueError(
@@ -138,11 +141,17 @@ def compare_llms(
             per_seed.append(_score(metric, outputs, refs, seed))
         results[name] = per_seed
 
-    deterministic: set[str] = set()
+    # Detect zero within-group variance per (metric, system): a metric whose
+    # scores are identical across all seeds has no sampling distribution. Warn
+    # only for systems that are constant in *every* metric (they ignore the seed).
+    zero_var: dict[str, set[str]] = {}  # metric -> systems with zero variance
     if len(seeds) > 1:
         for name, per_seed in results.items():
-            if all(len({row[k] for row in per_seed}) == 1 for k in per_seed[0]):
-                deterministic.add(name)
+            keys = list(per_seed[0])
+            constant = [k for k in keys if len({row[k] for row in per_seed}) == 1]
+            for k in constant:
+                zero_var.setdefault(k, set()).add(name)
+            if len(constant) == len(keys):
                 warnings.warn(
                     f"system {name!r} produced identical scores across all "
                     f"{len(seeds)} seeds — it likely ignores the seed or is "
@@ -158,14 +167,15 @@ def compare_llms(
     ds = ds.assign_coords(seed=list(seeds))  # use the actual seed values, not 0..n-1
     comparisons = compare_methods(ds, test=test, alpha=alpha)
 
-    if deterministic:
-        # A system with zero within-group variance has no valid sampling
-        # distribution, so any comparison involving it is not a real significance
-        # test — force it not-significant rather than report a duplicated-point
-        # p-value of ~0.
-        mask = comparisons["method_a"].isin(deterministic) | comparisons[
-            "method_b"
-        ].isin(deterministic)
+    if zero_var:
+        # A (metric, system) with zero variance has no valid sampling distribution,
+        # so its comparisons are not real significance tests — mask them per metric
+        # rather than report a duplicated-point p-value of ~0.
+        def _involves_zero_var(row) -> bool:
+            zv = zero_var.get(row["metric"], ())
+            return row["method_a"] in zv or row["method_b"] in zv
+
+        mask = comparisons.apply(_involves_zero_var, axis=1)
         comparisons.loc[mask, "significant"] = False
         for col in ("p_value", "p_corrected"):
             if col in comparisons.columns:

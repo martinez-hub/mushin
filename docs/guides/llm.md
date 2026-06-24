@@ -201,6 +201,11 @@ the metric and re-run without re-calling the systems.
   are written as JSON; a non-serializable output (e.g. a custom object) raises a
   clear `TypeError`. Return strings or plain JSON-friendly values, or run
   without a cache.
+- **Caching assumes per-input outputs.** On a partial cache hit, mushin calls
+  the system on **only the missing inputs**, so a system's `output[i]` must
+  depend solely on `input[i]` and the seed — not on which *other* inputs share
+  the batch. This holds for the usual one-prompt-one-completion systems. If your
+  system's per-item output depends on batch composition, don't use the cache.
 
 ## See also
 
