@@ -24,3 +24,21 @@ def test_main_writes_plot():
 
     ex.main()
     assert Path("sweep_accuracy.png").exists()
+
+
+def test_compare_classifiers_example_runs_on_synthetic():
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from compare_classifiers import run
+    from mushin.benchmark import BenchmarkResult
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(32, 1, 28, 28, generator=g)
+    y = torch.randint(0, 10, (32,), generator=g)
+    loader = DataLoader(TensorDataset(x, y), batch_size=16)
+
+    result = run(loader, loader, seeds=(0, 1))
+    assert isinstance(result, BenchmarkResult)
+    assert result.data.sizes["seed"] == 2
+    assert "accuracy" in result.data.data_vars
