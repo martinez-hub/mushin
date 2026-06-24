@@ -52,7 +52,12 @@ def _score_one(name: str | None, m: Metric, outputs, refs) -> dict[str, float]:
         return {base: float(value)}
     # plain callable: mean of per-example scores
     base = name if name is not None else "score"
-    scores = [float(m(o, r)) for o, r in zip(outputs, refs)]
+    scores = []
+    for i, (o, r) in enumerate(zip(outputs, refs)):
+        try:
+            scores.append(float(m(o, r)))
+        except Exception as e:
+            raise type(e)(f"metric {base!r} failed on example {i}: {e}") from e
     return {base: sum(scores) / len(scores)}
 
 

@@ -37,9 +37,11 @@ and reporting from `mushin.benchmark`:
 - The torch `compare` and `compare_llms` share the stats + reporting layer
   (`_stats`, `_aggregate.to_dataset`, `_result.BenchmarkResult`) **and**
   torchmetrics for metrics — the LLM path accepts `torchmetrics.Metric` objects
-  (notably `torchmetrics.text`: `ROUGEScore`, `BLEUScore`/`SacreBLEUScore`,
-  `CHRFScore`, `SQuAD`, `WordErrorRate`/`CharErrorRate`, `Perplexity`, …), so
-  standard text-eval metrics work out of the box with significance on top.
+  (the `torchmetrics.text` family: `WordErrorRate`/`CharErrorRate`, `BLEUScore`/
+  `SacreBLEUScore`, `CHRFScore`, `SQuAD`, `Perplexity`, `ROUGEScore`, …), so
+  standard text-eval metrics get statistical significance on top — the user
+  shapes `output`/`reference` to the chosen metric's `update()` contract (see the
+  metric contract below and the guide).
 
 Files:
 - `src/mushin/llm/__init__.py` — exports `compare_llms`, `llm_judge`, the
@@ -83,11 +85,16 @@ def compare_llms(
 - `Metric` is one of:
   - a `torchmetrics.Metric` — scored the streaming way (`metric.update(outputs,
     references)` over the batch, then `metric.compute()`), reset per
-    `(system, seed)`. This is how the standard `torchmetrics.text` metrics
-    (ROUGE, BLEU, SQuAD, WER, …) plug in directly. A metric whose `compute()`
-    returns a **dict** (e.g. `ROUGEScore` → `rouge1_fmeasure`, …; `SQuAD` →
-    `exact_match`, `f1`) **expands into one data variable per scalar key**, named
-    `<metric>_<subkey>` (or the subkey when a single metric is given).
+    `(system, seed)`. mushin passes `output`/`reference` **as-is** (it does not
+    reshape), so the user must shape them to the chosen metric's `update()`
+    contract: flat `str→str` for `WordErrorRate`/`CharErrorRate`/`Perplexity`;
+    `reference` as `list[str]` for `BLEUScore`/`SacreBLEUScore`/`CHRFScore`;
+    `output`/`reference` as the SQuAD dicts for `SQuAD`. A metric whose
+    `compute()` returns a **dict** (e.g. `SQuAD` → `exact_match`, `f1`;
+    `ROUGEScore` → `rouge1_fmeasure`, …) **expands into one data variable per
+    scalar key**, named `<metric>_<subkey>` (or the bare subkey when a single
+    metric is given). The guide documents the per-metric shapes; metrics that
+    don't fit `(output, reference)` should be wrapped as a plain callable.
   - a plain `Callable[[output, reference], float]` — scores one example; mushin
     means the per-example scores into one value per `(system, seed)`. Covers
     custom scorers and the `llm_judge` output. A metric that ignores `reference`

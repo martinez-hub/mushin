@@ -61,16 +61,16 @@ result = compare_llms(systems, data, metric=exact_match, seeds=range(5))
 
 Pass any `torchmetrics.Metric` object. mushin calls `metric.update(outputs,
 references)` with the full batch then `metric.compute()`, resetting between
-`(system, seed)` pairs. Standard text metrics from `torchmetrics.text` plug in
-directly:
+`(system, seed)` pairs. The error-rate metrics, which take flat string lists,
+plug in directly:
 
 ```python
-from torchmetrics.text import WordErrorRate, BLEUScore
+from torchmetrics.text import CharErrorRate, WordErrorRate
 
 result = compare_llms(
     systems,
-    data,
-    metric={"wer": WordErrorRate(), "bleu": BLEUScore()},
+    data,                 # each example's `reference` is a plain string
+    metric={"wer": WordErrorRate(), "cer": CharErrorRate()},
     seeds=range(5),
 )
 ```
@@ -78,10 +78,28 @@ result = compare_llms(
 A metric whose `compute()` returns a **dict** (e.g. `SQuAD` → `exact_match`,
 `f1`) expands into one data variable per key, named `<metric_name>_<subkey>`.
 
+!!! warning "Shape `output`/`reference` to the metric"
+    mushin passes your raw `output`s and `reference`s straight to
+    `metric.update(outputs, references)` — it does **not** reshape them. Each
+    torchmetrics text metric expects a specific shape, so shape your example
+    `reference` (and `output`) accordingly:
+
+    | metric | `output` | `reference` (per example) |
+    |---|---|---|
+    | `WordErrorRate`, `CharErrorRate`, `MatchErrorRate`, `Perplexity` | `str` | `str` |
+    | `BLEUScore`, `SacreBLEUScore`, `CHRFScore` | `str` | **`list[str]`** (one or more references) |
+    | `SQuAD` | `{"prediction_text": str, "id": str}` | `{"answers": {...}, "id": str}` |
+
+    Passing a plain `str` reference to `BLEUScore` does **not** error but scores
+    wrong; passing plain strings to `SQuAD` raises. If a metric doesn't fit this
+    `(output, reference)` shape, wrap it in a plain `Callable[[output,
+    reference], float]` instead.
+
 !!! note "Extra deps"
-    Some torchmetrics text metrics need optional packages. `WordErrorRate` and
-    `BLEUScore` work without extras. `ROUGEScore` needs `nltk`; install it
-    separately (`uv add nltk`) and run `nltk.download("punkt")` before use.
+    Some torchmetrics text metrics need optional packages. `WordErrorRate`,
+    `CharErrorRate`, `BLEUScore`, and `SQuAD` work without extras. `ROUGEScore`
+    needs `nltk`; install it separately (`uv add nltk`) and run
+    `nltk.download("punkt")` before use.
 
 ### A battery of metrics
 
@@ -177,6 +195,10 @@ the metric and re-run without re-calling the systems.
 - **Cache key collisions.** The cache key is `sha256(json(input))`. If your
   inputs are objects that don't serialize cleanly to JSON, use simple strings
   or dicts as inputs.
+- **Cached outputs must be JSON-serializable.** With `cache=`, system outputs
+  are written as JSON; a non-serializable output (e.g. a custom object) raises a
+  clear `TypeError`. Return strings or plain JSON-friendly values, or run
+  without a cache.
 
 ## See also
 

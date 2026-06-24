@@ -85,3 +85,42 @@ def test_cache_skips_recalls(tmp_path):
 def test_empty_inputs_rejected():
     with pytest.raises(ValueError):
         compare_llms({"a": lambda i, s: []}, [], metric=exact)
+
+
+def test_real_squad_dict_metric_expands():
+    """A real dict-returning torchmetrics metric works when output/reference are
+    shaped to its update() contract, and expands to one data variable per key."""
+    from torchmetrics.text import SQuAD
+
+    data = [
+        {
+            "input": i,
+            "reference": {
+                "answers": {"answer_start": [0], "text": ["cat"]},
+                "id": str(i),
+            },
+        }
+        for i in range(4)
+    ]
+
+    def sysA(inputs, seed):
+        return [{"prediction_text": "cat", "id": str(i)} for i in inputs]
+
+    result = compare_llms({"A": sysA}, data, metric=SQuAD(), seeds=range(2))
+    # single dict metric -> bare subkeys
+    assert "exact_match" in result.data.data_vars
+    assert "f1" in result.data.data_vars
+    assert float(result.data["exact_match"].sel({"method": "A"}).mean()) == 100.0
+
+
+def test_cache_rejects_non_serializable_output(tmp_path):
+    data = _data(2)
+
+    class NotJSON:  # a non-serializable system output
+        pass
+
+    def weird(inputs, seed):
+        return [NotJSON() for _ in inputs]
+
+    with pytest.raises(TypeError, match="JSON-serializable"):
+        compare_llms({"w": weird}, data, metric=exact, seeds=range(1), cache=tmp_path)

@@ -52,4 +52,13 @@ class OutputCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as f:
             for inp, output in pairs:
-                f.write(json.dumps({"key": _key(inp), "output": output}) + "\n")
+                try:
+                    record = json.dumps({"key": _key(inp), "output": output})
+                except TypeError as e:
+                    raise TypeError(
+                        f"system {system!r} produced an output that is not "
+                        f"JSON-serializable and cannot be cached: {output!r}. "
+                        "Return JSON-serializable outputs (e.g. strings) when "
+                        "using `cache=`, or call without a cache."
+                    ) from e
+                f.write(record + "\n")
