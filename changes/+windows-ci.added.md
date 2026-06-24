@@ -1,1 +1,0 @@
-The test suite now runs on Windows in CI (windows-latest) across Python 3.9-3.14, alongside Linux.
