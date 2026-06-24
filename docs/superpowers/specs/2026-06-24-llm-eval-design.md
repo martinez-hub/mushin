@@ -31,11 +31,15 @@ and reporting from `mushin.benchmark`:
 
 - `compare_llms` builds a `(method × seed)` `xarray.Dataset` of scalar metrics
   and calls the existing `mushin.benchmark._stats.compare_methods` →
-  `BenchmarkResult`. It does **not** touch the torch `evaluate`/task-registry
-  (different contract: systems not `nn.Module`, plain-callable metrics not
-  torchmetrics, no device/no_grad).
-- The torch `compare` and `compare_llms` share only the stats + reporting layer
-  (`_stats`, `_aggregate.to_dataset`, `_result.BenchmarkResult`).
+  `BenchmarkResult`. It does **not** reuse the torch `evaluate` loop or
+  task-registry (different contract: systems not `nn.Module`, no device/no_grad,
+  the system owns the forward pass).
+- The torch `compare` and `compare_llms` share the stats + reporting layer
+  (`_stats`, `_aggregate.to_dataset`, `_result.BenchmarkResult`) **and**
+  torchmetrics for metrics — the LLM path accepts `torchmetrics.Metric` objects
+  (notably `torchmetrics.text`: `ROUGEScore`, `BLEUScore`/`SacreBLEUScore`,
+  `CHRFScore`, `SQuAD`, `WordErrorRate`/`CharErrorRate`, `Perplexity`, …), so
+  standard text-eval metrics work out of the box with significance on top.
 
 Files:
 - `src/mushin/llm/__init__.py` — exports `compare_llms`, `llm_judge`, the
@@ -51,7 +55,7 @@ Files:
 def compare_llms(
     systems: dict[str, System],
     data: Sequence[Example],
-    metric: Metric | dict[str, Metric],
+    metric: Metric | dict[str, Metric],  # Metric = torchmetrics.Metric | Callable[[output, reference], float]
     seeds: Sequence[int] = (0, 1, 2, 3, 4),
     *,
     test: str = "welch",
@@ -71,11 +75,20 @@ def compare_llms(
 - `Example` — a mapping with at least `"input"` (passed to the system) and,
   when the metric needs it, `"reference"` (the gold answer). Extra keys are
   ignored. A plain `(input, reference)` tuple is also accepted and normalized.
-- `Metric = Callable[[output, reference], float]` — scores one example. mushin
-  aggregates the per-example scores into one value per `(system, seed)` by mean.
-  A `dict[str, Metric]` defines a battery (each becomes a data variable, exactly
-  like the torch battery). A metric that ignores `reference` (e.g. a
-  reference-free judge) is fine.
+- `Metric` is one of:
+  - a `torchmetrics.Metric` — scored the streaming way (`metric.update(outputs,
+    references)` over the batch, then `metric.compute()`), reset per
+    `(system, seed)`. This is how the standard `torchmetrics.text` metrics
+    (ROUGE, BLEU, SQuAD, WER, …) plug in directly. A metric whose `compute()`
+    returns a **dict** (e.g. `ROUGEScore` → `rouge1_fmeasure`, …; `SQuAD` →
+    `exact_match`, `f1`) **expands into one data variable per scalar key**, named
+    `<metric>_<subkey>` (or the subkey when a single metric is given).
+  - a plain `Callable[[output, reference], float]` — scores one example; mushin
+    means the per-example scores into one value per `(system, seed)`. Covers
+    custom scorers and the `llm_judge` output. A metric that ignores `reference`
+    (a reference-free judge) is fine.
+  - a `dict[str, Metric]` — a battery mixing any of the above; each entry becomes
+    its own data variable(s), exactly like the torch battery.
 
 ### Behavior
 
@@ -163,7 +176,12 @@ All hermetic — **no network, no real LLM**:
   variance). Assert `compare_llms` returns a `BenchmarkResult` with dims
   `(method, seed)`, the metric present, and significance behaving correctly
   (clear winner flagged; deterministic-tie not flagged).
-- **Metric battery:** a dict of two metrics → two data variables.
+- **Metric battery:** a dict mixing a plain callable and a `torchmetrics`
+  metric → the expected data variables.
+- **torchmetrics text metric:** a small fixed `(outputs, references)` scored with
+  a real `torchmetrics.text` metric (e.g. `ROUGEScore` or `SQuAD`) → assert the
+  dict-returning metric expands into the expected `<metric>_<subkey>` data
+  variables with hand-checked values.
 - **`llm_judge`:** a fake judge function (deterministic, seed-aware) + `parse` →
   verify it scores and is reproducible; a malformed judge reply → `ValueError`.
 - **Caching:** run twice with `cache=tmp_path`; assert the system is called the
