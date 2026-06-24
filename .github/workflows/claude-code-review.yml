@@ -53,7 +53,15 @@ jobs:
             (`src/mushin/benchmark/_stats.py`) or dependency-floor mistakes.
             Never add Claude/AI authorship anywhere.
 
-            Then run the review and post inline comments on the PR:
+            First, post specific issues as inline comments by running:
             /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} high --comment
+
+            Then ALWAYS post exactly one summary comment on the PR (even when you
+            found nothing), using:
+            gh pr comment ${{ github.event.pull_request.number }} --body "<text>"
+            The first line is the verdict — `🤖 Claude review — ✅ no major issues`
+            if you posted no inline issues, or `🤖 Claude review — ⚠️ N issue(s),
+            see inline` otherwise — followed by up to 3 short bullets.
+          claude_args: '--allowed-tools "Bash(gh pr comment:*)"'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
 
