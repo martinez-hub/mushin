@@ -28,11 +28,25 @@ _SAFE_GLOBALS = {("collections", "OrderedDict"), ("collections", "defaultdict")}
 _BUILTIN_MODULES = {"builtins", "__builtin__"}
 _SAFE_BUILTINS = {"list", "dict", "tuple", "set", "frozenset", "bytearray", "complex"}
 _SAFE_NUMPY_NAMES = {
-    "ndarray", "dtype",
-    "float16", "float32", "float64",
-    "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64",
-    "bool_", "complex64", "complex128", "intc", "intp", "longlong",
+    "ndarray",
+    "dtype",
+    "float16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "bool_",
+    "complex64",
+    "complex128",
+    "intc",
+    "intp",
+    "longlong",
 }
 
 
@@ -169,9 +183,7 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
         raise FileNotFoundError(f"{p} not found")
     rootp = Path(root).expanduser().resolve() if root is not None else None
     runs: list[Experiment] = []
-    for hydra_dir in sorted(
-        p.glob("**/.hydra"), key=lambda h: _job_sort_key(h, rootp)
-    ):
+    for hydra_dir in sorted(p.glob("**/.hydra"), key=lambda h: _job_sort_key(h, rootp)):
         run_dir = hydra_dir.parent
         cfg_file = hydra_dir / "config.yaml"
         cfg = (
@@ -336,9 +348,7 @@ def _server_root(root: str | Path | None) -> Path:
     (the documented behavior), never the whole filesystem.
     """
     return (
-        Path(root).expanduser().resolve()
-        if root is not None
-        else Path.cwd().resolve()
+        Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
     )
 
 

@@ -68,7 +68,9 @@ def _make_jobs(base: Path, n: int) -> Path:
     for i in range(n):
         run = base / str(i)
         (run / ".hydra").mkdir(parents=True)
-        OmegaConf.save(OmegaConf.create({"lr": float(i)}), run / ".hydra" / "config.yaml")
+        OmegaConf.save(
+            OmegaConf.create({"lr": float(i)}), run / ".hydra" / "config.yaml"
+        )
     return base
 
 
@@ -271,7 +273,9 @@ def test_unreadable_metrics_skipped(tmp_path):
     (base / "0" / "bad_metrics.pt").write_bytes(b"not a real torch file")
     out = _get_metrics(base)  # must not raise
     assert "metrics" in out["per_run"][0]  # good file still loaded
-    assert "bad_metrics" not in out["per_run"][0]  # unreadable file skipped, not executed
+    assert (
+        "bad_metrics" not in out["per_run"][0]
+    )  # unreadable file skipped, not executed
 
 
 def test_get_metrics_filter_by_leaf(tmp_path):
@@ -428,7 +432,9 @@ def test_env_interpolation_not_resolved(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSHIN_TEST_SECRET", "topsecret")
     base = tmp_path / "exp" / "0"
     (base / ".hydra").mkdir(parents=True)
-    (base / ".hydra" / "config.yaml").write_text("token: ${oc.env:MUSHIN_TEST_SECRET}\n")
+    (base / ".hydra" / "config.yaml").write_text(
+        "token: ${oc.env:MUSHIN_TEST_SECRET}\n"
+    )
 
     out = _get_config(base)
     assert "topsecret" not in str(out)  # secret never resolved
