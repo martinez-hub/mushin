@@ -44,8 +44,11 @@ and reporting from `mushin.benchmark`:
 Files:
 - `src/mushin/llm/__init__.py` — exports `compare_llms`, `llm_judge`, the
   `System`/`Metric` type aliases, and `Example`.
-- `src/mushin/llm/_compare.py` — `compare_llms` (orchestration: run → score →
-  aggregate → compare).
+- `src/mushin/llm/_compare.py` — `compare_llms` (orchestration: instantiate
+  systems → run → score → aggregate → compare).
+- `src/mushin/llm/_system.py` — normalize a system value (a callable, or a
+  hydra-zen config) into a callable, instantiating configs once via
+  `hydra_zen.instantiate`.
 - `src/mushin/llm/_judge.py` — the `llm_judge` helper.
 - `src/mushin/llm/_cache.py` — the on-disk output cache.
 
@@ -67,11 +70,13 @@ def compare_llms(
 
 ### Contracts
 
-- `System = Callable[[Sequence[Any], int], Sequence[Any]]` — given the list of
-  example **inputs** and a **seed**, returns a list of **outputs** (same length,
-  same order). The system wires the seed to its own sampling (provider `seed`
-  param, local RNG, temperature) for reproducibility. Batching/concurrency/
-  rate-limits are the system's responsibility.
+- A **system** is either (a) a callable
+  `Callable[[Sequence[Any], int], Sequence[Any]]` — given the list of example
+  **inputs** and a **seed**, returns a list of **outputs** (same length, same
+  order) — or (b) a **hydra-zen config** that instantiates to such a callable
+  (see *System configuration* below). The callable wires the seed to its own
+  sampling (provider `seed` param, local RNG, temperature) for reproducibility.
+  Batching/concurrency/rate-limits are the system's responsibility.
 - `Example` — a mapping with at least `"input"` (passed to the system) and,
   when the metric needs it, `"reference"` (the gold answer). Extra keys are
   ignored. A plain `(input, reference)` tuple is also accepted and normalized.
@@ -99,6 +104,27 @@ handling. A `seeds` of length 1, or a deterministic system that yields identical
 scores across seeds, produces zero within-system variance and is reported as
 **not** significant (no false positives) — the existing `_stats` logic, reused
 unchanged.
+
+## System configuration (hydra-zen)
+
+Systems are configured the mushin-native way — with hydra-zen — so LLM-eval runs
+are declarative, reproducible, and sweepable, consistent with the torch path's
+`MultiRunMetricsWorkflow`.
+
+- A value in the `systems` dict may be a hydra-zen config (`builds(...)` output /
+  dataclass / `DictConfig`). mushin **instantiates each system once** (via
+  `hydra_zen.instantiate`) before the seed loop, so a heavy local model is loaded
+  a single time and reused across all seeds. Already-callable systems are used
+  as-is (the user instantiated them once).
+- **Device / size** live in the config for *local* models: `device`,
+  `torch_dtype`, quantization, and `device_map="auto"` for models too big for one
+  device (the loader — e.g. HF `from_pretrained` — then shards across CPU/GPU).
+  mushin **delegates the actual placement to the loader**; it does not inspect
+  model sizes or available VRAM. API systems simply omit these fields.
+- mushin ships **no** loader/provider/model code — the config `_target_`s the
+  user's own generator class (or an HF/provider wrapper). mushin only
+  `instantiate`s and calls it. Docs include a worked recipe for a local HF
+  generator config (`device_map="auto"`) and an API-call config.
 
 ## The `llm_judge` helper
 
@@ -149,7 +175,8 @@ provider). mushin manages no event loop, thread pool, or rate limiter in v1.
 
 ## Data flow
 
-For each `system × seed`:
+Instantiate each system **once** up front (hydra-zen configs via
+`hydra_zen.instantiate`; callables as-is). Then for each `system × seed`:
 1. (cache-aware) obtain `outputs = system(inputs, seed)`.
 2. score each `(output, reference)` with each metric → per-example scores.
 3. mean over examples → one scalar per metric → one `(system, seed)` row.
@@ -190,6 +217,10 @@ All hermetic — **no network, no real LLM**:
   missing ones.
 - **Reproducibility:** same seeds + same (seed-respecting) fake → identical
   `result.data`.
+- **hydra-zen system config:** pass a system as a `builds(...)` config of a fake
+  generator class; assert mushin instantiates it **once** (a class-level counter
+  shows one construction across all seeds) and the run produces the expected
+  result — proving configs work and heavy models aren't reloaded per seed.
 - **Statistics reuse:** confirm `result.comparisons` columns/behavior match the
   torch path (it's the same `compare_methods`).
 
