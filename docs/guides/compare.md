@@ -23,9 +23,10 @@ for all methods are evaluated on `data`.
 ## The metric battery
 
 For `task="classification"`, the default battery includes accuracy, macro F1,
-and AUROC (computed via torchmetrics). For `task="segmentation"`, it includes
-mean IoU and pixel accuracy. You can pass a custom `metrics` dict to override
-the defaults.
+macro precision, macro recall, AUROC, and ECE (expected calibration error). For
+`task="segmentation"`, it includes mean IoU, Dice, pixel accuracy, and macro
+precision/recall. All are computed via torchmetrics. You can pass a custom
+`metrics` dict to override the defaults.
 
 ## Statistical tests
 
@@ -41,9 +42,12 @@ All pairwise comparisons are corrected for multiple testing with the Holm
 procedure at significance level `alpha` (default `0.05`).
 
 !!! warning "Single-seed behavior"
-    If any method has only one seed, statistical tests cannot run (no
-    variance to compare). `compare` will emit a warning and skip significance
-    testing for that method rather than producing false significance.
+    With only one seed per method there is no within-method variance, so a
+    parametric test returns a NaN p-value and the comparison is reported as
+    **not** significant rather than producing a false positive. `compare` also
+    warns when the chosen test cannot reach `alpha` at the given seed count
+    (e.g. Wilcoxon with very few seeds). Use several seeds for meaningful
+    significance.
 
 ## Reading the result
 

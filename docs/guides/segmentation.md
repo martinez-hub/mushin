@@ -16,8 +16,8 @@ result = compare(
 result.summary()
 ```
 
-The default segmentation battery includes **mean IoU** and **pixel accuracy**
-(computed via torchmetrics).
+The default segmentation battery includes **mean IoU**, **Dice**, **pixel
+accuracy**, and **macro precision/recall** (computed via torchmetrics).
 
 ## Ignoring void / boundary labels
 
@@ -60,10 +60,13 @@ The `predict_fn` signature is `(model, batch_x) -> (predictions, probabilities)`
 where `predictions` is a `(N, H, W)` long tensor of class indices and
 `probabilities` is a `(N, C, H, W)` float tensor of per-class probabilities.
 
-!!! note "predict_fn and prob_metrics"
-    If your model only returns logits or hard predictions (no probabilities),
-    omit the second return value and also pass `prob_metrics=frozenset()` to
-    skip AUROC-style metrics that require probabilities.
+!!! note "predict_fn must always return a 2-tuple"
+    `predict_fn` always returns `(predictions, probabilities)` — the evaluation
+    loop unpacks both. If you have no probabilities to provide, just return the
+    predictions twice (`return preds, preds`); the duplicate is never used,
+    because the segmentation battery has no probability-based metrics. (For
+    `task="segmentation"`, `prob_metrics` is already empty, so you don't need to
+    set it.)
 
 ## Using Study for segmentation
 
