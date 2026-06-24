@@ -1,0 +1,1 @@
+Added an in-repo Claude reviewer: a `@claude` mention bot and an auto PR-review workflow (tuned for mushin — API-signature accuracy in docs/examples), as a backstop to the Codex connector.
