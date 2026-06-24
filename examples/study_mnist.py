@@ -118,5 +118,7 @@ def _load_mnist(batch_size: int = 128) -> tuple[DataLoader, DataLoader]:
 
 if __name__ == "__main__":
     train_loader, test_loader = _load_mnist()
-    result = run(train_loader, test_loader, seeds=(0, 1, 2), working_dir="./study_output")
+    result = run(
+        train_loader, test_loader, seeds=(0, 1, 2), working_dir="./study_output"
+    )
     print(result.summary().to_string(index=False))
