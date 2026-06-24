@@ -86,7 +86,7 @@ A metric whose `compute()` returns a **dict** (e.g. `SQuAD` → `exact_match`,
 
     | metric | `output` | `reference` (per example) |
     |---|---|---|
-    | `WordErrorRate`, `CharErrorRate`, `MatchErrorRate`, `Perplexity` | `str` | `str` |
+    | `WordErrorRate`, `CharErrorRate`, `MatchErrorRate` | `str` | `str` |
     | `BLEUScore`, `SacreBLEUScore`, `CHRFScore` | `str` | **`list[str]`** (one or more references) |
     | `SQuAD` | `{"prediction_text": str, "id": str}` | `{"answers": {...}, "id": str}` |
 

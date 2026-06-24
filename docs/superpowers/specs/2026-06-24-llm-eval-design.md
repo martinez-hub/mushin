@@ -38,7 +38,7 @@ and reporting from `mushin.benchmark`:
   (`_stats`, `_aggregate.to_dataset`, `_result.BenchmarkResult`) **and**
   torchmetrics for metrics — the LLM path accepts `torchmetrics.Metric` objects
   (the `torchmetrics.text` family: `WordErrorRate`/`CharErrorRate`, `BLEUScore`/
-  `SacreBLEUScore`, `CHRFScore`, `SQuAD`, `Perplexity`, `ROUGEScore`, …), so
+  `SacreBLEUScore`, `CHRFScore`, `SQuAD`, `ROUGEScore`, …), so
   standard text-eval metrics get statistical significance on top — the user
   shapes `output`/`reference` to the chosen metric's `update()` contract (see the
   metric contract below and the guide).
@@ -87,7 +87,7 @@ def compare_llms(
     references)` over the batch, then `metric.compute()`), reset per
     `(system, seed)`. mushin passes `output`/`reference` **as-is** (it does not
     reshape), so the user must shape them to the chosen metric's `update()`
-    contract: flat `str→str` for `WordErrorRate`/`CharErrorRate`/`Perplexity`;
+    contract: flat `str→str` for `WordErrorRate`/`CharErrorRate`;
     `reference` as `list[str]` for `BLEUScore`/`SacreBLEUScore`/`CHRFScore`;
     `output`/`reference` as the SQuAD dicts for `SQuAD`. A metric whose
     `compute()` returns a **dict** (e.g. `SQuAD` → `exact_match`, `f1`;
