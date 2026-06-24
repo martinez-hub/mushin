@@ -36,32 +36,36 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          # Context: bias the review toward mushin's most common defect, then run
-          # the code-review plugin (which posts inline PR comments via --comment).
+          # track_progress posts a summary review comment (always); classify_inline_comments
+          # buffers/validates inline findings before posting them on the relevant lines.
+          track_progress: true
+          classify_inline_comments: true
           prompt: |
-            This repository is the mushin-py library — reproducible,
+            Review this pull request for the mushin-py library — reproducible,
             statistically-rigorous ML evaluation on PyTorch Lightning and
-            hydra-zen. When reviewing, pay special attention to API-signature
-            accuracy: for every mushin API call in `docs/` or `examples/`,
-            verify it against the real signatures in `src/` (which keyword
-            arguments `compare()` and `Study()` actually accept) and flag
-            invented/renamed parameters or examples that would error if run —
-            that is this project's most common defect. Also watch for undefined
-            placeholders shown as runnable code, vacuous tests, and statistics
-            (`src/mushin/benchmark/_stats.py`) or dependency-floor mistakes.
-            Never add Claude/AI authorship anywhere.
+            hydra-zen.
 
-            First, post specific issues as inline comments by running:
-            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} high --comment
+            Priorities, highest first:
+            1. Correctness. For EVERY mushin API call in `docs/` or `examples/`,
+               verify it against the real signatures in `src/` (which keyword
+               arguments `compare()` and `Study()` actually accept) and flag
+               invented/renamed parameters, wrong return shapes, or examples that
+               would error if a user ran them — this is the project's most common
+               defect.
+            2. Docs/examples must be runnable and accurate: no undefined
+               placeholder variables presented as runnable code; embedded
+               `--8<--` snippets must match their source script.
+            3. Test quality: would a test actually fail if the behavior broke?
+               Flag vacuous or tautological assertions.
+            4. Statistics (`src/mushin/benchmark/_stats.py`), public-API/compat
+               changes, dependency-floor changes, and CI/workflow correctness.
 
-            Then ALWAYS post exactly one summary comment on the PR (even when you
-            found nothing), using:
-            gh pr comment ${{ github.event.pull_request.number }} --body "<text>"
-            The first line is the verdict — `🤖 Claude review — ✅ no major issues`
-            if you posted no inline issues, or `🤖 Claude review — ⚠️ N issue(s),
-            see inline` otherwise — followed by up to 3 short bullets.
-          claude_args: '--allowed-tools "Bash(gh pr comment:*)"'
+            Post specific issues as inline comments on the relevant lines, and
+            always end with a brief summary review — a one-line verdict
+            (`✅ no major issues` or `⚠️ N issue(s)`) plus up to 3 bullets — even
+            when the PR is clean. Cite `file:line`, suggest concrete fixes, skip
+            pure style nits the formatter handles, and never add Claude/AI
+            authorship anywhere.
+          claude_args: '--max-turns 25'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
 
