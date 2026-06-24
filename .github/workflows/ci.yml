@@ -24,16 +24,17 @@ jobs:
         run: uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
         experimental: [false]
         include:
           # torch / Lightning may not ship 3.14 wheels yet; don't fail CI on it.
-          - python-version: "3.14"
-            experimental: true
+          - { os: ubuntu-latest, python-version: "3.14", experimental: true }
+          - { os: windows-latest, python-version: "3.14", experimental: true }
     continue-on-error: ${{ matrix.experimental }}
 
     steps:
@@ -76,3 +77,29 @@ jobs:
           fi
       - name: Changelog fragment check
         run: uv run towncrier check --compare-with origin/${{ github.base_ref }}
+
+  min-versions:
+    # Resolves the *lowest* declared dependency versions and runs the suite, so
+    # the floors in pyproject.toml stay honest. Runs on the oldest supported
+    # Python (3.9). Reproduce locally with `make test-lowest` (amd64 Docker).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Sync lowest-direct dependency versions (Python 3.9)
+        run: uv sync --resolution lowest-direct --python 3.9
+      # Some deps at their floor still `import pkg_resources` at import time; uv's
+      # minimal venv omits setuptools, which typical user environments include.
+      # Provide it so this job tests dependency-version compatibility, not
+      # setuptools presence. Pin < 81: setuptools 81 removed pkg_resources.
+      - name: Provide setuptools (pkg_resources) for old floors
+        run: uv pip install "setuptools<81"
+      - name: Show resolved environment
+        run: uv pip list
+      - name: Run tests
+        # --no-sync: never re-resolve here. A plain `uv run` would sync to the
+        # default (highest) resolution and silently test latest deps instead of
+        # the floors this job exists to validate.
+        run: uv run --no-sync pytest tests/ --hypothesis-profile fast -p no:cacheprovider

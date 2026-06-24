@@ -29,28 +29,42 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pytorch-lightning >= 1.5.0",
-    "hydra-zen >= 0.9.0",
+    # Lightning floor is 2.4: the pre-2.0 API (1.5) doesn't run this package, and
+    # we pin the floor to pair with the torch >= 2.4 floor below (Lightning 2.4 is
+    # contemporaneous with torch 2.4). Verified by the min-version CI job.
+    "pytorch-lightning >= 2.4.0",
+    # hydra-zen floor is 0.10: `mushin.study` imports `hydra_zen.multirun`, which
+    # 0.9 doesn't export. Verified by the min-version CI job.
+    "hydra-zen >= 0.10.0",
     "hydra-core >= 1.2.0",
-    # torch dropped Intel-macOS (x86_64) wheels after 2.2.x, so cap there on that
-    # platform only; everywhere else take any modern torch.
-    "torch >= 1.13.0,<2.3 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "torch >= 1.13.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    # torch 2.2.x (the Intel-macOS cap above) is built against NumPy 1.x; that
-    # platform is inherently Python <=3.11. Everywhere else take NumPy 2.x.
+    # torch floors are split by platform. Non-Intel uses NumPy 2 (below), which
+    # is ABI-incompatible with torch built against NumPy 1.x; PyTorch first ships
+    # NumPy-2-compatible wheels in 2.4.0 ("Numpy is not available" below that).
+    # Intel-macOS has no torch wheels past 2.2.x and uses NumPy 1.x, so it is
+    # pinned to exactly 2.2.x. Both verified by the min-version CI job.
+    "torch >= 2.2.0,<2.3 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch >= 2.4.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # Intel-macOS (torch 2.2.x) is built against NumPy 1.x and is inherently
+    # Python <=3.11. Everywhere else take NumPy 2.x.
     "numpy >= 1.24,<2 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "numpy >= 2 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "omegaconf >= 2.1.1",
-    "xarray >= 0.19.0",
+    # xarray 2024.6.0 is the first NumPy-2-compatible release (older xarray uses
+    # `np.unicode_`, removed in NumPy 2); it still supports Python 3.9. Verified
+    # by the min-version CI job.
+    "xarray >= 2024.6.0",
     "typing-extensions >= 4.1.0",
     "torchmetrics >= 1.0",
     "scipy >= 1.10",
-    "pandas >= 1.5",
+    # pandas 2.2.2 is the first release officially compatible with NumPy 2 (the
+    # non-Intel floor); older pandas imports under NumPy 2 only by luck (ABI
+    # "size changed" warning). Verified by the min-version CI job.
+    "pandas >= 2.2.2",
 ]
 
 [project.optional-dependencies]
 viz = ["matplotlib >= 3.3"]
-netcdf = ["netCDF4 >= 1.5.8"]
+netcdf = ["netCDF4 >= 1.7.0"]
 # The MCP SDK requires Python >= 3.10; mushin still supports 3.9, so gate it.
 mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
 
@@ -73,10 +87,10 @@ dev = [
     "pre-commit >= 3.5",
     "pytest >= 7.0.0",
     "hypothesis >= 6.28.0",
-    "pytest-xdist",
+    "pytest-xdist >= 3.0",
     "towncrier >= 23.11",
     "matplotlib >= 3.3",
-    "netCDF4 >= 1.5.8",
+    "netCDF4 >= 1.7.0",
     "mcp >= 1.2 ; python_version >= '3.10'",
 ]
 

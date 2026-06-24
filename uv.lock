@@ -2717,21 +2717,21 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "hydra-core", specifier = ">=1.2.0" },
-    { name = "hydra-zen", specifier = ">=0.9.0" },
+    { name = "hydra-zen", specifier = ">=0.10.0" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.3" },
     { name = "mcp", marker = "python_full_version >= '3.10' and extra == 'mcp'", specifier = ">=1.2" },
-    { name = "netcdf4", marker = "extra == 'netcdf'", specifier = ">=1.5.8" },
+    { name = "netcdf4", marker = "extra == 'netcdf'", specifier = ">=1.7.0" },
     { name = "numpy", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2" },
     { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=1.24,<2" },
     { name = "omegaconf", specifier = ">=2.1.1" },
-    { name = "pandas", specifier = ">=1.5" },
-    { name = "pytorch-lightning", specifier = ">=1.5.0" },
+    { name = "pandas", specifier = ">=2.2.2" },
+    { name = "pytorch-lightning", specifier = ">=2.4.0" },
     { name = "scipy", specifier = ">=1.10" },
-    { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=1.13.0" },
-    { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=1.13.0,<2.3" },
+    { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2.4.0" },
+    { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=2.2.0,<2.3" },
     { name = "torchmetrics", specifier = ">=1.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
-    { name = "xarray", specifier = ">=0.19.0" },
+    { name = "xarray", specifier = ">=2024.6.0" },
 ]
 provides-extras = ["viz", "netcdf", "mcp"]
 
@@ -2741,10 +2741,10 @@ dev = [
     { name = "hypothesis", specifier = ">=6.28.0" },
     { name = "matplotlib", specifier = ">=3.3" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.2" },
-    { name = "netcdf4", specifier = ">=1.5.8" },
+    { name = "netcdf4", specifier = ">=1.7.0" },
     { name = "pre-commit", specifier = ">=3.5" },
     { name = "pytest", specifier = ">=7.0.0" },
-    { name = "pytest-xdist" },
+    { name = "pytest-xdist", specifier = ">=3.0" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "towncrier", specifier = ">=23.11" },
 ]
