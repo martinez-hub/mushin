@@ -34,7 +34,7 @@ and stores the resulting paths.
 | `load_fn` | Callable that loads a checkpoint path into a `torch.nn.Module`. |
 | `seeds` | List of integer seeds to train each method on. |
 | `data` | Re-iterable data loader for evaluation. |
-| `num_classes` | Number of classes (required unless passing custom `metrics`). |
+| `num_classes` | Number of classes (required — `Study` evaluates with the default battery for its `task`). |
 | `task` | `"classification"` (default) or `"segmentation"`. |
 | `test` | Statistical test: `"welch"`, `"wilcoxon"`, `"mannwhitney"`, etc. |
 | `alpha` | Significance threshold (default `0.05`). |
