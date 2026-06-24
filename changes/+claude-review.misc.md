@@ -1,1 +1,1 @@
-Added an in-repo Claude reviewer: a `@claude` mention bot and an auto PR-review workflow (tuned for mushin — API-signature accuracy in docs/examples), as a backstop to the Codex connector.
+Added a `@claude` mention bot (GitHub Actions): mention `@claude` in any issue or PR comment to have Claude answer questions or make changes. PR *reviews* stay with the Codex connector.
