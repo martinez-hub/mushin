@@ -69,28 +69,34 @@ def make_train_fn(name: str, model_factory, loader: DataLoader, ckpt_dir: Path):
 
 # --8<-- [start:run]
 def run(
-    data_loader: DataLoader,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
     *,
     seeds=(0, 1, 2),
     working_dir: str | os.PathLike[str],
 ) -> BenchmarkResult:
-    """Run a Study: train CNN and MLP across seeds, then compare."""
-    ckpt_dir = Path(working_dir) / "checkpoints"
+    """Train CNN and MLP across seeds on ``train_loader``, then compare them on
+    the held-out ``test_loader``."""
+    # Resolve to an absolute path: each train_fn runs inside Hydra's per-job
+    # working directory, so a relative checkpoint dir would not point at the
+    # directory we create here.
+    work = Path(working_dir).resolve()
+    ckpt_dir = work / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     methods = {
-        "cnn": make_train_fn("cnn", _make_cnn, data_loader, ckpt_dir),
-        "mlp": make_train_fn("mlp", _make_mlp, data_loader, ckpt_dir),
+        "cnn": make_train_fn("cnn", _make_cnn, train_loader, ckpt_dir),
+        "mlp": make_train_fn("mlp", _make_mlp, train_loader, ckpt_dir),
     }
 
     study = Study(
         methods=methods,
         load_fn=lambda p: torch.load(p, weights_only=False),
         seeds=list(seeds),
-        data=data_loader,
+        data=test_loader,
         num_classes=10,
         test="welch",
-        working_dir=str(working_dir),
+        working_dir=str(work),
     )
     return study.run()
 
@@ -98,15 +104,19 @@ def run(
 # --8<-- [end:run]
 
 
-def _load_mnist(batch_size: int = 128) -> DataLoader:
+def _load_mnist(batch_size: int = 128) -> tuple[DataLoader, DataLoader]:
     from torchvision import datasets, transforms
 
     tf = transforms.ToTensor()
-    ds = datasets.MNIST("./data", train=False, download=True, transform=tf)
-    return DataLoader(ds, batch_size=batch_size)
+    train = datasets.MNIST("./data", train=True, download=True, transform=tf)
+    test = datasets.MNIST("./data", train=False, download=True, transform=tf)
+    return (
+        DataLoader(train, batch_size=batch_size, shuffle=True),
+        DataLoader(test, batch_size=batch_size),
+    )
 
 
 if __name__ == "__main__":
-    loader = _load_mnist()
-    result = run(loader, seeds=(0, 1, 2), working_dir="./study_output")
+    train_loader, test_loader = _load_mnist()
+    result = run(train_loader, test_loader, seeds=(0, 1, 2), working_dir="./study_output")
     print(result.summary().to_string(index=False))

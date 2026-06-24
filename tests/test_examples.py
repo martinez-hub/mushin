@@ -51,12 +51,13 @@ def test_study_mnist_example_runs_on_synthetic(tmp_path):
 
     from mushin.benchmark import BenchmarkResult
 
-    g = torch.Generator().manual_seed(1)
-    x = torch.randn(32, 1, 28, 28, generator=g)
-    y = torch.randint(0, 10, (32,), generator=g)
-    loader = DataLoader(TensorDataset(x, y), batch_size=16)
+    def _loader(seed):
+        gg = torch.Generator().manual_seed(seed)
+        x = torch.randn(32, 1, 28, 28, generator=gg)
+        y = torch.randint(0, 10, (32,), generator=gg)
+        return DataLoader(TensorDataset(x, y), batch_size=16)
 
-    result = run(loader, seeds=(0, 1), working_dir=tmp_path)
+    result = run(_loader(1), _loader(2), seeds=(0, 1), working_dir=tmp_path)
     assert isinstance(result, BenchmarkResult)
     assert result.data.sizes["seed"] == 2
     assert "accuracy" in result.data.data_vars
