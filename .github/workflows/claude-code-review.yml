@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
 
@@ -36,9 +36,31 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          prompt: |
+            Review this pull request for the mushin-py library (boilerplate-free,
+            reproducible, statistically-rigorous ML evaluation built on PyTorch
+            Lightning and hydra-zen) and post a concise PR review with inline
+            comments on the specific lines.
+
+            Focus, highest priority first:
+            1. Correctness. For EVERY mushin API call in `docs/` or `examples/`,
+               verify it against the real signatures in `src/` — e.g. which
+               keyword arguments `compare()` and `Study()` actually accept — and
+               flag invented or renamed parameters, wrong return shapes, or
+               examples that would error if a user ran them. This is the
+               project's most common defect.
+            2. Docs/examples must be runnable and accurate: no undefined
+               placeholder variables presented as runnable code; embedded
+               `--8<--` snippets must match their source script.
+            3. Test quality: would a test actually fail if the behavior broke?
+               Flag vacuous or tautological assertions.
+            4. Statistics correctness (`src/mushin/benchmark/_stats.py`),
+               public-API/compatibility changes, dependency-floor changes, and
+               CI/workflow correctness.
+
+            Be specific and concise: cite `file:line`, state the impact, and
+            suggest a concrete fix. Skip pure style nits the formatter handles.
+            Never add Claude/AI authorship to anything. If the PR looks good,
+            say so briefly.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
 
