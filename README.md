@@ -12,6 +12,8 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/mushin-py.svg)](https://pypi.org/project/mushin-py/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 
+**Docs:** https://martinez-hub.github.io/mushin/
+
 Boilerplate-free, reproducible machine-learning experiment workflows built on
 [PyTorch Lightning](https://lightning.ai/) and
 [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen).
