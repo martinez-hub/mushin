@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,13 @@ def _key(value: Any) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+def _safe_dir(name: str) -> str:
+    """A filesystem-safe directory name for a system, so an odd name (with `/`,
+    `..`, etc.) can't escape the cache root. A short hash keeps it unambiguous."""
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", name) or "_"
+    return f"{slug}-{hashlib.sha256(name.encode()).hexdigest()[:8]}"
+
+
 class OutputCache:
     """JSONL-per-(system, seed) cache of system outputs."""
 
@@ -21,7 +29,7 @@ class OutputCache:
         self.root = Path(root)
 
     def _path(self, system: str, seed: int) -> Path:
-        return self.root / system / f"seed{seed}.jsonl"
+        return self.root / _safe_dir(system) / f"seed{seed}.jsonl"
 
     def _load(self, system: str, seed: int) -> dict[str, Any]:
         path = self._path(system, seed)

@@ -28,7 +28,7 @@ from ._types import Metric
 def _normalize_examples(data: Sequence[Any]) -> tuple[list[Any], list[Any]]:
     inputs, refs = [], []
     for ex in data:
-        if isinstance(ex, dict):
+        if isinstance(ex, dict) and "input" in ex:
             inputs.append(ex["input"])
             refs.append(ex.get("reference"))
         elif isinstance(ex, tuple) and len(ex) == 2:

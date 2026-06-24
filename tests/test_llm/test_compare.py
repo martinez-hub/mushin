@@ -269,3 +269,13 @@ def test_empty_metric_battery_rejected():
     with pytest.raises(ValueError, match="metric.*empty"):
         compare_llms({"s": sys}, _data(2), metric={})
     assert calls["n"] == 0  # rejected before any system call
+
+
+def test_dict_without_input_key_is_treated_as_bare_input():
+    from mushin.llm._compare import _normalize_examples
+
+    inputs, refs = _normalize_examples(
+        [{"prompt": "hi"}, {"input": "x", "reference": "y"}]
+    )
+    assert inputs == [{"prompt": "hi"}, "x"]  # bare dict input vs example wrapper
+    assert refs == [None, "y"]
