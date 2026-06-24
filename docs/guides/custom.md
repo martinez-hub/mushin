@@ -4,9 +4,15 @@ mushin's metric batteries and prediction logic are fully replaceable. This guide
 shows how to extend mushin with custom metrics and how to adapt models that
 don't return plain tensors.
 
+!!! note "These are `compare` arguments"
+    `metrics`, `predict_fn`, and `prob_metrics` are arguments to **`compare`**.
+    `Study` always evaluates with the default battery for its `task`
+    (`classification` or `segmentation`) — to use a custom battery or predict
+    step with trained models, call `compare` directly.
+
 ## Custom metrics dict
 
-Pass a `metrics` dict to `compare` or `Study` to replace the default battery:
+Pass a `metrics` dict to `compare` to replace the default battery:
 
 ```python
 from torchmetrics.classification import MulticlassF1Score, MulticlassAccuracy
