@@ -63,6 +63,7 @@ nav:
   - Guides:
       - Workflows & sweeps: guides/workflows.md
       - Comparing methods: guides/compare.md
+      - LLM evaluation: guides/llm.md
       - Studies: guides/study.md
       - Segmentation: guides/segmentation.md
       - Custom metrics & predict_fn: guides/custom.md
@@ -70,6 +71,7 @@ nav:
       - Analyzing from Claude Code: guides/mcp.md
   - API Reference:
       - benchmark: reference/benchmark.md
+      - llm: reference/llm.md
       - study: reference/study.md
       - workflows: reference/workflows.md
       - lightning: reference/lightning.md

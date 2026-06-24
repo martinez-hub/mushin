@@ -63,6 +63,17 @@ def test_study_mnist_example_runs_on_synthetic(tmp_path):
     assert "accuracy" in result.data.data_vars
 
 
+def test_compare_llms_demo_example_runs_on_synthetic():
+    from compare_llms_demo import run
+
+    from mushin.benchmark import BenchmarkResult
+
+    data = [{"input": i, "reference": "even" if i % 2 == 0 else "odd"} for i in range(8)]
+    result = run(data)
+    assert isinstance(result, BenchmarkResult)
+    assert "score" in result.data.data_vars
+
+
 def test_segmentation_demo_example_runs_on_synthetic():
     import torch
     from segmentation_demo import run
