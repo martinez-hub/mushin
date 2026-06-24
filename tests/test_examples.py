@@ -60,3 +60,22 @@ def test_study_mnist_example_runs_on_synthetic(tmp_path):
     assert isinstance(result, BenchmarkResult)
     assert result.data.sizes["seed"] == 2
     assert "accuracy" in result.data.data_vars
+
+
+def test_segmentation_demo_example_runs_on_synthetic():
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from segmentation_demo import run
+    from mushin.benchmark import BenchmarkResult
+
+    g = torch.Generator().manual_seed(2)
+    N, C, H, W, num_classes = 8, 3, 8, 8, 4
+    x = torch.randn(N, C, H, W, generator=g)
+    masks = torch.randint(0, num_classes, (N, H, W), generator=g)
+    loader = DataLoader(TensorDataset(x, masks), batch_size=4)
+
+    result = run(loader, in_channels=C, num_classes=num_classes, seeds=(0, 1))
+    assert isinstance(result, BenchmarkResult)
+    assert result.data.sizes["seed"] == 2
+    assert "miou" in result.data.data_vars
