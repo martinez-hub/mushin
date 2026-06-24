@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import re
 import warnings
@@ -103,6 +104,10 @@ def _run(system, inputs, seed, cache, name) -> list[Any]:
         cache.put_many(
             name, seed, [(inp, out) for (_, inp), out in zip(missing, fresh)]
         )
+        # Normalize fresh outputs through the same JSON round-trip the cache uses
+        # (e.g. a tuple becomes a list), so a fresh run scores exactly what a later
+        # cached replay would — keeping cached and uncached runs consistent.
+        fresh = [json.loads(json.dumps(out)) for out in fresh]
         for (i, _), out in zip(missing, fresh):
             cached[i] = out
     return [cached[i] for i in range(len(inputs))]
@@ -127,6 +132,8 @@ def compare_llms(
     sysmap = {name: as_system(v) for name, v in systems.items()}
     store = OutputCache(cache) if cache is not None else None
     seeds = list(seeds)
+    if not seeds:
+        raise ValueError("`seeds` is empty; provide at least one seed")
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, system in sysmap.items():

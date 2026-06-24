@@ -223,3 +223,25 @@ def test_holm_recorrected_over_surviving_pairs():
     # every comparison involving C is masked
     cpairs = comps[(comps.method_a == "C") | (comps.method_b == "C")]
     assert cpairs["p_value"].isna().all()
+
+
+def test_empty_seeds_rejected():
+    with pytest.raises(ValueError, match="seed"):
+        compare_llms({"a": lambda ins, s: list(ins)}, _data(2), metric=exact, seeds=[])
+
+
+def test_cache_normalizes_output_json_form(tmp_path):
+    """A fresh cached run scores the JSON-normalized output (tuple -> list), so it
+    matches what a later cache replay scores."""
+    data = _data(3)
+
+    def sys(inputs, seed):
+        return [("a", i) for i in inputs]  # tuples (JSON-encoded as lists)
+
+    def is_list(output, reference):
+        return float(isinstance(output, list))
+
+    r1 = compare_llms({"s": sys}, data, metric=is_list, seeds=range(1), cache=tmp_path)
+    r2 = compare_llms({"s": sys}, data, metric=is_list, seeds=range(1), cache=tmp_path)
+    assert float(r1.data["score"].mean()) == 1.0  # fresh run already normalized
+    assert r1.data["score"].values.tolist() == r2.data["score"].values.tolist()
