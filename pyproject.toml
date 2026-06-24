@@ -73,6 +73,7 @@ mushin-mcp = "mushin.mcp.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/martinez-hub/mushin"
+Documentation = "https://martinez-hub.github.io/mushin/"
 Repository = "https://github.com/martinez-hub/mushin"
 Issues = "https://github.com/martinez-hub/mushin/issues"
 Changelog = "https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md"
