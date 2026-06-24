@@ -1,3 +1,3 @@
 # study
 
-Study API reference.
+::: mushin.study.Study

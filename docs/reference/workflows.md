@@ -1,3 +1,7 @@
 # workflows
 
-Workflows API reference.
+::: mushin.workflows.BaseWorkflow
+
+::: mushin.workflows.MultiRunMetricsWorkflow
+
+::: mushin.workflows.RobustnessCurve

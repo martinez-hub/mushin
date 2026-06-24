@@ -1,3 +1,5 @@
 # benchmark
 
-Benchmark API reference.
+::: mushin.benchmark.compare
+
+::: mushin.benchmark.BenchmarkResult
