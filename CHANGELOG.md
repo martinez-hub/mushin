@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.3.0] - 2026-06-24
+
+### Added
+
+- Optional read-only MCP server (`mushin-mcp`, `pip install "mushin-py[mcp]"`, Python >= 3.10) that lets Claude Code and other MCP clients list experiments, summarize swept parameters and metrics, read configs, and inspect saved datasets — with no training or sweep launching. (#32)
+- Added a documentation website (MkDocs Material) with how-to guides and an auto-generated API reference, deployed to GitHub Pages.
+- The test suite now runs on Windows in CI (windows-latest) across Python 3.9-3.14, alongside Linux.
+
+### Changed
+
+- Raised minimum dependency floors to a tested minimum and added a `min-versions` CI job that runs the suite against the lowest declared versions, so the floors stay honest. The old floors did not actually work: several were incompatible with NumPy 2 (the non-Intel floor), so `torch` (>= 2.4), `pandas` (>= 2.2.2), `xarray` (>= 2024.6), and `netCDF4` (>= 1.7.0) were raised to their first NumPy-2-compatible releases. `pytorch-lightning` was raised to >= 2.4 (the pre-2.0 1.5 API does not run this package) and `hydra-zen` to >= 0.10 (for `multirun`). Intel-macOS keeps torch 2.2.x / NumPy 1.x.
+
+
 ## [0.2.1] - 2026-06-23
 
 ### Added
@@ -79,7 +92,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/martinez-hub/mushin/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/martinez-hub/mushin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/martinez-hub/mushin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/martinez-hub/mushin/releases/tag/v0.1.0
