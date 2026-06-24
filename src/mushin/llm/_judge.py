@@ -19,7 +19,14 @@ def parse_score(reply: str) -> float:
         r"([0-9]*\.?[0-9]+)", text
     )
     if m:
-        return float(m.group(1))
+        score = float(m.group(1))
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(
+                f"judge returned a score of {score}, outside [0, 1] "
+                f"(reply: {reply!r}). Use a 0-1 rubric, or pass a custom `parse` "
+                "that rescales (e.g. a 1-10 scale)."
+            )
+        return score
     raise ValueError(f"could not parse a score from judge reply: {reply!r}")
 
 

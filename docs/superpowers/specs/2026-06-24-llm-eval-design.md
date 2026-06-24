@@ -106,11 +106,20 @@ def compare_llms(
 
 `test`, `alpha`, and the returned `BenchmarkResult` (`.data`, `.comparisons`,
 `.summary()`) are identical to the torch path — same significance, same Holm
-correction, same underpowered-test warning, same single-seed/zero-variance
-handling. A `seeds` of length 1, or a deterministic system that yields identical
-scores across seeds, produces zero within-system variance and is reported as
-**not** significant (no false positives) — the existing `_stats` logic, reused
-unchanged.
+correction, same underpowered-test warning. A `seeds` of length 1 gives a NaN
+p-value (not significant), as in the torch path.
+
+**Deterministic / seed-ignoring systems need a guard.** Unlike trained torch
+models, an LLM system may *ignore* the seed (temperature 0, or an API call
+without a seed param), giving **identical scores across all seeds**. Two such
+systems with different means then have zero within-group variance, and a t-test
+treats the duplicated points as independent samples → a tiny p-value and **false
+significance**. So `compare_llms` detects any system whose scores are identical
+across all seeds (when `len(seeds) > 1`) and emits a clear `UserWarning` that
+the seeds are duplicated points and seed-based significance is not meaningful —
+prompting the user to wire the seed to sampling or treat the score as a point
+estimate. (The actual seed values are also preserved as the `seed` coordinate
+via `assign_coords`, rather than `0..n-1`.)
 
 ## System configuration (hydra-zen)
 

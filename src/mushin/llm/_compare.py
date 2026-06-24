@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -123,6 +124,21 @@ def compare_llms(
             per_seed.append(_score(metric, outputs, refs))
         results[name] = per_seed
 
+    if len(seeds) > 1:
+        for name, per_seed in results.items():
+            if all(len({row[k] for row in per_seed}) == 1 for k in per_seed[0]):
+                warnings.warn(
+                    f"system {name!r} produced identical scores across all "
+                    f"{len(seeds)} seeds — it likely ignores the seed or is "
+                    "deterministic, so seed-based significance involving it is "
+                    "not meaningful (the seeds are duplicated points, not "
+                    "independent samples). Wire the seed to sampling, or treat "
+                    "its score as a point estimate.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
     ds = to_dataset(results)
+    ds = ds.assign_coords(seed=list(seeds))  # use the actual seed values, not 0..n-1
     comparisons = compare_methods(ds, test=test, alpha=alpha)
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)

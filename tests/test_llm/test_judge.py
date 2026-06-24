@@ -41,3 +41,12 @@ def test_judge_metric_flows_through_compare_llms():
     metric = llm_judge(judge, "Is the answer yes?")
     result = compare_llms({"A": sysA}, data, metric=metric, seeds=range(2))
     assert "score" in result.data.data_vars
+
+
+def test_parse_rejects_out_of_range():
+    from mushin.llm._judge import parse_score
+
+    with pytest.raises(ValueError, match="outside"):
+        parse_score("score: 5")
+    with pytest.raises(ValueError, match="outside"):
+        parse_score("7")

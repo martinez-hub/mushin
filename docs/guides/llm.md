@@ -181,12 +181,14 @@ the metric and re-run without re-calling the systems.
 
 ## Pitfalls
 
-- **Deterministic systems → zero variance.** If a system returns identical
-  outputs regardless of seed, all seed scores are equal → zero variance →
-  the test reports not significant. This is correct (there is nothing to
-  distinguish), but it means you cannot detect a difference between two
-  equally-deterministic systems. Wire the seed to sampling temperature or
-  a provider seed parameter.
+- **Deterministic / seed-ignoring systems → false significance.** If a system
+  ignores the seed (temperature 0, or an API call with no seed param), its
+  scores are identical across all seeds — duplicated points, not independent
+  samples. Two such systems with different means would otherwise get a tiny
+  p-value (false significance), so `compare_llms` **warns** when it detects a
+  system with identical scores across all seeds. Wire the seed to sampling
+  (temperature, a provider seed) to get real variance, or treat that system's
+  score as a single point estimate rather than a distribution.
 - **Too few seeds.** With `seeds=range(3)` even a clear winner may not reach
   p < 0.05. mushin warns you when this happens. Use ≥ 5 seeds or switch to
   `test="welch"`.

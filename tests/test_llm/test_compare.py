@@ -124,3 +124,30 @@ def test_cache_rejects_non_serializable_output(tmp_path):
 
     with pytest.raises(TypeError, match="JSON-serializable"):
         compare_llms({"w": weird}, data, metric=exact, seeds=range(1), cache=tmp_path)
+
+
+def test_warns_on_deterministic_zero_variance_system():
+    """A system that ignores the seed yields identical scores across seeds; the
+    seeds are duplicated points, so mushin warns that significance is unreliable."""
+    data = _data(6)
+
+    def deterministic(inputs, seed):  # ignores seed entirely
+        return ["yes" if i % 2 == 0 else "no" for i in inputs]
+
+    def other(inputs, seed):
+        return ["yes"] * len(inputs)
+
+    with pytest.warns(UserWarning, match="identical scores across all"):
+        compare_llms(
+            {"a": deterministic, "b": other}, data, metric=exact, seeds=range(4)
+        )
+
+
+def test_actual_seed_values_preserved():
+    data = _data(4)
+
+    def sysA(inputs, seed):
+        return ["yes" if i % 2 == 0 else "no" for i in inputs]
+
+    result = compare_llms({"A": sysA}, data, metric=exact, seeds=[13, 21])
+    assert result.data.coords["seed"].values.tolist() == [13, 21]
