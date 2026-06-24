@@ -138,9 +138,13 @@ def test_warns_on_deterministic_zero_variance_system():
         return ["yes"] * len(inputs)
 
     with pytest.warns(UserWarning, match="identical scores across all"):
-        compare_llms(
+        result = compare_llms(
             {"a": deterministic, "b": other}, data, metric=exact, seeds=range(4)
         )
+    # zero-variance systems must NOT be reported significant (no duplicated-point
+    # false positive), and the p-value is NaN.
+    assert not result.comparisons["significant"].any()
+    assert result.comparisons["p_value"].isna().all()
 
 
 def test_actual_seed_values_preserved():

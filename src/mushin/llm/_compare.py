@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import warnings
@@ -38,7 +39,18 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def _score_one(name: str | None, m: Metric, outputs, refs) -> dict[str, float]:
+def _accepts_seed(m) -> bool:
+    """True if the callable metric takes a `seed` argument (e.g. an llm_judge
+    metric), so the per-trial seed can be threaded through to it."""
+    try:
+        return "seed" in inspect.signature(m).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _score_one(
+    name: str | None, m: Metric, outputs, refs, seed: int
+) -> dict[str, float]:
     """Score a batch with one metric -> {data_var_name: value} (dicts expand)."""
     if isinstance(m, TorchMetric):
         m.reset()
@@ -51,24 +63,26 @@ def _score_one(name: str | None, m: Metric, outputs, refs) -> dict[str, float]:
                 for k, v in value.items()
             }
         return {base: float(value)}
-    # plain callable: mean of per-example scores
+    # plain callable: mean of per-example scores. Pass the trial seed if the metric
+    # accepts one (e.g. llm_judge), so a stochastic judge is tied to the run.
     base = name if name is not None else "score"
+    pass_seed = _accepts_seed(m)
     scores = []
     for i, (o, r) in enumerate(zip(outputs, refs)):
         try:
-            scores.append(float(m(o, r)))
+            scores.append(float(m(o, r, seed=seed) if pass_seed else m(o, r)))
         except Exception as e:
             raise type(e)(f"metric {base!r} failed on example {i}: {e}") from e
     return {base: sum(scores) / len(scores)}
 
 
-def _score(metrics, outputs, refs) -> dict[str, float]:
+def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
     row: dict[str, float] = {}
     if isinstance(metrics, dict):
         for name, m in metrics.items():
-            row.update(_score_one(name, m, outputs, refs))
+            row.update(_score_one(name, m, outputs, refs, seed))
     else:
-        row.update(_score_one(None, metrics, outputs, refs))
+        row.update(_score_one(None, metrics, outputs, refs, seed))
     return row
 
 
@@ -121,12 +135,14 @@ def compare_llms(
                     f"system {name!r} seed {seed} returned {len(outputs)} outputs "
                     f"for {len(inputs)} inputs"
                 )
-            per_seed.append(_score(metric, outputs, refs))
+            per_seed.append(_score(metric, outputs, refs, seed))
         results[name] = per_seed
 
+    deterministic: set[str] = set()
     if len(seeds) > 1:
         for name, per_seed in results.items():
             if all(len({row[k] for row in per_seed}) == 1 for k in per_seed[0]):
+                deterministic.add(name)
                 warnings.warn(
                     f"system {name!r} produced identical scores across all "
                     f"{len(seeds)} seeds — it likely ignores the seed or is "
@@ -141,4 +157,18 @@ def compare_llms(
     ds = to_dataset(results)
     ds = ds.assign_coords(seed=list(seeds))  # use the actual seed values, not 0..n-1
     comparisons = compare_methods(ds, test=test, alpha=alpha)
+
+    if deterministic:
+        # A system with zero within-group variance has no valid sampling
+        # distribution, so any comparison involving it is not a real significance
+        # test — force it not-significant rather than report a duplicated-point
+        # p-value of ~0.
+        mask = comparisons["method_a"].isin(deterministic) | comparisons[
+            "method_b"
+        ].isin(deterministic)
+        comparisons.loc[mask, "significant"] = False
+        for col in ("p_value", "p_corrected"):
+            if col in comparisons.columns:
+                comparisons.loc[mask, col] = float("nan")
+
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)

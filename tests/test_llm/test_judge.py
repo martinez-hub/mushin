@@ -50,3 +50,22 @@ def test_parse_rejects_out_of_range():
         parse_score("score: 5")
     with pytest.raises(ValueError, match="outside"):
         parse_score("7")
+
+
+def test_judge_receives_trial_seed():
+    """compare_llms threads the per-trial seed through an llm_judge metric."""
+    from mushin.llm import compare_llms
+
+    seen = set()
+
+    def judge(prompt, seed):
+        seen.add(seed)
+        return "yes"
+
+    data = [{"input": i, "reference": "x"} for i in range(3)]
+
+    def sysA(inputs, seed):
+        return ["yes"] * len(inputs)
+
+    compare_llms({"A": sysA}, data, metric=llm_judge(judge, "ok?"), seeds=[5, 9])
+    assert seen == {5, 9}  # judge got the trial seeds, not the fixed default 0

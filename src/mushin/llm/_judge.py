@@ -50,7 +50,9 @@ def llm_judge(
     (a user-supplied, provider-agnostic `judge(prompt, seed) -> reply`) to score
     each output against `rubric`, parsing the reply to a float."""
 
-    def metric(output: Any, reference: Any) -> float:
+    def metric(output: Any, reference: Any, seed: int = seed) -> float:
+        # `seed` defaults to the llm_judge seed; compare_llms overrides it with the
+        # per-trial seed so a stochastic judge is tied to (and reproducible per) run.
         prompt = template(rubric, output, reference)
         return parse(judge(prompt, seed))
 
