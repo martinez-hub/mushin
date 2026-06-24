@@ -14,7 +14,11 @@ from torchmetrics import Metric as TorchMetric
 
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
-from mushin.benchmark._stats import compare_methods, holm_correction
+from mushin.benchmark._stats import (
+    available_tests,
+    compare_methods,
+    holm_correction,
+)
 
 from ._cache import OutputCache
 from ._system import as_system
@@ -125,6 +129,10 @@ def compare_llms(
 ) -> BenchmarkResult:
     if not systems:
         raise ValueError("`systems` is empty")
+    if test not in available_tests():
+        # Validate up front so a typo'd test name fails before any (possibly
+        # token-spending) system calls or cache writes.
+        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")

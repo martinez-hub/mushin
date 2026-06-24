@@ -245,3 +245,15 @@ def test_cache_normalizes_output_json_form(tmp_path):
     r2 = compare_llms({"s": sys}, data, metric=is_list, seeds=range(1), cache=tmp_path)
     assert float(r1.data["score"].mean()) == 1.0  # fresh run already normalized
     assert r1.data["score"].values.tolist() == r2.data["score"].values.tolist()
+
+
+def test_unknown_test_rejected_before_running_systems():
+    calls = {"n": 0}
+
+    def sys(inputs, seed):
+        calls["n"] += 1
+        return ["yes"] * len(inputs)
+
+    with pytest.raises(ValueError, match="unknown test"):
+        compare_llms({"s": sys}, _data(2), metric=exact, test="bogus")
+    assert calls["n"] == 0  # validated before any (token-spending) system call
