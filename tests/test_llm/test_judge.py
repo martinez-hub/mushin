@@ -69,3 +69,15 @@ def test_judge_receives_trial_seed():
 
     compare_llms({"A": sysA}, data, metric=llm_judge(judge, "ok?"), seeds=[5, 9])
     assert seen == {5, 9}  # judge got the trial seeds, not the fixed default 0
+
+
+def test_parse_yes_no_requires_word_boundary():
+    from mushin.llm._judge import parse_score
+
+    assert parse_score("yes") == 1.0
+    assert parse_score("no") == 0.0
+    assert parse_score("Yes, definitely") == 1.0
+    with pytest.raises(ValueError):  # "nope" must not match "no"
+        parse_score("nope")
+    with pytest.raises(ValueError):  # "yesterday" must not match "yes"
+        parse_score("yesterday's answer is better")

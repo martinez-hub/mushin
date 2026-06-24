@@ -11,10 +11,9 @@ def parse_score(reply: str) -> float:
     """Extract a [0,1] score from a judge reply: a leading 0/1 float, yes/no, or
     `score: X`. Raise ValueError if none is found."""
     text = reply.strip().lower()
-    if text.startswith("yes"):
-        return 1.0
-    if text.startswith("no"):
-        return 0.0
+    yn = re.match(r"(yes|no)\b", text)  # whole word, so "nope"/"yesterday" don't match
+    if yn:
+        return 1.0 if yn.group(1) == "yes" else 0.0
     m = re.search(r"score\s*[:=]\s*([0-9]*\.?[0-9]+)", text) or re.match(
         r"([0-9]*\.?[0-9]+)", text
     )

@@ -187,3 +187,39 @@ def test_zero_variance_masked_per_metric():
     acc_row = comps[comps["metric"] == "acc"].iloc[0]
     assert const_row["p_value"] != const_row["p_value"]  # NaN -> masked
     assert acc_row["p_value"] == acc_row["p_value"]  # real p-value -> not masked
+
+
+def test_holm_recorrected_over_surviving_pairs():
+    """When a zero-variance system is masked, the remaining valid pair is
+    Holm-corrected over the reduced family (not over-corrected)."""
+    import warnings
+
+    data = _data(8)
+
+    def A(inputs, seed):
+        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
+        out[seed % len(out)] = "no"
+        return out
+
+    def B(inputs, seed):
+        out = ["yes" if i % 3 == 0 else "no" for i in inputs]
+        out[(seed + 1) % len(out)] = "yes"
+        return out
+
+    def C(inputs, seed):  # constant -> zero variance in `score`
+        return ["yes"] * len(inputs)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = compare_llms({"A": A, "B": B, "C": C}, data, metric=exact, seeds=range(5))
+
+    comps = r.comparisons
+    ab = comps[
+        ((comps.method_a == "A") & (comps.method_b == "B"))
+        | ((comps.method_a == "B") & (comps.method_b == "A"))
+    ].iloc[0]
+    # A-B is the only surviving pair -> Holm family of 1 -> no inflation
+    assert ab["p_corrected"] == ab["p_value"]
+    # every comparison involving C is masked
+    cpairs = comps[(comps.method_a == "C") | (comps.method_b == "C")]
+    assert cpairs["p_value"].isna().all()

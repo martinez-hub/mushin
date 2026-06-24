@@ -13,7 +13,7 @@ from torchmetrics import Metric as TorchMetric
 
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
-from mushin.benchmark._stats import compare_methods
+from mushin.benchmark._stats import compare_methods, holm_correction
 
 from ._cache import OutputCache
 from ._system import as_system
@@ -176,9 +176,20 @@ def compare_llms(
             return row["method_a"] in zv or row["method_b"] in zv
 
         mask = comparisons.apply(_involves_zero_var, axis=1)
+        comparisons.loc[mask, ["p_value", "p_corrected"]] = float("nan")
         comparisons.loc[mask, "significant"] = False
-        for col in ("p_value", "p_corrected"):
-            if col in comparisons.columns:
-                comparisons.loc[mask, col] = float("nan")
+
+        # Re-apply the Holm correction per metric over only the *surviving*
+        # comparisons, so they are not over-corrected for the excluded
+        # zero-variance pairs (which compare_methods had counted in the family).
+        for _, group in comparisons.groupby("metric"):
+            valid = group.index[~mask.loc[group.index]]
+            if len(valid):
+                pvals = comparisons.loc[valid, "p_value"].tolist()
+                corrected = holm_correction(pvals) if len(pvals) > 1 else pvals
+                comparisons.loc[valid, "p_corrected"] = [float(c) for c in corrected]
+                comparisons.loc[valid, "significant"] = [
+                    False if c != c else bool(c < alpha) for c in corrected
+                ]
 
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
