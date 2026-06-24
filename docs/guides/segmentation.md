@@ -1,23 +1,30 @@
 # Segmentation
 
 `compare` and `Study` support semantic segmentation via `task="segmentation"`.
+Models receive `(N, C, H, W)` input tensors and must produce `(N, num_classes, H, W)`
+logit tensors; the default `predict_fn` takes the argmax over classes and softmax
+probabilities for you.
 
-## Basic segmentation comparison
+## Runnable example
+
+The example below compares two tiny segmentation models on synthetic pixel masks:
 
 ```python
-from mushin.benchmark import compare
-
-result = compare(
-    methods={"fcn": [m0, m1, m2], "deeplab": [d0, d1, d2]},
-    data=test_loader,
-    task="segmentation",
-    num_classes=21,
-)
-result.summary()
+--8<-- "examples/segmentation_demo.py:run"
 ```
 
-The default segmentation battery includes **mean IoU**, **Dice**, **pixel
-accuracy**, and **macro precision/recall** (computed via torchmetrics).
+The default segmentation battery includes:
+
+| Metric | Notes |
+|---|---|
+| `miou` | Mean Intersection over Union (macro-averaged) |
+| `dice` | Macro-averaged Dice coefficient (= macro F1) |
+| `pixel_acc` | Micro-averaged pixel accuracy |
+| `precision` | Macro-averaged per-class precision |
+| `recall` | Macro-averaged per-class recall |
+
+All are confusion-matrix based and computed via torchmetrics, so streaming
+evaluation uses O(C²) memory.
 
 ## Ignoring void / boundary labels
 
@@ -41,18 +48,19 @@ Some models (e.g. `torchvision.models.segmentation`) return a dict instead of
 a plain tensor. Use `predict_fn` to adapt the output:
 
 ```python
-def seg_predict(model, x):
-    logits = model(x)["out"]
-    probs = logits.softmax(dim=1)
-    return probs.argmax(dim=1), probs
+--8<-- "examples/segmentation_demo.py:dict_predict"
+```
 
+Pass it to `compare`:
+
+```python
 compare(
     {"fcn": [m0, m1]},
     data=test_loader,
     task="segmentation",
     num_classes=21,
     ignore_index=255,
-    predict_fn=seg_predict,
+    predict_fn=torchvision_seg_predict,
 )
 ```
 
@@ -61,12 +69,10 @@ where `predictions` is a `(N, H, W)` long tensor of class indices and
 `probabilities` is a `(N, C, H, W)` float tensor of per-class probabilities.
 
 !!! note "predict_fn must always return a 2-tuple"
-    `predict_fn` always returns `(predictions, probabilities)` — the evaluation
-    loop unpacks both. If you have no probabilities to provide, just return the
-    predictions twice (`return preds, preds`); the duplicate is never used,
-    because the segmentation battery has no probability-based metrics. (For
-    `task="segmentation"`, `prob_metrics` is already empty, so you don't need to
-    set it.)
+    `predict_fn` always returns `(predictions, probabilities)`. If you have no
+    probabilities to provide, return the predictions twice
+    (`return preds, preds`). For `task="segmentation"`, `prob_metrics` is
+    already empty, so the duplicate is never used.
 
 ## Using Study for segmentation
 
@@ -75,7 +81,7 @@ from mushin import Study
 
 study = Study(
     methods={"fcn": train_fcn, "deeplab": train_deeplab},
-    load_fn=SegModel.load_from_checkpoint,
+    load_fn=lambda p: torch.load(p, weights_only=False),
     seeds=[0, 1, 2],
     data=test_loader,
     task="segmentation",
@@ -85,7 +91,17 @@ study = Study(
 result = study.run()
 ```
 
+!!! tip "Pitfalls"
+    - **Input shape:** Models must accept `(N, C, H, W)` and return
+      `(N, num_classes, H, W)` logits. A 1×1 `Conv2d` is the minimal example.
+    - **ignore_index:** Not supported by AUROC/ECE, but the segmentation
+      battery has neither — `ignore_index` works correctly for all five
+      segmentation metrics.
+    - **Dict-output models:** Always wrap them with a `predict_fn`; passing
+      a dict to the default `predict_fn` will raise an error.
+
 ## See also
 
 - [Comparing methods guide](compare.md) — statistical tests and result reading
+- [Custom metrics & predict_fn](custom.md) — override the metric battery
 - [API Reference — benchmark](../reference/benchmark.md)
