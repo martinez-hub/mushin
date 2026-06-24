@@ -124,7 +124,7 @@ pip install "mushin-py[mcp]"          # requires Python >= 3.10
 claude mcp add mushin -- mushin-mcp --root ./outputs
 ```
 
-See [docs/mcp.md](docs/mcp.md) for the full tool list and example prompts.
+See the [MCP guide](https://martinez-hub.github.io/mushin/guides/mcp/) for the full tool list and example prompts.
 
 ## Install
 
