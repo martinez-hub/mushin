@@ -49,17 +49,24 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.highlight: { anchor_linenums: true }
   - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
   - toc: { permalink: true }
 
 nav:
   - Home: index.md
   - Install: install.md
   - Quickstart: quickstart.md
+  - Tutorial: tutorial.md
+  - Core concepts: concepts.md
   - Guides:
       - Workflows & sweeps: guides/workflows.md
       - Comparing methods: guides/compare.md
       - Studies: guides/study.md
       - Segmentation: guides/segmentation.md
+      - Custom metrics & predict_fn: guides/custom.md
+      - Understanding the statistics: guides/statistics.md
       - Analyzing from Claude Code: guides/mcp.md
   - API Reference:
       - benchmark: reference/benchmark.md
