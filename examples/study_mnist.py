@@ -62,6 +62,8 @@ def make_train_fn(name: str, model_factory, loader: DataLoader, ckpt_dir: Path):
         return _train_and_save(model, loader, path)
 
     return train_fn
+
+
 # --8<-- [end:train_fn]
 
 
@@ -91,6 +93,8 @@ def run(
         working_dir=str(working_dir),
     )
     return study.run()
+
+
 # --8<-- [end:run]
 
 

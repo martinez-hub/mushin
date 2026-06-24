@@ -64,6 +64,8 @@ def build_dataset(working_dir: Path | None = None):
         working_dir=str(working_dir) if working_dir is not None else None,
     )
     return wf.to_xarray()
+
+
 # --8<-- [end:workflow]
 
 

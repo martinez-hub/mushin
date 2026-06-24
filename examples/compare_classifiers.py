@@ -35,6 +35,8 @@ def mlp() -> nn.Module:
         nn.ReLU(),
         nn.Linear(64, 10),
     )
+
+
 # --8<-- [end:models]
 
 
@@ -67,6 +69,8 @@ def run(
         num_classes=10,
         test="welch",
     )
+
+
 # --8<-- [end:run]
 
 

@@ -45,9 +45,13 @@ def run(
     methods: dict[str, list[nn.Module]] = {"model_a": [], "model_b": []}
     for seed in seeds:
         torch.manual_seed(seed)
-        methods["model_a"].append(_train(_tiny_seg_model(in_channels, num_classes), loader))
+        methods["model_a"].append(
+            _train(_tiny_seg_model(in_channels, num_classes), loader)
+        )
         torch.manual_seed(seed + 100)
-        methods["model_b"].append(_train(_tiny_seg_model(in_channels, num_classes), loader))
+        methods["model_b"].append(
+            _train(_tiny_seg_model(in_channels, num_classes), loader)
+        )
 
     return compare(
         methods,
@@ -56,6 +60,8 @@ def run(
         num_classes=num_classes,
         test="welch",
     )
+
+
 # --8<-- [end:run]
 
 
@@ -65,6 +71,8 @@ def torchvision_seg_predict(model, x):
     logits = model(x)["out"]
     probs = logits.softmax(dim=1)
     return probs.argmax(dim=1), probs
+
+
 # --8<-- [end:dict_predict]
 
 

@@ -28,9 +28,9 @@ def test_main_writes_plot():
 
 def test_compare_classifiers_example_runs_on_synthetic():
     import torch
+    from compare_classifiers import run
     from torch.utils.data import DataLoader, TensorDataset
 
-    from compare_classifiers import run
     from mushin.benchmark import BenchmarkResult
 
     g = torch.Generator().manual_seed(0)
@@ -46,9 +46,9 @@ def test_compare_classifiers_example_runs_on_synthetic():
 
 def test_study_mnist_example_runs_on_synthetic(tmp_path):
     import torch
+    from study_mnist import run
     from torch.utils.data import DataLoader, TensorDataset
 
-    from study_mnist import run
     from mushin.benchmark import BenchmarkResult
 
     g = torch.Generator().manual_seed(1)
@@ -64,9 +64,9 @@ def test_study_mnist_example_runs_on_synthetic(tmp_path):
 
 def test_segmentation_demo_example_runs_on_synthetic():
     import torch
+    from segmentation_demo import run
     from torch.utils.data import DataLoader, TensorDataset
 
-    from segmentation_demo import run
     from mushin.benchmark import BenchmarkResult
 
     g = torch.Generator().manual_seed(2)
