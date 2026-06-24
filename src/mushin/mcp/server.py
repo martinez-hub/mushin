@@ -410,12 +410,19 @@ class RootError(ValueError):
 
 
 def _resolve(path: str | Path, root: str | Path | None) -> Path:
-    """Resolve ``path`` to an absolute Path, enforcing ``root`` containment."""
-    p = Path(path).expanduser().resolve()
-    if root is not None:
-        root = Path(root).expanduser().resolve()
-        if p != root and root not in p.parents:
-            raise RootError(f"{p} is outside the configured root {root}")
+    """Resolve ``path`` to an absolute Path, enforcing ``root`` containment.
+
+    With a configured ``root``, a relative ``path`` is interpreted relative to
+    that root (not the server's CWD), so a rooted server doesn't depend on the
+    directory it was launched from.
+    """
+    rootp = Path(root).expanduser().resolve() if root is not None else None
+    raw = Path(path).expanduser()
+    if rootp is not None and not raw.is_absolute():
+        raw = rootp / raw
+    p = raw.resolve()
+    if rootp is not None and p != rootp and rootp not in p.parents:
+        raise RootError(f"{p} is outside the configured root {rootp}")
     return p
 
 

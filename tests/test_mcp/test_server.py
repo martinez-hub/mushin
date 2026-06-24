@@ -53,6 +53,16 @@ def test_resolve_outside_root_raises(tmp_path):
         _resolve(outside, root)
 
 
+def test_resolve_relative_path_under_root(tmp_path, monkeypatch):
+    """A relative path with a configured root resolves under root, not the CWD."""
+    root = tmp_path / "outputs"
+    (root / "exp").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # server launched from a different directory
+    assert _resolve("exp", root) == (root / "exp").resolve()
+
+
 def _make_jobs(base: Path, n: int) -> Path:
     """Build ``n`` Hydra job dirs named 0..n-1, each with config lr=float(i)."""
     for i in range(n):
@@ -490,3 +500,17 @@ def test_legacy_nonzip_metrics_not_misread(tmp_path):
     else:
         # older torch: data-only loader fails closed — skipped, not header garbage
         assert "legacy_metrics" not in out["per_run"][0]
+
+
+def test_tool_relative_path_resolved_under_root(tmp_path, monkeypatch):
+    """A rooted server accepts client paths relative to root, not its launch dir."""
+    from mushin.mcp.server import _get_metrics
+
+    root = tmp_path / "outputs"
+    _make_experiment(root / "exp")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    out = _get_metrics("exp", root=root)  # relative to root, despite the CWD
+    assert out["num_runs"] == 2
