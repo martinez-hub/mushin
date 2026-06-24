@@ -6,7 +6,7 @@ import dataclasses
 from typing import Any
 
 from hydra_zen import instantiate
-from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig
 
 
 def _is_config(value: Any) -> bool:

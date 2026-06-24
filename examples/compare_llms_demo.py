@@ -46,7 +46,9 @@ def run(data: list[dict]) -> BenchmarkResult:
 
 
 def _build_data(n: int = 20) -> list[dict]:
-    return [{"input": i, "reference": "even" if i % 2 == 0 else "odd"} for i in range(n)]
+    return [
+        {"input": i, "reference": "even" if i % 2 == 0 else "odd"} for i in range(n)
+    ]
 
 
 if __name__ == "__main__":

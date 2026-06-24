@@ -77,7 +77,9 @@ def _run(system, inputs, seed, cache, name) -> list[Any]:
                 f"system {name!r} seed {seed} returned {len(fresh)} outputs for "
                 f"{len(missing)} inputs"
             )
-        cache.put_many(name, seed, [(inp, out) for (_, inp), out in zip(missing, fresh)])
+        cache.put_many(
+            name, seed, [(inp, out) for (_, inp), out in zip(missing, fresh)]
+        )
         for (i, _), out in zip(missing, fresh):
             cached[i] = out
     return [cached[i] for i in range(len(inputs))]

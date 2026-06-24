@@ -68,7 +68,9 @@ def test_compare_llms_demo_example_runs_on_synthetic():
 
     from mushin.benchmark import BenchmarkResult
 
-    data = [{"input": i, "reference": "even" if i % 2 == 0 else "odd"} for i in range(8)]
+    data = [
+        {"input": i, "reference": "even" if i % 2 == 0 else "odd"} for i in range(8)
+    ]
     result = run(data)
     assert isinstance(result, BenchmarkResult)
     assert "score" in result.data.data_vars
