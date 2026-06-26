@@ -230,6 +230,30 @@ def test_empty_seeds_rejected():
         compare_llms({"a": lambda ins, s: list(ins)}, _data(2), metric=exact, seeds=[])
 
 
+def test_empty_seeds_rejected_before_instantiating_systems():
+    """The empty-seeds guard fires before `as_system` instantiates configs, so a
+    hydra-zen system (which may load a large model) is not built just to fail."""
+    # A config whose _target_ cannot be imported: if instantiation ran first we'd
+    # get an import error, not the seeds ValueError.
+    bad_config = {"_target_": "this.module.does.not.exist"}
+    with pytest.raises(ValueError, match="seed"):
+        compare_llms({"a": bad_config}, _data(2), metric=exact, seeds=[])
+
+
+def test_duplicate_seeds_rejected_before_running_systems():
+    """Duplicate seeds are the same trial; counting them as independent samples
+    would inflate significance, so they are rejected before any system call."""
+    calls = {"n": 0}
+
+    def sys(inputs, seed):
+        calls["n"] += 1
+        return ["yes"] * len(inputs)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        compare_llms({"s": sys}, _data(2), metric=exact, seeds=[0, 0, 1])
+    assert calls["n"] == 0  # rejected before any (token-spending) system call
+
+
 def test_cache_normalizes_output_json_form(tmp_path):
     """A fresh cached run scores the JSON-normalized output (tuple -> list), so it
     matches what a later cache replay scores."""

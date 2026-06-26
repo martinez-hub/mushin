@@ -164,12 +164,21 @@ def compare_llms(
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
-
-    sysmap = {name: as_system(v) for name, v in systems.items()}
-    store = OutputCache(cache) if cache is not None else None
+    # Validate seeds up front — before instantiating systems, which for hydra-zen
+    # configs can load large models or trigger provider setup. Duplicate seeds are
+    # the same (system, seed) trial: counting them as independent samples would
+    # understate variance and inflate significance, so reject them.
     seeds = list(seeds)
     if not seeds:
         raise ValueError("`seeds` is empty; provide at least one seed")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(
+            f"`seeds` contains duplicates ({seeds}); each seed is one trial and "
+            "must be unique — repeats are not independent samples."
+        )
+
+    sysmap = {name: as_system(v) for name, v in systems.items()}
+    store = OutputCache(cache) if cache is not None else None
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, system in sysmap.items():
