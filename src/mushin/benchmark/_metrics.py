@@ -84,38 +84,46 @@ def detection_battery(
             IntersectionOverUnion,
             MeanAveragePrecision,
         )
-    except ImportError as e:  # pragma: no cover - exercised via monkeypatch
+
+        class _DetectionMAP(MeanAveragePrecision):
+            """``MeanAveragePrecision`` minus its non-scalar bookkeeping keys
+            (``classes``/``*_per_class``), which are not single comparable scores.
+
+            Also normalizes the COCO ``-1.0`` 'not applicable' sentinel (a size
+            bucket with no matching ground truth) to ``NaN`` so it is excluded from
+            significance. Scoped to mAP/mAR here on purpose: the IoU-variant metrics
+            legitimately range into ``-1`` and must not be sentinel-converted."""
+
+            def compute(self):
+                out = {}
+                for k, v in super().compute().items():
+                    if k in _MAP_DROP:
+                        continue
+                    if (
+                        isinstance(v, torch.Tensor)
+                        and v.numel() == 1
+                        and v.item() == -1.0
+                    ):
+                        v = torch.tensor(float("nan"))
+                    out[k] = v
+                return out
+
+        # Build the metrics inside the try: torchvision may be importable while
+        # pycocotools is not, in which case MeanAveragePrecision raises a
+        # ModuleNotFoundError at *construction* — caught here and reported as the
+        # same clear missing-extra error rather than leaking from torchmetrics.
+        return {
+            "map": _DetectionMAP(box_format="xyxy"),
+            "iou": IntersectionOverUnion(),
+            "giou": GeneralizedIntersectionOverUnion(),
+            "ciou": CompleteIntersectionOverUnion(),
+            "diou": DistanceIntersectionOverUnion(),
+        }
+    except ImportError as e:
         raise ImportError(
             "the detection battery requires the optional detection extra; install "
             "it with `pip install mushin-py[detection]` (torchvision + pycocotools)."
         ) from e
-
-    class _DetectionMAP(MeanAveragePrecision):
-        """``MeanAveragePrecision`` minus its non-scalar bookkeeping keys
-        (``classes``/``*_per_class``), which are not single comparable scores.
-
-        Also normalizes the COCO ``-1.0`` 'not applicable' sentinel (a size bucket
-        with no matching ground truth) to ``NaN`` so it is excluded from
-        significance. Scoped to mAP/mAR here on purpose: the IoU-variant metrics
-        legitimately range into ``-1`` and must not be sentinel-converted."""
-
-        def compute(self):
-            out = {}
-            for k, v in super().compute().items():
-                if k in _MAP_DROP:
-                    continue
-                if isinstance(v, torch.Tensor) and v.numel() == 1 and v.item() == -1.0:
-                    v = torch.tensor(float("nan"))
-                out[k] = v
-            return out
-
-    return {
-        "map": _DetectionMAP(box_format="xyxy"),
-        "iou": IntersectionOverUnion(),
-        "giou": GeneralizedIntersectionOverUnion(),
-        "ciou": CompleteIntersectionOverUnion(),
-        "diou": DistanceIntersectionOverUnion(),
-    }
 
 
 def compute_battery(

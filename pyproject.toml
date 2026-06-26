@@ -75,7 +75,10 @@ mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
 detection = [
     "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "pycocotools >= 2.0.7",
+    # pycocotools is a C extension that is painful to build on Windows; gate it so
+    # `pip install mushin-py[detection]` succeeds there (the battery raises a clear
+    # error if it is then used without pycocotools).
+    "pycocotools >= 2.0.7 ; sys_platform != 'win32'",
 ]
 
 [project.scripts]
@@ -107,12 +110,11 @@ dev = [
     "matplotlib >= 3.3",
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2 ; python_version >= '3.10'",
-    # Detection deps so CI exercises the battery; floors match the `detection`
-    # extra. pycocotools is painful to build on Windows, so it is gated there.
-    "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "pycocotools >= 2.0.7 ; sys_platform != 'win32'",
 ]
+# Detection deps live in the `detection` extra, not here: pycocotools is a C
+# extension whose lowest-floor wheel is ABI-incompatible with the min-versions
+# job's numpy floor. The `test` CI job installs `--extra detection` to exercise
+# the battery; `min-versions` (core-floor validation) deliberately does not.
 
 [tool.setuptools.packages.find]
 where = ["src"]
