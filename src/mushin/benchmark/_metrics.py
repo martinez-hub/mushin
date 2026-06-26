@@ -66,6 +66,46 @@ def segmentation_battery(
     }
 
 
+_MAP_DROP = frozenset({"classes", "map_per_class", "mar_100_per_class"})
+
+
+def detection_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """The bounding-box detection battery: mean-average-precision plus the IoU
+    variants, every scalar output surfaced as its own metric. ``num_classes`` and
+    ``ignore_index`` are accepted for the uniform task interface but unused (mAP
+    infers classes from the labels). Requires the optional ``detection`` extra."""
+    try:
+        from torchmetrics.detection import (
+            CompleteIntersectionOverUnion,
+            DistanceIntersectionOverUnion,
+            GeneralizedIntersectionOverUnion,
+            IntersectionOverUnion,
+            MeanAveragePrecision,
+        )
+    except ImportError as e:  # pragma: no cover - exercised via monkeypatch
+        raise ImportError(
+            "the detection battery requires the optional detection extra; install "
+            "it with `pip install mushin-py[detection]` (torchvision + pycocotools)."
+        ) from e
+
+    class _DetectionMAP(MeanAveragePrecision):
+        """``MeanAveragePrecision`` minus its non-scalar bookkeeping keys
+        (``classes``/``*_per_class``), which are not single comparable scores."""
+
+        def compute(self):
+            return {k: v for k, v in super().compute().items() if k not in _MAP_DROP}
+
+    return {
+        "map": _DetectionMAP(box_format="xyxy"),
+        "iou": IntersectionOverUnion(),
+        "giou": GeneralizedIntersectionOverUnion(),
+        "ciou": CompleteIntersectionOverUnion(),
+        "diou": DistanceIntersectionOverUnion(),
+    }
+
+
 def compute_battery(
     battery: dict[str, Metric],
     preds: torch.Tensor,
