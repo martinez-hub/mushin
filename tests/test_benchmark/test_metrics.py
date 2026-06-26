@@ -38,3 +38,31 @@ def test_classification_battery_warns_on_ignore_index():
 
     with pytest.warns(UserWarning, match="ignore_index"):
         classification_battery(3, ignore_index=0)
+
+
+def test_compute_battery_expands_dict_metric():
+    import torch
+    from torchmetrics import Metric
+    from mushin.benchmark._metrics import compute_battery
+
+    class DictMetric(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = preds.float().mean()
+
+        def compute(self):
+            return {"x": self.v, "y": torch.tensor(-1.0)}  # -1 -> NaN
+
+    import math
+
+    out = compute_battery(
+        {"m": DictMetric()},
+        preds=torch.tensor([1.0]),
+        targets=torch.tensor([1.0]),
+        prob_metrics=frozenset(),
+    )
+    assert out["x"] == 1.0
+    assert math.isnan(out["y"])
