@@ -71,10 +71,13 @@ def evaluate(
 
     with torch.no_grad():
         for x, y in data:
-            x = x.to(device)
-            y = y.to(device)
+            x = _to_device(x, device)
+            y = _to_device(y, device)
             preds, probs = predict_fn(model, x)
             for name, metric in battery.items():
                 metric.update(probs if name in prob_metrics else preds, y)
 
-    return {name: float(metric.compute()) for name, metric in battery.items()}
+    out: dict[str, float] = {}
+    for name, metric in battery.items():
+        out.update(expand_metric_value(name, metric.compute()))
+    return out

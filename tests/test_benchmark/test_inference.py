@@ -204,3 +204,43 @@ def test_expand_metric_value_rejects_non_scalar():
 
     with pytest.raises(TypeError, match="non-scalar"):
         expand_metric_value("classes", {"classes": torch.tensor([0, 1, 2])})
+
+
+def test_evaluate_expands_dict_metric_and_keeps_scalar():
+    import torch
+    from torchmetrics import Metric
+    from mushin.benchmark._inference import evaluate
+
+    class ScalarMetric(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = preds.float().mean()
+
+        def compute(self):
+            return self.v
+
+    class DictMetric(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = preds.float().mean()
+
+        def compute(self):
+            return {"a": self.v, "b": self.v + 1}
+
+    model = torch.nn.Identity()
+    data = [(torch.tensor([1.0, 1.0]), torch.tensor([0, 0]))]  # one re-iterable batch
+
+    out = evaluate(
+        model,
+        data,
+        {"s": ScalarMetric(), "d": DictMetric()},
+        predict_fn=lambda m, x: (m(x), None),
+        prob_metrics=frozenset(),
+    )
+    assert out == {"s": 1.0, "a": 1.0, "b": 2.0}
