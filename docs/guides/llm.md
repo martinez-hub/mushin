@@ -201,6 +201,15 @@ the metric and re-run without re-calling the systems.
   for a more robust estimate.
 - **Wrong output length.** A system must return exactly `len(inputs)` outputs
   in the same order; mushin raises `ValueError` immediately if it doesn't.
+- **Seeds must be unique.** Each seed is one trial; a repeated seed is the same
+  `(system, seed)` trial, not an independent sample, so duplicates would
+  understate variance and inflate significance. `compare_llms` rejects a
+  non-unique `seeds` with a `ValueError` (before any system runs).
+- **Metric output names must not collide.** In a battery, a dict-returning
+  metric expands to `<name>_<subkey>`. If that collides with another entry — e.g.
+  `{"squad": SQuAD(), "squad_f1": custom}` produces two `squad_f1` — `compare_llms`
+  raises a `ValueError` rather than silently overwriting one score. Rename the
+  battery key to disambiguate.
 - **Cache key collisions.** The cache key is `sha256(json(input))`. If your
   inputs are objects that don't serialize cleanly to JSON, use simple strings
   or dicts as inputs.
