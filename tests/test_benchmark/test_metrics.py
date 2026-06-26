@@ -38,3 +38,81 @@ def test_classification_battery_warns_on_ignore_index():
 
     with pytest.warns(UserWarning, match="ignore_index"):
         classification_battery(3, ignore_index=0)
+
+
+def test_compute_battery_expands_dict_metric():
+    import torch
+    from torchmetrics import Metric
+
+    from mushin.benchmark._metrics import compute_battery
+
+    class DictMetric(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = preds.float().mean()
+
+        def compute(self):
+            return {"x": self.v, "y": self.v + 1}
+
+    out = compute_battery(
+        {"m": DictMetric()},
+        preds=torch.tensor([1.0]),
+        targets=torch.tensor([1.0]),
+        prob_metrics=frozenset(),
+    )
+    # the dict expands to one data var per key; no metric-agnostic sentinel here
+    assert out == {"x": 1.0, "y": 2.0}
+
+
+def test_detection_battery_contents_and_map_drops_metadata():
+    pytest = __import__("pytest")
+    # The detection metric classes are gated behind torchvision + pycocotools;
+    # the `torchmetrics.detection` module itself imports without them, so skip on
+    # the real deps (otherwise this would error instead of skip when absent).
+    pytest.importorskip("torchvision")
+    pytest.importorskip("pycocotools")
+    import torch
+
+    from mushin.benchmark._metrics import detection_battery
+
+    battery = detection_battery()
+    assert set(battery) == {"map", "iou", "giou", "ciou", "diou"}
+
+    preds = [
+        {
+            "boxes": torch.tensor([[0.0, 0.0, 10.0, 10.0]]),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
+    tgts = [
+        {"boxes": torch.tensor([[0.0, 0.0, 10.0, 10.0]]), "labels": torch.tensor([0])}
+    ]
+    battery["map"].update(preds, tgts)
+    keys = set(battery["map"].compute())
+    # the three non-scalar bookkeeping keys are dropped
+    assert {"classes", "map_per_class", "mar_100_per_class"}.isdisjoint(keys)
+    # the 12 scalar AP/AR values remain
+    assert {"map", "map_50", "map_75", "map_small", "mar_100"} <= keys
+
+
+def test_detection_battery_clear_error_without_extra(monkeypatch):
+    import builtins
+
+    import pytest
+
+    from mushin.benchmark import _metrics
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torchmetrics.detection":
+            raise ImportError("no detection extra")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ImportError, match="mushin-py\\[detection\\]"):
+        _metrics.detection_battery()

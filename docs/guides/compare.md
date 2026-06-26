@@ -101,6 +101,35 @@ across all method pairs.
     - **Mixing tasks:** Pass `task="segmentation"` for pixel-label outputs;
       the default classification battery will give wrong results otherwise.
 
+## Object detection
+
+`task="detection"` compares trained detectors over the full `torchmetrics.detection`
+bounding-box family. Each model's dataloader yields `(images, targets)` where
+`images` is a `list[Tensor]` and each target is a `dict` with `boxes` (`[N,4]`,
+xyxy) and `labels` (`[N]`); an eval-mode torchvision detector returns predictions
+as `list[dict]` with `boxes`/`scores`/`labels` (override `predict_fn` for other
+detectors).
+
+```python
+from mushin.benchmark import compare
+
+result = compare(
+    methods={"frcnn": frcnn_seeds, "retina": retina_seeds},  # one model per seed
+    data=coco_val_loader,
+    task="detection",
+    test="welch",
+)
+result.summary()   # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + significance
+```
+
+The result xarray carries every scalar output: the 12 mAP/mAR values
+(`map`, `map_50`, `map_75`, `map_small|medium|large`, `mar_1|10|100`,
+`mar_small|medium|large`) plus `iou`, `giou`, `ciou`, `diou`. A size bucket with no
+matching ground truth reports `NaN` (COCO's `-1` "not applicable" sentinel),
+excluded from significance. `num_classes` is not required for detection.
+
+Install the extra: `pip install mushin-py[detection]` (torchvision + pycocotools).
+
 ## See also
 
 - [Segmentation guide](segmentation.md) — `task="segmentation"` and `ignore_index`

@@ -67,6 +67,19 @@ viz = ["matplotlib >= 3.3"]
 netcdf = ["netCDF4 >= 1.7.0"]
 # The MCP SDK requires Python >= 3.10; mushin still supports 3.9, so gate it.
 mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
+# Detection metrics (MeanAveragePrecision + IoU variants) need torchvision and
+# pycocotools; gated so the core install stays lean. torchvision floors pair with
+# the platform-split torch floors above (0.17 ↔ torch 2.2 on Intel-mac, 0.19 ↔
+# torch 2.4 elsewhere). pycocotools floor is 2.0.7 — the first release with wheels
+# (2.0.0 has no Cython build-dep and fails to build under the min-versions job).
+detection = [
+    "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # pycocotools is a C extension that is painful to build on Windows; gate it so
+    # `pip install mushin-py[detection]` succeeds there (the battery raises a clear
+    # error if it is then used without pycocotools).
+    "pycocotools >= 2.0.7 ; sys_platform != 'win32'",
+]
 
 [project.scripts]
 mushin-mcp = "mushin.mcp.__main__:main"
@@ -98,6 +111,10 @@ dev = [
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2 ; python_version >= '3.10'",
 ]
+# Detection deps live in the `detection` extra, not here: pycocotools is a C
+# extension whose lowest-floor wheel is ABI-incompatible with the min-versions
+# job's numpy floor. The `test` CI job installs `--extra detection` to exercise
+# the battery; `min-versions` (core-floor validation) deliberately does not.
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -105,6 +122,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["examples"]
+addopts = "-m 'not real_data'"
+markers = [
+    "real_data: end-to-end checks that download a real dataset/model (deselected by default; run with -m real_data)",
+]
 filterwarnings = [
     # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read
     # results back; this deprecation is about that behavior changing upstream.

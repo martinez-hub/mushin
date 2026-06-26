@@ -160,3 +160,133 @@ def test_evaluate_explicit_device_and_resets_between_calls():
     assert reused.keys() == fresh.keys()
     for k in reused:
         assert abs(reused[k] - fresh[k]) < 1e-6  # no carryover from the first call
+
+
+def test_to_device_moves_tensors_in_nested_structures():
+    import torch
+
+    from mushin.benchmark._inference import _to_device
+
+    dev = torch.device("cpu")
+    obj = [
+        {"boxes": torch.zeros(2, 4), "labels": torch.tensor([1, 2])},
+        torch.ones(3),
+    ]
+    moved = _to_device(obj, dev)
+    assert isinstance(moved, list)
+    assert moved[0]["boxes"].device == dev and moved[0]["labels"].device == dev
+    assert moved[1].device == dev
+    # non-tensors pass through unchanged
+    assert _to_device("a string", dev) == "a string"
+    assert _to_device(7, dev) == 7
+
+
+def test_expand_metric_value_scalar_dict_and_passthrough():
+    import torch
+
+    from mushin.benchmark._inference import expand_metric_value
+
+    # scalar -> kept under the battery name
+    assert expand_metric_value("acc", torch.tensor(0.5)) == {"acc": 0.5}
+    # dict -> one entry per key (the metric's own key names)
+    out = expand_metric_value(
+        "map", {"map": torch.tensor(0.25), "map_50": torch.tensor(0.75)}
+    )
+    assert out == {"map": 0.25, "map_50": 0.75}
+    # `expand_metric_value` does NOT special-case -1.0 — the COCO sentinel is
+    # normalized to NaN upstream (inside the detection mAP battery), so a -1 from
+    # any other metric (e.g. an IoU variant) passes through verbatim here.
+    assert expand_metric_value("giou", {"giou": torch.tensor(-1.0)}) == {"giou": -1.0}
+
+
+def test_evaluate_rejects_colliding_metric_names():
+    """Two battery metrics producing the same data-variable name must raise, not
+    silently overwrite (a scalar `score` vs another metric returning {"score": ...})."""
+    import pytest
+    import torch
+    from torchmetrics import Metric
+
+    from mushin.benchmark._inference import evaluate
+
+    class Scalar(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = torch.tensor(1.0)
+
+        def compute(self):
+            return self.v
+
+    class DictScore(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = torch.tensor(2.0)
+
+        def compute(self):
+            return {"score": self.v}
+
+    data = [(torch.tensor([1.0]), torch.tensor([0]))]
+    with pytest.raises(ValueError, match="colliding"):
+        evaluate(
+            torch.nn.Identity(),
+            data,
+            {"score": Scalar(), "other": DictScore()},
+            predict_fn=lambda m, x: (m(x), None),
+            prob_metrics=frozenset(),
+        )
+
+
+def test_expand_metric_value_rejects_non_scalar():
+    import pytest
+    import torch
+
+    from mushin.benchmark._inference import expand_metric_value
+
+    with pytest.raises(TypeError, match="non-scalar"):
+        expand_metric_value("classes", {"classes": torch.tensor([0, 1, 2])})
+
+
+def test_evaluate_expands_dict_metric_and_keeps_scalar():
+    import torch
+    from torchmetrics import Metric
+
+    from mushin.benchmark._inference import evaluate
+
+    class ScalarMetric(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = preds.float().mean()
+
+        def compute(self):
+            return self.v
+
+    class DictMetric(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = preds.float().mean()
+
+        def compute(self):
+            return {"a": self.v, "b": self.v + 1}
+
+    model = torch.nn.Identity()
+    data = [(torch.tensor([1.0, 1.0]), torch.tensor([0, 0]))]  # one re-iterable batch
+
+    out = evaluate(
+        model,
+        data,
+        {"s": ScalarMetric(), "d": DictMetric()},
+        predict_fn=lambda m, x: (m(x), None),
+        prob_metrics=frozenset(),
+    )
+    assert out == {"s": 1.0, "a": 1.0, "b": 2.0}

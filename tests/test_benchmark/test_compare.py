@@ -110,7 +110,47 @@ def test_compare_rejects_unknown_task():
     from mushin.benchmark import compare
 
     with pytest.raises(NotImplementedError, match="not supported"):
-        compare(methods={"a": []}, data=[], task="detection", num_classes=2)
+        compare(methods={"a": []}, data=[], task="bogus_task", num_classes=2)
+
+
+def test_compare_detection_does_not_demand_num_classes(monkeypatch):
+    import torch
+    from torchmetrics import Metric
+
+    from mushin.benchmark import _tasks, compare
+
+    class Const(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = torch.tensor(0.5)
+
+        def compute(self):
+            return self.v
+
+    def fake_battery(num_classes=None, ignore_index=None):
+        return {"score": Const()}
+
+    monkeypatch.setitem(
+        _tasks._TASKS,
+        "detection",
+        _tasks.TaskSpec(
+            fake_battery,
+            lambda m, x: (m(x), None),
+            frozenset(),
+            requires_num_classes=False,
+        ),
+    )
+
+    class M(torch.nn.Module):
+        def forward(self, x):
+            return x
+
+    data = [(torch.tensor([1.0]), torch.tensor([1.0]))]
+    result = compare({"a": [M(), M()], "b": [M(), M()]}, data, task="detection")
+    assert "score" in result.data.data_vars
 
 
 def test_compare_rejects_one_shot_iterator():
