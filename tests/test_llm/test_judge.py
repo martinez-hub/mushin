@@ -71,6 +71,27 @@ def test_judge_receives_trial_seed():
     assert seen == {5, 9}  # judge got the trial seeds, not the fixed default 0
 
 
+def test_parse_explicit_score_beats_leading_verdict():
+    """A hedged reply that states an explicit score uses the number, not the
+    leading yes/no verdict."""
+    from mushin.llm._judge import parse_score
+
+    assert parse_score("no, but score: 0.9") == 0.9
+    assert parse_score("Yes, although score: 0") == 0.0
+    assert parse_score("yes") == 1.0  # a bare verdict still works
+
+
+def test_parse_fraction_scale():
+    """An N-scale fraction is divided out, not read as its numerator."""
+    from mushin.llm._judge import parse_score
+
+    assert parse_score("score: 1/10") == 0.1
+    assert parse_score("8/10") == 0.8
+    assert parse_score("score: 0/10") == 0.0
+    with pytest.raises(ValueError, match="outside"):
+        parse_score("score: 50/10")  # 5.0 still rejected as out of range
+
+
 def test_parse_yes_no_requires_word_boundary():
     from mushin.llm._judge import parse_score
 

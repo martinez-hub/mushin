@@ -10,6 +10,7 @@ import warnings
 from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
 from torchmetrics import Metric as TorchMetric
 
 from mushin.benchmark._aggregate import to_dataset
@@ -81,6 +82,19 @@ def _score_one(
     return {base: sum(scores) / len(scores)}
 
 
+def _is_constant(values) -> bool:
+    """True if seed-to-seed values have no meaningful within-group variance.
+
+    Uses ``np.allclose`` rather than exact equality so sub-epsilon float jitter —
+    e.g. from the non-associative ``sum(scores) / len(scores)`` reduction — counts
+    as constant and is masked, instead of leaking into a catastrophic-cancellation
+    "significant" p-value when ``compare_methods`` runs the parametric test on it.
+    This mirrors the ``np.allclose`` short-circuit ``compare_methods`` already uses
+    between systems."""
+    arr = np.asarray(values, dtype=float)
+    return bool(np.allclose(arr, arr[0]))
+
+
 def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
     row: dict[str, float] = {}
     if isinstance(metrics, dict):
@@ -91,9 +105,22 @@ def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
     return row
 
 
+def _normalize_output(out: Any) -> Any:
+    """Round-trip an output through JSON (tuple -> list, int keys -> str keys) so a
+    score does not depend on whether `cache=` was supplied. Cached replays are
+    always JSON (the cache stores JSON), so we apply the same normalization to
+    fresh outputs on *both* the cached and uncached paths. Best-effort: an output
+    that is not JSON-serializable (and so could not be cached anyway) passes
+    through unchanged, keeping the no-cache path usable for non-JSON outputs."""
+    try:
+        return json.loads(json.dumps(out))
+    except (TypeError, ValueError):
+        return out
+
+
 def _run(system, inputs, seed, cache, name) -> list[Any]:
     if cache is None:
-        return list(system(inputs, seed))
+        return [_normalize_output(out) for out in system(inputs, seed)]
     cached, missing = cache.partition(name, seed, inputs)
     if missing:
         # Call the system on ONLY the missing inputs. This assumes output[i]
@@ -108,12 +135,11 @@ def _run(system, inputs, seed, cache, name) -> list[Any]:
         cache.put_many(
             name, seed, [(inp, out) for (_, inp), out in zip(missing, fresh)]
         )
-        # Normalize fresh outputs through the same JSON round-trip the cache uses
-        # (e.g. a tuple becomes a list), so a fresh run scores exactly what a later
-        # cached replay would — keeping cached and uncached runs consistent.
-        fresh = [json.loads(json.dumps(out)) for out in fresh]
+        # Normalize fresh outputs the same way (see _normalize_output) so a fresh
+        # run scores exactly what a later cached replay — and a no-cache run —
+        # would score.
         for (i, _), out in zip(missing, fresh):
-            cached[i] = out
+            cached[i] = _normalize_output(out)
     return [cached[i] for i in range(len(inputs))]
 
 
@@ -165,7 +191,7 @@ def compare_llms(
     if len(seeds) > 1:
         for name, per_seed in results.items():
             keys = list(per_seed[0])
-            constant = [k for k in keys if len({row[k] for row in per_seed}) == 1]
+            constant = [k for k in keys if _is_constant([row[k] for row in per_seed])]
             for k in constant:
                 zero_var.setdefault(k, set()).add(name)
             if len(constant) == len(keys):
@@ -193,7 +219,11 @@ def compare_llms(
             return row["method_a"] in zv or row["method_b"] in zv
 
         mask = comparisons.apply(_involves_zero_var, axis=1)
-        comparisons.loc[mask, ["p_value", "p_corrected"]] = float("nan")
+        # NaN the effect_size too: a standardized effect divided by ~zero
+        # within-group variance is a meaningless ±inf/huge artifact, and reporting
+        # it next to significant=False is contradictory. mean_diff is left intact —
+        # it is a valid descriptive statistic regardless of significance.
+        comparisons.loc[mask, ["p_value", "p_corrected", "effect_size"]] = float("nan")
         comparisons.loc[mask, "significant"] = False
 
         # Re-apply the Holm correction per metric over only the *surviving*

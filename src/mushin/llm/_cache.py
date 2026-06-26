@@ -37,9 +37,17 @@ class OutputCache:
             return {}
         out: dict[str, Any] = {}
         for line in path.read_text().splitlines():
-            if line.strip():
+            if not line.strip():
+                continue
+            try:
                 rec = json.loads(line)
-                out[rec["key"]] = rec["output"]
+            except json.JSONDecodeError:
+                # A crash/OOM/disk-full mid-append can leave a truncated final
+                # line. The cache is an optimization, so skip the unreadable
+                # record (its input is simply recomputed) rather than poison the
+                # whole (system, seed) file on every future load.
+                continue
+            out[rec["key"]] = rec["output"]
         return out
 
     def partition(self, system: str, seed: int, inputs: list[Any]):

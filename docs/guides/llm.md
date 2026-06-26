@@ -39,9 +39,11 @@ result = compare_llms(
 )
 ```
 
-Use more seeds (≥ 5) for meaningful significance. With Welch's t-test and 5
-seeds you get reasonable power; with 3 seeds even a clear winner may not reach
-p < 0.05 — the tool will warn you.
+Use more seeds (≥ 5) for a robust estimate. Welch's t-test (the default) already
+has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
+`ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
+below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
+at the given seed count.
 
 ## Metric options
 
@@ -76,7 +78,10 @@ result = compare_llms(
 ```
 
 A metric whose `compute()` returns a **dict** (e.g. `SQuAD` → `exact_match`,
-`f1`) expands into one data variable per key, named `<metric_name>_<subkey>`.
+`f1`) expands into one data variable per key. In a **named battery**
+(`metric={"squad": SQuAD()}`) each key is prefixed with your name →
+`squad_exact_match`, `squad_f1`; a **single bare metric** (`metric=SQuAD()`)
+keeps the raw subkeys → `exact_match`, `f1`.
 
 !!! warning "Shape `output`/`reference` to the metric"
     mushin passes your raw `output`s and `reference`s straight to
@@ -189,9 +194,11 @@ the metric and re-run without re-calling the systems.
   system with identical scores across all seeds. Wire the seed to sampling
   (temperature, a provider seed) to get real variance, or treat that system's
   score as a single point estimate rather than a distribution.
-- **Too few seeds.** With `seeds=range(3)` even a clear winner may not reach
-  p < 0.05. mushin warns you when this happens. Use ≥ 5 seeds or switch to
-  `test="welch"`.
+- **Too few seeds for the chosen test.** The rank/paired tests can't reach
+  p < 0.05 at small _n_ (a Wilcoxon over 3 seeds bottoms out at p = 0.25);
+  `compare_llms` warns when the test you picked cannot reach `alpha` at the given
+  seed count. Welch (the default) is fine at 3–5 seeds — still prefer ≥ 5 seeds
+  for a more robust estimate.
 - **Wrong output length.** A system must return exactly `len(inputs)` outputs
   in the same order; mushin raises `ValueError` immediately if it doesn't.
 - **Cache key collisions.** The cache key is `sha256(json(input))`. If your

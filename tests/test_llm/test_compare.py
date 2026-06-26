@@ -271,6 +271,189 @@ def test_empty_metric_battery_rejected():
     assert calls["n"] == 0  # rejected before any system call
 
 
+def test_score_is_cache_independent_for_structured_outputs(tmp_path):
+    """A structured (non-string) output scores the same with and without `cache=`;
+    the cache is an optimization, not a result-changing switch."""
+
+    def sys(inputs, seed):
+        return [("out", i) for i in inputs]  # tuples -> JSON-normalized to lists
+
+    def is_list(output, reference):
+        return float(isinstance(output, list))
+
+    data = _data(3)
+    no_cache = compare_llms({"s": sys}, data, metric=is_list, seeds=range(1))
+    cached = compare_llms(
+        {"s": sys}, data, metric=is_list, seeds=range(1), cache=tmp_path
+    )
+    assert (
+        no_cache.data["score"].values.tolist() == cached.data["score"].values.tolist()
+    )
+    assert float(no_cache.data["score"].mean()) == 1.0  # both see a list, not a tuple
+
+
+def test_sub_epsilon_within_group_variance_is_masked():
+    """A system whose seed-to-seed scores differ only at sub-epsilon scale has no
+    real sampling distribution, so it is masked rather than reported significant
+    via catastrophic cancellation."""
+    data = _data(4)
+
+    def sysA(inputs, seed):
+        return ["x"] * len(inputs)
+
+    def sysB(inputs, seed):
+        return ["y"] * len(inputs)
+
+    def metric(output, reference, seed=0):
+        # near-constant per system: ~1e-9 jitter is within np.allclose, so there is
+        # no meaningful variance, but the two systems' means differ widely.
+        base = 0.5 if output == "x" else 0.9
+        return base + seed * 1e-9
+
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = compare_llms(
+            {"A": sysA, "B": sysB}, data, metric=metric, seeds=range(4)
+        )
+    # both systems are effectively constant -> every comparison masked, not "significant"
+    assert result.comparisons["p_value"].isna().all()
+    assert not result.comparisons["significant"].any()
+
+
+def test_masked_rows_have_nan_effect_size():
+    """A masked (no-sampling-distribution) row reports NaN effect_size rather than
+    a meaningless ±inf/huge standardized effect next to significant=False."""
+    import warnings
+
+    data = _data(6)
+
+    def const_a(inputs, seed):  # constant: 0.5 accuracy
+        return ["yes"] * len(inputs)
+
+    def const_b(inputs, seed):  # constant: 1.0 accuracy (different mean)
+        return ["yes" if i % 2 == 0 else "no" for i in inputs]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = compare_llms(
+            {"a": const_a, "b": const_b}, data, metric=exact, seeds=range(3)
+        )
+    assert r.comparisons["effect_size"].isna().all()
+    assert r.comparisons["p_value"].isna().all()
+    assert not r.comparisons["significant"].any()
+
+
+def test_system_receives_actual_seed_values():
+    """The system callable is invoked with the requested seed values (not 0..n-1)."""
+    data = _data(3)
+    seen = set()
+
+    def sysA(inputs, seed):
+        seen.add(seed)
+        return ["yes" if i % 2 == 0 else "no" for i in inputs]
+
+    compare_llms({"A": sysA}, data, metric=exact, seeds=[5, 9])
+    assert seen == {5, 9}
+
+
+def test_per_metric_masking_does_not_warn_whole_system():
+    """Masking a single constant metric must NOT emit the whole-system
+    'identical scores' warning, which is reserved for systems constant in *every*
+    metric."""
+    import warnings
+
+    data = _data(6)
+
+    def A(inputs, seed):
+        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
+        out[seed % len(out)] = "no"  # `acc` varies with seed
+        return out
+
+    def B(inputs, seed):
+        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
+        out[(seed + 1) % len(out)] = "yes"
+        return out
+
+    def const(o, r):
+        return 1.0  # constant only in this metric
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        compare_llms(
+            {"A": A, "B": B},
+            data,
+            metric={"const": const, "acc": exact},
+            seeds=range(4),
+        )
+    msgs = [str(w.message) for w in caught]
+    assert not any("identical scores across all" in m for m in msgs)
+
+
+def test_surviving_pairs_recorrected_over_reduced_family():
+    """With a masked zero-variance system, the surviving pairs are Holm-corrected
+    over the reduced family (not the original, larger family), and `significant`
+    is derived from those re-corrected p-values."""
+    import warnings
+
+    import numpy as np
+
+    from mushin.benchmark._stats import holm_correction
+
+    data = _data(4)
+    # Three varying systems (A, B, D) + one constant (C, masked). Per-seed scores
+    # are set directly via a seed-aware metric so the p-values are controlled.
+    # These are tuned so B-D is NON-significant under the original family of 6
+    # (p_corrected = 0.078) but SIGNIFICANT after re-Holm over the 3 survivors
+    # (0.039) — i.e. the re-correction genuinely flips the result, so a regression
+    # that dropped it would be caught here.
+    means = {
+        "A": [0.84, 0.87, 0.90, 0.93, 0.96],
+        "B": [0.575, 0.6075, 0.64, 0.6725, 0.705],
+        "D": [0.495, 0.5275, 0.56, 0.5925, 0.625],
+        "C": [0.68, 0.68, 0.68, 0.68, 0.68],  # constant -> masked
+    }
+
+    def make(name):
+        def s(inputs, seed):
+            return [name] * len(inputs)
+
+        return s
+
+    def metric(output, reference, seed=0):
+        return means[output][seed]
+
+    systems = {name: make(name) for name in means}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = compare_llms(systems, data, metric=metric, seeds=range(5))
+
+    comps = r.comparisons
+    involves_c = (comps["method_a"] == "C") | (comps["method_b"] == "C")
+    survivors = comps[~involves_c]
+    masked = comps[involves_c]
+
+    assert masked["p_value"].isna().all()  # every C pair masked
+    assert len(survivors) == 3  # A-B, A-D, B-D all survive
+
+    # p_corrected must equal Holm over ONLY the survivors' raw p-values (a family of
+    # 3), not the original family of 6 that compare_methods first corrected over.
+    expected = holm_correction(survivors["p_value"].tolist())
+    assert np.allclose(sorted(survivors["p_corrected"].tolist()), sorted(expected))
+    # and significant is derived from the re-corrected p-values
+    for _, row in survivors.iterrows():
+        assert row["significant"] == bool(row["p_corrected"] < r.alpha)
+
+    # B-D is the load-bearing case: significant ONLY because of the re-correction
+    # (under the original family of 6 it is p_corrected≈0.078, not significant).
+    bd = survivors[
+        ((survivors.method_a == "B") & (survivors.method_b == "D"))
+        | ((survivors.method_a == "D") & (survivors.method_b == "B"))
+    ].iloc[0]
+    assert bd["significant"] and bd["p_corrected"] < r.alpha
+
+
 def test_dict_without_input_key_is_treated_as_bare_input():
     from mushin.llm._compare import _normalize_examples
 

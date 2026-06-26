@@ -21,3 +21,19 @@ def test_cache_path_stays_under_root(tmp_path):
     assert written and all(str(p).startswith(str(tmp_path)) for p in written)
     cached, _ = c.partition("../evil/sys", 0, ["a"])
     assert cached == {0: "A"}  # still round-trips
+
+
+def test_truncated_trailing_line_is_skipped_not_fatal(tmp_path):
+    """A partial line left by a crash mid-write must not poison the whole cache:
+    good records still load and the missing input is simply recomputed."""
+    from mushin.llm._cache import OutputCache
+
+    c = OutputCache(tmp_path)
+    c.put_many("sys", 0, [("a", "A"), ("b", "B")])
+    path = c._path("sys", 0)
+    with path.open("a") as f:
+        f.write('{"key": "deadbeef", "output": "partial')  # truncated, no newline
+
+    cached, missing = c.partition("sys", 0, ["a", "b", "c"])
+    assert cached == {0: "A", 1: "B"}  # the two good records still load
+    assert [m[1] for m in missing] == ["c"]  # corrupt/absent -> recompute

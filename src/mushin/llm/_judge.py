@@ -6,27 +6,46 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+# A number, optionally written as a fraction `X/N` (e.g. an "8/10" scale).
+_NUM = r"([0-9]*\.?[0-9]+)\s*(?:/\s*([0-9]*\.?[0-9]+))?"
+
+
+def _to_float(num: str, denom: str | None) -> float:
+    """Resolve a captured number / fraction to a float (`1/10` -> 0.1)."""
+    value = float(num)
+    if denom is not None:
+        d = float(denom)
+        if d == 0:
+            raise ValueError(f"judge returned a zero denominator: {num}/{denom}")
+        value /= d
+    return value
+
 
 def parse_score(reply: str) -> float:
-    """Extract a [0,1] score from a judge reply: a leading 0/1 float, yes/no, or
-    `score: X`. Raise ValueError if none is found."""
+    """Extract a [0,1] score from a judge reply: a `score: X` (or `X/N` fraction),
+    a yes/no verdict, or a leading number. Raise ValueError if none is found.
+
+    An explicit ``score:`` wins over a leading yes/no, so a hedged reply such as
+    ``"no, but score: 0.9"`` uses the stated number rather than the verdict."""
     text = reply.strip().lower()
-    yn = re.match(r"(yes|no)\b", text)  # whole word, so "nope"/"yesterday" don't match
-    if yn:
-        return 1.0 if yn.group(1) == "yes" else 0.0
-    m = re.search(r"score\s*[:=]\s*([0-9]*\.?[0-9]+)", text) or re.match(
-        r"([0-9]*\.?[0-9]+)", text
-    )
+    m = re.search(rf"score\s*[:=]\s*{_NUM}", text)
     if m:
-        score = float(m.group(1))
-        if not 0.0 <= score <= 1.0:
-            raise ValueError(
-                f"judge returned a score of {score}, outside [0, 1] "
-                f"(reply: {reply!r}). Use a 0-1 rubric, or pass a custom `parse` "
-                "that rescales (e.g. a 1-10 scale)."
-            )
-        return score
-    raise ValueError(f"could not parse a score from judge reply: {reply!r}")
+        score = _to_float(m.group(1), m.group(2))
+    else:
+        yn = re.match(r"(yes|no)\b", text)  # whole word: "nope"/"yesterday" don't match
+        if yn:
+            return 1.0 if yn.group(1) == "yes" else 0.0
+        m = re.match(_NUM, text)
+        if not m:
+            raise ValueError(f"could not parse a score from judge reply: {reply!r}")
+        score = _to_float(m.group(1), m.group(2))
+    if not 0.0 <= score <= 1.0:
+        raise ValueError(
+            f"judge returned a score of {score}, outside [0, 1] "
+            f"(reply: {reply!r}). Use a 0-1 rubric, or pass a custom `parse` "
+            "that rescales (e.g. a 1-10 scale)."
+        )
+    return score
 
 
 def default_template(rubric: str, output: Any, reference: Any) -> str:
