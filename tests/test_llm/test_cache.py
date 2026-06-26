@@ -12,6 +12,28 @@ def test_partition_and_put(tmp_path):
     assert [m for m in missing] == [(1, "b")]  # only the uncached one
 
 
+def test_key_is_type_preserving_and_injective():
+    """Distinct Python inputs that JSON would conflate must hash differently."""
+    from mushin.llm._cache import _key
+
+    assert _key({1: "x"}) != _key({"1": "x"})  # int key vs str key
+    assert _key(("a", 1)) != _key(["a", 1])  # tuple vs list
+    # but equal values (any dict order) hash the same -> cache still hits
+    assert _key({"a": 1, "b": 2}) == _key({"b": 2, "a": 1})
+
+
+def test_distinct_structured_inputs_do_not_collide(tmp_path):
+    """A cached output for one structured input must not be served for a different
+    one that only JSON would treat as equal."""
+    from mushin.llm._cache import OutputCache
+
+    c = OutputCache(tmp_path)
+    c.put_many("sys", 0, [({1: "x"}, "A")])  # cache an int-keyed input
+    cached, missing = c.partition("sys", 0, [{1: "x"}, {"1": "x"}])
+    assert cached == {0: "A"}  # the int-keyed input hits
+    assert [m[1] for m in missing] == [{"1": "x"}]  # str-keyed input is a MISS, not "A"
+
+
 def test_cache_path_stays_under_root(tmp_path):
     from mushin.llm._cache import OutputCache
 

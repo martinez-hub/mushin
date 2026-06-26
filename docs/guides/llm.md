@@ -210,9 +210,12 @@ the metric and re-run without re-calling the systems.
   `{"squad": SQuAD(), "squad_f1": custom}` produces two `squad_f1` — `compare_llms`
   raises a `ValueError` rather than silently overwriting one score. Rename the
   battery key to disambiguate.
-- **Cache key collisions.** The cache key is `sha256(json(input))`. If your
-  inputs are objects that don't serialize cleanly to JSON, use simple strings
-  or dicts as inputs.
+- **Cache keys and input types.** The cache key is a **type-preserving** hash of
+  the input, so distinct inputs never collide — `{1: "x"}` vs `{"1": "x"}`, or a
+  tuple vs a list, hash differently (plain JSON would conflate them). Use
+  JSON-friendly inputs (strings, numbers, lists, dicts); arbitrary objects fall
+  back to `repr()`, which may not be stable across runs, so prefer simple strings
+  or dicts as inputs for reliable cache hits.
 - **Cached outputs must be JSON-serializable.** With `cache=`, system outputs
   are written as JSON; a non-serializable output (e.g. a custom object) raises a
   clear `TypeError`. Return strings or plain JSON-friendly values, or run

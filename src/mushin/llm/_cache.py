@@ -10,8 +10,25 @@ from pathlib import Path
 from typing import Any
 
 
+def _canonical(value: Any) -> Any:
+    """A type-preserving, order-stable structure for hashing inputs.
+
+    `json.dumps` is **not** injective for Python inputs: it coerces non-string
+    dict keys to strings (`{1: ...}` and `{"1": ...}` serialize identically) and
+    renders tuples and lists the same way. Two distinct inputs hashing alike would
+    make the cache replay the wrong output. Tagging every node with its type — and
+    sorting dict items by a stable key — keeps distinct inputs distinct while
+    staying independent of dict insertion order."""
+    if isinstance(value, dict):
+        items = ((_canonical(k), _canonical(v)) for k, v in value.items())
+        return ("dict", sorted(items, key=repr))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, [_canonical(v) for v in value])
+    return (type(value).__name__, value)
+
+
 def _key(value: Any) -> str:
-    blob = json.dumps(value, sort_keys=True, default=repr).encode()
+    blob = repr(_canonical(value)).encode()
     return hashlib.sha256(blob).hexdigest()
 
 
