@@ -112,19 +112,19 @@ def load_experiment(
     """
     assert Path(exp_path).exists(), f"{exp_path} not found"
 
-    # first find all .hydra files
+    # first find all .hydra directories
     if search_path is None:
         search_path = ".hydra"
-    cfg_files = sorted(Path(exp_path).absolute().glob(f"**/{str(search_path)}"))
+    hydra_dirs = sorted(Path(exp_path).absolute().glob(f"**/{str(search_path)}"))
 
     # For each file load metrics data
     exps = []
-    for path in cfg_files:
-        # Save experiment configuration
-        cfg_files = list(path.parent.glob("**/config.yaml"))
-        cfg = None
-        if len(cfg_files) == 1:
-            cfg = load_from_yaml(cfg_files[0])
+    for path in hydra_dirs:
+        # Save experiment configuration — load directly from the canonical
+        # .hydra/config.yaml so that DDP rank configs (e.g. .pl_hydra_rank_*/
+        # config.yaml) do not cause a silent cfg=None.
+        config_path = path / "config.yaml"
+        cfg = load_from_yaml(config_path) if config_path.exists() else None
 
         # Load metrics files
         files = path.parent.glob("*.pt")
@@ -136,8 +136,10 @@ def load_experiment(
         # Load path to checkpoints
         ckpts = [str(ckpt.resolve()) for ckpt in path.parent.glob("**/*.ckpt")]
 
-        # Append experiment to list
-        exps.append(Experiment(str(path.parent.parent), cfg, ckpts, metrics))
+        # Append experiment to list; working_dir is the per-job directory
+        # (path.parent), not its parent (path.parent.parent) which collapses
+        # every multirun job to the shared root.
+        exps.append(Experiment(str(path.parent), cfg, ckpts, metrics))
 
     if len(exps) == 1:
         return exps[0]
