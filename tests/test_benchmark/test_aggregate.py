@@ -27,3 +27,10 @@ def test_to_dataset_rejects_mismatched_metric_keys():
     results = {"a": [{"acc": 0.9}], "b": [{"f1": 0.7}]}
     with pytest.raises(ValueError, match="ragged"):
         to_dataset(results)
+
+
+def test_to_dataset_rejects_empty_seed_list_for_first_method():
+    """Empty seed list for the first method should raise ValueError, not IndexError."""
+    results = {"a": [], "b": [{"acc": 1.0}]}
+    with pytest.raises(ValueError, match="a"):
+        to_dataset(results)
