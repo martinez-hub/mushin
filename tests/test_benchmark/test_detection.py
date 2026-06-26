@@ -164,3 +164,29 @@ def test_compare_detection_end_to_end():
     assert float(result.data["map"].sel({"method": "good"}).mean()) == pytest.approx(
         1.0
     )
+
+
+@pytest.mark.real_data
+def test_real_coco_sample_end_to_end():
+    """Manual validation: a pretrained torchvision detector runs end-to-end through
+    compare(task="detection") and yields a plausible mAP. Run with: pytest -m real_data."""
+    from torchvision.models.detection import (
+        FasterRCNN_ResNet50_FPN_Weights,
+        fasterrcnn_resnet50_fpn,
+    )
+
+    weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT
+    model = fasterrcnn_resnet50_fpn(weights=weights).eval()
+
+    img = torch.rand(3, 320, 320)
+    tgts = [
+        {
+            "boxes": torch.tensor([[10.0, 10.0, 200.0, 200.0]]),
+            "labels": torch.tensor([1]),
+        }
+    ]
+    data = [([img], tgts)]
+
+    result = compare({"frcnn": [model]}, data, task="detection", test="welch")
+    m = float(result.data["map"].mean())
+    assert -1.0 <= m <= 1.0  # ran end-to-end on a real detector without error

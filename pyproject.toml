@@ -110,6 +110,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["examples"]
+addopts = "-m 'not real_data'"
+markers = [
+    "real_data: end-to-end checks that download a real dataset/model (deselected by default; run with -m real_data)",
+]
 filterwarnings = [
     # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read
     # results back; this deprecation is about that behavior changing upstream.
