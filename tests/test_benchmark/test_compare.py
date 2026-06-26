@@ -116,8 +116,8 @@ def test_compare_rejects_unknown_task():
 def test_compare_detection_does_not_demand_num_classes(monkeypatch):
     import torch
     from torchmetrics import Metric
-    from mushin.benchmark import compare
-    from mushin.benchmark import _tasks
+
+    from mushin.benchmark import _tasks, compare
 
     class Const(Metric):
         def __init__(self):

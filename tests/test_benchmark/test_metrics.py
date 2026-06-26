@@ -43,6 +43,7 @@ def test_classification_battery_warns_on_ignore_index():
 def test_compute_battery_expands_dict_metric():
     import torch
     from torchmetrics import Metric
+
     from mushin.benchmark._metrics import compute_battery
 
     class DictMetric(Metric):
@@ -76,6 +77,7 @@ def test_detection_battery_contents_and_map_drops_metadata():
     pytest.importorskip("torchvision")
     pytest.importorskip("pycocotools")
     import torch
+
     from mushin.benchmark._metrics import detection_battery
 
     battery = detection_battery()
@@ -101,7 +103,9 @@ def test_detection_battery_contents_and_map_drops_metadata():
 
 def test_detection_battery_clear_error_without_extra(monkeypatch):
     import builtins
+
     import pytest
+
     from mushin.benchmark import _metrics
 
     real_import = builtins.__import__

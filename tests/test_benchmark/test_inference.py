@@ -164,6 +164,7 @@ def test_evaluate_explicit_device_and_resets_between_calls():
 
 def test_to_device_moves_tensors_in_nested_structures():
     import torch
+
     from mushin.benchmark._inference import _to_device
 
     dev = torch.device("cpu")
@@ -182,7 +183,9 @@ def test_to_device_moves_tensors_in_nested_structures():
 
 def test_expand_metric_value_scalar_dict_and_sentinel():
     import math
+
     import torch
+
     from mushin.benchmark._inference import expand_metric_value
 
     # scalar -> kept under the battery name
@@ -200,6 +203,7 @@ def test_expand_metric_value_scalar_dict_and_sentinel():
 def test_expand_metric_value_rejects_non_scalar():
     import pytest
     import torch
+
     from mushin.benchmark._inference import expand_metric_value
 
     with pytest.raises(TypeError, match="non-scalar"):
@@ -209,6 +213,7 @@ def test_expand_metric_value_rejects_non_scalar():
 def test_evaluate_expands_dict_metric_and_keeps_scalar():
     import torch
     from torchmetrics import Metric
+
     from mushin.benchmark._inference import evaluate
 
     class ScalarMetric(Metric):

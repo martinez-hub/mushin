@@ -33,6 +33,7 @@ def test_segmentation_predict_returns_pixel_preds_and_probs():
 
 def test_default_detection_predict_fn_returns_model_output_and_none():
     import torch
+
     from mushin.benchmark._predict import default_detection_predict_fn
 
     sentinel = [
