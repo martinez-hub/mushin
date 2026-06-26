@@ -100,11 +100,38 @@ Study.from_checkpoints(
 ).run()
 ```
 
+## Compare LLM systems, with statistics
+
+The same significance spine extends to **LLM systems** — the one eval setting
+where "is this difference real, or just sampling noise?" is most often skipped.
+Bring your own systems, data, and metric; mushin runs each across reproducible
+seeds and reports Holm-corrected significance:
+
+```python
+from mushin.llm import compare_llms, llm_judge
+
+result = compare_llms(
+    systems={"prompt_a": system_a, "prompt_b": system_b},  # system(inputs, seed) -> outputs
+    data=eval_data,                                         # [{"input": ..., "reference": ...}, ...]
+    metric=llm_judge(my_judge, rubric="Is the answer correct?"),  # or any callable / torchmetric
+    seeds=range(5), test="welch",
+)
+result.summary()       # same paper-ready table as the torch path
+```
+
+Systems can be plain callables or hydra-zen configs (instantiated once, reused
+across seeds); metrics can be a plain scorer, a `torchmetrics` text metric, or a
+named battery. An optional on-disk output cache makes reruns/resumes free. See
+the [LLM evaluation guide](docs/guides/llm.md).
+
 ## What it provides
 
 - `benchmark.compare` — run a standard metric battery (torchmetrics) across
   trained seeds and get a labeled dataset + significance (scipy): `BenchmarkResult`
   with `.summary()`, `.comparisons`, and `.data`.
+- `llm.compare_llms`, `llm.llm_judge` — compare LLM systems across reproducible
+  seeds with significance (callables or hydra-zen configs; plain / `torchmetrics`
+  / judge metrics; optional output cache).
 - `Study` — orchestrate a multi-seed training sweep and route the trained models
   into `compare`, in one call; `Study.from_checkpoints(...)` for eval-only.
 - `BaseWorkflow`, `MultiRunMetricsWorkflow`, `RobustnessCurve` — declarative,
