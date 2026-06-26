@@ -68,8 +68,15 @@ netcdf = ["netCDF4 >= 1.7.0"]
 # The MCP SDK requires Python >= 3.10; mushin still supports 3.9, so gate it.
 mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
 # Detection metrics (MeanAveragePrecision + IoU variants) need torchvision and
-# pycocotools; gated so the core install stays lean.
-detection = ["torchvision", "pycocotools"]
+# pycocotools; gated so the core install stays lean. torchvision floors pair with
+# the platform-split torch floors above (0.17 ↔ torch 2.2 on Intel-mac, 0.19 ↔
+# torch 2.4 elsewhere). pycocotools floor is 2.0.7 — the first release with wheels
+# (2.0.0 has no Cython build-dep and fails to build under the min-versions job).
+detection = [
+    "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "pycocotools >= 2.0.7",
+]
 
 [project.scripts]
 mushin-mcp = "mushin.mcp.__main__:main"
@@ -100,8 +107,11 @@ dev = [
     "matplotlib >= 3.3",
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2 ; python_version >= '3.10'",
-    "torchvision",
-    "pycocotools ; sys_platform != 'win32'",
+    # Detection deps so CI exercises the battery; floors match the `detection`
+    # extra. pycocotools is painful to build on Windows, so it is gated there.
+    "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "pycocotools >= 2.0.7 ; sys_platform != 'win32'",
 ]
 
 [tool.setuptools.packages.find]
