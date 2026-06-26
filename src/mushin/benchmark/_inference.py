@@ -26,16 +26,16 @@ def _to_device(obj, device: torch.device):
 
 
 def _as_float(v) -> float:
-    """Coerce one metric value to a float. The COCO ``-1.0`` 'not applicable'
-    sentinel (a bucket with no matching ground truth) becomes ``NaN`` so the
-    significance machinery treats it as missing rather than a real score."""
+    """Coerce one scalar metric value to a float. (The COCO ``-1.0`` 'not
+    applicable' sentinel is normalized to ``NaN`` upstream, inside the detection
+    mAP battery — not here — so it is not applied to metrics like the IoU variants
+    whose range legitimately includes ``-1``.)"""
     if isinstance(v, torch.Tensor) and v.numel() != 1:
         raise TypeError(
             f"metric produced a non-scalar value of shape {tuple(v.shape)}; "
             "battery metrics must return scalar values per key"
         )
-    f = float(v)
-    return float("nan") if f == -1.0 else f
+    return float(v)
 
 
 def expand_metric_value(name: str, value) -> dict[str, float]:

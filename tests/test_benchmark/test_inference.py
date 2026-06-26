@@ -181,9 +181,7 @@ def test_to_device_moves_tensors_in_nested_structures():
     assert _to_device(7, dev) == 7
 
 
-def test_expand_metric_value_scalar_dict_and_sentinel():
-    import math
-
+def test_expand_metric_value_scalar_dict_and_passthrough():
     import torch
 
     from mushin.benchmark._inference import expand_metric_value
@@ -195,9 +193,10 @@ def test_expand_metric_value_scalar_dict_and_sentinel():
         "map", {"map": torch.tensor(0.25), "map_50": torch.tensor(0.75)}
     )
     assert out == {"map": 0.25, "map_50": 0.75}
-    # COCO -1.0 "not applicable" sentinel -> NaN
-    sent = expand_metric_value("map", {"map_small": torch.tensor(-1.0)})
-    assert math.isnan(sent["map_small"])
+    # `expand_metric_value` does NOT special-case -1.0 — the COCO sentinel is
+    # normalized to NaN upstream (inside the detection mAP battery), so a -1 from
+    # any other metric (e.g. an IoU variant) passes through verbatim here.
+    assert expand_metric_value("giou", {"giou": torch.tensor(-1.0)}) == {"giou": -1.0}
 
 
 def test_expand_metric_value_rejects_non_scalar():

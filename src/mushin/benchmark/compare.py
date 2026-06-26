@@ -34,9 +34,9 @@ def compare(
     Parameters
     ----------
     task : str
-        ``"classification"`` or ``"segmentation"``.
+        ``"classification"``, ``"segmentation"``, or ``"detection"``.
     num_classes : int or None
-        Required when ``metrics`` is not provided.
+        Required when ``metrics`` is not provided (not for ``"detection"``).
     ignore_index : int or None
         Label to exclude from segmentation metrics (e.g. a void/boundary class).
     prob_metrics : frozenset[str] or None

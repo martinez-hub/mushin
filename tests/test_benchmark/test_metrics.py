@@ -55,9 +55,7 @@ def test_compute_battery_expands_dict_metric():
             self.v = preds.float().mean()
 
         def compute(self):
-            return {"x": self.v, "y": torch.tensor(-1.0)}  # -1 -> NaN
-
-    import math
+            return {"x": self.v, "y": self.v + 1}
 
     out = compute_battery(
         {"m": DictMetric()},
@@ -65,8 +63,8 @@ def test_compute_battery_expands_dict_metric():
         targets=torch.tensor([1.0]),
         prob_metrics=frozenset(),
     )
-    assert out["x"] == 1.0
-    assert math.isnan(out["y"])
+    # the dict expands to one data var per key; no metric-agnostic sentinel here
+    assert out == {"x": 1.0, "y": 2.0}
 
 
 def test_detection_battery_contents_and_map_drops_metadata():

@@ -92,10 +92,22 @@ def detection_battery(
 
     class _DetectionMAP(MeanAveragePrecision):
         """``MeanAveragePrecision`` minus its non-scalar bookkeeping keys
-        (``classes``/``*_per_class``), which are not single comparable scores."""
+        (``classes``/``*_per_class``), which are not single comparable scores.
+
+        Also normalizes the COCO ``-1.0`` 'not applicable' sentinel (a size bucket
+        with no matching ground truth) to ``NaN`` so it is excluded from
+        significance. Scoped to mAP/mAR here on purpose: the IoU-variant metrics
+        legitimately range into ``-1`` and must not be sentinel-converted."""
 
         def compute(self):
-            return {k: v for k, v in super().compute().items() if k not in _MAP_DROP}
+            out = {}
+            for k, v in super().compute().items():
+                if k in _MAP_DROP:
+                    continue
+                if isinstance(v, torch.Tensor) and v.numel() == 1 and v.item() == -1.0:
+                    v = torch.tensor(float("nan"))
+                out[k] = v
+            return out
 
     return {
         "map": _DetectionMAP(box_format="xyxy"),

@@ -106,6 +106,26 @@ def test_battery_matches_torchmetrics_reference():
         else:
             assert ours == pytest.approx(gold)
 
+    # IoU-variant outputs (partial overlap, ~0.68 IoU here) must reproduce
+    # torchmetrics verbatim — and crucially are NOT sentinel-mangled (these metrics
+    # range into -1, so the -1->NaN normalization must stay scoped to mAP/mAR).
+    from torchmetrics.detection import (
+        CompleteIntersectionOverUnion,
+        DistanceIntersectionOverUnion,
+        GeneralizedIntersectionOverUnion,
+        IntersectionOverUnion,
+    )
+
+    for key, cls in (
+        ("iou", IntersectionOverUnion),
+        ("giou", GeneralizedIntersectionOverUnion),
+        ("ciou", CompleteIntersectionOverUnion),
+        ("diou", DistanceIntersectionOverUnion),
+    ):
+        ref_metric = cls()
+        ref_metric.update(preds, tgts)
+        assert out[key] == pytest.approx(float(ref_metric.compute()[key]))
+
 
 def test_size_bucket_sentinel_becomes_nan():
     """A 10x10 box (area 100) is 'small' under COCO, so the large bucket has no GT
