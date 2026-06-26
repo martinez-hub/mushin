@@ -801,3 +801,17 @@ def test_regression_68():
     xr1_coords = wf1.to_xarray().list_vals.data
     xr2_coords = wf2.to_xarray().list_vals.data
     assert np.all(xr1_coords == xr2_coords)
+
+
+def test_to_override_element_handles_numpy_scalars():
+    """NumPy/torch 0-d scalars (e.g. from np.arange or RobustnessCurve's epsilon
+    array) are emitted unquoted so Hydra sweeps over numbers, not strings."""
+    import numpy as np
+
+    from mushin.workflows import _to_override_element
+
+    assert _to_override_element(np.int64(3)) == "3"
+    assert _to_override_element(np.float32(1.5)) == "1.5"
+    assert _to_override_element(np.bool_(True)) == "true"
+    # strings still quoted (commas/spaces preserved)
+    assert _to_override_element("a,b") == "'a,b'"

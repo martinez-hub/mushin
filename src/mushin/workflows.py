@@ -60,6 +60,12 @@ def _to_override_element(item: Any) -> str:
     or '=' round-trip exactly through Hydra's override parser; lists/tuples are
     emitted recursively in Hydra's bracketed list syntax.
     """
+    # Unwrap a NumPy/torch 0-d scalar (e.g. from ``np.arange`` or RobustnessCurve's
+    # epsilon array) to its Python scalar first, so a swept number is emitted
+    # unquoted rather than falling through to the quoted-string fallback.
+    if hasattr(item, "item") and getattr(item, "ndim", None) == 0:
+        item = item.item()
+
     if isinstance(item, bool):
         return "true" if item else "false"
     if isinstance(item, (int, float)):
