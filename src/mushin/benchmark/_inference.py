@@ -12,6 +12,19 @@ from torchmetrics import Metric
 PredictFn = Callable[[torch.nn.Module, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
 
 
+def _to_device(obj, device: torch.device):
+    """Recursively move tensors to ``device`` through tensors, lists/tuples, and
+    dicts; anything else passes through. Lets one streaming loop serve tensor tasks
+    and detection's ``list[dict]`` batches alike."""
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device)
+    if isinstance(obj, dict):
+        return {k: _to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_device(v, device) for v in obj)
+    return obj
+
+
 def evaluate(
     model: torch.nn.Module,
     data: Iterable,

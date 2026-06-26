@@ -160,3 +160,21 @@ def test_evaluate_explicit_device_and_resets_between_calls():
     assert reused.keys() == fresh.keys()
     for k in reused:
         assert abs(reused[k] - fresh[k]) < 1e-6  # no carryover from the first call
+
+
+def test_to_device_moves_tensors_in_nested_structures():
+    import torch
+    from mushin.benchmark._inference import _to_device
+
+    dev = torch.device("cpu")
+    obj = [
+        {"boxes": torch.zeros(2, 4), "labels": torch.tensor([1, 2])},
+        torch.ones(3),
+    ]
+    moved = _to_device(obj, dev)
+    assert isinstance(moved, list)
+    assert moved[0]["boxes"].device == dev and moved[0]["labels"].device == dev
+    assert moved[1].device == dev
+    # non-tensors pass through unchanged
+    assert _to_device("a string", dev) == "a string"
+    assert _to_device(7, dev) == 7
