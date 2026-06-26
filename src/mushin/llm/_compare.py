@@ -99,7 +99,18 @@ def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
     row: dict[str, float] = {}
     if isinstance(metrics, dict):
         for name, m in metrics.items():
-            row.update(_score_one(name, m, outputs, refs, seed))
+            scored = _score_one(name, m, outputs, refs, seed)
+            # A dict-returning metric expands to `<name>_<subkey>`, which can collide
+            # with another battery entry (e.g. {"squad": SQuAD(), "squad_f1": ...}).
+            # Silently overwriting would report the wrong metric, so reject it.
+            clash = row.keys() & scored.keys()
+            if clash:
+                raise ValueError(
+                    f"metric battery produced colliding output name(s) "
+                    f"{sorted(clash)}; a dict-returning metric expands to "
+                    "`<name>_<subkey>` — rename the battery key(s) to avoid the clash."
+                )
+            row.update(scored)
     else:
         row.update(_score_one(None, metrics, outputs, refs, seed))
     return row

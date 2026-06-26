@@ -283,6 +283,30 @@ def test_unknown_test_rejected_before_running_systems():
     assert calls["n"] == 0  # validated before any (token-spending) system call
 
 
+def test_colliding_metric_output_names_rejected():
+    """A dict metric that expands to a name already used by another battery entry
+    must raise, not silently overwrite (which would report the wrong metric)."""
+    from torchmetrics.text import WordErrorRate
+
+    class FakeDictMetric(WordErrorRate):
+        def compute(self):
+            v = float(super().compute())
+            return {"a": v, "b": 1.0 - v}  # -> split_a / split_b
+
+    data = [{"input": i, "reference": "the cat"} for i in range(4)]
+
+    def sysA(inputs, seed):
+        return ["the cat"] * len(inputs)
+
+    def collide(o, r):
+        return 1.0
+
+    # "split" expands to split_a/split_b; the second entry is also named "split_a".
+    metric = {"split": FakeDictMetric(), "split_a": collide}
+    with pytest.raises(ValueError, match="colliding"):
+        compare_llms({"A": sysA}, data, metric=metric, seeds=range(2))
+
+
 def test_empty_metric_battery_rejected():
     calls = {"n": 0}
 
