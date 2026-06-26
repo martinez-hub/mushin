@@ -199,6 +199,48 @@ def test_expand_metric_value_scalar_dict_and_passthrough():
     assert expand_metric_value("giou", {"giou": torch.tensor(-1.0)}) == {"giou": -1.0}
 
 
+def test_evaluate_rejects_colliding_metric_names():
+    """Two battery metrics producing the same data-variable name must raise, not
+    silently overwrite (a scalar `score` vs another metric returning {"score": ...})."""
+    import pytest
+    import torch
+    from torchmetrics import Metric
+
+    from mushin.benchmark._inference import evaluate
+
+    class Scalar(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = torch.tensor(1.0)
+
+        def compute(self):
+            return self.v
+
+    class DictScore(Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+        def update(self, preds, target):
+            self.v = torch.tensor(2.0)
+
+        def compute(self):
+            return {"score": self.v}
+
+    data = [(torch.tensor([1.0]), torch.tensor([0]))]
+    with pytest.raises(ValueError, match="colliding"):
+        evaluate(
+            torch.nn.Identity(),
+            data,
+            {"score": Scalar(), "other": DictScore()},
+            predict_fn=lambda m, x: (m(x), None),
+            prob_metrics=frozenset(),
+        )
+
+
 def test_expand_metric_value_rejects_non_scalar():
     import pytest
     import torch

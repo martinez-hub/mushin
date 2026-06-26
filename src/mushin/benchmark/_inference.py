@@ -47,6 +47,21 @@ def expand_metric_value(name: str, value) -> dict[str, float]:
     return {name: _as_float(value)}
 
 
+def accumulate_metric(out: dict[str, float], name: str, value) -> None:
+    """Expand ``value`` into ``out``, raising on a data-variable name collision (two
+    metrics producing the same key — e.g. a scalar ``score`` metric alongside one
+    returning ``{"score": ...}``) rather than silently overwriting the earlier one."""
+    scored = expand_metric_value(name, value)
+    clash = out.keys() & scored.keys()
+    if clash:
+        raise ValueError(
+            f"metric battery produced colliding data-variable name(s) "
+            f"{sorted(clash)}; a dict-valued metric expands to its own keys — "
+            "rename the battery entry to avoid the clash."
+        )
+    out.update(scored)
+
+
 def evaluate(
     model: torch.nn.Module,
     data: Iterable,
@@ -79,5 +94,5 @@ def evaluate(
 
     out: dict[str, float] = {}
     for name, metric in battery.items():
-        out.update(expand_metric_value(name, metric.compute()))
+        accumulate_metric(out, name, metric.compute())
     return out

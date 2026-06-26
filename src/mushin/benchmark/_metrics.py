@@ -135,11 +135,11 @@ def compute_battery(
 ) -> dict[str, float]:
     """One-shot metric computation: reset, update once, compute. Metrics named in
     ``prob_metrics`` are fed ``probs`` (required if non-empty); the rest ``preds``."""
-    from ._inference import expand_metric_value
+    from ._inference import accumulate_metric
 
     out: dict[str, float] = {}
     for name, metric in battery.items():
         metric.reset()
         inp = probs if name in prob_metrics else preds
-        out.update(expand_metric_value(name, metric(inp, targets)))
+        accumulate_metric(out, name, metric(inp, targets))
     return out
