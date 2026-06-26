@@ -74,15 +74,27 @@ empty for detection).
 
 ### 1. `detection_battery(num_classes=None, ignore_index=None)` — `_metrics.py` (new)
 
-Returns the full bbox family:
+Returns the full bbox family (the `map` entry is the `_DetectionMAP` wrapper that
+drops the three non-scalar bookkeeping keys; all others are the raw torchmetrics
+classes):
 
 | battery key | class | data variables it contributes |
 |---|---|---|
-| `map` | `MeanAveragePrecision` | `map`, `map_50`, `map_75`, `map_small`, `map_medium`, `map_large`, `mar_1`, `mar_10`, `mar_100`, `mar_small`, `mar_medium`, `mar_large` |
+| `map` | `MeanAveragePrecision` | the 12 scalar AP/AR values: `map`, `map_50`, `map_75`, `map_small`, `map_medium`, `map_large`, `mar_1`, `mar_10`, `mar_100`, `mar_small`, `mar_medium`, `mar_large` |
 | `iou` | `IntersectionOverUnion` | `iou` |
 | `giou` | `GeneralizedIntersectionOverUnion` | `giou` |
 | `ciou` | `CompleteIntersectionOverUnion` | `ciou` |
 | `diou` | `DistanceIntersectionOverUnion` | `diou` |
+
+`MeanAveragePrecision.compute()` (verified against torchmetrics 1.8.2) also returns
+three **non-scalar bookkeeping** keys — `classes` (a tensor of present class ids),
+`map_per_class`, `mar_100_per_class` (per-class vectors; `-1` when
+`class_metrics=False`, the default). These are not single comparable scores
+(`float(classes)` even fails with >1 class), so they are dropped via a thin
+`_DetectionMAP(MeanAveragePrecision)` wrapper whose `compute()` returns only the 12
+scalar AP/AR values. The wrapper exists solely to drop metadata — **not** to curate
+the scores. Total data variables across the battery: **16** (12 mAP/mAR + iou + giou
++ ciou + diou).
 
 - `box_format` defaults to `"xyxy"` (torchvision convention); exposed as a
   passthrough.
