@@ -52,6 +52,26 @@ def _identity(x: T1) -> T1:
     return x
 
 
+def _to_override_element(item: Any) -> str:
+    """Serialize a single multirun element to Hydra override-grammar syntax.
+
+    Booleans/numbers are emitted unquoted; strings are single-quoted (with
+    embedded single-quotes escaped) so that values containing commas, spaces,
+    or '=' round-trip exactly through Hydra's override parser; lists/tuples are
+    emitted recursively in Hydra's bracketed list syntax.
+    """
+    if isinstance(item, bool):
+        return "true" if item else "false"
+    if isinstance(item, (int, float)):
+        return str(item)
+    if isinstance(item, str):
+        return "'" + item.replace("'", "\\'") + "'"
+    if isinstance(item, (list, tuple)):
+        return "[" + ",".join(_to_override_element(x) for x in item) + "]"
+    # Fall back to a quoted string representation for any other type.
+    return "'" + str(item).replace("'", "\\'") + "'"
+
+
 def _task_calls(
     pre_task: Callable[[Any], None], task: Callable[[Any], T1]
 ) -> Callable[[Any], T1]:
@@ -264,7 +284,7 @@ class BaseWorkflow:
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",
         with_log_configuration: bool = True,
-        **workflow_overrides: Union[str, int, float, bool, dict, multirun, hydra_list],
+        **workflow_overrides: Union[str, int, float, bool, multirun, hydra_list],
     ):
         """Run the experiment.
 
@@ -315,7 +335,7 @@ class BaseWorkflow:
         with_log_configuration : bool (default: True)
             If ``True``, enables the configuration of the logging subsystem from the loaded config.
 
-        **workflow_overrides: str | int | float | bool | multirun | hydra_list | dict
+        **workflow_overrides: str | int | float | bool | multirun | hydra_list
             These parameters represent the values for configurations to use for the
             experiment.
 
@@ -340,9 +360,7 @@ class BaseWorkflow:
             launch_overrides.append(f"hydra/launcher={launcher}")
 
         for k, v in workflow_overrides.items():
-            value_check(k, v, type_=(int, float, bool, str, dict, multirun, hydra_list))
-            if isinstance(v, multirun):
-                v = ",".join(str(item) for item in v)
+            value_check(k, v, type_=(int, float, bool, str, multirun, hydra_list))
 
             prefix = ""
             if (
@@ -351,7 +369,17 @@ class BaseWorkflow:
             ):
                 prefix = "+"
 
-            launch_overrides.append(f"{prefix}{k}={v}")
+            if isinstance(v, multirun):
+                # Build a Hydra `choice(...)` sweep rather than a comma-joined
+                # string. `choice(...)` always yields a sweep – even for a
+                # single element (so length-1 multiruns remain swept dimensions)
+                # – and each element is serialized/quoted so that values
+                # containing commas, spaces, or '=' are not silently re-split by
+                # Hydra's override parser.
+                choices = ",".join(_to_override_element(item) for item in v)
+                launch_overrides.append(f"{prefix}{k}=choice({choices})")
+            else:
+                launch_overrides.append(f"{prefix}{k}={v}")
 
         for _name in self._REQUIRED_STATIC_METHODS:
             if _name == "task" and hasattr(self, "evaluation_task"):
@@ -583,7 +611,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",
         with_log_configuration: bool = True,
-        **workflow_overrides: Union[str, int, float, bool, dict, multirun, hydra_list],
+        **workflow_overrides: Union[str, int, float, bool, multirun, hydra_list],
     ):
         # TODO: add docs
 
@@ -667,14 +695,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         overrides = load_from_yaml(multirun_cfg).hydra.overrides.task
         self.overrides = overrides
 
-        dirs = []
-
-        for o in overrides:
-            k, v = o.split("=")
-            k = k.replace("+", "")
-            if k == self._JOBDIR_NAME:
-                dirs = v.split(",")
-                break
+        # Use Hydra's override parser (rather than naive string splitting) so
+        # that the job-dir sweep – e.g. `+job_dir=choice('a','b')` – and any
+        # quoted values containing '=' / commas are parsed correctly.
+        parsed = self._parse_overrides(list(overrides))
+        jobdir_value = parsed.get(self._JOBDIR_NAME, [])
+        dirs = list(jobdir_value) if _non_str_sequence(jobdir_value) else []
 
         for d in dirs:
             overrides: list[str] = list(
@@ -751,6 +777,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         -------
         loaded_workflow : Self
         """
+        # Reset memoized caches so a reused workflow object does not return
+        # stale overrides/coordinates from a previously loaded directory.
+        self._multirun_task_overrides = {}
+        self._target_dir_multirun_overrides = None
+
         self.working_dir = Path(working_dir)
         self.output_subdir = load_from_yaml(
             self.working_dir / "multirun.yaml"
@@ -1066,7 +1097,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             This is helpful for filtering out parameters stored in
             `self.workflow_overrides`.
 
-        **workflow_overrides: dict | str | int | float | bool | multirun | hydra_list
+        **workflow_overrides: str | int | float | bool | multirun | hydra_list
             These parameters represent the values for configurations to use for the
             experiment.
 

@@ -416,8 +416,18 @@ def test_multirun_over_jobdir(load_from_working_dir):
     xr1 = wf.to_xarray()
     xr2 = snd_wf.to_xarray()
 
-    assert xr1.sizes == {"acc": 2, "epsilon": 3, "images_dim0": 4, "images_dim1": 1}
+    # `list_vals` is a length-1 multirun, so it is a swept (length-1) dimension
+    assert xr1.sizes == {
+        "acc": 2,
+        "list_vals": 1,
+        "epsilon": 3,
+        "images_dim0": 4,
+        "images_dim1": 1,
+    }
     assert xr2.sizes == {"val": 2, "job_dir": 6, "images_dim0": 4, "images_dim1": 1}
+
+    # drop the length-1 list_vals dim from xr1 for comparison with xr2 selections
+    xr1 = xr1.sel(list_vals="[0, 1]").drop_vars("list_vals")
 
     xr2 = xr2.set_index(job_dir=["epsilon", "acc", "list_vals"]).unstack("job_dir")
     xr2 = xr2.transpose(
@@ -649,6 +659,122 @@ def test_custom_metric_load_fn():
     wf.run(a=multirun([1, 2, 3]), b=False)
     wf.load_metrics("metrics.pkl")
     assert wf.metrics == dict(a=[[1] * 2, [2] * 2, [3] * 2], b=[False] * 3)
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_g1_multirun_string_value_with_comma_not_split():
+    # G1: a multirun whose string elements contain commas must launch exactly
+    # one job per element (not silently re-split into more jobs), and the
+    # labels must round-trip exactly.
+    class Blank(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(label):
+            return None
+
+    wf = Blank()
+    wf.run(label=multirun(["hello world", "foo,bar"]))
+
+    assert len(wf.jobs) == 2
+    assert wf.multirun_task_overrides["label"] == multirun(["hello world", "foo,bar"])
+
+    xdata = wf.to_xarray()
+    assert xdata.sizes == {"label": 2}
+    assert xdata.coords["label"].data.tolist() == ["hello world", "foo,bar"]
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_g2_length_one_multirun_is_a_sweep():
+    # G2: a length-1 multirun must remain a swept dimension (coord), not be
+    # collapsed into a scalar attribute.
+    class Blank(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return None
+
+    wf = Blank()
+    wf.run(a=multirun([5]))
+
+    assert len(wf.jobs) == 1
+    # recorded as a sweep (list), not a scalar
+    assert wf.multirun_task_overrides["a"] == multirun([5])
+
+    xdata = wf.to_xarray()
+    assert "a" in xdata.coords
+    assert "a" not in xdata.attrs
+    assert xdata.sizes == {"a": 1}
+    assert xdata.coords["a"].data.tolist() == [5]
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_g4_load_from_dir_resets_cached_overrides():
+    # G4: a reused workflow object must not return stale multirun overrides
+    # after load_from_dir points it at a different directory.
+    class Blank(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return None
+
+    wf_a = Blank()
+    wf_a.run(a=multirun([1, 2, 3]), working_dir="dir_a")
+
+    wf_b = Blank()
+    wf_b.run(a=multirun([7, 8]), working_dir="dir_b")
+
+    loader = Blank()
+    loader.load_from_dir(wf_a.working_dir, metrics_filename=None)
+    # populate the cache for dir_a
+    assert loader.multirun_task_overrides["a"] == multirun([1, 2, 3])
+    assert loader.to_xarray().sizes == {"a": 3}
+
+    # now point it at dir_b -- must reflect the NEW dir, not stale dir_a
+    loader.load_from_dir(wf_b.working_dir, metrics_filename=None)
+    assert loader.multirun_task_overrides["a"] == multirun([7, 8])
+    assert loader.to_xarray().sizes == {"a": 2}
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_g5_dict_override_rejected():
+    # G5: dict workflow_overrides were advertised but emitted invalid Hydra
+    # syntax; dict support has been dropped, so it must be rejected.
+    class Blank(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return None
+
+    wf = Blank()
+    with pytest.raises(TypeError):
+        wf.run(x={"a": 1})  # type: ignore
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_g3_target_dir_overrides_with_equals_in_value():
+    # G3: target_dir_multirun_overrides used o.split("=") (no maxsplit), which
+    # crashed when an override value contained '='. The previous run's
+    # overrides include a quoted value with '='; flattening must not crash.
+    class First(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(tag, eps):
+            tr.save(dict(eps=eps), "test_metrics.pt")
+            return dict(eps=eps)
+
+    class Second(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(job_dir):
+            return None
+
+    first = First()
+    first.run(
+        tag=multirun(["a=b", "c=d"]),
+        eps=multirun([1.0, 2.0]),
+        working_dir="first",
+    )
+
+    second = Second()
+    second.run(target_job_dirs=first.multirun_working_dirs, working_dir="second")
+
+    flattened = second.target_dir_multirun_overrides
+    assert flattened["tag"] == ["a=b", "a=b", "c=d", "c=d"]
+    assert flattened["eps"] == [1.0, 2.0, 1.0, 2.0]
 
 
 @pytest.mark.usefixtures("cleandir")
