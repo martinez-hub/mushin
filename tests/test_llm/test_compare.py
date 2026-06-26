@@ -340,6 +340,25 @@ def test_score_is_cache_independent_for_structured_outputs(tmp_path):
     assert float(no_cache.data["score"].mean()) == 1.0  # both see a list, not a tuple
 
 
+def test_structured_output_matches_identical_structured_reference():
+    """Output and reference are normalized on equal footing, so a structured label
+    (e.g. a tuple) matches an identical output instead of failing because the
+    output was JSON-normalized to a list while the reference stayed a tuple."""
+    data = [
+        {"input": i, "reference": ("even" if i % 2 == 0 else "odd", i)}
+        for i in range(4)
+    ]
+
+    def sysA(inputs, seed):
+        return [("even" if i % 2 == 0 else "odd", i) for i in inputs]
+
+    def exact(output, reference):
+        return float(output == reference)
+
+    r = compare_llms({"A": sysA}, data, metric=exact, seeds=range(2))
+    assert float(r.data["score"].mean()) == 1.0  # both round-trip to lists -> equal
+
+
 def test_sub_epsilon_within_group_variance_is_masked():
     """A system whose seed-to-seed scores differ only at sub-epsilon scale has no
     real sampling distribution, so it is masked rather than reported significant

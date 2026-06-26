@@ -175,6 +175,11 @@ def compare_llms(
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
+    # Normalize references through the same JSON round-trip applied to outputs (see
+    # _normalize_output), so output and reference are scored on equal footing — e.g.
+    # a structured label like ("a", 1) matches an identical output, which would
+    # otherwise become ["a", 1] and compare unequal.
+    refs = [_normalize_output(r) for r in refs]
     # Validate seeds up front — before instantiating systems, which for hydra-zen
     # configs can load large models or trigger provider setup. Duplicate seeds are
     # the same (system, seed) trial: counting them as independent samples would
