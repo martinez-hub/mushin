@@ -52,9 +52,9 @@ def compare(
 
     if metrics is not None:
         battery = metrics
+    elif spec.requires_num_classes and num_classes is None:
+        raise ValueError("`num_classes` is required when `metrics` is not provided")
     else:
-        if num_classes is None:
-            raise ValueError("`num_classes` is required when `metrics` is not provided")
         battery = spec.battery(num_classes, ignore_index=ignore_index)
 
     fn = predict_fn or spec.predict_fn

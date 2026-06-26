@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from torchmetrics import Metric
 
 from ._inference import PredictFn
-from ._metrics import classification_battery, segmentation_battery
+from ._metrics import classification_battery, detection_battery, segmentation_battery
 from ._predict import (
     default_classification_predict_fn,
+    default_detection_predict_fn,
     default_segmentation_predict_fn,
 )
 
@@ -22,6 +23,7 @@ class TaskSpec:
     battery: Callable[..., dict[str, Metric]]
     predict_fn: PredictFn
     prob_metrics: frozenset[str]
+    requires_num_classes: bool = True
 
 
 _TASKS: dict[str, TaskSpec] = {
@@ -34,6 +36,12 @@ _TASKS: dict[str, TaskSpec] = {
         segmentation_battery,
         default_segmentation_predict_fn,
         frozenset(),
+    ),
+    "detection": TaskSpec(
+        detection_battery,
+        default_detection_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
     ),
 }
 
