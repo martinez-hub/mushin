@@ -67,6 +67,9 @@ viz = ["matplotlib >= 3.3"]
 netcdf = ["netCDF4 >= 1.7.0"]
 # The MCP SDK requires Python >= 3.10; mushin still supports 3.9, so gate it.
 mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
+# Detection metrics (MeanAveragePrecision + IoU variants) need torchvision and
+# pycocotools; gated so the core install stays lean.
+detection = ["torchvision", "pycocotools"]
 
 [project.scripts]
 mushin-mcp = "mushin.mcp.__main__:main"
@@ -97,6 +100,8 @@ dev = [
     "matplotlib >= 3.3",
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2 ; python_version >= '3.10'",
+    "torchvision",
+    "pycocotools ; sys_platform != 'win32'",
 ]
 
 [tool.setuptools.packages.find]
