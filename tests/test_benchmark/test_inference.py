@@ -181,6 +181,21 @@ def test_to_device_moves_tensors_in_nested_structures():
     assert _to_device(7, dev) == 7
 
 
+def test_to_device_handles_namedtuple():
+    import collections
+
+    import torch
+
+    from mushin.benchmark._inference import _to_device
+
+    Point = collections.namedtuple("Point", ["a", "b"])
+    p = Point(torch.zeros(2), torch.ones(3))
+    moved = _to_device(p, torch.device("cpu"))
+    assert isinstance(moved, Point)  # type preserved, not collapsed to a plain tuple
+    assert moved.a.device == torch.device("cpu")
+    assert torch.equal(moved.b, torch.ones(3))
+
+
 def test_expand_metric_value_scalar_dict_and_passthrough():
     import torch
 
