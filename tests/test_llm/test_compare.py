@@ -68,6 +68,39 @@ def test_torchmetrics_scalar_and_dict_battery():
     assert "split_a" in result.data.data_vars and "split_b" in result.data.data_vars
 
 
+def test_per_example_dict_metric_is_averaged():
+    """A dict metric whose values are per-example tensors (e.g. BERTScore returns
+    per-prediction precision/recall/f1) is averaged over examples instead of
+    raising on float() of a multi-element tensor."""
+    import numpy as np
+    import torch
+    from torchmetrics.text import WordErrorRate
+
+    class PerExampleMetric(WordErrorRate):
+        def update(self, preds, target):
+            self._n = len(list(preds))
+
+        def compute(self):
+            return {
+                "precision": torch.linspace(0.0, 1.0, self._n),  # per-example vector
+                "recall": torch.full((self._n,), 0.5),
+            }
+
+    data = [{"input": i, "reference": "x"} for i in range(4)]
+
+    def sysA(inputs, seed):
+        return ["y"] * len(inputs)
+
+    result = compare_llms(
+        {"A": sysA}, data, metric={"bert": PerExampleMetric()}, seeds=range(2)
+    )
+    assert "bert_precision" in result.data.data_vars
+    assert "bert_recall" in result.data.data_vars
+    # averaged over the 4 examples: mean(linspace(0,1,4)) == 0.5, mean(0.5...) == 0.5
+    assert np.isclose(float(result.data["bert_precision"].mean()), 0.5)
+    assert np.isclose(float(result.data["bert_recall"].mean()), 0.5)
+
+
 def test_cache_skips_recalls(tmp_path):
     data = _data(4)
     calls = {"n": 0}

@@ -81,7 +81,9 @@ A metric whose `compute()` returns a **dict** (e.g. `SQuAD` → `exact_match`,
 `f1`) expands into one data variable per key. In a **named battery**
 (`metric={"squad": SQuAD()}`) each key is prefixed with your name →
 `squad_exact_match`, `squad_f1`; a **single bare metric** (`metric=SQuAD()`)
-keeps the raw subkeys → `exact_match`, `f1`.
+keeps the raw subkeys → `exact_match`, `f1`. A metric value that is a
+**per-example sequence/tensor** (e.g. `BERTScore`'s per-prediction
+`precision`/`recall`/`f1`) is averaged over the examples to a single trial score.
 
 !!! warning "Shape `output`/`reference` to the metric"
     mushin passes your raw `output`s and `reference`s straight to

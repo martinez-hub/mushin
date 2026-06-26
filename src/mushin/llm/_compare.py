@@ -56,6 +56,17 @@ def _accepts_seed(m) -> bool:
         return False
 
 
+def _to_scalar(v) -> float:
+    """Reduce a metric value to one float. A scalar passes through; a per-example
+    sequence/tensor (e.g. `BERTScore` returns per-prediction precision/recall/f1)
+    is averaged over examples — the same reduction applied to plain-callable
+    scores — instead of raising on `float()` of a multi-element tensor."""
+    if hasattr(v, "detach"):  # torch tensor -> CPU numpy
+        v = v.detach().cpu().numpy()
+    arr = np.asarray(v, dtype=float)
+    return float(arr.mean()) if arr.size else float("nan")
+
+
 def _score_one(
     name: str | None, m: Metric, outputs, refs, seed: int
 ) -> dict[str, float]:
@@ -67,10 +78,10 @@ def _score_one(
         base = name if name is not None else _snake(type(m).__name__)
         if isinstance(value, dict):
             return {
-                (f"{base}_{k}" if name is not None else str(k)): float(v)
+                (f"{base}_{k}" if name is not None else str(k)): _to_scalar(v)
                 for k, v in value.items()
             }
-        return {base: float(value)}
+        return {base: _to_scalar(value)}
     # plain callable: mean of per-example scores. Pass the trial seed if the metric
     # accepts one (e.g. llm_judge), so a stochastic judge is tied to the run.
     base = name if name is not None else "score"
