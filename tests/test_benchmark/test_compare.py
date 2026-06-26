@@ -27,6 +27,30 @@ class _Perfect(torch.nn.Module):
         return torch.nn.functional.one_hot(idx, self.num_classes).float() * 10.0
 
 
+class _AlmostPerfect(_Perfect):
+    """Like `_Perfect` but deterministically mislabels its first ``n_wrong`` inputs,
+    giving a high-but-non-constant per-model accuracy. A list of these with varying
+    ``n_wrong`` has real across-seed variance, so significance is legitimately
+    testable (a constant-across-seeds method has no sampling distribution and is
+    masked)."""
+
+    def __init__(self, loader, n_wrong, num_classes=3):
+        super().__init__(loader, num_classes)
+        self.n_wrong = n_wrong
+        self._seen = 0
+
+    def forward(self, x):
+        out = []
+        for row in x:
+            y = self._map[tuple(row.tolist())]
+            if self._seen < self.n_wrong:
+                y = (y + 1) % self.num_classes  # deterministic error
+            self._seen += 1
+            out.append(y)
+        idx = torch.tensor(out)
+        return torch.nn.functional.one_hot(idx, self.num_classes).float() * 10.0
+
+
 def test_compare_end_to_end():
     data = _loader(seed=0)
     good = [_Perfect(data) for _ in range(3)]
@@ -195,7 +219,9 @@ def test_compare_flags_significant_difference_end_to_end():
     torch.manual_seed(0)  # make the bad models' random init deterministic
     result = compare(
         methods={
-            "good": [_Perfect(data) for _ in range(6)],
+            # high but non-constant accuracy across seeds, so significance is a real
+            # test (a zero-variance method would be masked, not significant).
+            "good": [_AlmostPerfect(data, n_wrong=k) for k in (0, 1, 2, 1, 2, 3)],
             "bad": [torch.nn.Linear(4, 3) for _ in range(6)],
         },
         data=data,

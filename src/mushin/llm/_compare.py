@@ -6,7 +6,6 @@ import inspect
 import json
 import os
 import re
-import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -15,11 +14,7 @@ from torchmetrics import Metric as TorchMetric
 
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
-from mushin.benchmark._stats import (
-    available_tests,
-    compare_methods,
-    holm_correction,
-)
+from mushin.benchmark._stats import available_tests, compare_methods
 
 from ._cache import OutputCache
 from ._system import as_system
@@ -93,19 +88,6 @@ def _score_one(
         except Exception as e:
             raise type(e)(f"metric {base!r} failed on example {i}: {e}") from e
     return {base: sum(scores) / len(scores)}
-
-
-def _is_constant(values) -> bool:
-    """True if seed-to-seed values have no meaningful within-group variance.
-
-    Uses ``np.allclose`` rather than exact equality so sub-epsilon float jitter —
-    e.g. from the non-associative ``sum(scores) / len(scores)`` reduction — counts
-    as constant and is masked, instead of leaking into a catastrophic-cancellation
-    "significant" p-value when ``compare_methods`` runs the parametric test on it.
-    This mirrors the ``np.allclose`` short-circuit ``compare_methods`` already uses
-    between systems."""
-    arr = np.asarray(values, dtype=float)
-    return bool(np.allclose(arr, arr[0]))
 
 
 def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
@@ -222,59 +204,11 @@ def compare_llms(
             per_seed.append(_score(metric, outputs, refs, seed))
         results[name] = per_seed
 
-    # Detect zero within-group variance per (metric, system): a metric whose
-    # scores are identical across all seeds has no sampling distribution. Warn
-    # only for systems that are constant in *every* metric (they ignore the seed).
-    zero_var: dict[str, set[str]] = {}  # metric -> systems with zero variance
-    if len(seeds) > 1:
-        for name, per_seed in results.items():
-            keys = list(per_seed[0])
-            constant = [k for k in keys if _is_constant([row[k] for row in per_seed])]
-            for k in constant:
-                zero_var.setdefault(k, set()).add(name)
-            if len(constant) == len(keys):
-                warnings.warn(
-                    f"system {name!r} produced identical scores across all "
-                    f"{len(seeds)} seeds — it likely ignores the seed or is "
-                    "deterministic, so seed-based significance involving it is "
-                    "not meaningful (the seeds are duplicated points, not "
-                    "independent samples). Wire the seed to sampling, or treat "
-                    "its score as a point estimate.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-
     ds = to_dataset(results)
     ds = ds.assign_coords(seed=list(seeds))  # use the actual seed values, not 0..n-1
+    # compare_methods masks zero within-group-variance comparisons (a system
+    # constant across seeds has no sampling distribution), re-Holms the survivors,
+    # and warns for systems constant in every metric — so the LLM and torch paths
+    # handle deterministic systems identically.
     comparisons = compare_methods(ds, test=test, alpha=alpha)
-
-    if zero_var:
-        # A (metric, system) with zero variance has no valid sampling distribution,
-        # so its comparisons are not real significance tests — mask them per metric
-        # rather than report a duplicated-point p-value of ~0.
-        def _involves_zero_var(row) -> bool:
-            zv = zero_var.get(row["metric"], ())
-            return row["method_a"] in zv or row["method_b"] in zv
-
-        mask = comparisons.apply(_involves_zero_var, axis=1)
-        # NaN the effect_size too: a standardized effect divided by ~zero
-        # within-group variance is a meaningless ±inf/huge artifact, and reporting
-        # it next to significant=False is contradictory. mean_diff is left intact —
-        # it is a valid descriptive statistic regardless of significance.
-        comparisons.loc[mask, ["p_value", "p_corrected", "effect_size"]] = float("nan")
-        comparisons.loc[mask, "significant"] = False
-
-        # Re-apply the Holm correction per metric over only the *surviving*
-        # comparisons, so they are not over-corrected for the excluded
-        # zero-variance pairs (which compare_methods had counted in the family).
-        for _, group in comparisons.groupby("metric"):
-            valid = group.index[~mask.loc[group.index]]
-            if len(valid):
-                pvals = comparisons.loc[valid, "p_value"].tolist()
-                corrected = holm_correction(pvals) if len(pvals) > 1 else pvals
-                comparisons.loc[valid, "p_corrected"] = [float(c) for c in corrected]
-                comparisons.loc[valid, "significant"] = [
-                    False if c != c else bool(c < alpha) for c in corrected
-                ]
-
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
