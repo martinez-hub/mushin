@@ -34,3 +34,14 @@ def default_segmentation_predict_fn(
     probs = torch.softmax(logits, dim=1)
     preds = probs.argmax(dim=1)
     return preds, probs
+
+
+def default_detection_predict_fn(model: torch.nn.Module, x):
+    """Run a detection model and return ``(predictions, None)``.
+
+    Assumes the torchvision detection convention: an eval-mode detector maps a
+    list of image tensors to a ``list[dict]`` with ``boxes``/``scores``/``labels``.
+    There are no probabilities to feed metrics, so the second element is ``None``.
+    Override ``predict_fn`` for non-torchvision detectors (DETR, YOLO, ...).
+    """
+    return model(x), None

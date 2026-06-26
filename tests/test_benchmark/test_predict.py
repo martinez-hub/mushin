@@ -29,3 +29,24 @@ def test_segmentation_predict_returns_pixel_preds_and_probs():
     assert probs.shape == (2, 3, 8, 8)
     assert torch.allclose(probs.sum(dim=1), torch.ones(2, 8, 8), atol=1e-5)
     assert torch.equal(preds, probs.argmax(dim=1))
+
+
+def test_default_detection_predict_fn_returns_model_output_and_none():
+    import torch
+    from mushin.benchmark._predict import default_detection_predict_fn
+
+    sentinel = [
+        {
+            "boxes": torch.zeros(1, 4),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
+
+    class FakeDetector(torch.nn.Module):
+        def forward(self, x):
+            return sentinel
+
+    preds, probs = default_detection_predict_fn(FakeDetector(), [torch.zeros(3, 8, 8)])
+    assert preds is sentinel
+    assert probs is None
