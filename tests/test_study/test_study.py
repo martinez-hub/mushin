@@ -60,10 +60,13 @@ def test_full_motion_trains_then_compares(tmp_path):
 
         return train
 
+    # Use non-arange seeds (5, 9, 17) so the seed coordinate bug is detectable:
+    # with seeds=[0,1,2] the bug is hidden because arange(3) coincides with real seeds.
+    explicit_seeds = [5, 9, 17]
     study = Study(
         methods={"m1": make_train("m1"), "m2": make_train("m2")},
         load_fn=lambda p: torch.load(p, weights_only=False),
-        seeds=[0, 1, 2],
+        seeds=explicit_seeds,
         data=_loader(),
         num_classes=3,
         test="welch",
@@ -77,6 +80,8 @@ def test_full_motion_trains_then_compares(tmp_path):
     assert all(len(v) == 3 for v in study.checkpoints.values())
     # full-motion run records the resolved working directory (not left as the input)
     assert study.working_dir == str((tmp_path / "run").resolve())
+    # seed coordinate must carry the real seed values, not arange(n_seeds)
+    assert result.data.coords["seed"].values.tolist() == explicit_seeds
 
 
 class _PerfectSegmenter(torch.nn.Module):

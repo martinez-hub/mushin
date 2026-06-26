@@ -6,6 +6,7 @@ checkpoint paths deterministically."""
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Union
@@ -50,7 +51,7 @@ def run_training_sweep(
                 f"train_fn for method={name!r} seed={seed} returned no checkpoint path"
             )
         dest = ckpt_dir / f"m{method_index}__seed{seed}.ckpt"
-        os.replace(src, dest)
+        shutil.move(str(src), str(dest))
         return {"checkpoint": str(dest)}
 
     sweep_cls = type(

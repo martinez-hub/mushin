@@ -88,7 +88,7 @@ class Study:
                 "no checkpoints to evaluate; provide `methods` or use "
                 "Study.from_checkpoints(...)"
             )
-        return evaluate_checkpoints(
+        result = evaluate_checkpoints(
             self.checkpoints,
             self._load_fn,
             self._data,
@@ -98,3 +98,6 @@ class Study:
             self._alpha,
             ignore_index=self._ignore_index,
         )
+        if self._seeds is not None:
+            result.data = result.data.assign_coords(seed=list(self._seeds))
+        return result
