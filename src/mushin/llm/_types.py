@@ -13,6 +13,8 @@ System = Callable[[Sequence[Any], int], Sequence[Any]]
 # A metric is a torchmetrics Metric, or a per-example scorer (output, reference)->float.
 Metric = Union[TorchMetric, Callable[[Any, Any], float]]
 
-# An example is a {"input": ..., "reference": ...} mapping, or an (input, reference)
-# tuple, or a bare input (when the metric needs no reference).
+# An example is a {"input": ..., "reference": ...} mapping, or a bare input (when
+# the metric needs no reference). To attach a reference, use the mapping form — a
+# bare tuple is treated as the input itself, not an (input, reference) pair, so a
+# tuple-valued prompt is passed through intact.
 Example = Any

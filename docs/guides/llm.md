@@ -225,6 +225,12 @@ the metric and re-run without re-calling the systems.
   depend solely on `input[i]` and the seed — not on which *other* inputs share
   the batch. This holds for the usual one-prompt-one-completion systems. If your
   system's per-item output depends on batch composition, don't use the cache.
+  This also covers **duplicate inputs**: a compliant system returns the *same*
+  output for the same `(input, seed)`, so the cache correctly serves one value
+  for every occurrence. A system that returns *different* completions for
+  repeated occurrences of one input under a single seed depends on
+  occurrence/position — the same batch-composition dependence — so don't cache it
+  (deduplicate the eval set, or run without a cache).
 
 ## See also
 

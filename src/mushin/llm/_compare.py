@@ -32,10 +32,12 @@ def _normalize_examples(data: Sequence[Any]) -> tuple[list[Any], list[Any]]:
         if isinstance(ex, dict) and "input" in ex:
             inputs.append(ex["input"])
             refs.append(ex.get("reference"))
-        elif isinstance(ex, tuple) and len(ex) == 2:
-            inputs.append(ex[0])
-            refs.append(ex[1])
         else:
+            # Anything else is a bare input (reference=None). We deliberately do
+            # NOT treat a 2-tuple as (input, reference): a tuple-valued input such
+            # as (system_prompt, user_prompt) would otherwise be silently split and
+            # only its first element sent to the system. To attach a reference, use
+            # the explicit {"input": ..., "reference": ...} mapping.
             inputs.append(ex)
             refs.append(None)
     return inputs, refs

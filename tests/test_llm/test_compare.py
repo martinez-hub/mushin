@@ -529,3 +529,15 @@ def test_dict_without_input_key_is_treated_as_bare_input():
     )
     assert inputs == [{"prompt": "hi"}, "x"]  # bare dict input vs example wrapper
     assert refs == [None, "y"]
+
+
+def test_bare_two_tuple_is_an_input_not_split_into_reference():
+    """A 2-tuple is a bare input kept intact (e.g. (system_prompt, user_prompt)),
+    NOT split into (input, reference) — references come only via the dict form."""
+    from mushin.llm._compare import _normalize_examples
+
+    inputs, refs = _normalize_examples(
+        [("system", "user"), {"input": "x", "reference": "y"}]
+    )
+    assert inputs == [("system", "user"), "x"]  # tuple passed through whole
+    assert refs == [None, "y"]
