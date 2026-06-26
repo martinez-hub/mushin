@@ -74,6 +74,10 @@ def test_compare_llms_demo_example_runs_on_synthetic():
     result = run(data)
     assert isinstance(result, BenchmarkResult)
     assert "score" in result.data.data_vars
+    # The demo must actually demonstrate significance: seed-varying systems give
+    # real (non-NaN) p-values, not a masked zero-variance result.
+    assert not result.comparisons["p_value"].isna().any()
+    assert bool(result.comparisons["significant"].iloc[0])
 
 
 def test_segmentation_demo_example_runs_on_synthetic():
