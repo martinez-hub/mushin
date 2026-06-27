@@ -133,8 +133,21 @@ def test_compare_rejects_unknown_task():
 
     from mushin.benchmark import compare
 
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not a registered task"):
         compare(methods={"a": []}, data=[], task="bogus_task", num_classes=2)
+
+
+def test_compare_task_object_requires_num_classes():
+    from mushin.benchmark import Task, compare
+
+    # requires_num_classes defaults to True; passing a Task object (not a string)
+    # without num_classes must still hit the validation branch.
+    task = Task(
+        battery=lambda num_classes, ignore_index=None: {},
+        predict_fn=lambda model, x: (x, x),
+    )
+    with pytest.raises(ValueError, match="num_classes"):
+        compare(methods={"a": []}, data=[], task=task)
 
 
 def test_compare_detection_does_not_demand_num_classes(monkeypatch):

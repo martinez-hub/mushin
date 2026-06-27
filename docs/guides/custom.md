@@ -5,10 +5,11 @@ shows how to extend mushin with custom metrics and how to adapt models that
 don't return plain tensors.
 
 !!! note "These are `compare` arguments"
-    `metrics`, `predict_fn`, and `prob_metrics` are arguments to **`compare`**.
-    `Study` always evaluates with the default battery for its `task`
-    (`classification` or `segmentation`) — to use a custom battery or predict
-    step with trained models, call `compare` directly.
+    `metrics`, `predict_fn`, and `prob_metrics` are per-call arguments to
+    **`compare`**; `Study` does not take them directly. To customize evaluation
+    under `Study`, pass a `Task` object (or a registered task name) as `task=` —
+    it is forwarded to `compare`, and its `battery`/`predict_fn`/`prob_metrics`
+    are honored. See [Define a reusable task](#define-a-reusable-task) below.
 
 ## Custom metrics dict
 
@@ -142,7 +143,7 @@ compare(methods=..., data=..., task=acc_only, num_classes=3)
 register_task("acc_only", acc_only)
 compare(methods=..., data=..., task="acc_only", num_classes=3)
 
-list_tasks()   # {"classification": "...", ..., "acc_only": "accuracy-only ..."}
+list_tasks()   # name-sorted: {"acc_only": "accuracy-only ...", "classification": "...", ...}
 ```
 
 You can also import a built-in battery and tweak it:

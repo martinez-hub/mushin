@@ -78,8 +78,9 @@ def register_task(name: str, task: Task, *, overwrite: bool = False) -> None:
 def get_task(task: str) -> Task:
     """Look up a registered task by name."""
     if task not in _TASKS:
-        raise NotImplementedError(
-            f"task={task!r} is not supported; choose from {sorted(_TASKS)}"
+        raise ValueError(
+            f"task={task!r} is not a registered task; choose from "
+            f"{sorted(_TASKS)} or register it with register_task(...)"
         )
     return _TASKS[task]
 

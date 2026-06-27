@@ -11,7 +11,7 @@ def test_known_tasks():
 
 
 def test_unknown_task_raises():
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not a registered task"):
         get_task_spec("bogus_task")
 
 
@@ -101,5 +101,5 @@ def test_register_validates_inputs():
 def test_get_task_unknown_raises():
     from mushin.benchmark._tasks import get_task
 
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not a registered task"):
         get_task("nope_not_a_task")
