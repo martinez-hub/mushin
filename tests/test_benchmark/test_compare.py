@@ -234,3 +234,55 @@ def test_compare_flags_significant_difference_end_to_end():
     # mean_diff is method_a - method_b; identify the better method sign-robustly.
     better = row["method_a"] if row["mean_diff"] > 0 else row["method_b"]
     assert better == "good"
+
+
+def test_compare_accepts_task_object():
+    from torchmetrics.classification import MulticlassAccuracy
+
+    from mushin.benchmark import compare
+    from mushin.benchmark._tasks import Task
+
+    data = _loader(seed=0)
+    good = [_Perfect(data) for _ in range(3)]
+    bad = [torch.nn.Linear(4, 3) for _ in range(3)]
+
+    task = Task(
+        battery=lambda num_classes, ignore_index=None: {
+            "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro")
+        },
+        predict_fn=lambda model, x: (model(x).argmax(dim=-1), model(x).softmax(dim=-1)),
+        description="acc-only classification",
+    )
+    result = compare(
+        methods={"good": good, "bad": bad},
+        data=data,
+        task=task,
+        num_classes=3,
+    )
+    assert isinstance(result, BenchmarkResult)
+    assert "accuracy" in result.data
+
+
+def test_compare_accepts_registered_task_name():
+    from torchmetrics.classification import MulticlassAccuracy
+
+    from mushin.benchmark import compare
+    from mushin.benchmark._tasks import Task, register_task
+
+    register_task(
+        "acc_only",
+        Task(
+            battery=lambda num_classes, ignore_index=None: {
+                "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro")
+            },
+            predict_fn=lambda model, x: (
+                model(x).argmax(dim=-1),
+                model(x).softmax(dim=-1),
+            ),
+        ),
+        overwrite=True,
+    )
+    data = _loader(seed=1)
+    models = [_Perfect(data) for _ in range(3)]
+    result = compare(methods={"m": models}, data=data, task="acc_only", num_classes=3)
+    assert "accuracy" in result.data
