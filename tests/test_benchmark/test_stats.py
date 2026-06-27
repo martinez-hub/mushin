@@ -69,15 +69,22 @@ def test_welch_test_runs():
 
 
 def test_compare_default_wilcoxon_survives_identical_methods():
-    # identical per-seed values must not crash the default wilcoxon test
+    # identical per-seed values must not crash. Both methods are constant across
+    # seeds (zero within-group variance), so the comparison is masked (NaN p, not
+    # significant): there is no sampling distribution to test, regardless of the
+    # means matching.
+    import math
+
     results = {
         "a": [{"accuracy": 1.0}, {"accuracy": 1.0}, {"accuracy": 1.0}],
         "b": [{"accuracy": 1.0}, {"accuracy": 1.0}, {"accuracy": 1.0}],
     }
     ds = to_dataset(results)
-    df = compare_methods(ds, test="wilcoxon", alpha=0.05)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = compare_methods(ds, test="wilcoxon", alpha=0.05)
     row = df[df["metric"] == "accuracy"].iloc[0]
-    assert row["p_value"] == 1.0
+    assert math.isnan(row["p_value"])
     assert not row["significant"]
 
 
@@ -121,3 +128,34 @@ def test_compare_methods_warns_when_test_underpowered():
     ds = to_dataset(results)
     with pytest.warns(UserWarning, match="cannot reach"):
         compare_methods(ds, test="wilcoxon", alpha=0.05)
+
+
+def test_compare_methods_masks_zero_variance_methods():
+    """Two methods each constant-across-seeds at different means have no sampling
+    distribution -> masked (NaN p/effect, not significant), not a catastrophic-
+    cancellation false positive. Matches the llm compare path."""
+    import math
+
+    import xarray as xr
+
+    ds = xr.Dataset(
+        {"acc": (("method", "seed"), np.array([[0.5, 0.5, 0.5], [0.8, 0.8, 0.8]]))},
+        coords={"method": ["a", "b"], "seed": [0, 1, 2]},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        row = compare_methods(ds, test="welch").iloc[0]
+    assert math.isnan(row["p_value"])
+    assert math.isnan(row["effect_size"])
+    assert not row["significant"]
+
+
+def test_compare_methods_warns_on_method_constant_in_every_metric():
+    import xarray as xr
+
+    ds = xr.Dataset(
+        {"acc": (("method", "seed"), np.array([[1.0, 1.0, 1.0], [0.6, 0.7, 0.65]]))},
+        coords={"method": ["det", "stoch"], "seed": [0, 1, 2]},
+    )
+    with pytest.warns(UserWarning, match="identical scores across all"):
+        compare_methods(ds, test="welch")

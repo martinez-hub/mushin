@@ -20,6 +20,8 @@ def _to_device(obj, device: torch.device):
         return obj.to(device)
     if isinstance(obj, dict):
         return {k: _to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, tuple) and hasattr(obj, "_fields"):  # namedtuple
+        return type(obj)(*(_to_device(v, device) for v in obj))
     if isinstance(obj, (list, tuple)):
         return type(obj)(_to_device(v, device) for v in obj)
     return obj

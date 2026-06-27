@@ -21,6 +21,13 @@ def to_dataset(results: dict[str, list[dict[str, float]]]) -> xr.Dataset:
     if not methods:
         raise ValueError("`results` is empty")
 
+    # All methods must have at least one seed; fail early if any are empty.
+    for m in methods:
+        if len(results[m]) == 0:
+            raise ValueError(
+                f"ragged `results`: method {m!r} has no seeds (empty list)"
+            )
+
     n_seeds = len(results[methods[0]])
     metric_names = list(results[methods[0]][0])
     metric_keys = set(metric_names)

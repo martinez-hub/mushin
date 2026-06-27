@@ -53,28 +53,41 @@ class MetricsCallback(Callback):
     def _get_filename(self, stage: str):
         return self.save_dir / f"{stage}_{self.filename}"
 
-    def _process_metrics(self, stored_metrics, metrics):
+    def _record(self, stored, metrics, epoch=None):
+        """Append one round of metrics, keeping every series aligned to the same
+        length (== number of rounds recorded) so `list index == epoch` holds. A
+        metric absent this round is padded with NaN; a newly-seen metric is
+        backfilled with NaN for prior rounds. When `epoch` is given the callback
+        owns the `epoch` series, so a user metric literally named `epoch` is
+        skipped (it must not collide with the epoch axis)."""
+        incoming = {}
+        if epoch is not None:
+            incoming["epoch"] = epoch
         for k, v in metrics.items():
+            if epoch is not None and k == "epoch":
+                continue  # reserved: the callback owns the epoch axis
             if isinstance(v, torch.Tensor):
-                if v.ndim == 0:
-                    v = v.item()
-                else:
-                    v = v.cpu().numpy()
-            stored_metrics[k].append(v)
+                v = v.item() if v.ndim == 0 else v.cpu().numpy()
+            incoming[k] = v
+
+        n_rounds = max((len(s) for s in stored.values()), default=0)
+        for k in set(stored) | set(incoming):
+            series = stored[k]
+            while len(series) < n_rounds:  # backfill a newly-seen key
+                series.append(float("nan"))
+            series.append(incoming.get(k, float("nan")))  # value, or NaN if absent
 
     def on_validation_end(self, trainer: Trainer, pl_module: LightningModule):
-        # Make sure PL is not doing it's sanity check run
+        # Make sure PL is not doing its sanity check run
         if trainer.sanity_checking:
             return self.val_metrics
-
-        metrics = trainer.callback_metrics
-        self.val_metrics["epoch"].append(pl_module.current_epoch)
-        self._process_metrics(self.val_metrics, metrics)
+        self._record(
+            self.val_metrics, trainer.callback_metrics, pl_module.current_epoch
+        )
         torch.save(self.val_metrics, self._get_filename("fit"))
         return self.val_metrics
 
     def on_test_end(self, trainer: Trainer, pl_module: LightningModule):
-        metrics = trainer.callback_metrics
-        self._process_metrics(self.test_metrics, metrics)
+        self._record(self.test_metrics, trainer.callback_metrics)
         torch.save(self.test_metrics, self._get_filename("test"))
         return self.test_metrics
