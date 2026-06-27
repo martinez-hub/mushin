@@ -115,6 +115,52 @@ is only consumed by metrics listed in `prob_metrics`.
       `.reset()` before each model evaluation. Do not share metric instances
       across calls.
 
+## Define a reusable task
+
+The per-call `metrics=` / `predict_fn=` overrides are the quick path. To reuse a
+configuration across many `compare(...)` calls, build a `Task` and (optionally)
+register it under a name:
+
+```python
+from torchmetrics.classification import MulticlassAccuracy
+
+from mushin import Task, compare, register_task, list_tasks
+
+acc_only = Task(
+    battery=lambda num_classes, ignore_index=None: {
+        "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro"),
+    },
+    predict_fn=lambda model, x: (model(x).argmax(-1), model(x).softmax(-1)),
+    prob_metrics=frozenset(),          # which metric names consume probabilities
+    description="accuracy-only classification",
+)
+
+# Use it inline (no global state):
+compare(methods=..., data=..., task=acc_only, num_classes=3)
+
+# Or name it once and reuse by string:
+register_task("acc_only", acc_only)
+compare(methods=..., data=..., task="acc_only", num_classes=3)
+
+list_tasks()   # {"classification": "...", ..., "acc_only": "accuracy-only ..."}
+```
+
+You can also import a built-in battery and tweak it:
+
+```python
+from mushin import classification_battery
+
+battery = classification_battery(num_classes=10)
+del battery["ece"]                     # drop a metric you do not want
+compare(methods=..., data=..., metrics=battery)
+```
+
+torchmetrics covers many more domains (regression, audio, image quality,
+retrieval, …). Any of them works through a `Task`: put the relevant
+`torchmetrics.Metric` instances in the `battery` and return the right tensors
+from `predict_fn`. Distribution-level metrics (FID, KID, Inception Score) are not
+supported by the streaming `compare` loop.
+
 ## See also
 
 - [Comparing methods](compare.md)
