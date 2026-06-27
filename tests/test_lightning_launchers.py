@@ -89,3 +89,12 @@ def test_validate_skips_when_not_external():
     _validate_external_world_size(
         num_nodes=1, num_processes=2, cluster_environment=_Env()
     )
+
+
+def test_global_rank_computation():
+    from mushin.lightning.launchers import _global_rank
+
+    # node 0: local 0,1 -> global 0,1 ; node 1 with 2 GPUs/node: local 0,1 -> global 2,3
+    assert _global_rank(node_rank=0, num_processes=2, local_rank=1) == 1
+    assert _global_rank(node_rank=1, num_processes=2, local_rank=0) == 2
+    assert _global_rank(node_rank=1, num_processes=2, local_rank=1) == 3
