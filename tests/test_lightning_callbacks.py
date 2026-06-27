@@ -43,11 +43,12 @@ def test_metrics_callback(testing):
         assert not isinstance(v, torch.Tensor)
 
 
-def _make_fake_trainer(callback_metrics, sanity_checking=False):
+def _make_fake_trainer(callback_metrics, sanity_checking=False, is_global_zero=True):
     """Return a minimal fake Trainer-like object for unit testing MetricsCallback."""
     trainer = MagicMock()
     trainer.sanity_checking = sanity_checking
     trainer.callback_metrics = callback_metrics
+    trainer.is_global_zero = is_global_zero
     return trainer
 
 
@@ -119,3 +120,41 @@ def test_bug2_user_epoch_key_does_not_double_append():
     assert all(n == 1 for n in lengths.values()), (
         f"Series lengths are not equal after user 'epoch' key: {lengths}"
     )
+
+
+def test_metrics_callback_saves_only_on_global_zero(tmp_path):
+    import torch
+
+    from mushin.lightning.callbacks import MetricsCallback
+
+    cb = MetricsCallback(save_dir=tmp_path)
+    trainer = _make_fake_trainer(
+        callback_metrics={"val_acc": torch.tensor(0.5)}, is_global_zero=False
+    )
+    module = _make_fake_module(current_epoch=0)
+
+    cb.on_validation_end(trainer, module)
+    # non-zero rank records in memory but writes NO file (avoids N ranks clobbering)
+    assert not (tmp_path / "fit_metrics.pt").exists()
+    assert cb.val_metrics["val_acc"] == [0.5]
+
+    trainer0 = _make_fake_trainer(
+        callback_metrics={"val_acc": torch.tensor(0.6)}, is_global_zero=True
+    )
+    cb.on_validation_end(trainer0, _make_fake_module(current_epoch=1))
+    assert (tmp_path / "fit_metrics.pt").exists()  # rank 0 writes
+
+
+def test_metrics_callback_test_end_saves_only_on_global_zero(tmp_path):
+    import torch
+
+    from mushin.lightning.callbacks import MetricsCallback
+
+    cb = MetricsCallback(save_dir=tmp_path)
+    cb.on_test_end(
+        _make_fake_trainer(
+            callback_metrics={"acc": torch.tensor(1.0)}, is_global_zero=False
+        ),
+        _make_fake_module(current_epoch=0),
+    )
+    assert not (tmp_path / "test_metrics.pt").exists()
