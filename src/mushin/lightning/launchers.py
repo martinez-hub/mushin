@@ -38,6 +38,29 @@ def _setup_environment() -> None:
         distributed.destroy_process_group()
 
 
+def _validate_external_world_size(
+    num_nodes, num_processes, cluster_environment
+) -> None:
+    """Under an external launcher (SLURM/torchrun), fail fast if the number of
+    launched processes doesn't match num_nodes x devices-per-node — the #1
+    multi-node footgun (a mismatch otherwise hangs at rendezvous, OOMs, or
+    silently runs single-GPU). No-op for the single-node subprocess path."""
+    if (
+        cluster_environment is None
+        or not cluster_environment.creates_processes_externally
+    ):
+        return
+    expected = int(num_nodes) * int(num_processes)
+    actual = int(cluster_environment.world_size())
+    if actual != expected:
+        raise RuntimeError(
+            f"DDP world size mismatch: the launcher started {actual} process(es), "
+            f"but the Trainer expects num_nodes={num_nodes} x devices={num_processes} "
+            f"= {expected}. For DDP, set the launcher's tasks-per-node equal to "
+            f"GPUs-per-node (== Trainer `devices`). See the multi-node guide."
+        )
+
+
 def _teardown() -> None:
     # Remove only the env vars mushin set itself, so consecutive multirun jobs
     # start fresh without stomping scheduler-owned vars under SLURM/torchrun.
@@ -184,6 +207,9 @@ if PL_VERSION >= Version(1, 6, 0):
         def setup_environment(self) -> None:
             _setup_environment()
             super().setup_environment()
+            _validate_external_world_size(
+                self.num_nodes, self.num_processes, self.cluster_environment
+            )
 
         def _configure_launcher(self) -> None:
             if self.cluster_environment is None:  # pragma: no cover
