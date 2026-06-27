@@ -3,16 +3,6 @@ import pytest
 from mushin.benchmark._tasks import get_task_spec
 
 
-@pytest.fixture(autouse=True)
-def _restore_task_registry():
-    from mushin.benchmark._tasks import _TASKS
-
-    snapshot = dict(_TASKS)
-    yield
-    _TASKS.clear()
-    _TASKS.update(snapshot)
-
-
 def test_known_tasks():
     assert get_task_spec("classification").prob_metrics == frozenset({"auroc", "ece"})
     assert get_task_spec("segmentation").prob_metrics == frozenset()

@@ -8,8 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from mushin.benchmark import BenchmarkResult
-from mushin.benchmark._tasks import Task
+from mushin.benchmark import BenchmarkResult, Task
 
 from ._load import evaluate_checkpoints
 from ._sweep import TrainFn, run_training_sweep

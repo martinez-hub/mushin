@@ -25,3 +25,15 @@ def cleandir(tmp_path):
     yield tmp_path  # yields control to the test to be run
     os.chdir(old_dir)
     logging.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def _restore_task_registry():
+    """Snapshot and restore the global task registry around every test so that
+    tests which call register_task() don't leak entries into other tests."""
+    from mushin.benchmark._tasks import _TASKS
+
+    snapshot = dict(_TASKS)
+    yield
+    _TASKS.clear()
+    _TASKS.update(snapshot)
