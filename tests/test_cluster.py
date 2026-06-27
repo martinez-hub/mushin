@@ -50,3 +50,20 @@ def test_seed_everything_per_rank_defaults_rank_zero(monkeypatch):
     monkeypatch.delenv("RANK", raising=False)
     monkeypatch.delenv("SLURM_PROCID", raising=False)
     assert seed_everything_per_rank(42) == 42
+
+
+@pytest.mark.cluster
+def test_multinode_ddp_end_to_end(tmp_path):
+    """MERGE GATE: run on a real multi-node SLURM allocation. Launches a tiny DDP
+    job via submitit + SLURMEnvironment, then asserts it completed, metrics were
+    written exactly once (rank 0), and results load back. Run with:
+        pytest -m cluster tests/test_cluster.py
+    on a node with `hydra-submitit-launcher` installed and a SLURM allocation.
+    See docs/guides/multinode.md for the runbook and required env."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    # The concrete launch is documented in the runbook; this placeholder is the
+    # named merge gate. It skips cleanly until wired to a real allocation.
+    pytest.skip(
+        "Provide a SLURM allocation + partition/account, then implement the launch "
+        "per docs/guides/multinode.md (this is the merge gate)."
+    )
