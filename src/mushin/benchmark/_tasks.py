@@ -19,29 +19,43 @@ from ._predict import (
 
 
 @dataclass(frozen=True)
-class TaskSpec:
+class Task:
+    """A reusable evaluation task: a metric ``battery`` factory, a ``predict_fn``
+    that extracts ``(predictions, probabilities)`` from a model, the subset of
+    metric names that consume probabilities, and whether the battery needs
+    ``num_classes``. ``description`` is shown by :func:`list_tasks`."""
+
     battery: Callable[..., dict[str, Metric]]
     predict_fn: PredictFn
-    prob_metrics: frozenset[str]
+    prob_metrics: frozenset[str] = frozenset()
     requires_num_classes: bool = True
+    description: str = ""
 
 
-_TASKS: dict[str, TaskSpec] = {
-    "classification": TaskSpec(
+# Backward-compat alias (deprecated; removed in a future release).
+TaskSpec = Task
+
+
+_TASKS: dict[str, Task] = {
+    "classification": Task(
         classification_battery,
         default_classification_predict_fn,
         frozenset({"auroc", "ece"}),
+        description="Multiclass classification (accuracy, f1, precision, "
+        "recall, auroc, ece).",
     ),
-    "segmentation": TaskSpec(
+    "segmentation": Task(
         segmentation_battery,
         default_segmentation_predict_fn,
         frozenset(),
+        description="Semantic segmentation (miou, dice, pixel_acc, precision, recall).",
     ),
-    "detection": TaskSpec(
+    "detection": Task(
         detection_battery,
         default_detection_predict_fn,
         frozenset(),
         requires_num_classes=False,
+        description="Object detection (mAP/mAR family + IoU variants).",
     ),
 }
 
