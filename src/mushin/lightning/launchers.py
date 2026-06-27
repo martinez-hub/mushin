@@ -21,6 +21,16 @@ from .._compatibility import PL_VERSION, Version
 
 R = TypeVar("R")
 
+# Env vars mushin itself set (single-node subprocess launcher). Under an external
+# launcher (SLURM/torchrun) these are scheduler-owned and mushin sets none, so
+# teardown leaves them alone.
+_MUSHIN_SET_ENV: set[str] = set()
+
+
+def _set_env(name: str, value: str) -> None:
+    os.environ[name] = value
+    _MUSHIN_SET_ENV.add(name)
+
 
 def _setup_environment() -> None:
     if distributed.is_initialized():
@@ -28,18 +38,13 @@ def _setup_environment() -> None:
 
 
 def _teardown() -> None:
-    # Remove PL environments so next multirun starts fresh
-    envs = (
-        "LOCAL_RANK",
-        "NODE_RANK",
-        "WORLD_SIZE",
-        "MASTER_ADDR",
-        "MASTER_PORT",
-        "PL_GLOBAL_SEED",
-    )
-
-    for name in envs:
+    # Remove only the env vars mushin set itself, so consecutive multirun jobs
+    # start fresh without stomping scheduler-owned vars under SLURM/torchrun.
+    for name in list(_MUSHIN_SET_ENV):
         os.environ.pop(name, None)
+    _MUSHIN_SET_ENV.clear()
+    # PL_GLOBAL_SEED is Lightning's, not scheduler-owned; safe to reset each job.
+    os.environ.pop("PL_GLOBAL_SEED", None)
 
 
 def _subprocess_call(local_rank: int, testing: bool, predicting: bool) -> None:
@@ -241,14 +246,12 @@ if PL_VERSION >= Version(1, 6, 0):
             # bookkeeping of spawned processes
             self._check_can_spawn_children()
 
-            # DDP Environment variables
-            os.environ["MASTER_ADDR"] = self.cluster_environment.main_address
-            os.environ["MASTER_PORT"] = str(self.cluster_environment.main_port)
-
-            # allow the user to pass the node rank
-            os.environ["NODE_RANK"] = str(self.cluster_environment.node_rank())
-            os.environ["LOCAL_RANK"] = str(self.cluster_environment.local_rank())
-            os.environ["WORLD_SIZE"] = f"{self.num_processes * self.num_nodes}"
+            # DDP Environment variables (tracked so _teardown clears only these)
+            _set_env("MASTER_ADDR", self.cluster_environment.main_address)
+            _set_env("MASTER_PORT", str(self.cluster_environment.main_port))
+            _set_env("NODE_RANK", str(self.cluster_environment.node_rank()))
+            _set_env("LOCAL_RANK", str(self.cluster_environment.local_rank()))
+            _set_env("WORLD_SIZE", f"{self.num_processes * self.num_nodes}")
 
             for local_rank in range(1, self.num_processes):
                 _subprocess_call(local_rank, testing, predicting)
