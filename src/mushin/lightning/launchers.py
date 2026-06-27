@@ -212,10 +212,14 @@ if PL_VERSION >= Version(1, 6, 0):
 
         def setup_environment(self) -> None:
             _setup_environment()
-            super().setup_environment()
+            # Validate BEFORE super().setup_environment(): that is where Lightning
+            # initializes the process group / rendezvous, which is exactly what
+            # hangs when the launcher started the wrong number of ranks. Failing
+            # fast here turns a hang into a legible error.
             _validate_external_world_size(
                 self.num_nodes, self.num_processes, self.cluster_environment
             )
+            super().setup_environment()
 
         def _configure_launcher(self) -> None:
             if self.cluster_environment is None:  # pragma: no cover

@@ -31,6 +31,10 @@ def test_submitit_slurm_config_rejects_bad_inputs():
         submitit_slurm_config(nodes=0, gpus_per_node=4)
     with pytest.raises(ValueError):
         submitit_slurm_config(nodes=1, gpus_per_node=0)
+    # tasks_per_node is derived from gpus_per_node and must not be overridable
+    # via **extra (that desync is exactly the footgun this helper prevents)
+    with pytest.raises(ValueError, match="tasks_per_node"):
+        submitit_slurm_config(nodes=1, gpus_per_node=4, tasks_per_node=1)
 
 
 def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch):
