@@ -71,7 +71,14 @@ def _teardown() -> None:
     os.environ.pop("PL_GLOBAL_SEED", None)
 
 
-def _subprocess_call(local_rank: int, testing: bool, predicting: bool) -> None:
+def _global_rank(node_rank: int, num_processes: int, local_rank: int) -> int:
+    """Global rank = node_rank * (GPUs per node) + local_rank."""
+    return int(node_rank) * int(num_processes) + int(local_rank)
+
+
+def _subprocess_call(
+    local_rank: int, global_rank: int, testing: bool, predicting: bool
+) -> None:
     env_copy = os.environ.copy()
     env_copy["LOCAL_RANK"] = f"{local_rank}"
     # CWD is the Hydra working directory
@@ -116,7 +123,7 @@ def _subprocess_call(local_rank: int, testing: bool, predicting: bool) -> None:
 
     command += [
         f"hydra.run.dir={os_cwd}",
-        f"hydra.output_subdir=.pl_hydra_rank_{local_rank}",
+        f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
         f"hydra.job.name={hydra_cfg.job.name}",
     ]
     subprocess.Popen(command, env=env_copy, cwd=cwd)
@@ -280,8 +287,14 @@ if PL_VERSION >= Version(1, 6, 0):
             _set_env("LOCAL_RANK", str(self.cluster_environment.local_rank()))
             _set_env("WORLD_SIZE", f"{self.num_processes * self.num_nodes}")
 
+            node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
-                _subprocess_call(local_rank, testing, predicting)
+                _subprocess_call(
+                    local_rank,
+                    _global_rank(node_rank, self.num_processes, local_rank),
+                    testing,
+                    predicting,
+                )
 
                 # starting all processes at once can cause issues
                 # with dataloaders delay between 1-10 seconds
@@ -394,12 +407,18 @@ else:  # pragma: no cover
             os.environ["WORLD_SIZE"] = f"{self.num_processes * self.num_nodes}"
 
             self.interactive_ddp_procs = []
+            node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
                 testing = self.lightning_module.trainer.state.fn == TrainerFn.TESTING
                 predicting = (
                     self.lightning_module.trainer.state.fn == TrainerFn.PREDICTING
                 )
-                _subprocess_call(local_rank, testing=testing, predicting=predicting)
+                _subprocess_call(
+                    local_rank,
+                    _global_rank(node_rank, self.num_processes, local_rank),
+                    testing=testing,
+                    predicting=predicting,
+                )
 
                 # starting all processes at once can cause issues
                 # with dataloaders delay between 1-10 seconds
