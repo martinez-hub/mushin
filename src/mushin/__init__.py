@@ -20,7 +20,9 @@ from .workflows import MultiRunMetricsWorkflow, hydra_list, multirun
 # pytorch_lightning, which alone accounts for ~1.1s (~65%) of a cold `import
 # mushin` and is unused by the sweep -> xarray core. `_tuning`/`_study` import
 # pytorch_lightning only inside functions, so they stay eager and cheap.
-_LAZY_LIGHTNING = frozenset({"HydraDDP", "MetricsCallback"})
+_LAZY_LIGHTNING = frozenset(
+    {"HydraDDP", "MetricsCallback", "submitit_slurm_config", "seed_everything_per_rank"}
+)
 
 # Benchmark exports are loaded on first attribute access (see __getattr__), so a
 # bare `import mushin` does not pull torchmetrics-heavy battery code.
@@ -66,7 +68,12 @@ if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
         retrieval_battery,
         segmentation_battery,
     )
-    from .lightning import HydraDDP, MetricsCallback  # noqa: F401
+    from .lightning import (  # noqa: F401
+        HydraDDP,
+        MetricsCallback,
+        seed_everything_per_rank,
+        submitit_slurm_config,
+    )
 
     # Not in __all__ (deprecated top-level names); kept for type-checkers only.
     from .workflows import BaseWorkflow, RobustnessCurve  # noqa: F401
@@ -117,6 +124,8 @@ __all__ = [
     "MultiRunMetricsWorkflow",
     "HydraDDP",
     "pin_gpu_round_robin",
+    "submitit_slurm_config",
+    "seed_everything_per_rank",
     "multirun",
     "hydra_list",
     "Study",
