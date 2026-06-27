@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mushin.benchmark import BenchmarkResult
+from mushin.benchmark._tasks import Task
 
 from ._load import evaluate_checkpoints
 from ._sweep import TrainFn, run_training_sweep
@@ -38,7 +39,7 @@ class Study:
         data,
         *,
         num_classes: int,
-        task: str = "classification",
+        task: str | Task = "classification",
         test: str = "wilcoxon",
         alpha: float = 0.05,
         ignore_index: int | None = None,
@@ -58,7 +59,7 @@ class Study:
         data,
         *,
         num_classes: int,
-        task: str = "classification",
+        task: str | Task = "classification",
         test: str = "wilcoxon",
         alpha: float = 0.05,
         ignore_index: int | None = None,
