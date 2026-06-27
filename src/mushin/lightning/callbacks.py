@@ -84,10 +84,14 @@ class MetricsCallback(Callback):
         self._record(
             self.val_metrics, trainer.callback_metrics, pl_module.current_epoch
         )
-        torch.save(self.val_metrics, self._get_filename("fit"))
+        # Under (multi-node) DDP every rank fires this callback; only rank 0 writes
+        # so N ranks don't clobber the same file on a shared filesystem.
+        if trainer.is_global_zero:
+            torch.save(self.val_metrics, self._get_filename("fit"))
         return self.val_metrics
 
     def on_test_end(self, trainer: Trainer, pl_module: LightningModule):
         self._record(self.test_metrics, trainer.callback_metrics)
-        torch.save(self.test_metrics, self._get_filename("test"))
+        if trainer.is_global_zero:
+            torch.save(self.test_metrics, self._get_filename("test"))
         return self.test_metrics

@@ -4,7 +4,12 @@
 
 from . import llm
 from ._utils import load_experiment, load_from_checkpoint
-from .lightning import HydraDDP, MetricsCallback
+from .lightning import (
+    HydraDDP,
+    MetricsCallback,
+    seed_everything_per_rank,
+    submitit_slurm_config,
+)
 from .study import Study  # keep last: avoids a circular import via .study -> _sweep
 from .workflows import (
     BaseWorkflow,
@@ -21,6 +26,8 @@ __all__ = [
     "MetricsCallback",
     "MultiRunMetricsWorkflow",
     "HydraDDP",
+    "submitit_slurm_config",
+    "seed_everything_per_rank",
     "RobustnessCurve",
     "BaseWorkflow",
     "multirun",

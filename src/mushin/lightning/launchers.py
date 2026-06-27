@@ -21,28 +21,63 @@ from .._compatibility import PL_VERSION, Version
 
 R = TypeVar("R")
 
+# Env vars mushin itself set (single-node subprocess launcher). Under an external
+# launcher (SLURM/torchrun) these are scheduler-owned and mushin sets none, so
+# teardown leaves them alone.
+_MUSHIN_SET_ENV: set[str] = set()
+
+
+def _set_env(name: str, value: str) -> None:
+    os.environ[name] = value
+    _MUSHIN_SET_ENV.add(name)
+
 
 def _setup_environment() -> None:
     if distributed.is_initialized():
         distributed.destroy_process_group()
 
 
+def _validate_external_world_size(
+    num_nodes, num_processes, cluster_environment
+) -> None:
+    """Under an external launcher (SLURM/torchrun), fail fast if the number of
+    launched processes doesn't match num_nodes x devices-per-node — the #1
+    multi-node footgun (a mismatch otherwise hangs at rendezvous, OOMs, or
+    silently runs single-GPU). No-op for the single-node subprocess path."""
+    if (
+        cluster_environment is None
+        or not cluster_environment.creates_processes_externally
+    ):
+        return
+    expected = int(num_nodes) * int(num_processes)
+    actual = int(cluster_environment.world_size())
+    if actual != expected:
+        raise RuntimeError(
+            f"DDP world size mismatch: the launcher started {actual} process(es), "
+            f"but the Trainer expects num_nodes={num_nodes} x devices={num_processes} "
+            f"= {expected}. For DDP, set the launcher's tasks-per-node equal to "
+            f"GPUs-per-node (== Trainer `devices`). See the multi-node guide."
+        )
+
+
 def _teardown() -> None:
-    # Remove PL environments so next multirun starts fresh
-    envs = (
-        "LOCAL_RANK",
-        "NODE_RANK",
-        "WORLD_SIZE",
-        "MASTER_ADDR",
-        "MASTER_PORT",
-        "PL_GLOBAL_SEED",
-    )
-
-    for name in envs:
+    # Remove only the env vars mushin set itself, so consecutive multirun jobs
+    # start fresh without stomping scheduler-owned vars under SLURM/torchrun.
+    for name in list(_MUSHIN_SET_ENV):
         os.environ.pop(name, None)
+    _MUSHIN_SET_ENV.clear()
+    # PL_GLOBAL_SEED is Lightning's, not scheduler-owned; safe to reset each job.
+    os.environ.pop("PL_GLOBAL_SEED", None)
 
 
-def _subprocess_call(local_rank: int, testing: bool, predicting: bool) -> None:
+def _global_rank(node_rank: int, num_processes: int, local_rank: int) -> int:
+    """Global rank = node_rank * (GPUs per node) + local_rank."""
+    return int(node_rank) * int(num_processes) + int(local_rank)
+
+
+def _subprocess_call(
+    local_rank: int, global_rank: int, testing: bool, predicting: bool
+) -> None:
     env_copy = os.environ.copy()
     env_copy["LOCAL_RANK"] = f"{local_rank}"
     # CWD is the Hydra working directory
@@ -87,7 +122,7 @@ def _subprocess_call(local_rank: int, testing: bool, predicting: bool) -> None:
 
     command += [
         f"hydra.run.dir={os_cwd}",
-        f"hydra.output_subdir=.pl_hydra_rank_{local_rank}",
+        f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
         f"hydra.job.name={hydra_cfg.job.name}",
     ]
     subprocess.Popen(command, env=env_copy, cwd=cwd)
@@ -177,6 +212,13 @@ if PL_VERSION >= Version(1, 6, 0):
 
         def setup_environment(self) -> None:
             _setup_environment()
+            # Validate BEFORE super().setup_environment(): that is where Lightning
+            # initializes the process group / rendezvous, which is exactly what
+            # hangs when the launcher started the wrong number of ranks. Failing
+            # fast here turns a hang into a legible error.
+            _validate_external_world_size(
+                self.num_nodes, self.num_processes, self.cluster_environment
+            )
             super().setup_environment()
 
         def _configure_launcher(self) -> None:
@@ -241,17 +283,21 @@ if PL_VERSION >= Version(1, 6, 0):
             # bookkeeping of spawned processes
             self._check_can_spawn_children()
 
-            # DDP Environment variables
-            os.environ["MASTER_ADDR"] = self.cluster_environment.main_address
-            os.environ["MASTER_PORT"] = str(self.cluster_environment.main_port)
+            # DDP Environment variables (tracked so _teardown clears only these)
+            _set_env("MASTER_ADDR", self.cluster_environment.main_address)
+            _set_env("MASTER_PORT", str(self.cluster_environment.main_port))
+            _set_env("NODE_RANK", str(self.cluster_environment.node_rank()))
+            _set_env("LOCAL_RANK", str(self.cluster_environment.local_rank()))
+            _set_env("WORLD_SIZE", f"{self.num_processes * self.num_nodes}")
 
-            # allow the user to pass the node rank
-            os.environ["NODE_RANK"] = str(self.cluster_environment.node_rank())
-            os.environ["LOCAL_RANK"] = str(self.cluster_environment.local_rank())
-            os.environ["WORLD_SIZE"] = f"{self.num_processes * self.num_nodes}"
-
+            node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
-                _subprocess_call(local_rank, testing, predicting)
+                _subprocess_call(
+                    local_rank,
+                    _global_rank(node_rank, self.num_processes, local_rank),
+                    testing,
+                    predicting,
+                )
 
                 # starting all processes at once can cause issues
                 # with dataloaders delay between 1-10 seconds
@@ -364,12 +410,18 @@ else:  # pragma: no cover
             os.environ["WORLD_SIZE"] = f"{self.num_processes * self.num_nodes}"
 
             self.interactive_ddp_procs = []
+            node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
                 testing = self.lightning_module.trainer.state.fn == TrainerFn.TESTING
                 predicting = (
                     self.lightning_module.trainer.state.fn == TrainerFn.PREDICTING
                 )
-                _subprocess_call(local_rank, testing=testing, predicting=predicting)
+                _subprocess_call(
+                    local_rank,
+                    _global_rank(node_rank, self.num_processes, local_rank),
+                    testing=testing,
+                    predicting=predicting,
+                )
 
                 # starting all processes at once can cause issues
                 # with dataloaders delay between 1-10 seconds
