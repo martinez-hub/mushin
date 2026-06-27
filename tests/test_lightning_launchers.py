@@ -42,3 +42,50 @@ def test_teardown_is_idempotent_when_nothing_set(monkeypatch):
 
 def test_setup_environment_noop_when_distributed_uninitialized():
     _setup_environment()  # process group not initialized -> no-op, must not raise
+
+
+def test_validate_external_world_size_mismatch_raises():
+    import pytest
+
+    from mushin.lightning.launchers import _validate_external_world_size
+
+    class _Env:
+        creates_processes_externally = True
+
+        def world_size(self):
+            return 4  # launcher started 4 (e.g. ntasks_per_node=2 over 2 nodes)
+
+    # Trainer expects num_nodes=2 x devices=4 = 8
+    with pytest.raises(RuntimeError, match="world size"):
+        _validate_external_world_size(
+            num_nodes=2, num_processes=4, cluster_environment=_Env()
+        )
+
+
+def test_validate_external_world_size_match_ok():
+    from mushin.lightning.launchers import _validate_external_world_size
+
+    class _Env:
+        creates_processes_externally = True
+
+        def world_size(self):
+            return 8
+
+    # 2 nodes x 4 devices == 8 -> no error
+    _validate_external_world_size(
+        num_nodes=2, num_processes=4, cluster_environment=_Env()
+    )
+
+
+def test_validate_skips_when_not_external():
+    from mushin.lightning.launchers import _validate_external_world_size
+
+    class _Env:
+        creates_processes_externally = False  # single-node subprocess path
+
+        def world_size(self):
+            return 999  # mismatched, but must be ignored
+
+    _validate_external_world_size(
+        num_nodes=1, num_processes=2, cluster_environment=_Env()
+    )
