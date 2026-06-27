@@ -92,6 +92,9 @@ def evaluate(
             y = _to_device(y, device)
             preds, probs = predict_fn(model, x)
             for name, metric in battery.items():
+                # Extension seam: a future per-Task ``update_fn`` (Spec 2) will
+                # own this call to support non-(preds, target) signatures such as
+                # retrieval's ``indexes``. Keep the dispatch here, in one place.
                 metric.update(probs if name in prob_metrics else preds, y)
 
     out: dict[str, float] = {}
