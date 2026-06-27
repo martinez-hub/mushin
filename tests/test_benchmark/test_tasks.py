@@ -3,6 +3,16 @@ import pytest
 from mushin.benchmark._tasks import get_task_spec
 
 
+@pytest.fixture(autouse=True)
+def _restore_task_registry():
+    from mushin.benchmark._tasks import _TASKS
+
+    snapshot = dict(_TASKS)
+    yield
+    _TASKS.clear()
+    _TASKS.update(snapshot)
+
+
 def test_known_tasks():
     assert get_task_spec("classification").prob_metrics == frozenset({"auroc", "ece"})
     assert get_task_spec("segmentation").prob_metrics == frozenset()
@@ -53,3 +63,53 @@ def test_builtins_have_descriptions():
 
     for name, spec in _TASKS.items():
         assert spec.description, f"{name} should have a non-empty description"
+
+
+def _toy_task():
+    from mushin.benchmark._tasks import Task
+
+    return Task(
+        battery=lambda num_classes, ignore_index=None: {},
+        predict_fn=lambda model, x: (x, x),
+        description="toy",
+    )
+
+
+def test_list_tasks_returns_builtins_with_descriptions():
+    from mushin.benchmark._tasks import list_tasks
+
+    tasks = list_tasks()
+    assert set(tasks) >= {"classification", "segmentation", "detection"}
+    assert all(desc for desc in tasks.values())
+
+
+def test_register_and_get_task():
+    from mushin.benchmark._tasks import get_task, register_task
+
+    register_task("toy_reg", _toy_task())
+    assert get_task("toy_reg").description == "toy"
+
+
+def test_register_duplicate_requires_overwrite():
+    from mushin.benchmark._tasks import register_task
+
+    register_task("toy_dup", _toy_task())
+    with pytest.raises(ValueError, match="already registered"):
+        register_task("toy_dup", _toy_task())
+    register_task("toy_dup", _toy_task(), overwrite=True)
+
+
+def test_register_validates_inputs():
+    from mushin.benchmark._tasks import register_task
+
+    with pytest.raises(ValueError, match="non-empty"):
+        register_task("", _toy_task())
+    with pytest.raises(TypeError, match="Task"):
+        register_task("bad", object())
+
+
+def test_get_task_unknown_raises():
+    from mushin.benchmark._tasks import get_task
+
+    with pytest.raises(NotImplementedError, match="not supported"):
+        get_task("nope_not_a_task")

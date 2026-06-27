@@ -60,9 +60,34 @@ _TASKS: dict[str, Task] = {
 }
 
 
-def get_task_spec(task: str) -> TaskSpec:
+def register_task(name: str, task: Task, *, overwrite: bool = False) -> None:
+    """Register ``task`` under ``name`` so ``compare(task=name)`` and
+    ``Study(task=name)`` can look it up. Set ``overwrite=True`` to replace an
+    existing entry."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("`name` must be a non-empty string")
+    if not isinstance(task, Task):
+        raise TypeError(f"`task` must be a Task, got {type(task).__name__}")
+    if name in _TASKS and not overwrite:
+        raise ValueError(
+            f"task {name!r} is already registered; pass overwrite=True to replace it"
+        )
+    _TASKS[name] = task
+
+
+def get_task(task: str) -> Task:
+    """Look up a registered task by name."""
     if task not in _TASKS:
         raise NotImplementedError(
             f"task={task!r} is not supported; choose from {sorted(_TASKS)}"
         )
     return _TASKS[task]
+
+
+def list_tasks() -> dict[str, str]:
+    """Return ``{name: description}`` for every registered task, name-sorted."""
+    return {name: _TASKS[name].description for name in sorted(_TASKS)}
+
+
+# Backward-compat alias (deprecated; use get_task).
+get_task_spec = get_task
