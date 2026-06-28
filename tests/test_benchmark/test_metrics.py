@@ -116,3 +116,31 @@ def test_detection_battery_clear_error_without_extra(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match="mushin-py\\[detection\\]"):
         _metrics.detection_battery()
+
+
+def test_regression_battery_end_to_end():
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark import BenchmarkResult, compare
+
+    class _AffineModel(torch.nn.Module):
+        def __init__(self, w, b):
+            super().__init__()
+            self.w, self.b = w, b
+
+        def forward(self, x):
+            return x[:, 0] * self.w + self.b  # shape (N,)
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(32, 1, generator=g)
+    y = x[:, 0] * 2.0 + 1.0  # true relation
+    loader = DataLoader(TensorDataset(x, y), batch_size=16)
+
+    good = [_AffineModel(2.0, 1.0) for _ in range(3)]  # exact
+    bad = [_AffineModel(0.0, 0.0) for _ in range(3)]  # constant 0
+
+    result = compare(methods={"good": good, "bad": bad}, data=loader, task="regression")
+    assert isinstance(result, BenchmarkResult)
+    for name in ["mse", "mae", "rmse", "r2", "pearson", "spearman"]:
+        assert name in result.data

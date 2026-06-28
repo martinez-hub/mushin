@@ -5,6 +5,7 @@
 from ._metrics import (
     classification_battery,
     detection_battery,
+    regression_battery,
     segmentation_battery,
 )
 from ._result import BenchmarkResult
@@ -21,4 +22,5 @@ __all__ = [
     "classification_battery",
     "segmentation_battery",
     "detection_battery",
+    "regression_battery",
 ]

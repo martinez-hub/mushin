@@ -45,3 +45,11 @@ def default_detection_predict_fn(model: torch.nn.Module, x):
     Override ``predict_fn`` for non-torchvision detectors (DETR, YOLO, ...).
     """
     return model(x), None
+
+
+def default_passthrough_predict_fn(model: torch.nn.Module, x):
+    """Return ``(model(x), None)`` — the model's raw output is the prediction and
+    there are no probabilities. Used by tasks with no probability metrics
+    (regression, image quality, audio, retrieval), where metrics consume the raw
+    output directly against the target."""
+    return model(x), None

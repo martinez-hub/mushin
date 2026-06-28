@@ -18,6 +18,13 @@ from torchmetrics.classification import (
     MulticlassPrecision,
     MulticlassRecall,
 )
+from torchmetrics.regression import (
+    MeanAbsoluteError,
+    MeanSquaredError,
+    PearsonCorrCoef,
+    R2Score,
+    SpearmanCorrCoef,
+)
 
 
 def classification_battery(
@@ -63,6 +70,22 @@ def segmentation_battery(
         "recall": MulticlassRecall(
             num_classes, average="macro", ignore_index=ignore_index
         ),
+    }
+
+
+def regression_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Scalar-regression battery. ``num_classes``/``ignore_index`` are accepted for
+    the uniform task interface but unused. Predictions and targets are continuous
+    tensors of matching shape (e.g. ``(N,)``)."""
+    return {
+        "mse": MeanSquaredError(),
+        "mae": MeanAbsoluteError(),
+        "rmse": MeanSquaredError(squared=False),
+        "r2": R2Score(),
+        "pearson": PearsonCorrCoef(),
+        "spearman": SpearmanCorrCoef(),
     }
 
 

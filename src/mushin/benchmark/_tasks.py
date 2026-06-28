@@ -10,10 +10,16 @@ from dataclasses import dataclass
 from torchmetrics import Metric
 
 from ._inference import PredictFn, UpdateFn
-from ._metrics import classification_battery, detection_battery, segmentation_battery
+from ._metrics import (
+    classification_battery,
+    detection_battery,
+    regression_battery,
+    segmentation_battery,
+)
 from ._predict import (
     default_classification_predict_fn,
     default_detection_predict_fn,
+    default_passthrough_predict_fn,
     default_segmentation_predict_fn,
 )
 
@@ -57,6 +63,13 @@ _TASKS: dict[str, Task] = {
         frozenset(),
         requires_num_classes=False,
         description="Object detection (mAP/mAR family + IoU variants).",
+    ),
+    "regression": Task(
+        regression_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Scalar regression (mse, mae, rmse, r2, pearson, spearman).",
     ),
 }
 

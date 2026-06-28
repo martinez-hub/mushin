@@ -13,6 +13,7 @@ from .benchmark import (
     get_task,
     list_tasks,
     register_task,
+    regression_battery,
     segmentation_battery,
 )
 from .lightning import HydraDDP, MetricsCallback
@@ -46,4 +47,5 @@ __all__ = [
     "classification_battery",
     "segmentation_battery",
     "detection_battery",
+    "regression_battery",
 ]
