@@ -170,10 +170,17 @@ batteries. Each is `requires_num_classes=False`; the default `predict_fn` return
 
 | task | default metrics | `target` (the `y` in each batch) |
 |---|---|---|
-| `regression` | mse, mae, rmse, r2, pearson, spearman | continuous tensor, same shape as the output |
-| `image_quality` | ssim, psnr, ms_ssim, lpips | reference image `(N, C, H, W)` |
+| `regression` | mse, mae, rmse, r2, pearson, spearman | continuous tensor `(N,)` or `(N, 1)` — single-target only |
+| `image_quality` | ssim, psnr, ms_ssim, lpips | reference image `(N, C, H, W)` — `ms_ssim` needs `H, W > 160` |
 | `audio` | si_sdr, si_snr, pesq, stoi | reference waveform `(N, T)` |
-| `retrieval` | retrieval_map, ndcg, mrr, precision, recall | a `(relevance, indexes)` tuple |
+| `retrieval` | retrieval_map, ndcg, mrr, precision, recall | a `(relevance, indexes)` tuple — `relevance` binary 0/1 (only `ndcg` accepts graded) |
+
+Notes on the contracts: `regression` is single-target — multi-output `(N, D>1)`
+targets crash `pearson`/`spearman` (build a custom `Task` with `num_outputs=D` for
+those). `retrieval`'s `relevance` must be binary for `retrieval_map`/`mrr`/
+`precision`/`recall`; only `ndcg` handles graded judgments. `image_quality`'s
+`ms_ssim` needs images larger than 160 px per side (torchmetrics' 5-scale default);
+drop it or customize it for smaller images.
 
 ```python
 from mushin import compare

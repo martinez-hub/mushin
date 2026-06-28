@@ -145,6 +145,21 @@ def test_regression_battery_end_to_end():
     for name in ["mse", "mae", "rmse", "r2", "pearson", "spearman"]:
         assert name in result.data
 
+    # The exact "good" model has known values: zero error, perfect correlation.
+    # Assert them (not just key presence) so a mis-wired metric or a degenerate /
+    # NaN result is caught.
+    import pytest
+
+    def good_val(name):
+        return float(result.data[name].sel(method="good").values.ravel()[0])
+
+    assert good_val("mse") == pytest.approx(0.0, abs=1e-5)
+    assert good_val("mae") == pytest.approx(0.0, abs=1e-5)
+    assert good_val("rmse") == pytest.approx(0.0, abs=1e-5)
+    assert good_val("r2") == pytest.approx(1.0, abs=1e-4)
+    assert good_val("pearson") == pytest.approx(1.0, abs=1e-4)
+    assert good_val("spearman") == pytest.approx(1.0, abs=1e-4)
+
 
 def test_retrieval_battery_end_to_end():
     import torch
@@ -152,13 +167,17 @@ def test_retrieval_battery_end_to_end():
 
     from mushin.benchmark import BenchmarkResult, compare
 
-    # Two queries, three docs each. y = (relevance, indexes). The model maps x -> a
-    # score; here x already IS the score so Identity ranks perfectly.
+    # Two queries, two docs each. y = (relevance, indexes); the model maps x -> a
+    # score (Identity here). The data is chosen so that the per-query grouping
+    # MATTERS: query 0's relevant doc has a LOW score (ranked last -> AP 0.5) while
+    # query 1's relevant doc has a HIGH score (AP 1.0). Grouped MAP = 0.75; if the
+    # update_fn dropped the `indexes=` grouping (merging both queries into one
+    # ranking) the MAP would be 0.5 instead — so asserting 0.75 guards the hook.
     class _RetrievalDS(Dataset):
         def __init__(self):
-            self.scores = torch.tensor([0.9, 0.1, 0.2, 0.8, 0.3, 0.7])
-            self.rel = torch.tensor([1, 0, 0, 1, 0, 1])
-            self.idx = torch.tensor([0, 0, 0, 1, 1, 1])
+            self.scores = torch.tensor([0.9, 0.1, 0.5, 0.4])
+            self.rel = torch.tensor([0, 1, 1, 0])
+            self.idx = torch.tensor([0, 0, 1, 1])
 
         def __len__(self):
             return 1  # single batch
@@ -176,3 +195,14 @@ def test_retrieval_battery_end_to_end():
     assert isinstance(result, BenchmarkResult)
     for name in ["retrieval_map", "ndcg", "mrr", "precision", "recall"]:
         assert name in result.data
+
+    import pytest
+
+    def val(name):
+        return float(result.data[name].sel(method="m").values.ravel()[0])
+
+    # Grouping-sensitive values: per-query MAP/MRR are mean(0.5, 1.0) = 0.75.
+    assert val("retrieval_map") == pytest.approx(0.75, abs=1e-4)
+    assert val("mrr") == pytest.approx(0.75, abs=1e-4)
+    for name in ["retrieval_map", "ndcg", "mrr", "precision", "recall"]:
+        assert 0.0 <= val(name) <= 1.0

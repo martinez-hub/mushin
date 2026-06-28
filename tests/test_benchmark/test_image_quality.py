@@ -5,15 +5,17 @@ import torch
 
 
 def test_image_quality_missing_extra_raises(monkeypatch):
-    # Force the optional LPIPS import/construction to fail and assert the clear
-    # missing-extra error, regardless of whether the extra is installed.
-    import torchmetrics.image as tmi
+    # Force the optional LPIPS construction to fail and assert the clear missing-
+    # extra error, regardless of whether the extra is installed. Patch the submodule
+    # the battery imports from (torchmetrics.image.lpip) — the top-level
+    # torchmetrics.image namespace lacks the attribute when lpips is absent.
+    import torchmetrics.image.lpip as tmi_lpip
 
     class _Boom:
         def __init__(self, *a, **k):
             raise ImportError("simulated missing lpips")
 
-    monkeypatch.setattr(tmi, "LearnedPerceptualImagePatchSimilarity", _Boom)
+    monkeypatch.setattr(tmi_lpip, "LearnedPerceptualImagePatchSimilarity", _Boom)
 
     from mushin.benchmark._metrics import image_quality_battery
 
@@ -47,3 +49,16 @@ def test_image_quality_battery_end_to_end():
     assert isinstance(result, BenchmarkResult)
     for name in ["ssim", "psnr", "ms_ssim", "lpips"]:
         assert name in result.data
+
+    import math
+
+    def val(name):
+        return float(result.data[name].sel(method="m").values.ravel()[0])
+
+    # All finite (a near, not exact, reconstruction keeps psnr finite), and the
+    # near-perfect reconstruction scores high on similarity / low on lpips.
+    for name in ["ssim", "psnr", "ms_ssim", "lpips"]:
+        assert math.isfinite(val(name))
+    assert val("ssim") > 0.9
+    assert val("ms_ssim") > 0.9
+    assert val("lpips") < 0.05

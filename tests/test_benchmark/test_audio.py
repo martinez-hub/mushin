@@ -45,3 +45,15 @@ def test_audio_battery_end_to_end():
     assert isinstance(result, BenchmarkResult)
     for name in ["si_sdr", "si_snr", "pesq", "stoi"]:
         assert name in result.data
+
+    import math
+
+    def val(name):
+        return float(result.data[name].sel(method="m").values.ravel()[0])
+
+    # All finite (a near, not exact, reconstruction keeps si_sdr/si_snr finite), and
+    # the near-perfect estimate scores a high SI-SDR/SI-SNR.
+    for name in ["si_sdr", "si_snr", "pesq", "stoi"]:
+        assert math.isfinite(val(name))
+    assert val("si_sdr") > 20.0
+    assert val("si_snr") > 20.0

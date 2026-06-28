@@ -85,8 +85,11 @@ def regression_battery(
     num_classes: int | None = None, ignore_index: int | None = None
 ) -> dict[str, Metric]:
     """Scalar-regression battery. ``num_classes``/``ignore_index`` are accepted for
-    the uniform task interface but unused. Predictions and targets are continuous
-    tensors of matching shape (e.g. ``(N,)``)."""
+    the uniform task interface but unused. This is a SINGLE-TARGET battery:
+    predictions and targets are continuous tensors of shape ``(N,)`` or ``(N, 1)``.
+    Multi-output targets ``(N, D>1)`` are not supported here — ``pearson``/
+    ``spearman`` are built with ``num_outputs=1`` and raise on ``D>1``; use a custom
+    Task with ``num_outputs=D`` for multi-output regression."""
     return {
         "mse": MeanSquaredError(),
         "mae": MeanAbsoluteError(),
@@ -103,7 +106,10 @@ def retrieval_battery(
     """Information-retrieval battery over grouped (per-query) predictions.
     ``num_classes``/``ignore_index`` are accepted for the uniform interface but
     unused. Batches must yield ``y = (relevance, indexes)``; see
-    ``retrieval_update``."""
+    ``retrieval_update``. ``relevance`` must be BINARY (0/1) for ``retrieval_map``/
+    ``mrr``/``precision``/``recall`` (they raise on graded values); only ``ndcg``
+    accepts graded relevance. For graded judgments, use a custom Task with just the
+    graded-capable metrics (e.g. ``RetrievalNormalizedDCG``)."""
     return {
         "retrieval_map": RetrievalMAP(),
         "ndcg": RetrievalNormalizedDCG(),
@@ -188,14 +194,22 @@ def image_quality_battery(
     optional ``image`` extra (LPIPS pulls in torchvision + lpips). ``num_classes``/
     ``ignore_index`` are accepted for the uniform interface but unused. Images are
     ``(N, C, H, W)``; ``data_range=1.0`` assumes inputs in ``[0, 1]`` and
-    ``LearnedPerceptualImagePatchSimilarity(normalize=True)`` accepts that range."""
+    ``LearnedPerceptualImagePatchSimilarity(normalize=True)`` accepts that range.
+    Note ``ms_ssim`` requires ``H, W > 160`` (torchmetrics default 5 scales / kernel
+    11); for smaller images drop ``ms_ssim`` or pass a custom
+    ``MultiScaleStructuralSimilarityIndexMeasure`` with fewer ``betas``."""
     try:
         from torchmetrics.image import (
-            LearnedPerceptualImagePatchSimilarity,
             MultiScaleStructuralSimilarityIndexMeasure,
             PeakSignalNoiseRatio,
             StructuralSimilarityIndexMeasure,
         )
+
+        # LPIPS is imported from its submodule, not the top-level ``torchmetrics.image``
+        # namespace: torchmetrics only re-exports it at top level when its deps
+        # (torchvision + lpips) are present, so a clean env without the ``image``
+        # extra would AttributeError rather than reach the construction-time check.
+        from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
         return {
             "ssim": StructuralSimilarityIndexMeasure(data_range=1.0),
