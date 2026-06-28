@@ -62,8 +62,11 @@ def compare(
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, models in methods.items():
+        # spec.update_fn is forwarded even when metrics= overrides the battery, so
+        # a task's update_fn must stay compatible with the substituted battery.
         results[name] = [
-            evaluate(model, data, battery, fn, pm, device) for model in models
+            evaluate(model, data, battery, fn, pm, device, update_fn=spec.update_fn)
+            for model in models
         ]
 
     ds = to_dataset(results)

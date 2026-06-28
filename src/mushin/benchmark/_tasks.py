@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from torchmetrics import Metric
 
-from ._inference import PredictFn
+from ._inference import PredictFn, UpdateFn
 from ._metrics import classification_battery, detection_battery, segmentation_battery
 from ._predict import (
     default_classification_predict_fn,
@@ -30,6 +30,7 @@ class Task:
     prob_metrics: frozenset[str] = frozenset()
     requires_num_classes: bool = True
     description: str = ""
+    update_fn: UpdateFn | None = None
 
 
 # Backward-compat alias (deprecated; removed in a future release).
