@@ -14,6 +14,8 @@ from ._metrics import (
     classification_battery,
     detection_battery,
     regression_battery,
+    retrieval_battery,
+    retrieval_update,
     segmentation_battery,
 )
 from ._predict import (
@@ -70,6 +72,14 @@ _TASKS: dict[str, Task] = {
         frozenset(),
         requires_num_classes=False,
         description="Scalar regression (mse, mae, rmse, r2, pearson, spearman).",
+    ),
+    "retrieval": Task(
+        retrieval_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Information retrieval (retrieval_map, ndcg, mrr, precision, recall).",
+        update_fn=retrieval_update,
     ),
 }
 

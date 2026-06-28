@@ -25,6 +25,13 @@ from torchmetrics.regression import (
     R2Score,
     SpearmanCorrCoef,
 )
+from torchmetrics.retrieval import (
+    RetrievalMAP,
+    RetrievalMRR,
+    RetrievalNormalizedDCG,
+    RetrievalPrecision,
+    RetrievalRecall,
+)
 
 
 def classification_battery(
@@ -87,6 +94,30 @@ def regression_battery(
         "pearson": PearsonCorrCoef(),
         "spearman": SpearmanCorrCoef(),
     }
+
+
+def retrieval_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Information-retrieval battery over grouped (per-query) predictions.
+    ``num_classes``/``ignore_index`` are accepted for the uniform interface but
+    unused. Batches must yield ``y = (relevance, indexes)``; see
+    ``retrieval_update``."""
+    return {
+        "retrieval_map": RetrievalMAP(),
+        "ndcg": RetrievalNormalizedDCG(),
+        "mrr": RetrievalMRR(),
+        "precision": RetrievalPrecision(),
+        "recall": RetrievalRecall(),
+    }
+
+
+def retrieval_update(battery, preds, probs, target):
+    """update_fn for the retrieval task: ``target`` is a ``(relevance, indexes)``
+    tuple, and every retrieval metric takes ``(preds, relevance, indexes=...)``."""
+    relevance, indexes = target
+    for metric in battery.values():
+        metric.update(preds, relevance, indexes=indexes)
 
 
 _MAP_DROP = frozenset({"classes", "map_per_class", "mar_100_per_class"})

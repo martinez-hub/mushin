@@ -144,3 +144,35 @@ def test_regression_battery_end_to_end():
     assert isinstance(result, BenchmarkResult)
     for name in ["mse", "mae", "rmse", "r2", "pearson", "spearman"]:
         assert name in result.data
+
+
+def test_retrieval_battery_end_to_end():
+    import torch
+    from torch.utils.data import DataLoader, Dataset
+
+    from mushin.benchmark import BenchmarkResult, compare
+
+    # Two queries, three docs each. y = (relevance, indexes). The model maps x -> a
+    # score; here x already IS the score so Identity ranks perfectly.
+    class _RetrievalDS(Dataset):
+        def __init__(self):
+            self.scores = torch.tensor([0.9, 0.1, 0.2, 0.8, 0.3, 0.7])
+            self.rel = torch.tensor([1, 0, 0, 1, 0, 1])
+            self.idx = torch.tensor([0, 0, 0, 1, 1, 1])
+
+        def __len__(self):
+            return 1  # single batch
+
+        def __getitem__(self, _i):
+            return self.scores, (self.rel, self.idx)
+
+    def collate(batch):  # one item; pass tensors through unbatched
+        return batch[0]
+
+    loader = DataLoader(_RetrievalDS(), batch_size=1, collate_fn=collate)
+    models = [torch.nn.Identity() for _ in range(3)]
+
+    result = compare(methods={"m": models}, data=loader, task="retrieval")
+    assert isinstance(result, BenchmarkResult)
+    for name in ["retrieval_map", "ndcg", "mrr", "precision", "recall"]:
+        assert name in result.data
