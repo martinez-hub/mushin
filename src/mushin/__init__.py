@@ -7,6 +7,7 @@ from ._utils import load_experiment, load_from_checkpoint
 from .benchmark import (
     BenchmarkResult,
     Task,
+    audio_battery,
     classification_battery,
     compare,
     detection_battery,
@@ -46,6 +47,7 @@ __all__ = [
     "register_task",
     "get_task",
     "list_tasks",
+    "audio_battery",
     "classification_battery",
     "segmentation_battery",
     "detection_battery",

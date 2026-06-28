@@ -11,6 +11,7 @@ from torchmetrics import Metric
 
 from ._inference import PredictFn, UpdateFn
 from ._metrics import (
+    audio_battery,
     classification_battery,
     detection_battery,
     image_quality_battery,
@@ -88,6 +89,13 @@ _TASKS: dict[str, Task] = {
         frozenset(),
         requires_num_classes=False,
         description="Paired image quality (ssim, psnr, ms_ssim, lpips).",
+    ),
+    "audio": Task(
+        audio_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Speech/audio quality (si_sdr, si_snr, pesq, stoi).",
     ),
 }
 

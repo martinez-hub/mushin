@@ -89,6 +89,13 @@ image = [
     "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "lpips >= 0.1.4",
 ]
+# Audio PESQ/STOI need the pesq + pystoi C/native packages; SI-SDR/SI-SNR are core
+# but the battery is all-or-nothing. Both are gated off win32 where the C build is
+# painful (the battery raises a clear error if used without them).
+audio = [
+    "pesq >= 0.0.4 ; sys_platform != 'win32'",
+    "pystoi >= 0.3.3 ; sys_platform != 'win32'",
+]
 
 [project.scripts]
 mushin-mcp = "mushin.mcp.__main__:main"
