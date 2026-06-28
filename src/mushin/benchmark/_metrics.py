@@ -1,6 +1,7 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""Metric batteries (classification + segmentation), delegated to torchmetrics."""
+"""Metric batteries (classification, segmentation, detection, regression, image
+quality, audio, retrieval), delegated to torchmetrics."""
 
 from __future__ import annotations
 
