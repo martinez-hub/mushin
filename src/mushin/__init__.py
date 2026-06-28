@@ -11,6 +11,7 @@ from .benchmark import (
     compare,
     detection_battery,
     get_task,
+    image_quality_battery,
     list_tasks,
     register_task,
     regression_battery,
@@ -50,4 +51,5 @@ __all__ = [
     "detection_battery",
     "regression_battery",
     "retrieval_battery",
+    "image_quality_battery",
 ]

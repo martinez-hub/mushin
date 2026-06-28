@@ -180,6 +180,35 @@ def detection_battery(
         ) from e
 
 
+def image_quality_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Paired image-quality battery (generated vs reference image). Requires the
+    optional ``image`` extra (LPIPS pulls in torchvision + lpips). ``num_classes``/
+    ``ignore_index`` are accepted for the uniform interface but unused. Images are
+    ``(N, C, H, W)``; ``data_range=1.0`` assumes inputs in ``[0, 1]`` and
+    ``LearnedPerceptualImagePatchSimilarity(normalize=True)`` accepts that range."""
+    try:
+        from torchmetrics.image import (
+            LearnedPerceptualImagePatchSimilarity,
+            MultiScaleStructuralSimilarityIndexMeasure,
+            PeakSignalNoiseRatio,
+            StructuralSimilarityIndexMeasure,
+        )
+
+        return {
+            "ssim": StructuralSimilarityIndexMeasure(data_range=1.0),
+            "psnr": PeakSignalNoiseRatio(data_range=1.0),
+            "ms_ssim": MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0),
+            "lpips": LearnedPerceptualImagePatchSimilarity(normalize=True),
+        }
+    except ImportError as e:
+        raise ImportError(
+            "the image_quality battery requires the optional image extra; install "
+            "it with `pip install mushin-py[image]` (torchvision + lpips)."
+        ) from e
+
+
 def compute_battery(
     battery: dict[str, Metric],
     preds: torch.Tensor,

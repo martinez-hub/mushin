@@ -13,6 +13,7 @@ from ._inference import PredictFn, UpdateFn
 from ._metrics import (
     classification_battery,
     detection_battery,
+    image_quality_battery,
     regression_battery,
     retrieval_battery,
     retrieval_update,
@@ -80,6 +81,13 @@ _TASKS: dict[str, Task] = {
         requires_num_classes=False,
         description="Information retrieval (retrieval_map, ndcg, mrr, precision, recall).",
         update_fn=retrieval_update,
+    ),
+    "image_quality": Task(
+        image_quality_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Paired image quality (ssim, psnr, ms_ssim, lpips).",
     ),
 }
 

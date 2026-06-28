@@ -80,6 +80,15 @@ detection = [
     # error if it is then used without pycocotools).
     "pycocotools >= 2.0.7 ; sys_platform != 'win32'",
 ]
+# Image-quality LPIPS needs torchvision (backbone) + the lpips package; SSIM/PSNR/
+# MS-SSIM are core torchmetrics but the battery is all-or-nothing, so it requires
+# this extra as a whole. torchvision floors pair with the platform-split torch
+# floors above.
+image = [
+    "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "lpips >= 0.1.4",
+]
 
 [project.scripts]
 mushin-mcp = "mushin.mcp.__main__:main"

@@ -5,6 +5,7 @@
 from ._metrics import (
     classification_battery,
     detection_battery,
+    image_quality_battery,
     regression_battery,
     retrieval_battery,
     segmentation_battery,
@@ -25,4 +26,5 @@ __all__ = [
     "detection_battery",
     "regression_battery",
     "retrieval_battery",
+    "image_quality_battery",
 ]
