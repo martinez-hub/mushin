@@ -133,8 +133,21 @@ def test_compare_rejects_unknown_task():
 
     from mushin.benchmark import compare
 
-    with pytest.raises(NotImplementedError, match="not supported"):
+    with pytest.raises(ValueError, match="not a registered task"):
         compare(methods={"a": []}, data=[], task="bogus_task", num_classes=2)
+
+
+def test_compare_task_object_requires_num_classes():
+    from mushin.benchmark import Task, compare
+
+    # requires_num_classes defaults to True; passing a Task object (not a string)
+    # without num_classes must still hit the validation branch.
+    task = Task(
+        battery=lambda num_classes, ignore_index=None: {},
+        predict_fn=lambda model, x: (x, x),
+    )
+    with pytest.raises(ValueError, match="num_classes"):
+        compare(methods={"a": []}, data=[], task=task)
 
 
 def test_compare_detection_does_not_demand_num_classes(monkeypatch):
@@ -234,3 +247,55 @@ def test_compare_flags_significant_difference_end_to_end():
     # mean_diff is method_a - method_b; identify the better method sign-robustly.
     better = row["method_a"] if row["mean_diff"] > 0 else row["method_b"]
     assert better == "good"
+
+
+def test_compare_accepts_task_object():
+    from torchmetrics.classification import MulticlassAccuracy
+
+    from mushin.benchmark import compare
+    from mushin.benchmark._tasks import Task
+
+    data = _loader(seed=0)
+    good = [_Perfect(data) for _ in range(3)]
+    bad = [torch.nn.Linear(4, 3) for _ in range(3)]
+
+    task = Task(
+        battery=lambda num_classes, ignore_index=None: {
+            "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro")
+        },
+        predict_fn=lambda model, x: (model(x).argmax(dim=-1), model(x).softmax(dim=-1)),
+        description="acc-only classification",
+    )
+    result = compare(
+        methods={"good": good, "bad": bad},
+        data=data,
+        task=task,
+        num_classes=3,
+    )
+    assert isinstance(result, BenchmarkResult)
+    assert "accuracy" in result.data
+
+
+def test_compare_accepts_registered_task_name():
+    from torchmetrics.classification import MulticlassAccuracy
+
+    from mushin.benchmark import compare
+    from mushin.benchmark._tasks import Task, register_task
+
+    register_task(
+        "acc_only",
+        Task(
+            battery=lambda num_classes, ignore_index=None: {
+                "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro")
+            },
+            predict_fn=lambda model, x: (
+                model(x).argmax(dim=-1),
+                model(x).softmax(dim=-1),
+            ),
+        ),
+        overwrite=True,
+    )
+    data = _loader(seed=1)
+    models = [_Perfect(data) for _ in range(3)]
+    result = compare(methods={"m": models}, data=data, task="acc_only", num_classes=3)
+    assert "accuracy" in result.data

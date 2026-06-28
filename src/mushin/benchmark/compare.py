@@ -12,13 +12,13 @@ from ._aggregate import to_dataset
 from ._inference import PredictFn, evaluate
 from ._result import BenchmarkResult
 from ._stats import compare_methods
-from ._tasks import get_task_spec
+from ._tasks import Task, get_task
 
 
 def compare(
     methods: dict[str, Sequence[torch.nn.Module]],
     data: Iterable,
-    task: str = "classification",
+    task: str | Task = "classification",
     *,
     num_classes: int | None = None,
     predict_fn: PredictFn | None = None,
@@ -42,7 +42,7 @@ def compare(
     prob_metrics : frozenset[str] or None
         Metrics whose names need probabilities; defaults to the task's set.
     """
-    spec = get_task_spec(task)
+    spec = task if isinstance(task, Task) else get_task(task)
 
     if isinstance(data, Iterator):
         raise TypeError(

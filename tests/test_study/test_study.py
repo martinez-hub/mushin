@@ -125,3 +125,39 @@ def test_study_forwards_ignore_index_for_segmentation(tmp_path):
     )
     result = study.run()
     assert float(result.data["pixel_acc"].mean()) == 1.0
+
+
+def test_study_from_checkpoints_accepts_task_object(tmp_path):
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    from torchmetrics.classification import MulticlassAccuracy
+
+    from mushin import Study
+    from mushin.benchmark._tasks import Task
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(32, 4, generator=g)
+    y = torch.randint(0, 3, (32,), generator=g)
+    data = DataLoader(TensorDataset(x, y), batch_size=16)
+
+    def load_fn(_path):
+        return torch.nn.Linear(4, 3)
+
+    task = Task(
+        battery=lambda num_classes, ignore_index=None: {
+            "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro")
+        },
+        predict_fn=lambda model, x: (
+            model(x).argmax(dim=-1),
+            model(x).softmax(dim=-1),
+        ),
+    )
+    study = Study.from_checkpoints(
+        checkpoints={"m": ["a.ckpt", "b.ckpt", "c.ckpt"]},
+        load_fn=load_fn,
+        data=data,
+        num_classes=3,
+        task=task,
+    )
+    result = study.run()
+    assert "accuracy" in result.data

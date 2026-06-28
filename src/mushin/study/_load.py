@@ -14,7 +14,7 @@ def evaluate_checkpoints(
     checkpoints: dict[str, Sequence[str]],
     load_fn: Callable[[str], Any],
     data,
-    task: str,
+    task,  # str | Task — resolved inside compare()
     num_classes: int,
     test: str = "wilcoxon",
     alpha: float = 0.05,
