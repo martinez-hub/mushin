@@ -53,7 +53,11 @@ dependencies = [
     "xarray >= 2024.6.0",
     "typing-extensions >= 4.1.0",
     "torchmetrics >= 1.0",
-    "scipy >= 1.10",
+    # scipy 1.13 is the first release compatible with NumPy 2 (the non-Intel
+    # floor); it still supports NumPy 1.x for the Intel-mac branch. Lower floors
+    # are ABI-incompatible with NumPy 2 (`_ARRAY_API not found`). Verified by the
+    # min-version CI job.
+    "scipy >= 1.13",
     # pandas 2.2.2 is the first release officially compatible with NumPy 2 (the
     # non-Intel floor); older pandas imports under NumPy 2 only by luck (ABI
     # "size changed" warning). Verified by the min-version CI job.
@@ -61,9 +65,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# matplotlib 3.6 is the first release with Python 3.10 wheels (3.3 fails to build
-# from source there); paired with the >=3.10 requires-python above.
-viz = ["matplotlib >= 3.6"]
+# matplotlib 3.9 is the first release compatible with NumPy 2 (the non-Intel
+# floor) that also ships Python 3.10 wheels; lower floors either fail to build on
+# 3.10 (3.3) or are NumPy-2 ABI-incompatible. Still supports NumPy 1.x for the
+# Intel-mac branch. Verified by the min-version CI job.
+viz = ["matplotlib >= 3.9"]
 netcdf = ["netCDF4 >= 1.7.0"]
 mcp = ["mcp >= 1.2"]
 # Detection metrics (MeanAveragePrecision + IoU variants) need torchvision and
@@ -106,7 +112,7 @@ dev = [
     "hypothesis >= 6.28.0",
     "pytest-xdist >= 3.0",
     "towncrier >= 23.11",
-    "matplotlib >= 3.6",
+    "matplotlib >= 3.9",
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2",
 ]
