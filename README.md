@@ -186,7 +186,7 @@ Or use the `make` shortcuts (`make help` to list them): `make check` runs
 lint + format-check + spell + tests (what CI runs); `make test-py PYTHON=3.12`
 runs the suite on a specific Python version.
 
-Supported Python versions: 3.9 – 3.14.
+Supported Python versions: 3.10 – 3.14.
 
 ## Relationship to upstream
 
