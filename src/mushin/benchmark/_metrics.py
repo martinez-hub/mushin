@@ -228,28 +228,31 @@ def audio_battery(
     num_classes: int | None = None, ignore_index: int | None = None
 ) -> dict[str, Metric]:
     """Speech/audio battery (estimated vs reference waveform). Requires the optional
-    ``audio`` extra (PESQ needs ``pesq``; STOI needs ``pystoi``). SI-SDR/SI-SNR are
-    core, but the battery is all-or-nothing. ``num_classes``/``ignore_index`` are
-    accepted for the uniform interface but unused. Waveforms are ``(N, T)``; PESQ/
-    STOI assume a 16 kHz sample rate (override via a custom Task for other rates)."""
+    ``audio`` extra (STOI needs ``pystoi``). SI-SDR/SI-SNR are core, but the battery
+    is all-or-nothing. ``num_classes``/``ignore_index`` are accepted for the uniform
+    interface but unused. Waveforms are ``(N, T)``; STOI assumes a 16 kHz sample
+    rate (override via a custom Task for other rates).
+
+    PESQ is intentionally omitted: the only released ``pesq`` package (0.0.4) fails
+    to import under NumPy 2 (the supported non-Intel platform) and has no fixed
+    release, so it cannot be shipped reliably. Add it via a custom Task on a
+    NumPy-1.x environment if needed."""
     try:
         from torchmetrics.audio import (
             ScaleInvariantSignalDistortionRatio,
             ScaleInvariantSignalNoiseRatio,
         )
-        from torchmetrics.audio.pesq import PerceptualEvaluationSpeechQuality
         from torchmetrics.audio.stoi import ShortTimeObjectiveIntelligibility
 
         return {
             "si_sdr": ScaleInvariantSignalDistortionRatio(),
             "si_snr": ScaleInvariantSignalNoiseRatio(),
-            "pesq": PerceptualEvaluationSpeechQuality(fs=16000, mode="wb"),
             "stoi": ShortTimeObjectiveIntelligibility(fs=16000),
         }
     except ImportError as e:
         raise ImportError(
             "the audio battery requires the optional audio extra; install it with "
-            "`pip install mushin-py[audio]` (pesq + pystoi)."
+            "`pip install mushin-py[audio]` (pystoi)."
         ) from e
 
 

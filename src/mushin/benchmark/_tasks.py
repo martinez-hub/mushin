@@ -95,7 +95,7 @@ _TASKS: dict[str, Task] = {
         default_passthrough_predict_fn,
         frozenset(),
         requires_num_classes=False,
-        description="Speech/audio quality (si_sdr, si_snr, pesq, stoi).",
+        description="Speech/audio quality (si_sdr, si_snr, stoi).",
     ),
 }
 

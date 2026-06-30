@@ -1995,7 +1995,6 @@ dependencies = [
 
 [package.optional-dependencies]
 audio = [
-    { name = "pesq", marker = "sys_platform != 'win32'" },
     { name = "pystoi", marker = "sys_platform != 'win32'" },
 ]
 detection = [
@@ -2052,7 +2051,6 @@ requires-dist = [
     { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=1.24,<2" },
     { name = "omegaconf", specifier = ">=2.1.1" },
     { name = "pandas", specifier = ">=2.2.2" },
-    { name = "pesq", marker = "sys_platform != 'win32' and extra == 'audio'", specifier = ">=0.0.4" },
     { name = "pycocotools", marker = "sys_platform != 'win32' and extra == 'detection'", specifier = ">=2.0.7" },
     { name = "pystoi", marker = "sys_platform != 'win32' and extra == 'audio'", specifier = ">=0.3.3" },
     { name = "pytorch-lightning", specifier = ">=2.4.0" },
@@ -2762,12 +2760,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
 ]
-
-[[package]]
-name = "pesq"
-version = "0.0.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/22/e6/f8bdcef3238ac10fb3ce37d150e9b03a152d971febd681f088c6e5e17d8e/pesq-0.0.4.tar.gz", hash = "sha256:b724b28f73fb638522982bd68e8c3c0957e2f45210639a460233b17aa7fc890b", size = 38702, upload-time = "2022-05-17T14:15:26.301Z" }
 
 [[package]]
 name = "pillow"

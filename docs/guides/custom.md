@@ -172,7 +172,7 @@ batteries. Each is `requires_num_classes=False`; the default `predict_fn` return
 |---|---|---|
 | `regression` | mse, mae, rmse, r2, pearson, spearman | continuous tensor `(N,)` or `(N, 1)` — single-target only |
 | `image_quality` | ssim, psnr, ms_ssim, lpips | reference image `(N, C, H, W)` — `ms_ssim` needs `H, W > 160` |
-| `audio` | si_sdr, si_snr, pesq, stoi | reference waveform `(N, T)` |
+| `audio` | si_sdr, si_snr, stoi | reference waveform `(N, T)` |
 | `retrieval` | retrieval_map, ndcg, mrr, precision, recall | a `(relevance, indexes)` tuple — `relevance` binary 0/1 (only `ndcg` accepts graded) |
 
 Notes on the contracts: `regression` is single-target — multi-output `(N, D>1)`
@@ -190,7 +190,7 @@ compare(methods=..., data=regression_loader, task="regression")
 
 **Optional extras.** `image_quality` needs `pip install mushin-py[image]`
 (torchvision + lpips) and `audio` needs `pip install mushin-py[audio]`
-(pesq + pystoi). These batteries are all-or-nothing: they raise a clear error if
+(just pystoi; PESQ is excluded &mdash; its only release is NumPy-2-incompatible). These batteries are all-or-nothing: they raise a clear error if
 the extra is missing. For just the core metrics (e.g. SSIM alone), pass an
 explicit `metrics={...}` or build a custom `Task`. Distribution-level metrics
 (FID, KID, Inception Score) are not supported by the streaming `compare` loop.

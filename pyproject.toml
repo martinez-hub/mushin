@@ -94,11 +94,12 @@ image = [
     "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "lpips >= 0.1.4",
 ]
-# Audio PESQ/STOI need the pesq + pystoi C/native packages; SI-SDR/SI-SNR are core
-# but the battery is all-or-nothing. Both are gated off win32 where the C build is
-# painful (the battery raises a clear error if used without them).
+# Audio STOI needs the pystoi package; SI-SDR/SI-SNR are core but the battery is
+# all-or-nothing. Gated off win32 where the native build is painful (the battery
+# raises a clear error if used without it). PESQ is intentionally excluded: the
+# only released `pesq` (0.0.4) fails to import under NumPy 2 and has no fixed
+# release, so it would crash on the supported non-Intel platforms.
 audio = [
-    "pesq >= 0.0.4 ; sys_platform != 'win32'",
     "pystoi >= 0.3.3 ; sys_platform != 'win32'",
 ]
 

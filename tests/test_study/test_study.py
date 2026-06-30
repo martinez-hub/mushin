@@ -161,3 +161,30 @@ def test_study_from_checkpoints_accepts_task_object(tmp_path):
     )
     result = study.run()
     assert "accuracy" in result.data
+
+
+def test_from_checkpoints_classless_task_no_num_classes(tmp_path):
+    # Classless tasks (requires_num_classes=False) must run through Study WITHOUT a
+    # num_classes argument — it now defaults to None and is forwarded to compare().
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin import Study
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(16, 1, generator=g)
+    y = x[:, 0] * 2.0 + 1.0
+    data = DataLoader(TensorDataset(x, y), batch_size=8)
+
+    class _Affine(torch.nn.Module):
+        def forward(self, t):
+            return t[:, 0] * 2.0 + 1.0
+
+    study = Study.from_checkpoints(
+        checkpoints={"m": ["a", "b", "c"]},
+        load_fn=lambda _p: _Affine(),
+        data=data,
+        task="regression",  # no num_classes passed
+    )
+    result = study.run()
+    assert "mse" in result.data
