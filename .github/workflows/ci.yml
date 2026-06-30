@@ -29,7 +29,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
         experimental: [false]
         include:
           # torch / Lightning may not ship 3.14 wheels yet; don't fail CI on it.
@@ -85,15 +85,15 @@ jobs:
   min-versions:
     # Resolves the *lowest* declared dependency versions and runs the suite, so
     # the floors in pyproject.toml stay honest. Runs on the oldest supported
-    # Python (3.9). Reproduce locally with `make test-lowest` (amd64 Docker).
+    # Python (3.10). Reproduce locally with `make test-lowest` (amd64 Docker).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-      - name: Sync lowest-direct dependency versions (Python 3.9)
-        run: uv sync --resolution lowest-direct --python 3.9
+      - name: Sync lowest-direct dependency versions (Python 3.10)
+        run: uv sync --resolution lowest-direct --python 3.10
       # Some deps at their floor still `import pkg_resources` at import time; uv's
       # minimal venv omits setuptools, which typical user environments include.
       # Provide it so this job tests dependency-version compatibility, not

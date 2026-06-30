@@ -9,7 +9,7 @@ name = "mushin-py"
 version = "0.3.0"
 description = "Boilerplate-free, reproducible ML experiment workflows built on PyTorch Lightning and hydra-zen. Carved out of MIT-LL's responsible-ai-toolbox."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Josue Martinez-Martinez" },
@@ -19,7 +19,6 @@ maintainers = [
 ]
 keywords = ["machine learning", "reproducibility", "pytorch-lightning", "hydra", "hydra-zen"]
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -50,12 +49,15 @@ dependencies = [
     "numpy >= 2 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "omegaconf >= 2.1.1",
     # xarray 2024.6.0 is the first NumPy-2-compatible release (older xarray uses
-    # `np.unicode_`, removed in NumPy 2); it still supports Python 3.9. Verified
-    # by the min-version CI job.
+    # `np.unicode_`, removed in NumPy 2). Verified by the min-version CI job.
     "xarray >= 2024.6.0",
     "typing-extensions >= 4.1.0",
     "torchmetrics >= 1.0",
-    "scipy >= 1.10",
+    # scipy 1.13 is the first release compatible with NumPy 2 (the non-Intel
+    # floor); it still supports NumPy 1.x for the Intel-mac branch. Lower floors
+    # are ABI-incompatible with NumPy 2 (`_ARRAY_API not found`). Verified by the
+    # min-version CI job.
+    "scipy >= 1.13",
     # pandas 2.2.2 is the first release officially compatible with NumPy 2 (the
     # non-Intel floor); older pandas imports under NumPy 2 only by luck (ABI
     # "size changed" warning). Verified by the min-version CI job.
@@ -63,10 +65,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viz = ["matplotlib >= 3.3"]
+# matplotlib 3.9 is the first release compatible with NumPy 2 (the non-Intel
+# floor) that also ships Python 3.10 wheels; lower floors either fail to build on
+# 3.10 (3.3) or are NumPy-2 ABI-incompatible. Still supports NumPy 1.x for the
+# Intel-mac branch. Verified by the min-version CI job.
+viz = ["matplotlib >= 3.9"]
 netcdf = ["netCDF4 >= 1.7.0"]
-# The MCP SDK requires Python >= 3.10; mushin still supports 3.9, so gate it.
-mcp = ["mcp >= 1.2 ; python_version >= '3.10'"]
+mcp = ["mcp >= 1.2"]
 # Detection metrics (MeanAveragePrecision + IoU variants) need torchvision and
 # pycocotools; gated so the core install stays lean. torchvision floors pair with
 # the platform-split torch floors above (0.17 ↔ torch 2.2 on Intel-mac, 0.19 ↔
@@ -123,9 +128,9 @@ dev = [
     "hypothesis >= 6.28.0",
     "pytest-xdist >= 3.0",
     "towncrier >= 23.11",
-    "matplotlib >= 3.3",
+    "matplotlib >= 3.9",
     "netCDF4 >= 1.7.0",
-    "mcp >= 1.2 ; python_version >= '3.10'",
+    "mcp >= 1.2",
 ]
 # Detection deps live in the `detection` extra, not here: pycocotools is a C
 # extension whose lowest-floor wheel is ABI-incompatible with the min-versions
@@ -152,6 +157,10 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 88
+# Kept at py39 deliberately: requires-python is now >=3.10, but bumping this to
+# py310 turns on pyupgrade modernizations (Optional -> |, etc.) across the whole
+# codebase — a large mechanical diff deferred to a focused follow-up, kept out of
+# this security/deps PR.
 target-version = "py39"
 src = ["src", "tests"]
 

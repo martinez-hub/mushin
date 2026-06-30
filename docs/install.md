@@ -30,8 +30,8 @@ uv add mushin-py
 
 | Platform | Python | torch | NumPy |
 |---|---|---|---|
-| Linux / Windows / non-Intel macOS | 3.9 – 3.14 | ≥ 2.4 | ≥ 2 |
-| Intel macOS (x86_64) | 3.9 – 3.11 | 2.2.x | 1.x |
+| Linux / Windows / non-Intel macOS | 3.10 – 3.14 | ≥ 2.4 | ≥ 2 |
+| Intel macOS (x86_64) | 3.10 – 3.11 | 2.2.x | 1.x |
 
 A few notes:
 
@@ -40,5 +40,6 @@ A few notes:
   x86_64 architecture. `mushin` supports this platform at torch 2.2.x and
   NumPy 1.x, but Python 3.12+ is not available there because NumPy 2 is
   required for Python 3.12 wheels and is ABI-incompatible with torch 2.2.x.
-- The **`mcp` extra** requires Python ≥ 3.10 (the MCP SDK does not support 3.9).
+- **Python 3.9** is not supported (it reached end-of-life in October 2025);
+  `mushin` requires Python ≥ 3.10.
 - These floors are enforced by the `min-versions` CI job on every pull request.

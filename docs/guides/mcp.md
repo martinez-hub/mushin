@@ -6,10 +6,6 @@ server. Point it at a directory of completed mushin runs and an MCP client
 and compare them conversationally — without training, launching sweeps, or
 loading model weights.
 
-!!! note "Python version requirement"
-    The MCP SDK requires Python >= 3.10. mushin still supports 3.9, so the
-    `mcp` extra is gated on `python_version >= '3.10'`.
-
 ## Install
 
 ```bash
