@@ -7,7 +7,6 @@ This script is called from `mushin.lightning.launchers.HydraDDP
 """
 
 import logging
-from typing import Optional
 
 import hydra
 from hydra_zen import zen
@@ -19,7 +18,7 @@ log = logging.getLogger(__name__)
 def task(
     trainer: Trainer,
     module: LightningModule,
-    datamodule: Optional[LightningDataModule] = None,
+    datamodule: LightningDataModule | None = None,
     pl_testing: bool = False,
     pl_predicting: bool = False,
     pl_local_rank: int = 0,

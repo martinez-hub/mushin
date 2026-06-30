@@ -4,7 +4,7 @@
 import string
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import hypothesis.strategies as st
 import matplotlib.pyplot as plt
@@ -483,8 +483,8 @@ class GridMetrics(MultiRunMetricsWorkflow):
 @pytest.mark.parametrize("load_from_working_dir", [False, True])
 @pytest.mark.usefixtures("cleandir")
 def test_working_subdirs(
-    hydra_sweep_dir: Optional[str],
-    hydra_sweep_subdir: Optional[str],
+    hydra_sweep_dir: str | None,
+    hydra_sweep_subdir: str | None,
     load_from_working_dir: bool,
 ):
     overrides = [

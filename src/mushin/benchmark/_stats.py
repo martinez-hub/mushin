@@ -173,7 +173,7 @@ def compare_methods(
             )
             pvals.append(p)
         corrected = holm_correction(pvals) if len(pvals) > 1 else pvals
-        for rec, pc in zip(recs, corrected):
+        for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)
             rows.append(rec)

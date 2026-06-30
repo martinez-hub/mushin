@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Union
+from typing import Any
 
 from torchmetrics import Metric as TorchMetric
 
@@ -11,7 +11,7 @@ from torchmetrics import Metric as TorchMetric
 System = Callable[[Sequence[Any], int], Sequence[Any]]
 
 # A metric is a torchmetrics Metric, or a per-example scorer (output, reference)->float.
-Metric = Union[TorchMetric, Callable[[Any, Any], float]]
+Metric = TorchMetric | Callable[[Any, Any], float]
 
 # An example is a {"input": ..., "reference": ...} mapping, or a bare input (when
 # the metric needs no reference). To attach a reference, use the mapping form — a

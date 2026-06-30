@@ -5,9 +5,10 @@
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from time import sleep
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 from hydra.core.hydra_config import HydraConfig
