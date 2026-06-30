@@ -9,11 +9,21 @@ from dataclasses import dataclass
 
 from torchmetrics import Metric
 
-from ._inference import PredictFn
-from ._metrics import classification_battery, detection_battery, segmentation_battery
+from ._inference import PredictFn, UpdateFn
+from ._metrics import (
+    audio_battery,
+    classification_battery,
+    detection_battery,
+    image_quality_battery,
+    regression_battery,
+    retrieval_battery,
+    retrieval_update,
+    segmentation_battery,
+)
 from ._predict import (
     default_classification_predict_fn,
     default_detection_predict_fn,
+    default_passthrough_predict_fn,
     default_segmentation_predict_fn,
 )
 
@@ -30,6 +40,7 @@ class Task:
     prob_metrics: frozenset[str] = frozenset()
     requires_num_classes: bool = True
     description: str = ""
+    update_fn: UpdateFn | None = None
 
 
 # Backward-compat alias (deprecated; removed in a future release).
@@ -56,6 +67,35 @@ _TASKS: dict[str, Task] = {
         frozenset(),
         requires_num_classes=False,
         description="Object detection (mAP/mAR family + IoU variants).",
+    ),
+    "regression": Task(
+        regression_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Scalar regression (mse, mae, rmse, r2, pearson, spearman).",
+    ),
+    "retrieval": Task(
+        retrieval_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Information retrieval (retrieval_map, ndcg, mrr, precision, recall).",
+        update_fn=retrieval_update,
+    ),
+    "image_quality": Task(
+        image_quality_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Paired image quality (ssim, psnr, ms_ssim, lpips).",
+    ),
+    "audio": Task(
+        audio_battery,
+        default_passthrough_predict_fn,
+        frozenset(),
+        requires_num_classes=False,
+        description="Speech/audio quality (si_sdr, si_snr, stoi).",
     ),
 }
 

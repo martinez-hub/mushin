@@ -3,8 +3,12 @@
 """Standard evaluation protocols: run a benchmark, get a labeled dataset back."""
 
 from ._metrics import (
+    audio_battery,
     classification_battery,
     detection_battery,
+    image_quality_battery,
+    regression_battery,
+    retrieval_battery,
     segmentation_battery,
 )
 from ._result import BenchmarkResult
@@ -18,7 +22,11 @@ __all__ = [
     "register_task",
     "get_task",
     "list_tasks",
+    "audio_battery",
     "classification_battery",
     "segmentation_battery",
     "detection_battery",
+    "regression_battery",
+    "retrieval_battery",
+    "image_quality_battery",
 ]

@@ -43,14 +43,15 @@ jobs:
         with:
           enable-cache: true
       - name: Sync environment (Python ${{ matrix.python-version }})
-        # --extra detection exercises the detection battery (torchvision +
-        # pycocotools on Linux; pycocotools is win32-gated, so it is absent on
-        # Windows and the detection tests skip there via importorskip).
-        run: uv sync --extra detection --python ${{ matrix.python-version }}
+        # --extra detection/image/audio exercise the optional batteries. Their
+        # C-extension deps (pycocotools, pesq, pystoi) are win32-gated, so on
+        # Windows those metrics are absent and the corresponding tests skip via
+        # importorskip; SSIM/PSNR/MS-SSIM/SI-SDR core paths still run.
+        run: uv sync --extra detection --extra image --extra audio --python ${{ matrix.python-version }}
       - name: Show resolved environment
         run: uv pip list
       - name: Run tests
-        run: uv run --extra detection pytest tests/ --hypothesis-profile fast -p no:cacheprovider
+        run: uv run --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
   changelog:
     runs-on: ubuntu-latest

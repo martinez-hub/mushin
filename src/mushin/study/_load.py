@@ -15,7 +15,7 @@ def evaluate_checkpoints(
     load_fn: Callable[[str], Any],
     data,
     task,  # str | Task — resolved inside compare()
-    num_classes: int,
+    num_classes: int | None = None,
     test: str = "wilcoxon",
     alpha: float = 0.05,
     ignore_index: int | None = None,

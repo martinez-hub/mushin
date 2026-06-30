@@ -305,3 +305,47 @@ def test_evaluate_expands_dict_metric_and_keeps_scalar():
         prob_metrics=frozenset(),
     )
     assert out == {"s": 1.0, "a": 1.0, "b": 2.0}
+
+
+def test_evaluate_uses_custom_update_fn():
+    import torch
+    from torchmetrics import MeanMetric
+
+    from mushin.benchmark._inference import evaluate
+
+    # data yields (x, y) where y is a (value, weight) tuple — a shape the default
+    # (preds, target) loop could not handle; the custom update_fn unpacks it.
+    data = [(torch.zeros(2, 1), (torch.tensor([1.0, 3.0]), torch.tensor([1.0, 1.0])))]
+    model = torch.nn.Identity()
+    battery = {"m": MeanMetric()}
+
+    def predict_fn(model, x):
+        return torch.tensor([1.0, 3.0]), None
+
+    calls = {"n": 0}
+
+    def update_fn(battery, preds, probs, target):
+        calls["n"] += 1
+        value, _weight = target
+        battery["m"].update(value)
+
+    out = evaluate(model, data, battery, predict_fn, frozenset(), update_fn=update_fn)
+    assert calls["n"] == 1
+    assert out["m"] == 2.0  # mean of [1.0, 3.0]
+
+
+def test_evaluate_default_update_fn_unchanged():
+    import torch
+    from torchmetrics.classification import MulticlassAccuracy
+
+    from mushin.benchmark._inference import evaluate
+
+    data = [(torch.zeros(3, 2), torch.tensor([0, 1, 2]))]
+    model = torch.nn.Identity()
+    battery = {"acc": MulticlassAccuracy(num_classes=3, average="micro")}
+
+    def predict_fn(model, x):
+        return torch.tensor([0, 1, 2]), None  # all correct
+
+    out = evaluate(model, data, battery, predict_fn, frozenset())  # update_fn omitted
+    assert out["acc"] == 1.0

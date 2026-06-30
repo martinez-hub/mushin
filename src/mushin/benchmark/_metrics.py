@@ -1,6 +1,7 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""Metric batteries (classification + segmentation), delegated to torchmetrics."""
+"""Metric batteries (classification, segmentation, detection, regression, image
+quality, audio, retrieval), delegated to torchmetrics."""
 
 from __future__ import annotations
 
@@ -17,6 +18,20 @@ from torchmetrics.classification import (
     MulticlassJaccardIndex,
     MulticlassPrecision,
     MulticlassRecall,
+)
+from torchmetrics.regression import (
+    MeanAbsoluteError,
+    MeanSquaredError,
+    PearsonCorrCoef,
+    R2Score,
+    SpearmanCorrCoef,
+)
+from torchmetrics.retrieval import (
+    RetrievalMAP,
+    RetrievalMRR,
+    RetrievalNormalizedDCG,
+    RetrievalPrecision,
+    RetrievalRecall,
 )
 
 
@@ -64,6 +79,52 @@ def segmentation_battery(
             num_classes, average="macro", ignore_index=ignore_index
         ),
     }
+
+
+def regression_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Scalar-regression battery. ``num_classes``/``ignore_index`` are accepted for
+    the uniform task interface but unused. This is a SINGLE-TARGET battery:
+    predictions and targets are continuous tensors of shape ``(N,)`` or ``(N, 1)``.
+    Multi-output targets ``(N, D>1)`` are not supported here — ``pearson``/
+    ``spearman`` are built with ``num_outputs=1`` and raise on ``D>1``; use a custom
+    Task with ``num_outputs=D`` for multi-output regression."""
+    return {
+        "mse": MeanSquaredError(),
+        "mae": MeanAbsoluteError(),
+        "rmse": MeanSquaredError(squared=False),
+        "r2": R2Score(),
+        "pearson": PearsonCorrCoef(),
+        "spearman": SpearmanCorrCoef(),
+    }
+
+
+def retrieval_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Information-retrieval battery over grouped (per-query) predictions.
+    ``num_classes``/``ignore_index`` are accepted for the uniform interface but
+    unused. Batches must yield ``y = (relevance, indexes)``; see
+    ``retrieval_update``. ``relevance`` must be BINARY (0/1) for ``retrieval_map``/
+    ``mrr``/``precision``/``recall`` (they raise on graded values); only ``ndcg``
+    accepts graded relevance. For graded judgments, use a custom Task with just the
+    graded-capable metrics (e.g. ``RetrievalNormalizedDCG``)."""
+    return {
+        "retrieval_map": RetrievalMAP(),
+        "ndcg": RetrievalNormalizedDCG(),
+        "mrr": RetrievalMRR(),
+        "precision": RetrievalPrecision(),
+        "recall": RetrievalRecall(),
+    }
+
+
+def retrieval_update(battery, preds, probs, target):
+    """update_fn for the retrieval task: ``target`` is a ``(relevance, indexes)``
+    tuple, and every retrieval metric takes ``(preds, relevance, indexes=...)``."""
+    relevance, indexes = target
+    for metric in battery.values():
+        metric.update(preds, relevance, indexes=indexes)
 
 
 _MAP_DROP = frozenset({"classes", "map_per_class", "mar_100_per_class"})
@@ -123,6 +184,75 @@ def detection_battery(
         raise ImportError(
             "the detection battery requires the optional detection extra; install "
             "it with `pip install mushin-py[detection]` (torchvision + pycocotools)."
+        ) from e
+
+
+def image_quality_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Paired image-quality battery (generated vs reference image). Requires the
+    optional ``image`` extra (LPIPS pulls in torchvision + lpips). ``num_classes``/
+    ``ignore_index`` are accepted for the uniform interface but unused. Images are
+    ``(N, C, H, W)``; ``data_range=1.0`` assumes inputs in ``[0, 1]`` and
+    ``LearnedPerceptualImagePatchSimilarity(normalize=True)`` accepts that range.
+    Note ``ms_ssim`` requires ``H, W > 160`` (torchmetrics default 5 scales / kernel
+    11); for smaller images drop ``ms_ssim`` or pass a custom
+    ``MultiScaleStructuralSimilarityIndexMeasure`` with fewer ``betas``."""
+    try:
+        from torchmetrics.image import (
+            MultiScaleStructuralSimilarityIndexMeasure,
+            PeakSignalNoiseRatio,
+            StructuralSimilarityIndexMeasure,
+        )
+
+        # LPIPS is imported from its submodule, not the top-level ``torchmetrics.image``
+        # namespace: torchmetrics only re-exports it at top level when its deps
+        # (torchvision + lpips) are present, so a clean env without the ``image``
+        # extra would AttributeError rather than reach the construction-time check.
+        from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+        return {
+            "ssim": StructuralSimilarityIndexMeasure(data_range=1.0),
+            "psnr": PeakSignalNoiseRatio(data_range=1.0),
+            "ms_ssim": MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0),
+            "lpips": LearnedPerceptualImagePatchSimilarity(normalize=True),
+        }
+    except ImportError as e:
+        raise ImportError(
+            "the image_quality battery requires the optional image extra; install "
+            "it with `pip install mushin-py[image]` (torchvision + lpips)."
+        ) from e
+
+
+def audio_battery(
+    num_classes: int | None = None, ignore_index: int | None = None
+) -> dict[str, Metric]:
+    """Speech/audio battery (estimated vs reference waveform). Requires the optional
+    ``audio`` extra (STOI needs ``pystoi``). SI-SDR/SI-SNR are core, but the battery
+    is all-or-nothing. ``num_classes``/``ignore_index`` are accepted for the uniform
+    interface but unused. Waveforms are ``(N, T)``; STOI assumes a 16 kHz sample
+    rate (override via a custom Task for other rates).
+
+    PESQ is intentionally omitted: the only released ``pesq`` package (0.0.4) fails
+    to import under NumPy 2 (the supported non-Intel platform) and has no fixed
+    release, so it cannot be shipped reliably. Add it via a custom Task on a
+    NumPy-1.x environment if needed."""
+    try:
+        from torchmetrics.audio import (
+            ScaleInvariantSignalDistortionRatio,
+            ScaleInvariantSignalNoiseRatio,
+        )
+        from torchmetrics.audio.stoi import ShortTimeObjectiveIntelligibility
+
+        return {
+            "si_sdr": ScaleInvariantSignalDistortionRatio(),
+            "si_snr": ScaleInvariantSignalNoiseRatio(),
+            "stoi": ShortTimeObjectiveIntelligibility(fs=16000),
+        }
+    except ImportError as e:
+        raise ImportError(
+            "the audio battery requires the optional audio extra; install it with "
+            "`pip install mushin-py[audio]` (pystoi)."
         ) from e
 
 

@@ -85,6 +85,23 @@ detection = [
     # error if it is then used without pycocotools).
     "pycocotools >= 2.0.7 ; sys_platform != 'win32'",
 ]
+# Image-quality LPIPS needs torchvision (backbone) + the lpips package; SSIM/PSNR/
+# MS-SSIM are core torchmetrics but the battery is all-or-nothing, so it requires
+# this extra as a whole. torchvision floors pair with the platform-split torch
+# floors above.
+image = [
+    "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "lpips >= 0.1.4",
+]
+# Audio STOI needs the pystoi package; SI-SDR/SI-SNR are core but the battery is
+# all-or-nothing. Gated off win32 where the native build is painful (the battery
+# raises a clear error if used without it). PESQ is intentionally excluded: the
+# only released `pesq` (0.0.4) fails to import under NumPy 2 and has no fixed
+# release, so it would crash on the supported non-Intel platforms.
+audio = [
+    "pystoi >= 0.3.3 ; sys_platform != 'win32'",
+]
 
 [project.scripts]
 mushin-mcp = "mushin.mcp.__main__:main"

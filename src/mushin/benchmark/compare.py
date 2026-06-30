@@ -33,10 +33,14 @@ def compare(
 
     Parameters
     ----------
-    task : str
-        ``"classification"``, ``"segmentation"``, or ``"detection"``.
+    task : str or Task
+        A registered task name (``"classification"``, ``"segmentation"``,
+        ``"detection"``, ``"regression"``, ``"retrieval"``, ``"image_quality"``,
+        ``"audio"``, or a custom one — see ``list_tasks()``) or a ``Task`` object.
     num_classes : int or None
-        Required when ``metrics`` is not provided (not for ``"detection"``).
+        Required (when ``metrics`` is not provided) only for tasks whose battery
+        needs it — ``"classification"`` and ``"segmentation"``; ignored for the
+        others.
     ignore_index : int or None
         Label to exclude from segmentation metrics (e.g. a void/boundary class).
     prob_metrics : frozenset[str] or None
@@ -62,8 +66,11 @@ def compare(
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, models in methods.items():
+        # spec.update_fn is forwarded even when metrics= overrides the battery, so
+        # a task's update_fn must stay compatible with the substituted battery.
         results[name] = [
-            evaluate(model, data, battery, fn, pm, device) for model in models
+            evaluate(model, data, battery, fn, pm, device, update_fn=spec.update_fn)
+            for model in models
         ]
 
     ds = to_dataset(results)

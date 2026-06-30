@@ -5,11 +5,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable
+from typing import Optional
 
 import torch
 from torchmetrics import Metric
 
 PredictFn = Callable[[torch.nn.Module, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+
+# Owns all metric.update() calls for one batch: (battery, preds, probs, target).
+# `Optional[...]` (not `... | None`) because this alias is evaluated at runtime,
+# and `X | None` is a TypeError under Python 3.9.
+UpdateFn = Callable[
+    [dict[str, Metric], torch.Tensor, Optional[torch.Tensor], object], None
+]
 
 
 def _to_device(obj, device: torch.device):
@@ -71,11 +79,14 @@ def evaluate(
     predict_fn: PredictFn,
     prob_metrics: Collection[str],
     device: torch.device | None = None,
+    update_fn: UpdateFn | None = None,
 ) -> dict[str, float]:
     """Stream ``data`` through ``model``, updating each metric in ``battery`` per
     batch, and return ``{name: value}``. Metrics named in ``prob_metrics`` are fed
     probabilities; the rest hard predictions. O(C^2) memory for confusion-matrix
-    metrics."""
+    metrics. If ``update_fn`` is given it owns every ``metric.update(...)`` call
+    for a batch (receiving ``(battery, preds, probs, target)``); when ``None`` the
+    default ``(probs|preds, target)`` dispatch is used."""
     if device is None:
         params = list(model.parameters())
         device = params[0].device if params else torch.device("cpu")
@@ -86,16 +97,18 @@ def evaluate(
         metric.reset()
         metric.to(device)
 
+    if update_fn is None:
+
+        def update_fn(battery, preds, probs, target):
+            for name, metric in battery.items():
+                metric.update(probs if name in prob_metrics else preds, target)
+
     with torch.no_grad():
         for x, y in data:
             x = _to_device(x, device)
             y = _to_device(y, device)
             preds, probs = predict_fn(model, x)
-            for name, metric in battery.items():
-                # Extension seam: a future per-Task ``update_fn`` (Spec 2) will
-                # own this call to support non-(preds, target) signatures such as
-                # retrieval's ``indexes``. Keep the dispatch here, in one place.
-                metric.update(probs if name in prob_metrics else preds, y)
+            update_fn(battery, preds, probs, y)
 
     out: dict[str, float] = {}
     for name, metric in battery.items():

@@ -162,6 +162,63 @@ retrieval, …). Any of them works through a `Task`: put the relevant
 from `predict_fn`. Distribution-level metrics (FID, KID, Inception Score) are not
 supported by the streaming `compare` loop.
 
+## More built-in tasks
+
+Beyond `classification`, `segmentation`, and `detection`, mushin ships these
+batteries. Each is `requires_num_classes=False`; the default `predict_fn` returns
+`(model(x), None)` and metrics consume the model output against the target.
+
+| task | default metrics | `target` (the `y` in each batch) |
+|---|---|---|
+| `regression` | mse, mae, rmse, r2, pearson, spearman | continuous tensor `(N,)` or `(N, 1)` — single-target only |
+| `image_quality` | ssim, psnr, ms_ssim, lpips | reference image `(N, C, H, W)` — `ms_ssim` needs `H, W > 160` |
+| `audio` | si_sdr, si_snr, stoi | reference waveform `(N, T)` |
+| `retrieval` | retrieval_map, ndcg, mrr, precision, recall | a `(relevance, indexes)` tuple — `relevance` binary 0/1 (only `ndcg` accepts graded) |
+
+Notes on the contracts: `regression` is single-target — multi-output `(N, D>1)`
+targets crash `pearson`/`spearman` (build a custom `Task` with `num_outputs=D` for
+those). `retrieval`'s `relevance` must be binary for `retrieval_map`/`mrr`/
+`precision`/`recall`; only `ndcg` handles graded judgments. `image_quality`'s
+`ms_ssim` needs images larger than 160 px per side (torchmetrics' 5-scale default);
+drop it or customize it for smaller images.
+
+```python
+from mushin import compare
+
+compare(methods=..., data=regression_loader, task="regression")
+```
+
+**Optional extras.** `image_quality` needs `pip install mushin-py[image]`
+(torchvision + lpips) and `audio` needs `pip install mushin-py[audio]`
+(just pystoi; PESQ is excluded &mdash; its only release is NumPy-2-incompatible). These batteries are all-or-nothing: they raise a clear error if
+the extra is missing. For just the core metrics (e.g. SSIM alone), pass an
+explicit `metrics={...}` or build a custom `Task`. Distribution-level metrics
+(FID, KID, Inception Score) are not supported by the streaming `compare` loop.
+
+**Retrieval data contract.** Retrieval metrics score documents grouped by query,
+so each batch yields `y = (relevance, indexes)`: `relevance` is the per-document
+target and `indexes` assigns each document to a query. This is wired through the
+task's `update_fn`.
+
+### Custom update step (`update_fn`)
+
+Most tasks update metrics as `metric.update(preds, target)`. When a metric needs a
+different call (like retrieval's `indexes`), give the `Task` an `update_fn` that
+owns the per-batch dispatch:
+
+```python
+from mushin import Task
+
+def my_update(battery, preds, probs, target):
+    for metric in battery.values():
+        metric.update(preds, target)   # or any signature your metrics need
+
+task = Task(battery=..., predict_fn=..., update_fn=my_update)
+```
+
+`update_fn(battery, preds, probs, target)` is called once per batch; when it is
+`None` (the default), mushin uses the standard `(preds, target)` loop.
+
 ## See also
 
 - [Comparing methods](compare.md)

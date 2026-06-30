@@ -1391,6 +1391,28 @@ wheels = [
 ]
 
 [[package]]
+name = "lpips"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch", version = "2.2.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "torch", version = "2.12.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "torchvision", version = "0.17.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "torchvision", version = "0.27.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/2d/4b8148d32f5bd461eb7d5daa54fcc998f86eaa709a57f4ef6aa4c62f024f/lpips-0.1.4.tar.gz", hash = "sha256:3846331df6c69688aec3d300a5eeef6c529435bc8460bd58201c3d62e56188fa", size = 18029, upload-time = "2021-08-25T22:10:32.803Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/13/1df50c7925d9d2746702719f40e864f51ed66f307b20ad32392f1ad2bb87/lpips-0.1.4-py3-none-any.whl", hash = "sha256:fd537af5828b69d2e6ffc0a397bd506dbc28ca183543617690844c08e102ec5e", size = 53763, upload-time = "2021-08-25T22:10:31.257Z" },
+]
+
+[[package]]
 name = "markdown"
 version = "3.10.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1972,8 +1994,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+audio = [
+    { name = "pystoi", marker = "sys_platform != 'win32'" },
+]
 detection = [
     { name = "pycocotools", marker = "sys_platform != 'win32'" },
+    { name = "torchvision", version = "0.17.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "torchvision", version = "0.27.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+]
+image = [
+    { name = "lpips" },
     { name = "torchvision", version = "0.17.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "torchvision", version = "0.27.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
 ]
@@ -2013,6 +2043,7 @@ docs = [
 requires-dist = [
     { name = "hydra-core", specifier = ">=1.2.0" },
     { name = "hydra-zen", specifier = ">=0.10.0" },
+    { name = "lpips", marker = "extra == 'image'", specifier = ">=0.1.4" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.9" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
     { name = "netcdf4", marker = "extra == 'netcdf'", specifier = ">=1.7.0" },
@@ -2021,17 +2052,20 @@ requires-dist = [
     { name = "omegaconf", specifier = ">=2.1.1" },
     { name = "pandas", specifier = ">=2.2.2" },
     { name = "pycocotools", marker = "sys_platform != 'win32' and extra == 'detection'", specifier = ">=2.0.7" },
+    { name = "pystoi", marker = "sys_platform != 'win32' and extra == 'audio'", specifier = ">=0.3.3" },
     { name = "pytorch-lightning", specifier = ">=2.4.0" },
     { name = "scipy", specifier = ">=1.13" },
     { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2.4.0" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=2.2.0,<2.3" },
     { name = "torchmetrics", specifier = ">=1.0" },
     { name = "torchvision", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'detection'", specifier = ">=0.17,<0.18" },
+    { name = "torchvision", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'image'", specifier = ">=0.17,<0.18" },
     { name = "torchvision", marker = "(platform_machine != 'x86_64' and extra == 'detection') or (sys_platform != 'darwin' and extra == 'detection')", specifier = ">=0.19" },
+    { name = "torchvision", marker = "(platform_machine != 'x86_64' and extra == 'image') or (sys_platform != 'darwin' and extra == 'image')", specifier = ">=0.19" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "xarray", specifier = ">=2024.6.0" },
 ]
-provides-extras = ["viz", "netcdf", "mcp", "detection"]
+provides-extras = ["viz", "netcdf", "mcp", "detection", "image", "audio"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3226,6 +3260,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pystoi"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.11' and platform_machine != 'ARM64' and sys_platform == 'win32') or (python_full_version < '3.11' and sys_platform != 'darwin' and sys_platform != 'win32')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and sys_platform != 'win32')" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'win32')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'ARM64') or (python_full_version < '3.11' and sys_platform != 'win32')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform != 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/3d/1ae8bdb686c6aaaeef474aa6b790abbe38f42b61188b57a974dd9320e521/pystoi-0.4.1.tar.gz", hash = "sha256:1c6f50d6fbfee46b00c922458cdbd27228d9830ca81cea788fd600fc2f7de6e4", size = 10401, upload-time = "2023-12-29T16:48:05.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/22/60cd92bd3ec00948800984410f4cf5ded5bd8e9b715729f3642efe0edb3d/pystoi-0.4.1-py2.py3-none-any.whl", hash = "sha256:e277b671663d26d35a2416c9c8010a74084e6c3970354506398051a554896939", size = 8218, upload-time = "2023-12-29T16:48:03.748Z" },
 ]
 
 [[package]]
