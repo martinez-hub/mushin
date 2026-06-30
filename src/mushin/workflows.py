@@ -3,15 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from inspect import getattr_static
 from pathlib import Path
 from typing import (
     Any,
-    Callable,
-    Optional,
+    TypeAlias,
+    TypeGuard,
     TypeVar,
-    Union,
 )
 
 import numpy as np
@@ -21,11 +20,11 @@ from hydra.core.utils import JobReturn
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._compatibility import HYDRA_VERSION
 from hydra_zen._launch import _NotSet
-from typing_extensions import Self, TypeAlias, TypeGuard
+from typing_extensions import Self
 
 from ._validate import value_check
 
-LoadedValue: TypeAlias = Union[str, int, float, bool, list[Any], dict[str, Any]]
+LoadedValue: TypeAlias = str | int | float | bool | list[Any] | dict[str, Any]
 
 __all__ = [
     "BaseWorkflow",
@@ -44,7 +43,7 @@ _VERSION_BASE_DEFAULT = _NotSet if HYDRA_VERSION < (1, 2, 0) else "1.1"
 def _sort_x_by_k(x: T, k: Iterable[Any]) -> T:
     k = tuple(k)
     assert len(x) == len(k)
-    sorted_, _ = zip(*sorted(zip(x, k), key=lambda x: x[1]))
+    sorted_, _ = zip(*sorted(zip(x, k, strict=True), key=lambda x: x[1]), strict=True)
     return type(x)(sorted_)
 
 
@@ -116,7 +115,7 @@ class BaseWorkflow:
     cfgs: list[Any]
     metrics: dict[str, list[Any]]
     workflow_overrides: dict[str, Any]
-    jobs: Union[list[JobReturn], list[Any], JobReturn]
+    jobs: list[JobReturn] | list[Any] | JobReturn
 
     def __init__(self, eval_task_cfg=None) -> None:
         """Workflows and experiments using Hydra.
@@ -148,7 +147,7 @@ class BaseWorkflow:
         return self._working_dir
 
     @working_dir.setter
-    def working_dir(self, path: Union[str, Path]):
+    def working_dir(self, path: str | Path):
         if isinstance(path, str):
             path = Path(path)
         value_check("path", path, type_=Path)
@@ -164,7 +163,7 @@ class BaseWorkflow:
     @staticmethod
     def _parse_overrides(
         overrides,
-    ) -> dict[str, Union[LoadedValue, Sequence[LoadedValue]]]:
+    ) -> dict[str, LoadedValue | Sequence[LoadedValue]]:
         parser = OverridesParser.create()
         parsed_overrides = parser.parse_overrides(overrides=overrides)
 
@@ -184,7 +183,7 @@ class BaseWorkflow:
     @property
     def multirun_task_overrides(
         self,
-    ) -> dict[str, Union[LoadedValue, Sequence[LoadedValue]]]:
+    ) -> dict[str, LoadedValue | Sequence[LoadedValue]]:
         """Returns override param-name -> value.
 
         A sequence of overrides associated with a multirun will
@@ -275,22 +274,20 @@ class BaseWorkflow:
     def run(
         self,
         *,
-        working_dir: Optional[str] = None,
-        sweeper: Optional[str] = None,
-        launcher: Optional[str] = None,
-        overrides: Optional[list[str]] = None,
-        task_fn_wrapper: Union[
-            Callable[[Callable[..., T1]], Callable[[Any], T1]], None
-        ] = zen,
-        pre_task_fn_wrapper: Union[
-            Callable[[Callable[..., None]], Callable[[Any], None]], None
-        ] = zen,
-        version_base: Optional[Union[str, type[_NotSet]]] = _VERSION_BASE_DEFAULT,
+        working_dir: str | None = None,
+        sweeper: str | None = None,
+        launcher: str | None = None,
+        overrides: list[str] | None = None,
+        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]]
+        | None = zen,
+        pre_task_fn_wrapper: Callable[[Callable[..., None]], Callable[[Any], None]]
+        | None = zen,
+        version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
         to_dictconfig: bool = False,
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",
         with_log_configuration: bool = True,
-        **workflow_overrides: Union[str, int, float, bool, multirun, hydra_list],
+        **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
 
@@ -530,7 +527,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         loss        (epsilon, scale) float64 0.01 1.0 0.04 4.0 0.09 9.0
     """
 
-    def __init__(self, eval_task_cfg=None, working_dir: Optional[Path] = None) -> None:
+    def __init__(self, eval_task_cfg=None, working_dir: Path | None = None) -> None:
         super().__init__(eval_task_cfg)
         self._working_dir = working_dir
 
@@ -542,11 +539,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     #      for re-indexing based on overrides values
 
     _JOBDIR_NAME: str = "job_dir"
-    _target_dir_multirun_overrides: Optional[defaultdict[str, list[Any]]] = None
-    output_subdir: Optional[str] = None
+    _target_dir_multirun_overrides: defaultdict[str, list[Any]] | None = None
+    output_subdir: str | None = None
 
     # List of all the dirs that the multirun writes to; sorted by job-num
-    multirun_working_dirs: Optional[list[Path]] = None
+    multirun_working_dirs: list[Path] | None = None
 
     @staticmethod
     def task(*args: Any, **kwargs: Any) -> Mapping[str, Any]:  # pragma: no cover
@@ -601,23 +598,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     def run(
         self,
         *,
-        task_fn_wrapper: Union[
-            Callable[[Callable[..., T1]], Callable[[Any], T1]], None
-        ] = zen,
-        pre_task_fn_wrapper: Union[
-            Callable[[Callable[..., None]], Callable[[Any], None]], None
-        ] = zen,
-        working_dir: Optional[str] = None,
-        sweeper: Optional[str] = None,
-        launcher: Optional[str] = None,
-        overrides: Optional[list[str]] = None,
-        version_base: Optional[Union[str, type[_NotSet]]] = _VERSION_BASE_DEFAULT,
-        target_job_dirs: Optional[Sequence[Union[str, Path]]] = None,
+        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]]
+        | None = zen,
+        pre_task_fn_wrapper: Callable[[Callable[..., None]], Callable[[Any], None]]
+        | None = zen,
+        working_dir: str | None = None,
+        sweeper: str | None = None,
+        launcher: str | None = None,
+        overrides: list[str] | None = None,
+        version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
+        target_job_dirs: Sequence[str | Path] | None = None,
         to_dictconfig: bool = False,
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",
         with_log_configuration: bool = True,
-        **workflow_overrides: Union[str, int, float, bool, multirun, hydra_list],
+        **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         # TODO: add docs
 
@@ -762,8 +757,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
     def load_from_dir(
         self: Self,
-        working_dir: Union[Path, str],
-        metrics_filename: Union[str, Sequence[str], None],
+        working_dir: Path | str,
+        metrics_filename: str | Sequence[str] | None,
     ) -> Self:
         """Loading workflow job data from a given working directory. The workflow
         is loaded in-place and "self" is returned by this method.
@@ -818,7 +813,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         return self
 
     def load_metrics(
-        self, metrics_filename: Union[str, Sequence[str]]
+        self, metrics_filename: str | Sequence[str]
     ) -> dict[str, list[Any]]:
         """Loads and aggregates across all multirun working dirs, and stores
         the metrics in `self.metrics`.
@@ -889,8 +884,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
     @staticmethod
     def _sanitize_coordinate_for_xarray(
-        value: Union[LoadedValue, Sequence[LoadedValue]],
-    ) -> Union[str, int, float, bool, list[Union[str, int, float, bool]]]:
+        value: LoadedValue | Sequence[LoadedValue],
+    ) -> str | int | float | bool | list[str | int | float | bool]:
         """Nested sequences are not permitted for xarray coordinates. This
         Returns a list of scalars when `value` is a multi-run or a scalar.
 
@@ -905,9 +900,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     def to_xarray(
         self,
         include_working_subdirs_as_data_var: bool = False,
-        coord_from_metrics: Optional[str] = None,
+        coord_from_metrics: str | None = None,
         non_multirun_params_as_singleton_dims: bool = False,
-        metrics_filename: Union[str, Sequence[str], None] = None,
+        metrics_filename: str | Sequence[str] | None = None,
     ):
         """Convert workflow data to xarray Dataset.
 
@@ -1053,24 +1048,22 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
     def run(
         self,
         *,
-        epsilon: Union[str, Sequence[float]],
-        task_fn_wrapper: Union[
-            Callable[[Callable[..., T1]], Callable[[Any], T1]], None
-        ] = zen,
-        pre_task_fn_wrapper: Union[
-            Callable[[Callable[..., None]], Callable[[Any], None]], None
-        ] = zen,
-        target_job_dirs: Optional[Sequence[Union[str, Path]]] = None,  # TODO: add docs
-        version_base: Optional[Union[str, type[_NotSet]]] = _VERSION_BASE_DEFAULT,
-        working_dir: Optional[str] = None,
-        sweeper: Optional[str] = None,
-        launcher: Optional[str] = None,
-        overrides: Optional[list[str]] = None,
+        epsilon: str | Sequence[float],
+        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]]
+        | None = zen,
+        pre_task_fn_wrapper: Callable[[Callable[..., None]], Callable[[Any], None]]
+        | None = zen,
+        target_job_dirs: Sequence[str | Path] | None = None,  # TODO: add docs
+        version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
+        working_dir: str | None = None,
+        sweeper: str | None = None,
+        launcher: str | None = None,
+        overrides: list[str] | None = None,
         to_dictconfig: bool = False,
         config_name: str = "rai_workflow",
         job_name: str = "rai_workflow",
         with_log_configuration: bool = True,
-        **workflow_overrides: Union[str, int, float, bool, multirun, hydra_list],
+        **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment for varying value `epsilon`.
 
@@ -1135,9 +1128,9 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
     def to_xarray(
         self,
         include_working_subdirs_as_data_var: bool = False,
-        coord_from_metrics: Optional[str] = None,
+        coord_from_metrics: str | None = None,
         non_multirun_params_as_singleton_dims: bool = False,
-        metrics_filename: Union[str, Sequence[str], None] = None,
+        metrics_filename: str | Sequence[str] | None = None,
     ):
         """Convert workflow data to xarray Dataset.
 
@@ -1183,8 +1176,8 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         self,
         metric: str,
         ax: Any = None,
-        group: Optional[str] = None,
-        save_filename: Optional[str] = None,
+        group: str | None = None,
+        save_filename: str | None = None,
         non_multirun_params_as_singleton_dims: bool = False,
         **kwargs,
     ) -> Any:

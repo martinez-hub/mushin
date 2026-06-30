@@ -82,7 +82,7 @@ def _score_one(
     base = name if name is not None else "score"
     pass_seed = _accepts_seed(m)
     scores = []
-    for i, (o, r) in enumerate(zip(outputs, refs)):
+    for i, (o, r) in enumerate(zip(outputs, refs, strict=True)):
         try:
             scores.append(float(m(o, r, seed=seed) if pass_seed else m(o, r)))
         except Exception as e:
@@ -139,12 +139,14 @@ def _run(system, inputs, seed, cache, name) -> list[Any]:
                 f"{len(missing)} inputs"
             )
         cache.put_many(
-            name, seed, [(inp, out) for (_, inp), out in zip(missing, fresh)]
+            name,
+            seed,
+            [(inp, out) for (_, inp), out in zip(missing, fresh, strict=True)],
         )
         # Normalize fresh outputs the same way (see _normalize_output) so a fresh
         # run scores exactly what a later cached replay — and a no-cache run —
         # would score.
-        for (i, _), out in zip(missing, fresh):
+        for (i, _), out in zip(missing, fresh, strict=True):
             cached[i] = _normalize_output(out)
     return [cached[i] for i in range(len(inputs))]
 

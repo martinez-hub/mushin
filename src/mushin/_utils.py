@@ -5,7 +5,7 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from hydra_zen import load_from_yaml
@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 def load_from_checkpoint(
     model: nn.Module,
     *,
-    ckpt: Optional[Union[str, Path]] = None,
-    weights_key: Optional[str] = None,
-    weights_key_strip: Optional[str] = None,
-    model_attr: Optional[str] = None,
+    ckpt: str | Path | None = None,
+    weights_key: str | None = None,
+    weights_key_strip: str | None = None,
+    model_attr: str | None = None,
 ) -> nn.Module:
     """Load model weights.
 
@@ -89,14 +89,14 @@ def load_from_checkpoint(
 @dataclass
 class Experiment:
     working_dir: str
-    cfg: Optional[Union[dict, ListConfig, DictConfig]]
+    cfg: dict | ListConfig | DictConfig | None
     ckpts: list[str]
     metrics: dict
 
 
 def load_experiment(
-    exp_path: Union[str, Path], search_path: Optional[Union[str, Path]] = None
-) -> Union[Experiment, list[Experiment]]:
+    exp_path: str | Path, search_path: str | Path | None = None
+) -> Experiment | list[Experiment]:
     """Loads all configuration and metrics outputs in an experiment directory.
 
     Parameters

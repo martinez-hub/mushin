@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable
-from typing import Optional
 
 import torch
 from torchmetrics import Metric
@@ -16,7 +15,7 @@ PredictFn = Callable[[torch.nn.Module, torch.Tensor], tuple[torch.Tensor, torch.
 # `Optional[...]` (not `... | None`) because this alias is evaluated at runtime,
 # and `X | None` is a TypeError under Python 3.9.
 UpdateFn = Callable[
-    [dict[str, Metric], torch.Tensor, Optional[torch.Tensor], object], None
+    [dict[str, Metric], torch.Tensor, torch.Tensor | None, object], None
 ]
 
 

@@ -4,7 +4,6 @@
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Union
 
 import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -40,8 +39,8 @@ class MetricsCallback(Callback):
 
     def __init__(
         self,
-        save_dir: Union[Path, str] = ".",
-        filename: Union[Path, str] = "metrics.pt",
+        save_dir: Path | str = ".",
+        filename: Path | str = "metrics.pt",
     ):
         super().__init__()
         self.save_dir = Path(save_dir)
