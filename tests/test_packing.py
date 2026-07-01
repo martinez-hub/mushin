@@ -79,3 +79,11 @@ def test_warns_when_cuda_already_initialized(monkeypatch):
         gpu = pin_gpu_round_robin(num_gpus=2, job_index=1)
     assert gpu == 1
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"  # still set
+
+
+def test_pin_gpu_round_robin_exported():
+    import mushin
+    from mushin import pin_gpu_round_robin
+
+    assert "pin_gpu_round_robin" in mushin.__all__
+    assert callable(pin_gpu_round_robin)
