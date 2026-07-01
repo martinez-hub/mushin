@@ -1,6 +1,8 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
 
+import pytest
+
 
 def test_hydra_fsdp_is_fsdp_strategy_with_mixin():
     from pytorch_lightning.strategies import FSDPStrategy
@@ -57,3 +59,12 @@ def test_hydra_fsdp_exported():
     assert A is B
     assert "HydraFSDP" in mushin.__all__
     assert "HydraFSDP" in mushin.lightning.__all__
+
+
+@pytest.mark.cluster
+def test_hydra_fsdp_multirun_end_to_end():
+    # Human-run gate: a real FSDP run under Hydra multirun needs 2+ GPUs, so it
+    # cannot run in CI. Deselected by default (addopts excludes `cluster`); run
+    # with `pytest -m cluster` on a multi-GPU host. See
+    # examples/sharding_fsdp_multirun.py for the actual runnable demo.
+    pytest.skip("requires >=2 GPUs; run the example on a multi-GPU host")
