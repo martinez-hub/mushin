@@ -8,10 +8,13 @@ runs **several small jobs per GPU** to use each device's full potential.
 mushin does not assign GPUs — placement is decided by your **launcher** and by
 Lightning/torch inside each job. So packing is a launcher/environment recipe.
 
-## joblib / basic launcher: `pin_gpu_round_robin`
+## joblib launcher: `pin_gpu_round_robin`
 
 Pin each job to one GPU round-robin, and run more jobs concurrently than you have
-GPUs. `pin_gpu_round_robin` sets `CUDA_VISIBLE_DEVICES` from the Hydra job index —
+GPUs. Use a launcher that runs **each job in its own parallel process** — joblib
+(below) or Ray. The default/basic launcher runs a sweep serially in one process,
+so packing does not apply: the second job would hit already-initialized CUDA and
+`pin_gpu_round_robin` raises. `pin_gpu_round_robin` sets `CUDA_VISIBLE_DEVICES` from the Hydra job index —
 call it at the **top** of your task function, before any CUDA use:
 
 ```python
@@ -56,7 +59,12 @@ devices. `num_gpus` must not exceed the size of that allocation.
 
 ## Ray: true fractional-GPU sharing (recommended for heavier sharing)
 
-`hydra-ray-launcher` supports fractional GPUs natively — no mushin code needed:
+`hydra-ray-launcher` supports fractional GPUs natively — no mushin code needed.
+Install the plugin first:
+
+```bash
+pip install hydra-ray-launcher
+```
 
 ```bash
 python train.py --multirun hydra/launcher=ray \
