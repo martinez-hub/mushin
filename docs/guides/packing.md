@@ -34,6 +34,20 @@ python train.py --multirun \
 `pin_gpu_round_robin` only maps a job to a device; the concurrency
 (`n_jobs = num_gpus * jobs_per_gpu`) is your launcher setting.
 
+**Each job must run in a fresh process.** Pinning works by setting
+`CUDA_VISIBLE_DEVICES` *before* CUDA initializes — once a process has touched
+CUDA, its visible devices are fixed. If your launcher **reuses worker processes**
+across jobs (joblib's loky backend does when there are more jobs than `n_jobs`),
+a reused worker stays on its first job's GPU. `pin_gpu_round_robin` **raises** in
+that case rather than silently mispinning, so you find out immediately. For
+robust packing without this constraint, prefer Ray (below), which runs each job
+in its own process and can share a GPU fractionally.
+
+If `CUDA_VISIBLE_DEVICES` is **already set** (e.g. SLURM or a container restricts
+you to devices `4,5`), the helper indexes into that allocation — slot 0 → `4`,
+slot 1 → `5` — instead of overwriting it, so packed jobs stay on their assigned
+devices. `num_gpus` must not exceed the size of that allocation.
+
 ## Ray: true fractional-GPU sharing (recommended for heavier sharing)
 
 `hydra-ray-launcher` supports fractional GPUs natively — no mushin code needed:
@@ -51,9 +65,10 @@ time-slicing a device rather than each pinned to a whole one.
 - **NVIDIA MPS** (Multi-Process Service) improves compute overlap when several
   small processes share a GPU — start `nvidia-cuda-mps-control -d` before the
   sweep. Combine with the round-robin pinning above.
-- **MIG** (A100/H100) partitions one physical GPU into isolated instances; assign
-  jobs to slices via `CUDA_VISIBLE_DEVICES=MIG-<uuid>` (MIG instances appear as
-  devices), which `pin_gpu_round_robin` does not compute for you — set it directly.
+- **MIG** (A100/H100) partitions one physical GPU into isolated instances that
+  appear as devices. Export the slice UUIDs as the visible pool
+  (`CUDA_VISIBLE_DEVICES=MIG-<uuid-a>,MIG-<uuid-b>,...`) and `pin_gpu_round_robin`
+  will round-robin across them like any other allocation.
 
 ## Caveats
 

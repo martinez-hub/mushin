@@ -30,9 +30,9 @@ def test_job_index_defaults_to_hydra_job_num(monkeypatch):
 
     from mushin._packing import pin_gpu_round_robin
 
-    # a real OmegaConf config, as HydraConfig.get() returns (the helper uses
-    # OmegaConf.is_missing on it)
-    cfg = OmegaConf.create({"hydra": {"job": {"num": 3}}})
+    # HydraConfig.get() returns the HydraConf node itself, so the job is at the
+    # top level (`.job.num`), not under a `.hydra` wrapper.
+    cfg = OmegaConf.create({"job": {"num": 3}})
 
     class _FakeHydraConfig:
         @staticmethod
@@ -69,14 +69,14 @@ def test_no_active_hydra_raises(monkeypatch):
 
 
 def test_single_run_missing_job_num_raises(monkeypatch):
-    # single-run (plain @hydra.main): HydraConfig is initialized but hydra.job.num
-    # is MISSING. Must raise the friendly RuntimeError, not an OmegaConf error.
+    # single-run (plain @hydra.main): HydraConfig is initialized but job.num is
+    # MISSING. Must raise the friendly RuntimeError, not an OmegaConf error.
     import hydra.core.hydra_config as hc
     from omegaconf import OmegaConf
 
     from mushin._packing import pin_gpu_round_robin
 
-    cfg = OmegaConf.create({"hydra": {"job": {"num": "???"}}})  # ??? == MISSING
+    cfg = OmegaConf.create({"job": {"num": "???"}})  # ??? == MISSING
 
     class _FakeHydraConfig:
         @staticmethod
@@ -92,7 +92,9 @@ def test_single_run_missing_job_num_raises(monkeypatch):
         pin_gpu_round_robin(num_gpus=2)
 
 
-def test_warns_when_cuda_already_initialized(monkeypatch):
+def test_raises_when_cuda_already_initialized(monkeypatch):
+    # A reused worker whose first job already touched CUDA cannot be re-pinned;
+    # fail loud instead of silently leaving the job on the previous GPU.
     import torch
 
     from mushin._packing import pin_gpu_round_robin
@@ -100,10 +102,35 @@ def test_warns_when_cuda_already_initialized(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
-    with pytest.warns(UserWarning, match="already initialized"):
-        gpu = pin_gpu_round_robin(num_gpus=2, job_index=1)
-    assert gpu == 1
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"  # still set
+    with pytest.raises(RuntimeError, match="already initialized"):
+        pin_gpu_round_robin(num_gpus=2, job_index=1)
+    # nothing was changed before the raise
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+def test_indexes_into_existing_allocation(monkeypatch):
+    # SLURM/containers may restrict the process to a device subset; the helper
+    # must select from that pool, not overwrite it with a bare ordinal.
+    from mushin._packing import pin_gpu_round_robin
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5")
+
+    slot = pin_gpu_round_robin(num_gpus=2, job_index=3)  # 3 % 2 == 1 -> "5"
+    assert slot == 1
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "5"
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5")  # restore the allocation
+    slot = pin_gpu_round_robin(num_gpus=2, job_index=2)  # 2 % 2 == 0 -> "4"
+    assert slot == 0
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "4"
+
+
+def test_num_gpus_exceeding_allocation_raises(monkeypatch):
+    from mushin._packing import pin_gpu_round_robin
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5")
+    with pytest.raises(ValueError, match="exceeds"):
+        pin_gpu_round_robin(num_gpus=4, job_index=0)
 
 
 def test_pin_gpu_round_robin_exported():
