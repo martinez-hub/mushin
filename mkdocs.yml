@@ -65,6 +65,7 @@ nav:
       - Comparing methods: guides/compare.md
       - LLM evaluation: guides/llm.md
       - Studies: guides/study.md
+      - Sharded training: guides/sharding.md
       - Segmentation: guides/segmentation.md
       - Custom metrics & predict_fn: guides/custom.md
       - Understanding the statistics: guides/statistics.md
