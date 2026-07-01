@@ -29,6 +29,11 @@ def test_hydra_fsdp_configures_reattach_launcher_single_node():
     strat.num_nodes = 1
     strat._configure_launcher()
     assert isinstance(strat._launcher, _HydraReattachLauncher)
+    # The launcher must receive the correct topology: a swapped num_processes/
+    # num_nodes wiring bug would still pass an isinstance check but break the
+    # WORLD_SIZE computation and the rank-spawn loop bound.
+    assert strat._launcher.num_processes == 2
+    assert strat._launcher.num_nodes == 1
     assert strat._rank_0_will_call_children_scripts is True
 
 
