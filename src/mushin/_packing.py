@@ -35,14 +35,23 @@ def pin_gpu_round_robin(num_gpus: int, job_index: int | None = None) -> int:
 
     if job_index is None:
         from hydra.core.hydra_config import HydraConfig
+        from omegaconf import OmegaConf
 
+        # hydra.job.num is populated only by the --multirun sweep launcher; in
+        # single-run (plain @hydra.main) it is MISSING even though HydraConfig is
+        # initialized. Catch both so the user gets this clear message instead of an
+        # opaque OmegaConf MissingMandatoryValue.
+        no_index = RuntimeError(
+            "pin_gpu_round_robin: no Hydra multirun job index (hydra.job.num) is "
+            "available — it is set only inside a Hydra --multirun sweep, not in "
+            "single-run mode or outside Hydra. Pass job_index=... explicitly."
+        )
         if not HydraConfig.initialized():
-            raise RuntimeError(
-                "pin_gpu_round_robin: no active Hydra job to read the job index "
-                "from. Pass job_index=... explicitly, or call this inside a Hydra "
-                "(multirun) task function."
-            )
-        job_index = int(HydraConfig.get().hydra.job.num)
+            raise no_index
+        job = HydraConfig.get().hydra.job
+        if OmegaConf.is_missing(job, "num"):
+            raise no_index
+        job_index = int(job.num)
 
     gpu = job_index % num_gpus
 
