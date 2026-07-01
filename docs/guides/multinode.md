@@ -68,8 +68,9 @@ seed_everything_per_rank(1234)   # each rank: 1234 + global_rank
 
 ## Metrics
 
-`MetricsCallback` writes `metrics.pt` only on global rank 0, so the N ranks don't
-clobber the file on a shared filesystem; `load_experiment` reads it back as usual.
+`MetricsCallback` writes its output (`fit_metrics.pt` / `test_metrics.pt`, one per
+stage) only on global rank 0, so the N ranks don't clobber the file on a shared
+filesystem; `load_experiment` reads it back as usual.
 
 ## Runbook (the merge gate)
 
@@ -79,7 +80,7 @@ To validate a real multi-node run on your cluster:
 2. Build the launcher config with `submitit_slurm_config(nodes=2, gpus_per_node=<G>, partition=<P>, account=<A>)`.
 3. Configure the Trainer with `devices=<G>`, `num_nodes=2`, `strategy=builds(HydraDDP)`.
 4. Launch your hydra-zen workflow with `hydra/launcher=submitit_slurm` and `--multirun`.
-5. Confirm: the job completes, `metrics.pt` exists exactly once per job dir,
+5. Confirm: the job completes, `fit_metrics.pt` exists exactly once per job dir,
    `load_experiment` aggregates the results, and a mismatched `tasks_per_node`
    raises the fail-fast world-size error rather than hanging.
 
