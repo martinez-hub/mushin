@@ -6,6 +6,7 @@ from . import llm
 from ._utils import load_experiment, load_from_checkpoint
 from .lightning import (
     HydraDDP,
+    HydraFSDP,
     MetricsCallback,
     seed_everything_per_rank,
     submitit_slurm_config,
@@ -26,6 +27,7 @@ __all__ = [
     "MetricsCallback",
     "MultiRunMetricsWorkflow",
     "HydraDDP",
+    "HydraFSDP",
     "submitit_slurm_config",
     "seed_everything_per_rank",
     "RobustnessCurve",
