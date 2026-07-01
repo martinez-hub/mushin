@@ -47,3 +47,13 @@ def test_hydra_fsdp_steps_aside_under_external_launcher():
     strat._launcher = None
     strat._configure_launcher()
     assert strat._launcher is None
+
+
+def test_hydra_fsdp_exported():
+    import mushin
+    from mushin import HydraFSDP as A
+    from mushin.lightning import HydraFSDP as B
+
+    assert A is B
+    assert "HydraFSDP" in mushin.__all__
+    assert "HydraFSDP" in mushin.lightning.__all__
