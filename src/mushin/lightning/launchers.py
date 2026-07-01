@@ -135,7 +135,39 @@ if PL_VERSION >= Version(1, 6, 0):
         _SubprocessScriptLauncher,
     )
 
-    class HydraDDP(DDPStrategy):  # type: ignore
+    class _HydraReattachMixin:
+        """Hydra-aware launcher behavior shared by ``HydraDDP`` and ``HydraFSDP``:
+        reattach each rank via the job's saved ``config.yaml`` (not ``sys.argv``,
+        which in a Hydra sweep would re-run the wrong job), fail fast on an external
+        world-size mismatch, and scope env-var teardown to what mushin set so
+        consecutive multirun jobs start clean without stomping scheduler-owned vars.
+        """
+
+        def setup_environment(self) -> None:
+            _setup_environment()
+            # Validate BEFORE super().setup_environment(): that is where Lightning
+            # initializes the process group / rendezvous, which is exactly what
+            # hangs when the launcher started the wrong number of ranks.
+            _validate_external_world_size(
+                self.num_nodes, self.num_processes, self.cluster_environment
+            )
+            super().setup_environment()
+
+        def _configure_launcher(self) -> None:
+            if self.cluster_environment is None:  # pragma: no cover
+                raise TypeError("cluster_environment is None")
+            if not self.cluster_environment.creates_processes_externally:
+                self._launcher = _HydraReattachLauncher(
+                    self.cluster_environment, self.num_processes, self.num_nodes
+                )
+                self._rank_0_will_call_children_scripts = True
+
+        def teardown(self) -> None:
+            """Additional teardown so consecutive Hydra multirun jobs start fresh."""
+            super().teardown()
+            _teardown()
+
+    class HydraDDP(_HydraReattachMixin, DDPStrategy):  # type: ignore
         """DDP Strategy that supports Hydra run and multirun jobs.
 
         This strategy assumes a PyTorch Lightning `Trainer.fit` or `Trainer.test` has been configured
@@ -211,33 +243,7 @@ if PL_VERSION >= Version(1, 6, 0):
         >>> job = launch(Config, task_function)
         """
 
-        def setup_environment(self) -> None:
-            _setup_environment()
-            # Validate BEFORE super().setup_environment(): that is where Lightning
-            # initializes the process group / rendezvous, which is exactly what
-            # hangs when the launcher started the wrong number of ranks. Failing
-            # fast here turns a hang into a legible error.
-            _validate_external_world_size(
-                self.num_nodes, self.num_processes, self.cluster_environment
-            )
-            super().setup_environment()
-
-        def _configure_launcher(self) -> None:
-            if self.cluster_environment is None:  # pragma: no cover
-                raise TypeError("HydraDDP.cluster_environment is None")
-
-            if not self.cluster_environment.creates_processes_externally:
-                self._launcher = _HydraDDPLauncher(
-                    self.cluster_environment, self.num_processes, self.num_nodes
-                )
-                self._rank_0_will_call_children_scripts = True
-
-        def teardown(self) -> None:
-            """Performs additional teardown steps for PL to allow for Hydra multirun jobs."""
-            super().teardown()
-            _teardown()
-
-    class _HydraDDPLauncher(_SubprocessScriptLauncher):
+    class _HydraReattachLauncher(_SubprocessScriptLauncher):
         @property
         def is_interactive_compatible(self) -> bool:  # pragma: no cover
             return True
