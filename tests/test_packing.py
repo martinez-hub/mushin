@@ -133,6 +133,16 @@ def test_num_gpus_exceeding_allocation_raises(monkeypatch):
         pin_gpu_round_robin(num_gpus=4, job_index=0)
 
 
+def test_explicit_empty_allocation_is_preserved(monkeypatch):
+    # CUDA_VISIBLE_DEVICES="" deliberately hides all GPUs; refuse to un-hide one.
+    from mushin._packing import pin_gpu_round_robin
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    with pytest.raises(RuntimeError, match="empty allocation"):
+        pin_gpu_round_robin(num_gpus=2, job_index=0)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""  # untouched
+
+
 def test_pin_gpu_round_robin_exported():
     import mushin
     from mushin import pin_gpu_round_robin
