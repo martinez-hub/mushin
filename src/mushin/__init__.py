@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from . import llm
+from ._packing import pin_gpu_round_robin
 from ._utils import load_experiment, load_from_checkpoint
 from .benchmark import (
     BenchmarkResult,
@@ -33,6 +34,7 @@ __all__ = [
     "llm",
     "load_experiment",
     "load_from_checkpoint",
+    "pin_gpu_round_robin",
     "MetricsCallback",
     "MultiRunMetricsWorkflow",
     "HydraDDP",

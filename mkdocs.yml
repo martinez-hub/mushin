@@ -62,6 +62,7 @@ nav:
   - Core concepts: concepts.md
   - Guides:
       - Workflows & sweeps: guides/workflows.md
+      - Packing small jobs: guides/packing.md
       - Comparing methods: guides/compare.md
       - LLM evaluation: guides/llm.md
       - Studies: guides/study.md
