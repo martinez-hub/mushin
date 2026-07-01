@@ -199,7 +199,7 @@ ignore = [
 [tool.codespell]
 skip = "*.lock,*.ckpt,*.pt,.git,.venv,*.egg-info"
 # "mushin" (無心) and a few ML terms trip the default dictionary.
-ignore-words-list = "mushin,nin,tha"
+ignore-words-list = "mushin,nin,tha,strat"
 
 [tool.towncrier]
 # News fragments live in changes/<id>.<type>.md and are assembled into
