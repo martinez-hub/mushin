@@ -119,3 +119,66 @@ def test_bug2_user_epoch_key_does_not_double_append():
     assert all(n == 1 for n in lengths.values()), (
         f"Series lengths are not equal after user 'epoch' key: {lengths}"
     )
+
+
+def test_distributed_teardown_destroys_group_when_initialized(monkeypatch):
+    import torch.distributed as dist
+
+    from mushin.lightning.callbacks import DistributedTeardown
+
+    calls = {"destroy": 0}
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        dist,
+        "destroy_process_group",
+        lambda: calls.__setitem__("destroy", calls["destroy"] + 1),
+    )
+
+    DistributedTeardown().teardown(trainer=None, pl_module=None, stage="fit")
+    assert calls["destroy"] == 1
+
+
+def test_distributed_teardown_noop_when_not_initialized(monkeypatch):
+    import torch.distributed as dist
+
+    from mushin.lightning.callbacks import DistributedTeardown
+
+    calls = {"destroy": 0}
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        dist,
+        "destroy_process_group",
+        lambda: calls.__setitem__("destroy", calls["destroy"] + 1),
+    )
+
+    # must not raise and must not destroy when no group is initialized
+    DistributedTeardown().teardown(trainer=None, pl_module=None, stage="fit")
+    assert calls["destroy"] == 0
+
+
+def test_distributed_teardown_pops_leaked_env(monkeypatch):
+    import torch.distributed as dist
+
+    from mushin.lightning.callbacks import DistributedTeardown
+
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("NODE_RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+    monkeypatch.setenv("MASTER_PORT", "12345")
+    monkeypatch.setenv("PL_GLOBAL_SEED", "1")
+
+    DistributedTeardown().teardown(trainer=None, pl_module=None, stage="fit")
+
+    import os
+
+    assert "LOCAL_RANK" not in os.environ
+    assert "NODE_RANK" not in os.environ
+    assert "WORLD_SIZE" not in os.environ
+    assert "MASTER_ADDR" not in os.environ
+    assert "MASTER_PORT" not in os.environ
+    assert "PL_GLOBAL_SEED" not in os.environ

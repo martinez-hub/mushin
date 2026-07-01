@@ -9,6 +9,7 @@ import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
 
 from .._validate import value_check
+from .launchers import _teardown
 
 
 class MetricsCallback(Callback):
@@ -90,3 +91,29 @@ class MetricsCallback(Callback):
         self._record(self.test_metrics, trainer.callback_metrics)
         torch.save(self.test_metrics, self._get_filename("test"))
         return self.test_metrics
+
+
+class DistributedTeardown(Callback):
+    """Destroy the ``torch.distributed`` process group at the end of each Trainer
+    run so consecutive Hydra ``--multirun`` jobs (run in one process) start clean.
+
+    Lightning's ``FSDPStrategy``/``DeepSpeedStrategy`` do not destroy the process
+    group on teardown, so without this the next multirun job's
+    ``init_process_group`` fails. ``HydraDDP`` does not need it (it clears any
+    leftover group at the next job's setup); use this with sharded strategies (or
+    any strategy) under ``--multirun``. Do not add it alongside ``HydraDDP`` --
+    ``HydraDDP`` performs its own teardown, so combining them is redundant.
+    Idempotent and safe in single-process / CPU runs (a no-op when no group is
+    initialized).
+    """
+
+    def teardown(
+        self, trainer: Trainer, pl_module: LightningModule, stage: str
+    ) -> None:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
+        # Pop leaked LOCAL_RANK/NODE_RANK/.../PL_GLOBAL_SEED so the next multirun
+        # job re-initializes from a clean environment.
+        _teardown()
