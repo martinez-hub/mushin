@@ -97,10 +97,17 @@ def pin_gpu_round_robin(num_gpus: int, job_index: int | None = None) -> int:
     # Respect an existing allocation: schedulers/containers often restrict this
     # process to a device subset (e.g. "4,5" or GPU UUIDs). Index into that pool
     # instead of overwriting it with a bare ordinal that would escape onto the
-    # wrong physical devices.
-    existing = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    visible = [d for d in existing.split(",") if d != ""]
-    if visible:
+    # wrong physical devices. A *present* variable is honored even when empty — an
+    # explicit "" hides all GPUs on purpose, so we refuse rather than un-hide one.
+    existing = os.environ.get("CUDA_VISIBLE_DEVICES")  # None only if truly unset
+    if existing is not None:
+        visible = [d for d in existing.split(",") if d != ""]
+        if not visible:
+            raise RuntimeError(
+                "pin_gpu_round_robin: CUDA_VISIBLE_DEVICES is set to an empty "
+                "allocation (no GPUs visible); refusing to override it. Unset the "
+                "variable to pin by ordinal, or allocate GPUs to this process."
+            )
         if num_gpus > len(visible):
             raise ValueError(
                 f"num_gpus={num_gpus} exceeds the {len(visible)} device(s) already "

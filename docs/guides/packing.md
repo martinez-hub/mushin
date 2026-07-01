@@ -22,6 +22,12 @@ def task(cfg):
     # ... build the Trainer(devices=1, accelerator="gpu") and train ...
 ```
 
+The joblib launcher is a separate Hydra plugin — install it first:
+
+```bash
+pip install hydra-joblib-launcher
+```
+
 Then run the sweep with the joblib launcher and enough concurrency to place
 `jobs_per_gpu` jobs on each GPU (here 4 GPUs x 3 jobs/GPU = 12 concurrent):
 
