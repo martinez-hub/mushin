@@ -5,6 +5,7 @@
 import importlib
 from typing import TYPE_CHECKING
 
+from ._packing import pin_gpu_round_robin
 from ._resume import ResumeContext
 from ._sweep_decorator import sweep
 from ._tuning import tune_batch_size, tune_learning_rate
@@ -115,6 +116,7 @@ __all__ = [
     "MetricsCallback",
     "MultiRunMetricsWorkflow",
     "HydraDDP",
+    "pin_gpu_round_robin",
     "multirun",
     "hydra_list",
     "Study",
