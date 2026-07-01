@@ -182,3 +182,13 @@ def test_distributed_teardown_pops_leaked_env(monkeypatch):
     assert "MASTER_ADDR" not in os.environ
     assert "MASTER_PORT" not in os.environ
     assert "PL_GLOBAL_SEED" not in os.environ
+
+
+def test_distributed_teardown_exported():
+    import mushin
+    from mushin import DistributedTeardown as A
+    from mushin.lightning import DistributedTeardown as B
+
+    assert A is B
+    assert "DistributedTeardown" in mushin.__all__
+    assert "DistributedTeardown" in mushin.lightning.__all__

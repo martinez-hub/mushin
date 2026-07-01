@@ -19,7 +19,7 @@ from .benchmark import (
     retrieval_battery,
     segmentation_battery,
 )
-from .lightning import HydraDDP, MetricsCallback
+from .lightning import DistributedTeardown, HydraDDP, MetricsCallback
 from .study import Study  # keep last: avoids a circular import via .study -> _sweep
 from .workflows import (
     BaseWorkflow,
@@ -34,6 +34,7 @@ __all__ = [
     "load_experiment",
     "load_from_checkpoint",
     "MetricsCallback",
+    "DistributedTeardown",
     "MultiRunMetricsWorkflow",
     "HydraDDP",
     "RobustnessCurve",
