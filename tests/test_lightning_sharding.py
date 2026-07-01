@@ -9,11 +9,11 @@ def test_fsdp_strategy_builds_via_hydra_zen():
     from hydra_zen import builds, instantiate
 
     # The exact shape documented in the sharding guide. Construction must not
-    # initialize distributed (CPU-only), so this is hermetic.
-    cfg = builds(
-        FSDPStrategy,
-        sharding_strategy="FULL_SHARD",
-        populate_full_signature=True,
-    )
+    # initialize distributed (CPU-only), so this is hermetic. Note: no
+    # populate_full_signature — it would pull FSDPStrategy's ``timeout: timedelta``
+    # default, which the lowest-supported hydra-zen (0.10) cannot serialize
+    # (HydraZenUnsupportedPrimitiveError). Passing only the args we document keeps
+    # the guard valid across the dependency floor.
+    cfg = builds(FSDPStrategy, sharding_strategy="FULL_SHARD")
     strategy = instantiate(cfg)
     assert isinstance(strategy, FSDPStrategy)
