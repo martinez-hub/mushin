@@ -90,7 +90,11 @@ def tune_batch_size(
         ``device_batch * accumulate_grad_batches * num_devices``. Must be
         divisible by ``num_devices``.
     pin_path : str, Path, or None
-        Sidecar YAML. Defaults to ``<trainer.log_dir>/mushin_batch_pin.yaml``.
+        Sidecar YAML. Defaults to ``<trainer.log_dir>/mushin_batch_pin.yaml``. The
+        pin is keyed on the found ``device_batch``; the recorded
+        ``effective_batch_size``/``num_devices`` document the tuning context, and a
+        later call that requests a different one is reused-with-a-warning (pass
+        ``retune=True`` to re-tune instead).
     num_devices : int or None
         Defaults to ``trainer.num_devices``.
     safety_margin : float
@@ -134,6 +138,28 @@ def tune_batch_size(
     pin = None if retune else _read_pin(pin_path)
     if pin is not None:
         device_batch = int(pin["device_batch"])
+        if device_batch < 1:
+            raise ValueError(
+                f"pin file {pin_path} has an invalid device_batch={device_batch} "
+                "(must be >= 1); delete it or pass retune=True to re-tune."
+            )
+        # The pin records the tuning context so it stays self-documenting. If this
+        # call asks for a different context, the pinned device_batch is still reused
+        # (that is the point of pinning) but the mismatch is surfaced, not silent.
+        pinned_eff = pin.get("effective_batch_size")
+        pinned_nd = pin.get("num_devices")
+        if (pinned_eff is not None and int(pinned_eff) != effective_batch_size) or (
+            pinned_nd is not None and int(pinned_nd) != num_devices
+        ):
+            warnings.warn(
+                f"tune_batch_size: pin file {pin_path} was recorded for "
+                f"effective_batch_size={pinned_eff}, num_devices={pinned_nd}, but this "
+                f"call requested effective_batch_size={effective_batch_size}, "
+                f"num_devices={num_devices}. Reusing the pinned device_batch="
+                f"{device_batch}; pass retune=True to re-tune for the new target.",
+                UserWarning,
+                stacklevel=2,
+            )
     else:
         found_max = Tuner(trainer).scale_batch_size(
             module, datamodule=datamodule, batch_arg_name=batch_arg, **scale_kwargs
