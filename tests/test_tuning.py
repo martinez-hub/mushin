@@ -615,6 +615,43 @@ def test_lr_pin_non_finite_learning_rate_raises(tmp_path):
         tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=pin_path)
 
 
+def test_lr_missing_owner_raises(tmp_path):
+    # lr_attr not present on the module (misspelled/renamed): reject rather than
+    # create a dead attribute configure_optimizers never reads.
+    from mushin._tuning import tune_learning_rate
+
+    class Bare:
+        pass
+
+    with pytest.raises(ValueError, match="does not expose"):
+        tune_learning_rate(_make_trainer(), Bare(), None, pin_path=tmp_path / "lr.yaml")
+
+
+def test_batch_no_pin_written_when_owner_invalid(monkeypatch, tmp_path):
+    # A call that fails owner validation must not leave a sidecar behind (deferred
+    # write), or a later non-retune run would read an unverified pin.
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 128)
+
+    class ModWithBatch:
+        def __init__(self):
+            self.batch_size = 2
+
+    pin_path = tmp_path / "p.yaml"
+    with pytest.raises(ValueError, match="both the module and datamodule"):
+        tune_batch_size(
+            _make_trainer(),
+            ModWithBatch(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=pin_path,
+            retune=True,
+        )
+    assert not pin_path.exists()
+
+
 def test_exports():
     import mushin
     from mushin import tune_batch_size, tune_learning_rate
