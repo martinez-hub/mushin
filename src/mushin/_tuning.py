@@ -36,8 +36,8 @@ class LRPin:
 
 def _default_pin_path(trainer, filename: str) -> Path:
     base = (
-        getattr(trainer, "log_dir", None)
-        or getattr(trainer, "default_root_dir", None)
+        getattr(trainer, "default_root_dir", None)
+        or getattr(trainer, "log_dir", None)
         or "."
     )
     return Path(base) / filename
@@ -59,6 +59,21 @@ def _write_pin(path, mapping: dict) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(OmegaConf.create(dict(mapping)), p)
+
+
+def _set_attr(target, name: str, value) -> None:
+    """Set ``name`` on ``target``, also updating ``.hparams`` if it contains the key.
+
+    ``pytorch_lightning.utilities.parsing.lightning_setattr`` requires a
+    ``_trainer`` attribute (it is designed for attached modules); this helper
+    provides the same hparams-awareness for standalone objects — used by
+    :func:`tune_batch_size` and :func:`tune_learning_rate` when applying the
+    found value before training begins.
+    """
+    setattr(target, name, value)
+    hparams = getattr(target, "hparams", None)
+    if isinstance(hparams, dict) and name in hparams:
+        hparams[name] = value
 
 
 def tune_batch_size(
@@ -90,13 +105,13 @@ def tune_batch_size(
         ``device_batch * accumulate_grad_batches * num_devices``. Must be
         divisible by ``num_devices``.
     pin_path : str, Path, or None
-        Sidecar YAML. Defaults to ``<trainer.log_dir>/mushin_batch_pin.yaml``. The
-        pin is keyed on the found ``device_batch``; the recorded
+        Sidecar YAML. Defaults to ``<trainer.default_root_dir>/mushin_batch_pin.yaml``.
+        The pin is keyed on the found ``device_batch``; the recorded
         ``effective_batch_size``/``num_devices`` document the tuning context, and a
         later call that requests a different one is reused-with-a-warning (pass
         ``retune=True`` to re-tune instead).
     num_devices : int or None
-        Defaults to ``trainer.num_devices``.
+        Defaults to ``trainer.num_devices * trainer.num_nodes`` (total devices across all nodes).
     safety_margin : float
         Fraction in ``[0, 1)`` to back the found max off by (OOM noise).
     batch_arg : str
@@ -122,7 +137,9 @@ def tune_batch_size(
     if not (0.0 <= safety_margin < 1.0):
         raise ValueError(f"safety_margin must be in [0, 1); got {safety_margin}")
     if num_devices is None:
-        num_devices = max(1, int(getattr(trainer, "num_devices", 1) or 1))
+        per_node = int(getattr(trainer, "num_devices", 1) or 1)
+        nodes = int(getattr(trainer, "num_nodes", 1) or 1)
+        num_devices = max(1, per_node * nodes)
     if num_devices < 1:
         raise ValueError(f"num_devices must be >= 1; got {num_devices}")
     if effective_batch_size % num_devices != 0:
@@ -195,10 +212,12 @@ def tune_batch_size(
         )
 
     # apply: device batch on the datamodule (else the module); accumulation on trainer
-    if datamodule is not None and hasattr(datamodule, batch_arg):
-        setattr(datamodule, batch_arg, device_batch)
-    else:
-        setattr(module, batch_arg, device_batch)
+    target = (
+        datamodule
+        if datamodule is not None and hasattr(datamodule, batch_arg)
+        else module
+    )
+    _set_attr(target, batch_arg, device_batch)
     trainer.accumulate_grad_batches = accumulate
 
     return BatchPin(
@@ -230,7 +249,7 @@ def tune_learning_rate(
     Parameters
     ----------
     pin_path : str, Path, or None
-        Sidecar YAML. Defaults to ``<trainer.log_dir>/mushin_lr_pin.yaml``.
+        Sidecar YAML. Defaults to ``<trainer.default_root_dir>/mushin_lr_pin.yaml``.
     lr_attr : str
         Attribute on the module set to the found learning rate.
     retune : bool
@@ -246,6 +265,11 @@ def tune_learning_rate(
     pin = None if retune else _read_pin(pin_path)
     if pin is not None:
         lr = float(pin["learning_rate"])
+        if not lr > 0:
+            raise ValueError(
+                f"pin file {pin_path} has an invalid learning_rate={lr} "
+                "(must be > 0); delete it or pass retune=True to re-tune."
+            )
     else:
         # update_attr=False: we set the attribute ourselves, uniformly, whether
         # the value came from the finder or a pin.
@@ -261,5 +285,5 @@ def tune_learning_rate(
         lr = float(lr)
         _write_pin(pin_path, {"learning_rate": lr})
 
-    setattr(module, lr_attr, lr)
+    _set_attr(module, lr_attr, lr)
     return LRPin(learning_rate=lr)
