@@ -135,6 +135,35 @@ def test_batch_exact_hparams_updated(monkeypatch, tmp_path):
     assert dm.hparams["batch_size"] == 256
 
 
+def test_batch_hparams_only_datamodule_is_target(monkeypatch, tmp_path):
+    """A datamodule exposing batch_size ONLY via .hparams (no direct attribute, as
+    with save_hyperparameters()) is still the apply target, not skipped for the module."""
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 512)
+
+    class DMHparamsOnly:
+        def __init__(self):
+            self.hparams = {"batch_size": 2}  # no direct self.batch_size
+
+    class Mod:
+        pass
+
+    dm = DMHparamsOnly()
+    module = Mod()
+    tune_batch_size(
+        _make_trainer(),
+        module,
+        dm,
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
+    )
+    assert dm.hparams["batch_size"] == 256  # applied to the datamodule's hparams
+    assert not hasattr(module, "batch_size")  # not misapplied to the module
+
+
 def test_batch_accumulation_clean_divisor(monkeypatch, tmp_path):
     from mushin._tuning import tune_batch_size
 
@@ -477,6 +506,15 @@ def test_lr_pin_invalid_learning_rate_raises(tmp_path):
             None,
             pin_path=pin_path,
         )
+
+
+def test_lr_pin_non_finite_learning_rate_raises(tmp_path):
+    from mushin._tuning import _write_pin, tune_learning_rate
+
+    pin_path = tmp_path / "lr.yaml"
+    _write_pin(pin_path, {"learning_rate": float("inf")})
+    with pytest.raises(ValueError, match="learning_rate"):
+        tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=pin_path)
 
 
 def test_exports():
