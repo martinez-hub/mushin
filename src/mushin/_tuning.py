@@ -35,6 +35,21 @@ class LRPin:
 
 
 def _default_pin_path(trainer, filename: str) -> Path:
+    # Inside a Hydra --multirun sweep the default directory is shared across all
+    # jobs, so distinct configs would clobber (and silently reuse) one another's
+    # pins. Require an explicit, per-config pin_path there instead of guessing.
+    from hydra.core.hydra_config import HydraConfig
+
+    if HydraConfig.initialized():
+        from hydra.types import RunMode
+
+        if HydraConfig.get().mode == RunMode.MULTIRUN:
+            raise RuntimeError(
+                "auto-tuning: no pin_path given inside a Hydra --multirun sweep. The "
+                "default pin directory is shared across sweep jobs, so different "
+                "configs would overwrite and silently reuse each other's pins. Pass "
+                "an explicit per-config pin_path=... (and commit it for reproducibility)."
+            )
     base = (
         getattr(trainer, "default_root_dir", None)
         or getattr(trainer, "log_dir", None)

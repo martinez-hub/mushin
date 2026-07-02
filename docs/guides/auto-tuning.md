@@ -57,6 +57,10 @@ The suggestion is written to `<trainer.default_root_dir>/mushin_lr_pin.yaml` and
 - **Tune on a single device.** The pinned device batch and recomputed
   accumulation then apply at scale; running the finder itself under DDP is not
   orchestrated for you.
+- **Pass an explicit `pin_path` in a sweep.** The default pin directory is shared
+  across the jobs of a Hydra `--multirun`, so distinct configs would clobber each
+  other's pins. Inside a multirun the helpers require an explicit, per-config
+  `pin_path=` (commit it) rather than guess one.
 - **Reproducibility is preserved by the pin.** Re-runs reuse the recorded device
   batch regardless of hardware. A pinned batch that no longer fits on smaller
   hardware is a deliberate `retune=True` decision, not a silent change.
