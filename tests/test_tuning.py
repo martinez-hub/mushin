@@ -366,6 +366,53 @@ def test_batch_pin_context_mismatch_warns(monkeypatch, tmp_path):
     assert pin.effective_batch_size == 512 and pin.drift == 0  # 128*4*1 == 512
 
 
+def test_batch_pin_clamped_on_scale_out(monkeypatch, tmp_path):
+    # A pin found on 1 device must be clamped to the per-device target when reused
+    # on more devices, or accumulation bottoms out at 1 and the effective overshoots.
+    from mushin._tuning import _write_pin, tune_batch_size
+
+    pin_path = tmp_path / "batch.yaml"
+    _write_pin(
+        pin_path, {"device_batch": 256, "effective_batch_size": 256, "num_devices": 1}
+    )
+
+    # reused on 4 devices: per_device_total = 256/4 = 64, so device_batch clamps to 64
+    with pytest.warns(UserWarning, match="was recorded for"):
+        pin = tune_batch_size(
+            _make_trainer(),
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=4,
+            pin_path=pin_path,
+        )
+    assert pin.device_batch == 64 and pin.accumulate_grad_batches == 1
+    assert pin.effective_batch_size == 256 and pin.drift == 0  # not 1024
+
+
+def test_batch_rejects_ambiguous_owners(monkeypatch, tmp_path):
+    # Both module and datamodule expose batch_arg -> ambiguous which one the tuner
+    # scaled; reject rather than apply to the wrong object.
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 128)
+
+    class ModWithBatch:
+        def __init__(self):
+            self.batch_size = 2
+
+    with pytest.raises(ValueError, match="both the module and datamodule"):
+        tune_batch_size(
+            _make_trainer(),
+            ModWithBatch(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+
+
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     from mushin._tuning import tune_batch_size
 
