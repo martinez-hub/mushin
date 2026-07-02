@@ -48,6 +48,51 @@ def test_default_pin_path_falls_back_to_log_dir():
     assert _default_pin_path(trainer, "x.yaml") == Path("/tmp/run7") / "x.yaml"
 
 
+def test_default_pin_path_requires_explicit_in_multirun(monkeypatch):
+    from types import SimpleNamespace
+
+    import hydra.core.hydra_config as hc
+    from hydra.types import RunMode
+
+    from mushin._tuning import _default_pin_path
+
+    class _FakeHC:
+        @staticmethod
+        def initialized():
+            return True
+
+        @staticmethod
+        def get():
+            return SimpleNamespace(mode=RunMode.MULTIRUN)
+
+    monkeypatch.setattr(hc, "HydraConfig", _FakeHC)
+    trainer = SimpleNamespace(default_root_dir="/tmp/root", log_dir=None)
+    with pytest.raises(RuntimeError, match="multirun"):
+        _default_pin_path(trainer, "mushin_batch_pin.yaml")
+
+
+def test_default_pin_path_ok_in_single_run(monkeypatch):
+    from types import SimpleNamespace
+
+    import hydra.core.hydra_config as hc
+    from hydra.types import RunMode
+
+    from mushin._tuning import _default_pin_path
+
+    class _FakeHC:
+        @staticmethod
+        def initialized():
+            return True
+
+        @staticmethod
+        def get():
+            return SimpleNamespace(mode=RunMode.RUN)
+
+    monkeypatch.setattr(hc, "HydraConfig", _FakeHC)
+    trainer = SimpleNamespace(default_root_dir="/tmp/root", log_dir=None)
+    assert _default_pin_path(trainer, "x.yaml") == Path("/tmp/root") / "x.yaml"
+
+
 def test_batchpin_and_lrpin_are_frozen_dataclasses():
     import dataclasses
 
