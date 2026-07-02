@@ -236,6 +236,56 @@ def test_batch_none_from_tuner_raises(monkeypatch, tmp_path):
         )
 
 
+def test_batch_pin_invalid_device_batch_raises(tmp_path):
+    from mushin._tuning import _write_pin, tune_batch_size
+
+    pin_path = tmp_path / "bad.yaml"
+    _write_pin(
+        pin_path, {"device_batch": 0, "effective_batch_size": 256, "num_devices": 1}
+    )
+    with pytest.raises(ValueError, match="device_batch"):
+        tune_batch_size(
+            _make_trainer(),
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=pin_path,
+        )
+
+
+def test_batch_pin_context_mismatch_warns(monkeypatch, tmp_path):
+    from mushin._tuning import tune_batch_size
+
+    counter = {"n": 0}
+    _patch_scale(monkeypatch, 128, counter)
+    pin_path = tmp_path / "batch.yaml"
+    # first tune records effective_batch_size=256, num_devices=1
+    tune_batch_size(
+        _make_trainer(),
+        object(),
+        _DM(),
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=pin_path,
+    )
+    assert counter["n"] == 1
+
+    # re-run with a DIFFERENT target reuses the pinned device_batch but warns
+    with pytest.warns(UserWarning, match="was recorded for"):
+        pin = tune_batch_size(
+            _make_trainer(),
+            object(),
+            _DM(),
+            effective_batch_size=512,
+            num_devices=1,
+            pin_path=pin_path,
+        )
+    assert counter["n"] == 1  # still no new search
+    assert pin.device_batch == 128 and pin.accumulate_grad_batches == 4
+    assert pin.effective_batch_size == 512 and pin.drift == 0  # 128*4*1 == 512
+
+
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     from mushin._tuning import tune_batch_size
 
