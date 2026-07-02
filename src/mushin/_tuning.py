@@ -190,6 +190,10 @@ def tune_batch_size(
                 UserWarning,
                 stacklevel=2,
             )
+        # Clamp the pinned value the same way fresh tuning does: reusing a pin on
+        # more devices shrinks the per-device target, and an unclamped device_batch
+        # would bottom the accumulation out at 1 and overshoot the effective batch.
+        device_batch = min(device_batch, per_device_total)
     else:
         found_max = Tuner(trainer).scale_batch_size(
             module, datamodule=datamodule, batch_arg_name=batch_arg, **scale_kwargs
@@ -224,12 +228,19 @@ def tune_batch_size(
             stacklevel=2,
         )
 
-    # apply: device batch on the datamodule (else the module); accumulation on trainer
-    target = (
-        datamodule
-        if datamodule is not None and _has_attr(datamodule, batch_arg)
-        else module
-    )
+    # apply: device batch on the datamodule (else the module); accumulation on trainer.
+    # Lightning's tuner scales only ONE owner (module first, then datamodule), so if
+    # both expose batch_arg it is ambiguous which one the found value was tested for —
+    # reject rather than silently apply to the object the tuner did not scale.
+    module_has = _has_attr(module, batch_arg)
+    dm_has = datamodule is not None and _has_attr(datamodule, batch_arg)
+    if module_has and dm_has:
+        raise ValueError(
+            f"both the module and datamodule expose '{batch_arg}', so Lightning's "
+            "batch-size finder scales one while this would apply to the other. Expose "
+            f"'{batch_arg}' on exactly one of them (or set batch_arg=) to disambiguate."
+        )
+    target = datamodule if dm_has else module
     _set_attr(target, batch_arg, device_batch)
     trainer.accumulate_grad_batches = accumulate
 
