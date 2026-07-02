@@ -1,5 +1,7 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+from pathlib import Path
+
 import pytest
 
 
@@ -25,25 +27,25 @@ def test_write_pin_creates_parent_dirs(tmp_path):
     assert _read_pin(path) == {"learning_rate": 0.001}
 
 
-def test_default_pin_path_uses_trainer_log_dir():
+def test_default_pin_path_prefers_default_root_dir():
     from types import SimpleNamespace
 
     from mushin._tuning import _default_pin_path
 
-    trainer = SimpleNamespace(log_dir="/tmp/run7", default_root_dir="/tmp/root")
+    trainer = SimpleNamespace(default_root_dir="/tmp/root", log_dir="/tmp/run7")
     assert (
-        str(_default_pin_path(trainer, "mushin_batch_pin.yaml"))
-        == "/tmp/run7/mushin_batch_pin.yaml"
+        _default_pin_path(trainer, "mushin_batch_pin.yaml")
+        == Path("/tmp/root") / "mushin_batch_pin.yaml"
     )
 
 
-def test_default_pin_path_falls_back_to_default_root_dir():
+def test_default_pin_path_falls_back_to_log_dir():
     from types import SimpleNamespace
 
     from mushin._tuning import _default_pin_path
 
-    trainer = SimpleNamespace(log_dir=None, default_root_dir="/tmp/root")
-    assert str(_default_pin_path(trainer, "x.yaml")) == "/tmp/root/x.yaml"
+    trainer = SimpleNamespace(default_root_dir=None, log_dir="/tmp/run7")
+    assert _default_pin_path(trainer, "x.yaml") == Path("/tmp/run7") / "x.yaml"
 
 
 def test_batchpin_and_lrpin_are_frozen_dataclasses():
@@ -106,6 +108,31 @@ def test_batch_exact_when_max_meets_target(monkeypatch, tmp_path):
     assert (pin.device_batch, pin.accumulate_grad_batches) == (256, 1)
     assert pin.effective_batch_size == 256 and pin.drift == 0
     assert dm.batch_size == 256  # applied to the datamodule
+
+
+def test_batch_exact_hparams_updated(monkeypatch, tmp_path):
+    """tune_batch_size also updates .hparams when batch_size is stored there."""
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 512)
+
+    class DMWithHparams:
+        def __init__(self):
+            self.batch_size = 2
+            self.hparams = {"batch_size": 2}
+
+    dm = DMWithHparams()
+    tune_batch_size(
+        _make_trainer(),
+        object(),
+        dm,
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
+    )
+    assert dm.batch_size == 256
+    assert dm.hparams["batch_size"] == 256
 
 
 def test_batch_accumulation_clean_divisor(monkeypatch, tmp_path):
@@ -179,6 +206,30 @@ def test_batch_num_devices_divides_effective(monkeypatch, tmp_path):
     )
     assert pin.device_batch == 64 and pin.accumulate_grad_batches == 1
     assert pin.num_devices == 4 and pin.effective_batch_size == 256
+
+
+def test_batch_num_devices_multiplies_nodes(monkeypatch, tmp_path):
+    """num_devices inference multiplies per-node devices by num_nodes."""
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 512)
+
+    trainer = _make_trainer()
+    # Patch num_devices and num_nodes as read-only properties on this trainer instance
+    monkeypatch.setattr(type(trainer), "num_devices", property(lambda self: 2))
+    monkeypatch.setattr(type(trainer), "num_nodes", property(lambda self: 2))
+
+    pin = tune_batch_size(
+        trainer,
+        object(),
+        _DM(),
+        effective_batch_size=8,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
+    )
+    # 2 devices * 2 nodes = 4 total; per_device_total = 8 / 4 = 2
+    assert pin.num_devices == 4
+    assert pin.device_batch == 2
 
 
 def test_batch_invalid_inputs(monkeypatch, tmp_path):
@@ -355,6 +406,24 @@ def test_lr_sets_attr_and_writes_pin(monkeypatch, tmp_path):
     assert pin_path.exists()
 
 
+def test_lr_hparams_updated(monkeypatch, tmp_path):
+    """tune_learning_rate also updates .hparams when lr is stored there."""
+    from mushin._tuning import tune_learning_rate
+
+    _patch_lr_find(monkeypatch, 0.0456)
+
+    class ModWithHparams:
+        def __init__(self):
+            self.lr = 0.0
+            self.hparams = {"lr": 0.0}
+
+    mod = ModWithHparams()
+    pin = tune_learning_rate(_make_trainer(), mod, None, pin_path=tmp_path / "lr.yaml")
+    assert mod.lr == 0.0456
+    assert mod.hparams["lr"] == 0.0456
+    assert pin.learning_rate == 0.0456
+
+
 def test_lr_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     from mushin._tuning import tune_learning_rate
 
@@ -394,6 +463,20 @@ def test_lr_none_suggestion_raises(monkeypatch, tmp_path):
     _patch_lr_find(monkeypatch, None)
     with pytest.raises(RuntimeError, match="no learning-rate suggestion"):
         tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=tmp_path / "lr.yaml")
+
+
+def test_lr_pin_invalid_learning_rate_raises(tmp_path):
+    from mushin._tuning import _write_pin, tune_learning_rate
+
+    pin_path = tmp_path / "lr.yaml"
+    _write_pin(pin_path, {"learning_rate": 0.0})
+    with pytest.raises(ValueError, match="learning_rate"):
+        tune_learning_rate(
+            _make_trainer(),
+            _Mod(),
+            None,
+            pin_path=pin_path,
+        )
 
 
 def test_exports():

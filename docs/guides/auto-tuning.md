@@ -29,7 +29,7 @@ The device batch is maximized for throughput, so the realized effective batch
 can differ slightly from the target when the device batch doesn't divide it
 evenly — the helper **records the actual value** in `pin.effective_batch_size`
 and **warns** when it drifts. The found device batch is written to
-`<trainer.log_dir>/mushin_batch_pin.yaml` (override with `pin_path=`); commit it
+`<trainer.default_root_dir>/mushin_batch_pin.yaml` (override with `pin_path=`); commit it
 to make re-runs deterministic. Pass `retune=True` to search again — for example
 when you deliberately move to hardware where the pinned batch no longer fits.
 
@@ -47,7 +47,7 @@ trainer.fit(module, datamodule=datamodule)
 
 Learning rate is hardware-independent, so there is no device math — pinning just
 makes the stochastic range test skip on re-runs and reuse the exact found value.
-The suggestion is written to `<trainer.log_dir>/mushin_lr_pin.yaml` and set on
+The suggestion is written to `<trainer.default_root_dir>/mushin_lr_pin.yaml` and set on
 `module.lr` (use `lr_attr=` for a different attribute).
 
 ## Caveats
