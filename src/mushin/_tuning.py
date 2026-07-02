@@ -156,7 +156,10 @@ def tune_batch_size(
         With the ACTUAL realized ``effective_batch_size`` and the ``drift`` from
         the requested value.
     """
-    from pytorch_lightning.callbacks import GradientAccumulationScheduler
+    from pytorch_lightning.callbacks import (
+        BatchSizeFinder,
+        GradientAccumulationScheduler,
+    )
     from pytorch_lightning.tuner.tuning import Tuner
 
     if effective_batch_size < 1:
@@ -165,17 +168,23 @@ def tune_batch_size(
         )
     if not (0.0 <= safety_margin < 1.0):
         raise ValueError(f"safety_margin must be in [0, 1); got {safety_margin}")
+    callbacks = getattr(trainer, "callbacks", []) or []
     # A GradientAccumulationScheduler drives accumulation itself; Lightning rejects
     # it being combined with a non-1 trainer.accumulate_grad_batches at fit start.
     # Fail here rather than write a pin and crash on the documented immediate fit.
-    if any(
-        isinstance(cb, GradientAccumulationScheduler)
-        for cb in getattr(trainer, "callbacks", []) or []
-    ):
+    if any(isinstance(cb, GradientAccumulationScheduler) for cb in callbacks):
         raise ValueError(
             "tune_batch_size sets trainer.accumulate_grad_batches, which conflicts "
             "with a GradientAccumulationScheduler callback already on the Trainer. "
             "Remove that callback, or do not auto-tune the batch size for this run."
+        )
+    # A BatchSizeFinder callback re-runs its own search at fit and would overwrite the
+    # pinned batch, defeating find-once/pin. Reject rather than silently lose the pin.
+    if any(isinstance(cb, BatchSizeFinder) for cb in callbacks):
+        raise ValueError(
+            "the Trainer already has a Lightning BatchSizeFinder callback, which "
+            "would run its own search at fit and overwrite the tuned/pinned batch. "
+            "Use tune_batch_size or that callback, not both."
         )
     if num_devices is None:
         per_node = int(getattr(trainer, "num_devices", 1) or 1)
@@ -321,7 +330,20 @@ def tune_learning_rate(
     **lr_find_kwargs
         Forwarded to ``Tuner.lr_find`` (e.g. ``min_lr``, ``max_lr``, ``num_training``).
     """
+    from pytorch_lightning.callbacks import LearningRateFinder
     from pytorch_lightning.tuner.tuning import Tuner
+
+    # A LearningRateFinder callback re-runs its stochastic range test at fit and can
+    # move the model off the pinned LR, breaking determinism. Reject the combination.
+    if any(
+        isinstance(cb, LearningRateFinder)
+        for cb in getattr(trainer, "callbacks", []) or []
+    ):
+        raise ValueError(
+            "the Trainer already has a Lightning LearningRateFinder callback, which "
+            "would run its own range test at fit and move the model off the tuned/"
+            "pinned learning rate. Use tune_learning_rate or that callback, not both."
+        )
 
     # Validate the LR owner up front: a misspelled/renamed lr_attr would otherwise
     # have _set_attr create a dead attribute while configure_optimizers keeps reading

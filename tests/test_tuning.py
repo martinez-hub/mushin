@@ -509,6 +509,51 @@ def test_batch_rejects_existing_accumulation_scheduler(monkeypatch, tmp_path):
         )
 
 
+def test_batch_rejects_existing_batch_size_finder(monkeypatch, tmp_path):
+    # A Lightning BatchSizeFinder callback would run its own search at fit and
+    # overwrite the pinned batch; reject the combination.
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import BatchSizeFinder
+
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 128)
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        callbacks=[BatchSizeFinder()],
+    )
+    with pytest.raises(ValueError, match="BatchSizeFinder"):
+        tune_batch_size(
+            trainer,
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+
+
+def test_lr_rejects_existing_lr_finder(tmp_path):
+    # A Lightning LearningRateFinder callback would run its own range test at fit
+    # and move off the pinned LR; reject the combination.
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import LearningRateFinder
+
+    from mushin._tuning import tune_learning_rate
+
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        callbacks=[LearningRateFinder()],
+    )
+    with pytest.raises(ValueError, match="LearningRateFinder"):
+        tune_learning_rate(trainer, _Mod(), None, pin_path=tmp_path / "lr.yaml")
+
+
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     from mushin._tuning import tune_batch_size
 
