@@ -182,3 +182,58 @@ def tune_batch_size(
         num_devices=num_devices,
         drift=drift,
     )
+
+
+def tune_learning_rate(
+    trainer,
+    module,
+    datamodule=None,
+    *,
+    pin_path=None,
+    lr_attr: str = "lr",
+    retune: bool = False,
+    **lr_find_kwargs,
+) -> LRPin:
+    """Record-and-pin Lightning's LR finder.
+
+    Runs ``Tuner.lr_find`` once, writes the suggested learning rate to
+    ``pin_path``, and sets ``module.<lr_attr>``. A later call reads the pin and
+    skips the (stochastic) range test; ``retune=True`` forces a fresh search.
+    Learning rate is hardware-independent, so there is no device math.
+
+    Parameters
+    ----------
+    pin_path : str, Path, or None
+        Sidecar YAML. Defaults to ``<trainer.log_dir>/mushin_lr_pin.yaml``.
+    lr_attr : str
+        Attribute on the module set to the found learning rate.
+    retune : bool
+        Ignore any existing pin and search again.
+    **lr_find_kwargs
+        Forwarded to ``Tuner.lr_find`` (e.g. ``min_lr``, ``max_lr``, ``num_training``).
+    """
+    from pytorch_lightning.tuner.tuning import Tuner
+
+    if pin_path is None:
+        pin_path = _default_pin_path(trainer, "mushin_lr_pin.yaml")
+
+    pin = None if retune else _read_pin(pin_path)
+    if pin is not None:
+        lr = float(pin["learning_rate"])
+    else:
+        # update_attr=False: we set the attribute ourselves, uniformly, whether
+        # the value came from the finder or a pin.
+        finder = Tuner(trainer).lr_find(
+            module, datamodule=datamodule, update_attr=False, **lr_find_kwargs
+        )
+        lr = finder.suggestion() if finder is not None else None
+        if lr is None:
+            raise RuntimeError(
+                "tune_learning_rate: Tuner.lr_find found no learning-rate suggestion. "
+                "Widen the range (min_lr/max_lr) or increase num_training."
+            )
+        lr = float(lr)
+        _write_pin(pin_path, {"learning_rate": lr})
+
+    setattr(module, lr_attr, lr)
+    return LRPin(learning_rate=lr)
