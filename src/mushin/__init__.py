@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from . import llm
+from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint
 from .benchmark import (
     BenchmarkResult,
@@ -33,6 +34,8 @@ __all__ = [
     "llm",
     "load_experiment",
     "load_from_checkpoint",
+    "tune_batch_size",
+    "tune_learning_rate",
     "MetricsCallback",
     "MultiRunMetricsWorkflow",
     "HydraDDP",

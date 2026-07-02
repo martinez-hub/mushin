@@ -344,3 +344,12 @@ def test_lr_none_suggestion_raises(monkeypatch, tmp_path):
     _patch_lr_find(monkeypatch, None)
     with pytest.raises(RuntimeError, match="no learning-rate suggestion"):
         tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=tmp_path / "lr.yaml")
+
+
+def test_exports():
+    import mushin
+    from mushin import tune_batch_size, tune_learning_rate
+
+    assert "tune_batch_size" in mushin.__all__
+    assert "tune_learning_rate" in mushin.__all__
+    assert callable(tune_batch_size) and callable(tune_learning_rate)
