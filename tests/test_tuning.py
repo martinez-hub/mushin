@@ -267,3 +267,80 @@ def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     )
     assert counter["n"] == 2  # retune forces a fresh search
     assert r3.device_batch == 128
+
+
+class _Mod:
+    def __init__(self):
+        self.lr = 0.0
+
+
+class _FakeFinder:
+    def __init__(self, value):
+        self._value = value
+
+    def suggestion(self):
+        return self._value
+
+
+def _patch_lr_find(monkeypatch, suggestion, counter=None):
+    from pytorch_lightning.tuner.tuning import Tuner
+
+    def fake(self, *a, **k):
+        if counter is not None:
+            counter["n"] += 1
+        return _FakeFinder(suggestion)
+
+    monkeypatch.setattr(Tuner, "lr_find", fake)
+
+
+def test_lr_sets_attr_and_writes_pin(monkeypatch, tmp_path):
+    from mushin._tuning import tune_learning_rate
+
+    _patch_lr_find(monkeypatch, 0.0123)
+    pin_path = tmp_path / "lr.yaml"
+    mod = _Mod()
+    pin = tune_learning_rate(_make_trainer(), mod, None, pin_path=pin_path)
+    assert pin.learning_rate == 0.0123
+    assert mod.lr == 0.0123
+    assert pin_path.exists()
+
+
+def test_lr_pin_roundtrip_skips_search(monkeypatch, tmp_path):
+    from mushin._tuning import tune_learning_rate
+
+    counter = {"n": 0}
+    _patch_lr_find(monkeypatch, 0.05, counter)
+    pin_path = tmp_path / "lr.yaml"
+    tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=pin_path)
+    assert counter["n"] == 1
+
+    mod2 = _Mod()
+    pin2 = tune_learning_rate(_make_trainer(), mod2, None, pin_path=pin_path)
+    assert counter["n"] == 1  # search skipped
+    assert mod2.lr == 0.05 and pin2.learning_rate == 0.05
+
+    tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=pin_path, retune=True)
+    assert counter["n"] == 2  # retune forces a fresh search
+
+
+def test_lr_custom_attr_name(monkeypatch, tmp_path):
+    from mushin._tuning import tune_learning_rate
+
+    _patch_lr_find(monkeypatch, 0.007)
+
+    class M:
+        learning_rate = 0.0
+
+    m = M()
+    tune_learning_rate(
+        _make_trainer(), m, None, pin_path=tmp_path / "lr.yaml", lr_attr="learning_rate"
+    )
+    assert m.learning_rate == 0.007
+
+
+def test_lr_none_suggestion_raises(monkeypatch, tmp_path):
+    from mushin._tuning import tune_learning_rate
+
+    _patch_lr_find(monkeypatch, None)
+    with pytest.raises(RuntimeError, match="no learning-rate suggestion"):
+        tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=tmp_path / "lr.yaml")
