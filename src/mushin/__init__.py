@@ -5,6 +5,7 @@
 import importlib
 from typing import TYPE_CHECKING
 
+from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
 from .lightning import HydraDDP, MetricsCallback
 from .study import (
@@ -94,6 +95,8 @@ __all__ = [
     "load_experiment",
     "load_from_checkpoint",
     "original_cwd",
+    "tune_batch_size",
+    "tune_learning_rate",
     "MetricsCallback",
     "MultiRunMetricsWorkflow",
     "HydraDDP",
