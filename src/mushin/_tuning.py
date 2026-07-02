@@ -175,6 +175,26 @@ def tune_batch_size(
         )
     per_device_total = effective_batch_size // num_devices
 
+    # Validate the batch owner up front (before any search or pin write), so we fail
+    # fast and never leave a sidecar behind for a call that raises. Lightning's finder
+    # scales one owner (module first, then datamodule); if both expose batch_arg the
+    # found value could be untested for the loader fit uses, and if neither does the
+    # value has nothing to apply to.
+    module_has = _has_attr(module, batch_arg)
+    dm_has = datamodule is not None and _has_attr(datamodule, batch_arg)
+    if module_has and dm_has:
+        raise ValueError(
+            f"both the module and datamodule expose '{batch_arg}', so Lightning's "
+            "batch-size finder scales one while this would apply to the other. Expose "
+            f"'{batch_arg}' on exactly one of them (or set batch_arg=) to disambiguate."
+        )
+    if not module_has and not dm_has:
+        raise ValueError(
+            f"neither the module nor the datamodule exposes '{batch_arg}', so the "
+            "tuned batch size cannot be applied to anything the dataloader reads. "
+            f"Expose '{batch_arg}' on your datamodule (or module), or set batch_arg=."
+        )
+
     if pin_path is None:
         pin_path = _default_pin_path(trainer, "mushin_batch_pin.yaml")
 
@@ -245,23 +265,6 @@ def tune_batch_size(
     # Lightning's tuner scales only ONE owner (module first, then datamodule), so if
     # both expose batch_arg it is ambiguous which one the found value was tested for —
     # reject rather than silently apply to the object the tuner did not scale.
-    module_has = _has_attr(module, batch_arg)
-    dm_has = datamodule is not None and _has_attr(datamodule, batch_arg)
-    if module_has and dm_has:
-        raise ValueError(
-            f"both the module and datamodule expose '{batch_arg}', so Lightning's "
-            "batch-size finder scales one while this would apply to the other. Expose "
-            f"'{batch_arg}' on exactly one of them (or set batch_arg=) to disambiguate."
-        )
-    if not module_has and not dm_has:
-        # On the pinned path no search ran to catch this; applying to the module
-        # would create a dead attribute the dataloader never reads, silently keeping
-        # the stale batch size. (The fresh-search path already fails via the tuner.)
-        raise ValueError(
-            f"neither the module nor the datamodule exposes '{batch_arg}', so the "
-            "tuned batch size cannot be applied to anything the dataloader reads. "
-            f"Expose '{batch_arg}' on your datamodule (or module), or set batch_arg=."
-        )
     target = datamodule if dm_has else module
     _set_attr(target, batch_arg, device_batch)
     trainer.accumulate_grad_batches = accumulate
@@ -304,6 +307,16 @@ def tune_learning_rate(
         Forwarded to ``Tuner.lr_find`` (e.g. ``min_lr``, ``max_lr``, ``num_training``).
     """
     from pytorch_lightning.tuner.tuning import Tuner
+
+    # Validate the LR owner up front: a misspelled/renamed lr_attr would otherwise
+    # have _set_attr create a dead attribute while configure_optimizers keeps reading
+    # the old field, so LRPin would report a value that never took effect.
+    if not _has_attr(module, lr_attr):
+        raise ValueError(
+            f"the module does not expose '{lr_attr}', so the tuned learning rate "
+            "cannot be applied to anything configure_optimizers reads. Define "
+            f"self.{lr_attr} on the module, or pass lr_attr=."
+        )
 
     if pin_path is None:
         pin_path = _default_pin_path(trainer, "mushin_lr_pin.yaml")
