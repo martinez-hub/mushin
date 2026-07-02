@@ -141,6 +141,7 @@ def tune_batch_size(
         With the ACTUAL realized ``effective_batch_size`` and the ``drift`` from
         the requested value.
     """
+    from pytorch_lightning.callbacks import GradientAccumulationScheduler
     from pytorch_lightning.tuner.tuning import Tuner
 
     if effective_batch_size < 1:
@@ -149,6 +150,18 @@ def tune_batch_size(
         )
     if not (0.0 <= safety_margin < 1.0):
         raise ValueError(f"safety_margin must be in [0, 1); got {safety_margin}")
+    # A GradientAccumulationScheduler drives accumulation itself; Lightning rejects
+    # it being combined with a non-1 trainer.accumulate_grad_batches at fit start.
+    # Fail here rather than write a pin and crash on the documented immediate fit.
+    if any(
+        isinstance(cb, GradientAccumulationScheduler)
+        for cb in getattr(trainer, "callbacks", []) or []
+    ):
+        raise ValueError(
+            "tune_batch_size sets trainer.accumulate_grad_batches, which conflicts "
+            "with a GradientAccumulationScheduler callback already on the Trainer. "
+            "Remove that callback, or do not auto-tune the batch size for this run."
+        )
     if num_devices is None:
         per_node = int(getattr(trainer, "num_devices", 1) or 1)
         nodes = int(getattr(trainer, "num_nodes", 1) or 1)
@@ -239,6 +252,15 @@ def tune_batch_size(
             f"both the module and datamodule expose '{batch_arg}', so Lightning's "
             "batch-size finder scales one while this would apply to the other. Expose "
             f"'{batch_arg}' on exactly one of them (or set batch_arg=) to disambiguate."
+        )
+    if not module_has and not dm_has:
+        # On the pinned path no search ran to catch this; applying to the module
+        # would create a dead attribute the dataloader never reads, silently keeping
+        # the stale batch size. (The fresh-search path already fails via the tuner.)
+        raise ValueError(
+            f"neither the module nor the datamodule exposes '{batch_arg}', so the "
+            "tuned batch size cannot be applied to anything the dataloader reads. "
+            f"Expose '{batch_arg}' on your datamodule (or module), or set batch_arg=."
         )
     target = datamodule if dm_has else module
     _set_attr(target, batch_arg, device_batch)

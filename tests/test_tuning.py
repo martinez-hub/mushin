@@ -413,6 +413,57 @@ def test_batch_rejects_ambiguous_owners(monkeypatch, tmp_path):
         )
 
 
+def test_batch_pin_no_owner_raises(tmp_path):
+    # Reused pin but neither module nor datamodule exposes batch_arg: applying would
+    # create a dead attribute and silently keep the stale batch. Reject instead.
+    from mushin._tuning import _write_pin, tune_batch_size
+
+    pin_path = tmp_path / "p.yaml"
+    _write_pin(
+        pin_path, {"device_batch": 8, "effective_batch_size": 8, "num_devices": 1}
+    )
+
+    class Bare:
+        pass
+
+    with pytest.raises(ValueError, match="neither the module nor the datamodule"):
+        tune_batch_size(
+            _make_trainer(),
+            Bare(),
+            None,
+            effective_batch_size=8,
+            num_devices=1,
+            pin_path=pin_path,
+        )
+
+
+def test_batch_rejects_existing_accumulation_scheduler(monkeypatch, tmp_path):
+    # A GradientAccumulationScheduler drives accumulation; combining it with a
+    # non-1 accumulate_grad_batches makes Lightning crash at fit. Fail early.
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import GradientAccumulationScheduler
+
+    from mushin._tuning import tune_batch_size
+
+    _patch_scale(monkeypatch, 128)
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        callbacks=[GradientAccumulationScheduler(scheduling={0: 2})],
+    )
+    with pytest.raises(ValueError, match="GradientAccumulationScheduler"):
+        tune_batch_size(
+            trainer,
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+
+
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     from mushin._tuning import tune_batch_size
 
