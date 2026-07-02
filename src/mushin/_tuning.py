@@ -76,6 +76,19 @@ def _set_attr(target, name: str, value) -> None:
         hparams[name] = value
 
 
+def _has_attr(target, name: str) -> bool:
+    """True if ``target`` exposes ``name`` directly or via a ``.hparams`` mapping.
+
+    A datamodule that stores the batch size only through ``save_hyperparameters()``
+    has no direct attribute, so a plain ``hasattr`` would miss it and the value
+    would be applied to the wrong object.
+    """
+    if hasattr(target, name):
+        return True
+    hparams = getattr(target, "hparams", None)
+    return isinstance(hparams, dict) and name in hparams
+
+
 def tune_batch_size(
     trainer,
     module,
@@ -214,7 +227,7 @@ def tune_batch_size(
     # apply: device batch on the datamodule (else the module); accumulation on trainer
     target = (
         datamodule
-        if datamodule is not None and hasattr(datamodule, batch_arg)
+        if datamodule is not None and _has_attr(datamodule, batch_arg)
         else module
     )
     _set_attr(target, batch_arg, device_batch)
@@ -265,7 +278,7 @@ def tune_learning_rate(
     pin = None if retune else _read_pin(pin_path)
     if pin is not None:
         lr = float(pin["learning_rate"])
-        if not lr > 0:
+        if not (lr > 0 and math.isfinite(lr)):
             raise ValueError(
                 f"pin file {pin_path} has an invalid learning_rate={lr} "
                 "(must be > 0); delete it or pass retune=True to re-tune."
