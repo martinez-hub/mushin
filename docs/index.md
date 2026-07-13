@@ -9,6 +9,24 @@ hydra-zen. Define your experiment as a function, sweep over parameters with
 Hydra, and get results back as a labeled `xarray.Dataset` — not rows in a
 dashboard you have to export.
 
+!!! tip "What's new in 0.4.0"
+    - **Auto-tuning** — [`tune_batch_size` / `tune_learning_rate`](guides/auto-tuning.md):
+      find the batch size / LR once, pin it to a sidecar file, and reuse it — with an
+      exact, hardware-independent effective batch (no drift).
+    - **Task API + more batteries** — first-class, reusable evaluation tasks
+      (`register_task` / `get_task` / `list_tasks`) plus regression, image-quality,
+      audio, retrieval, and detection batteries for [`compare`](guides/compare.md).
+    - **LLM evaluation** — [`compare_llms`](guides/llm.md): compare LLM systems across
+      reproducible seeds with statistical significance.
+    - **Lighter import** — `import mushin` no longer pulls the benchmark/LLM machinery
+      until you use it, and the new [`mushin.original_cwd()`](concepts.md#working-directories)
+      anchors relative paths inside `task()`.
+    - **Deprecation** — `BaseWorkflow` and `RobustnessCurve` moved out of the top-level
+      namespace; import them from `mushin.workflows` (they still work, with a warning).
+
+    See the full [changelog](https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md)
+    for every change.
+
 ## Three pillars
 
 **Sweeps → datasets.**
