@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.4.1] - 2026-07-13
+
+### Added
+
+- Added a runnable scikit-learn sweep example (`examples/sklearn_sweep.py`) demonstrating that the framework-agnostic `MultiRunMetricsWorkflow` wraps non-Lightning models (here `LogisticRegression`) and still returns a labeled `xarray.Dataset`. `scikit-learn` is a dev-only dependency for the example and its test; the package itself has no scikit-learn dependency.
+
+### Misc
+
+- Documentation: add a "Frameworks: Lightning-first, sweep layer agnostic" section to Core concepts, clarifying that the sweep->dataset workflow wraps any framework (scikit-learn, XGBoost, ...) while compare/auto-tuning/HydraDDP are PyTorch/Lightning-specific.
+- Documentation: add a Changelog page to the docs site that embeds CHANGELOG.md (self-maintaining, no duplication).
+- Documentation: add an API reference page for the auto-tuning helpers (`tune_batch_size`, `tune_learning_rate`), which had a usage guide but no auto-generated API docs.
+- Documentation: announce the 0.4.0 release with a "What's new" highlights callout on the docs home page.
+- Documentation: refresh the README for 0.4.0 — add auto-tuning and the task API/batteries to the feature list, note the framework-agnostic sweep layer (scikit-learn example), and fix the stale `viz` extra description that referenced the now-deprecated `RobustnessCurve`.
+
+
 ## [0.4.0] - 2026-07-13
 
 ### Added
@@ -158,7 +173,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/martinez-hub/mushin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/martinez-hub/mushin/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/martinez-hub/mushin/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/martinez-hub/mushin/compare/v0.2.0...v0.2.1

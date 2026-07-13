@@ -1,1 +1,0 @@
-Documentation: refresh the README for 0.4.0 — add auto-tuning and the task API/batteries to the feature list, note the framework-agnostic sweep layer (scikit-learn example), and fix the stale `viz` extra description that referenced the now-deprecated `RobustnessCurve`.
