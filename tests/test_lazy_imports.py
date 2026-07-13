@@ -49,3 +49,26 @@ def test_unknown_attribute_raises_attribute_error():
         pass
     else:  # pragma: no cover
         raise AssertionError("expected AttributeError")
+
+
+import warnings  # noqa: E402, F401 -- appended mid-file per test-file convention
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("name", ["BaseWorkflow", "RobustnessCurve"])
+def test_deprecated_names_warn_but_resolve(name):
+    import mushin
+
+    with pytest.warns(DeprecationWarning, match=name):
+        obj = getattr(mushin, name)
+    from mushin import workflows
+
+    assert obj is getattr(workflows, name)
+
+
+@pytest.mark.parametrize("name", ["BaseWorkflow", "RobustnessCurve"])
+def test_deprecated_names_absent_from_all(name):
+    import mushin
+
+    assert name not in mushin.__all__
