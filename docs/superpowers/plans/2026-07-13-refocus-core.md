@@ -570,9 +570,13 @@ Then check CI is green and read the Codex review before merging (per repo policy
 
 ---
 
-## Task 7 (administrative): Close the out-of-scope HPC PRs
+## Task 7 (administrative): HPC PRs — SUPERSEDED, no action
 
-Not a code change — a repo decision from the spec (item 5). Preserve the branches.
+**Revised 2026-07-13:** the original plan was to close #50/#58/#59. That was
+reversed — the PRs stay **open**, CI-green, gated on real GPU/cluster validation
+(closing would not advance that validation). No action here. `HydraDDP` stays on
+`main`. Their long-term home is decided *after* hardware validation. The original
+close steps are retained below for record but should NOT be executed.
 
 - [ ] **Step 1: Close #50, #58, #59 with an explanatory comment**
 
