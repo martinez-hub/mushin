@@ -305,11 +305,12 @@ def test_batch_invalid_inputs(monkeypatch, tmp_path):
         )
 
 
-def test_batch_none_from_tuner_raises(monkeypatch, tmp_path):
+@pytest.mark.parametrize("bad", [None, 0])
+def test_batch_unusable_from_tuner_raises(monkeypatch, tmp_path, bad):
     from mushin._tuning import tune_batch_size
 
-    _patch_scale(monkeypatch, None)
-    with pytest.raises(RuntimeError, match="no batch size"):
+    _patch_scale(monkeypatch, bad)
+    with pytest.raises(RuntimeError, match="no usable batch size"):
         tune_batch_size(
             _make_trainer(),
             object(),

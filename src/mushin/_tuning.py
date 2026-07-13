@@ -213,18 +213,21 @@ def tune_batch_size(
         found_max = Tuner(trainer).scale_batch_size(
             module, datamodule=datamodule, batch_arg_name=batch_arg, **scale_kwargs
         )
-        if found_max is None:
+        if found_max is None or int(found_max) < 1:
             raise RuntimeError(
-                "tune_batch_size: Tuner.scale_batch_size returned no batch size. "
-                f"Check that the model or datamodule exposes the '{batch_arg}' "
-                "attribute, or pass an explicit pin file."
+                "tune_batch_size: Tuner.scale_batch_size returned no usable batch "
+                f"size ({found_max}). Check that the model or datamodule exposes the "
+                f"'{batch_arg}' attribute, or pass an explicit pin file."
             )
         found_max = int(found_max)
         _write_pin(pin_path, {"found_max_device_batch": found_max})
 
     device_batch = _largest_divisor_leq(per_device_total, found_max)
     accumulate = per_device_total // device_batch  # exact: device_batch divides target
-    if device_batch < found_max and device_batch * 2 <= found_max:
+    # Warn only when a bigger device batch WOULD have fit but no larger divisor of
+    # the per-device target was available (wasted headroom). When
+    # device_batch == per_device_total the choice is already optimal (accumulate=1).
+    if device_batch < per_device_total and device_batch * 2 <= found_max:
         warnings.warn(
             f"tune_batch_size: chosen device_batch={device_batch} is well below the "
             f"{found_max} that fits, because effective_batch_size={effective_batch_size} "
