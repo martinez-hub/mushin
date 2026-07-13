@@ -749,3 +749,25 @@ def test_exports():
     assert "tune_batch_size" in mushin.__all__
     assert "tune_learning_rate" in mushin.__all__
     assert callable(tune_batch_size) and callable(tune_learning_rate)
+
+
+@pytest.mark.parametrize(
+    "target, cap, expected",
+    [
+        (128, 100, 64),   # divisors of 128 <=100 -> 64
+        (128, 128, 128),  # cap == target -> target itself
+        (512, 600, 512),  # cap > target -> target (accumulate would be 1)
+        (512, 300, 256),  # largest power-of-two divisor <=300
+        (100, 7, 5),      # divisors of 100 <=7 -> 5
+        (17, 4, 1),       # prime target, small cap -> 1
+        (1, 1, 1),        # degenerate
+        (128, 1, 1),      # cap 1 -> 1 divides everything
+    ],
+)
+def test_largest_divisor_leq(target, cap, expected):
+    from mushin._tuning import _largest_divisor_leq
+
+    d = _largest_divisor_leq(target, cap)
+    assert d == expected
+    assert target % d == 0  # it is always an exact divisor
+    assert 1 <= d <= cap

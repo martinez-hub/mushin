@@ -104,6 +104,21 @@ def _has_attr(target, name: str) -> bool:
     return isinstance(hparams, dict) and name in hparams
 
 
+def _largest_divisor_leq(target: int, cap: int) -> int:
+    """Largest ``d`` with ``d`` dividing ``target`` and ``1 <= d <= cap``.
+
+    Used to pick a device batch that divides the per-device target exactly, so the
+    realized effective batch equals the requested one with no drift. ``d == 1``
+    always divides ``target``, so a value in ``[1, cap]`` always exists. For the
+    round batch sizes researchers use (256/512/1024, many divisors) this returns a
+    value at or just below ``cap``; only pathological (near-prime) targets fall far.
+    """
+    d = min(int(target), int(cap))
+    while target % d != 0:
+        d -= 1
+    return d
+
+
 def tune_batch_size(
     trainer,
     module,
