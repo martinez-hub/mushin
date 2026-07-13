@@ -65,6 +65,10 @@ wf.run(
 )
 ```
 
+> **Heads up:** your `task()` runs in a per-job directory. If it reads or writes
+> files by relative path, wrap them with `mushin.original_cwd() / "..."` — see
+> [Concepts](concepts.md#working-directories).
+
 ## Get results as a dataset
 
 ```python
