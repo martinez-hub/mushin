@@ -158,7 +158,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/martinez-hub/mushin/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/martinez-hub/mushin/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/martinez-hub/mushin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/martinez-hub/mushin/compare/v0.1.0...v0.2.0
