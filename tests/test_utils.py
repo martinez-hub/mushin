@@ -4,11 +4,14 @@
 
 """Tests for mushin._utils.load_experiment."""
 
+from pathlib import Path
+
 import pytest
 import torch
 from omegaconf import OmegaConf
 
-from mushin._utils import Experiment, load_experiment
+import mushin
+from mushin._utils import Experiment, load_experiment, original_cwd
 
 
 def _write_hydra_cfg(hydra_dir, lr=0.1):
@@ -190,3 +193,19 @@ class TestMultirunLayout:
         assert working_dirs == expected, (
             f"working_dirs should be per-job {expected}, got {working_dirs}"
         )
+
+
+def test_original_cwd_outside_hydra_returns_process_cwd():
+    # No active Hydra run -> falls back to the process working directory.
+    assert original_cwd() == Path.cwd()
+
+
+def test_original_cwd_is_exported():
+    assert mushin.original_cwd is original_cwd
+
+
+def test_original_cwd_uses_hydra_when_available(monkeypatch):
+    import mushin._utils as utils
+
+    monkeypatch.setattr(utils, "_hydra_original_cwd", lambda: "/tmp/launch-dir")
+    assert original_cwd() == Path("/tmp/launch-dir")

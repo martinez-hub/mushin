@@ -6,12 +6,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
-
-from mushin.benchmark import BenchmarkResult, Task
+from typing import TYPE_CHECKING, Any
 
 from ._load import evaluate_checkpoints
 from ._sweep import TrainFn, run_training_sweep
+
+if TYPE_CHECKING:
+    # Deferred: keep `import mushin` from pulling in the benchmark subsystem.
+    # Safe here because `from __future__ import annotations` (above) means these
+    # names are only ever needed at type-check time, never at runtime.
+    from mushin.benchmark import BenchmarkResult, Task
 
 
 class Study:

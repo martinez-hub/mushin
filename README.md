@@ -134,9 +134,10 @@ the [LLM evaluation guide](docs/guides/llm.md).
   / judge metrics; optional output cache).
 - `Study` — orchestrate a multi-seed training sweep and route the trained models
   into `compare`, in one call; `Study.from_checkpoints(...)` for eval-only.
-- `BaseWorkflow`, `MultiRunMetricsWorkflow`, `RobustnessCurve` — declarative,
-  reproducible experiment workflows that record configs, checkpoints, and
-  metrics, and load results back as labeled `xarray` datasets.
+- `MultiRunMetricsWorkflow` (plus its base `mushin.workflows.BaseWorkflow` and the
+  `mushin.workflows.RobustnessCurve` variant) — declarative, reproducible
+  experiment workflows that record configs, checkpoints, and metrics, and load
+  results back as labeled `xarray` datasets.
 - `MetricsCallback` — a Lightning callback for capturing metrics.
 - `HydraDDP` — a Hydra/Lightning strategy for multi-GPU (DDP) launches.
 - `multirun`, `hydra_list`, `load_experiment`, `load_from_checkpoint` — helpers.

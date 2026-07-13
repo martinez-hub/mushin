@@ -66,3 +66,16 @@ You can override either end:
 - Pass `predict_fn=` to adapt models that return dicts or non-standard tensors.
 
 See [Custom metrics & predict_fn](guides/custom.md).
+
+## Working directories
+
+!!! warning "Relative paths inside `task()`"
+    Each run executes inside Hydra's own per-job output directory, **not** the
+    directory you launched from. A relative path like `open("data/train.csv")`
+    will silently resolve against the wrong place. Anchor paths to the launch
+    directory with [`mushin.original_cwd()`][mushin.original_cwd]:
+
+    ```python
+    import mushin
+    path = mushin.original_cwd() / "data" / "train.csv"
+    ```

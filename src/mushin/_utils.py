@@ -15,6 +15,38 @@ from torch import nn
 log = logging.getLogger(__name__)
 
 
+def _hydra_original_cwd() -> str | None:
+    """Return Hydra's launch cwd if a run is active, else None.
+
+    Isolated for monkeypatching in tests. Hydra raises if no run is active, so we
+    swallow that and let the caller fall back to the process cwd.
+    """
+    try:
+        from hydra.core.hydra_config import HydraConfig
+        from hydra.utils import get_original_cwd
+
+        if HydraConfig.initialized():
+            return get_original_cwd()
+    except Exception:  # hydra not initialised / not installed in this context
+        return None
+    return None
+
+
+def original_cwd() -> Path:
+    """Directory the experiment was launched from.
+
+    Inside a Hydra job the process cwd is the per-job output directory, so relative
+    paths in a ``task()`` silently resolve against the wrong place. Use this to
+    anchor paths against the launch directory instead::
+
+        data = load(mushin.original_cwd() / "data" / "train.csv")
+
+    Outside a Hydra run this is just the current working directory.
+    """
+    launch = _hydra_original_cwd()
+    return Path(launch) if launch is not None else Path.cwd()
+
+
 def load_from_checkpoint(
     model: nn.Module,
     *,
