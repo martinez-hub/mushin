@@ -583,14 +583,14 @@ def test_exports():
 @pytest.mark.parametrize(
     "target, cap, expected",
     [
-        (128, 100, 64),   # divisors of 128 <=100 -> 64
+        (128, 100, 64),  # divisors of 128 <=100 -> 64
         (128, 128, 128),  # cap == target -> target itself
         (512, 600, 512),  # cap > target -> target (accumulate would be 1)
         (512, 300, 256),  # largest power-of-two divisor <=300
-        (100, 7, 5),      # divisors of 100 <=7 -> 5
-        (17, 4, 1),       # prime target, small cap -> 1
-        (1, 1, 1),        # degenerate
-        (128, 1, 1),      # cap 1 -> 1 divides everything
+        (100, 7, 5),  # divisors of 100 <=7 -> 5
+        (17, 4, 1),  # prime target, small cap -> 1
+        (1, 1, 1),  # degenerate
+        (128, 1, 1),  # cap 1 -> 1 divides everything
     ],
 )
 def test_largest_divisor_leq(target, cap, expected):
@@ -625,10 +625,12 @@ def test_batch_exact_via_divisor_when_max_not_a_divisor(monkeypatch, tmp_path):
     trainer.num_devices = 4  # -> per_device_total = 512/4 = 128
     module = _Owner(batch_size=1)
     pin = tune_batch_size(
-        trainer, module, effective_batch_size=512,
+        trainer,
+        module,
+        effective_batch_size=512,
         pin_path=tmp_path / "pin.yaml",
     )
-    assert pin.device_batch == 64          # largest divisor of 128 <= 100
+    assert pin.device_batch == 64  # largest divisor of 128 <= 100
     assert pin.accumulate_grad_batches == 2
     assert pin.num_devices == 4
     assert pin.effective_batch_size == 512  # always exact
@@ -641,13 +643,17 @@ def test_batch_exact_via_divisor_when_max_not_a_divisor(monkeypatch, tmp_path):
     "effective, num_devices, found_max",
     [(512, 1, 300), (512, 4, 100), (256, 2, 50), (1024, 8, 33), (128, 1, 128)],
 )
-def test_batch_effective_is_always_exact(monkeypatch, tmp_path, effective, num_devices, found_max):
+def test_batch_effective_is_always_exact(
+    monkeypatch, tmp_path, effective, num_devices, found_max
+):
     _patch_scale(monkeypatch, found_max=found_max)
     trainer = _FakeTrainer()
     trainer.num_devices = num_devices
     module = _Owner(batch_size=1)
     pin = tune_batch_size(
-        trainer, module, effective_batch_size=effective,
+        trainer,
+        module,
+        effective_batch_size=effective,
         pin_path=tmp_path / "pin.yaml",
     )
     assert pin.device_batch * pin.accumulate_grad_batches * pin.num_devices == effective
@@ -658,7 +664,9 @@ def test_batch_pin_stores_found_max_and_rederives_on_reuse(monkeypatch, tmp_path
     _patch_scale(monkeypatch, found_max=200)
     pin_path = tmp_path / "pin.yaml"
     t1 = _FakeTrainer()
-    tune_batch_size(t1, _Owner(batch_size=1), effective_batch_size=512, pin_path=pin_path)
+    tune_batch_size(
+        t1, _Owner(batch_size=1), effective_batch_size=512, pin_path=pin_path
+    )
 
     from mushin._tuning import _read_pin
 
@@ -696,6 +704,8 @@ def test_batch_effective_not_divisible_by_num_devices_raises(tmp_path):
     trainer.num_devices = 3
     with pytest.raises(ValueError, match="divisible by num_devices"):
         tune_batch_size(
-            trainer, _Owner(batch_size=1), effective_batch_size=512,
+            trainer,
+            _Owner(batch_size=1),
+            effective_batch_size=512,
             pin_path=tmp_path / "pin.yaml",
         )
