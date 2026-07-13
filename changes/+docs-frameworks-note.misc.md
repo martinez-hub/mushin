@@ -1,1 +1,0 @@
-Documentation: add a "Frameworks: Lightning-first, sweep layer agnostic" section to Core concepts, clarifying that the sweep->dataset workflow wraps any framework (scikit-learn, XGBoost, ...) while compare/auto-tuning/HydraDDP are PyTorch/Lightning-specific.
