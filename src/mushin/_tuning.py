@@ -277,20 +277,7 @@ def tune_learning_rate(
     **lr_find_kwargs
         Forwarded to ``Tuner.lr_find`` (e.g. ``min_lr``, ``max_lr``, ``num_training``).
     """
-    from pytorch_lightning.callbacks import LearningRateFinder
     from pytorch_lightning.tuner.tuning import Tuner
-
-    # A LearningRateFinder callback re-runs its stochastic range test at fit and can
-    # move the model off the pinned LR, breaking determinism. Reject the combination.
-    if any(
-        isinstance(cb, LearningRateFinder)
-        for cb in getattr(trainer, "callbacks", []) or []
-    ):
-        raise ValueError(
-            "the Trainer already has a Lightning LearningRateFinder callback, which "
-            "would run its own range test at fit and move the model off the tuned/"
-            "pinned learning rate. Use tune_learning_rate or that callback, not both."
-        )
 
     # Validate the LR owner up front: a misspelled/renamed lr_attr would otherwise
     # have _set_attr create a dead attribute while configure_optimizers keeps reading

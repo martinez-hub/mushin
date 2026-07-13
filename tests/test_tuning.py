@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mushin._tuning import tune_batch_size
+from mushin._tuning import tune_batch_size, tune_learning_rate
 
 
 def test_pin_roundtrip(tmp_path):
@@ -360,22 +360,28 @@ def test_batch_pin_no_owner_raises(tmp_path):
         )
 
 
-def test_lr_rejects_existing_lr_finder(tmp_path):
-    # A Lightning LearningRateFinder callback would run its own range test at fit
-    # and move off the pinned LR; reject the combination.
-    import pytorch_lightning as pl
+def test_lr_allows_existing_lr_finder_callback(monkeypatch, tmp_path):
+    """The LearningRateFinder-conflict guard was removed; a pre-existing callback
+    must not raise. (We still pin/apply our own found value.)"""
     from pytorch_lightning.callbacks import LearningRateFinder
+    from pytorch_lightning.tuner.tuning import Tuner
 
-    from mushin._tuning import tune_learning_rate
+    class _Sugg:
+        def suggestion(self):
+            return 0.01
 
-    trainer = pl.Trainer(
-        logger=False,
-        enable_checkpointing=False,
-        enable_progress_bar=False,
-        callbacks=[LearningRateFinder()],
-    )
-    with pytest.raises(ValueError, match="LearningRateFinder"):
-        tune_learning_rate(trainer, _Mod(), None, pin_path=tmp_path / "lr.yaml")
+    monkeypatch.setattr(Tuner, "lr_find", lambda self, *a, **k: _Sugg(), raising=True)
+
+    class _Mod:
+        def __init__(self):
+            self.lr = 0.1
+
+    trainer = _FakeTrainer()
+    trainer.callbacks = [LearningRateFinder()]
+    module = _Mod()
+    pin = tune_learning_rate(trainer, module, pin_path=tmp_path / "lr.yaml")
+    assert pin.learning_rate == 0.01
+    assert module.lr == 0.01
 
 
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
