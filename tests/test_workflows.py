@@ -1,6 +1,7 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
+import inspect
 import string
 from collections.abc import Sequence
 from pathlib import Path
@@ -815,3 +816,10 @@ def test_to_override_element_handles_numpy_scalars():
     assert _to_override_element(np.bool_(True)) == "true"
     # strings still quoted (commas/spaces preserved)
     assert _to_override_element("a,b") == "'a,b'"
+
+
+@pytest.mark.parametrize("cls", [BaseWorkflow, MultiRunMetricsWorkflow, RobustnessCurve])
+@pytest.mark.parametrize("param", ["config_name", "job_name"])
+def test_run_defaults_are_not_rai_branded(cls, param):
+    default = inspect.signature(cls.run).parameters[param].default
+    assert default == "mushin_workflow"

@@ -284,8 +284,8 @@ class BaseWorkflow:
         | None = zen,
         version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
         to_dictconfig: bool = False,
-        config_name: str = "rai_workflow",
-        job_name: str = "rai_workflow",
+        config_name: str = "mushin_workflow",
+        job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
@@ -329,10 +329,10 @@ class BaseWorkflow:
             If ``True``, convert a ``dataclasses.dataclass`` to a ``omegaconf.DictConfig``. Note, this
             will remove Hydra's capability for validation with structured configurations.
 
-        config_name : str (default: "rai_workflow")
+        config_name : str (default: "mushin_workflow")
             Name of the stored configuration in Hydra's ConfigStore API.
 
-        job_name : str (default: "rai_workflow")
+        job_name : str (default: "mushin_workflow")
             Name of job for logging.
 
         with_log_configuration : bool (default: True)
@@ -609,8 +609,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
         target_job_dirs: Sequence[str | Path] | None = None,
         to_dictconfig: bool = False,
-        config_name: str = "rai_workflow",
-        job_name: str = "rai_workflow",
+        config_name: str = "mushin_workflow",
+        job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
@@ -1060,8 +1060,8 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         launcher: str | None = None,
         overrides: list[str] | None = None,
         to_dictconfig: bool = False,
-        config_name: str = "rai_workflow",
-        job_name: str = "rai_workflow",
+        config_name: str = "mushin_workflow",
+        job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
