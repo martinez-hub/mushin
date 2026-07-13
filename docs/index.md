@@ -24,8 +24,7 @@ dashboard you have to export.
     - **Deprecation** — `BaseWorkflow` and `RobustnessCurve` moved out of the top-level
       namespace; import them from `mushin.workflows` (they still work, with a warning).
 
-    See the full [changelog](https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md)
-    for every change.
+    See the full [changelog](changelog.md) for every change.
 
 ## Three pillars
 

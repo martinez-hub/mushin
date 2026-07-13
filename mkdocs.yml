@@ -78,3 +78,4 @@ nav:
       - lightning: reference/lightning.md
       - utils: reference/utils.md
   - Contributing: contributing.md
+  - Changelog: changelog.md
