@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from mushin._tuning import tune_batch_size
+
 
 def test_pin_roundtrip(tmp_path):
     from mushin._tuning import _read_pin, _write_pin
@@ -103,10 +105,16 @@ def test_batchpin_and_lrpin_are_frozen_dataclasses():
         accumulate_grad_batches=4,
         effective_batch_size=256,
         num_devices=1,
-        drift=0,
     )
     lp = LRPin(learning_rate=0.001)
     assert dataclasses.is_dataclass(bp) and dataclasses.is_dataclass(lp)
+    assert {f.name for f in dataclasses.fields(bp)} == {
+        "device_batch",
+        "accumulate_grad_batches",
+        "effective_batch_size",
+        "num_devices",
+    }
+    assert not hasattr(bp, "drift")
     with pytest.raises(dataclasses.FrozenInstanceError):
         bp.device_batch = 1
 
@@ -124,14 +132,14 @@ class _DM:
         self.batch_size = batch_size
 
 
-def _patch_scale(monkeypatch, return_value, counter=None):
-    """Patch Tuner.scale_batch_size to return a fixed value (no real search)."""
+def _patch_scale(monkeypatch, found_max, counter=None):
+    """Patch Tuner.scale_batch_size to return a fixed found_max (no real search)."""
     from pytorch_lightning.tuner.tuning import Tuner
 
     def fake(self, *a, **k):
         if counter is not None:
             counter["n"] += 1
-        return return_value
+        return found_max
 
     monkeypatch.setattr(Tuner, "scale_batch_size", fake)
 
@@ -151,7 +159,7 @@ def test_batch_exact_when_max_meets_target(monkeypatch, tmp_path):
         retune=True,
     )
     assert (pin.device_batch, pin.accumulate_grad_batches) == (256, 1)
-    assert pin.effective_batch_size == 256 and pin.drift == 0
+    assert pin.effective_batch_size == 256
     assert dm.batch_size == 256  # applied to the datamodule
 
 
@@ -224,45 +232,8 @@ def test_batch_accumulation_clean_divisor(monkeypatch, tmp_path):
         retune=True,
     )
     assert (pin.device_batch, pin.accumulate_grad_batches) == (64, 4)
-    assert pin.effective_batch_size == 256 and pin.drift == 0
+    assert pin.effective_batch_size == 256
     assert trainer.accumulate_grad_batches == 4  # applied to the trainer
-
-
-def test_batch_drift_warns_when_not_divisible(monkeypatch, tmp_path):
-    from mushin._tuning import tune_batch_size
-
-    _patch_scale(monkeypatch, 100)  # 256/100 -> round(2.56)=3 -> 300
-    with pytest.warns(UserWarning, match="differs from requested"):
-        pin = tune_batch_size(
-            _make_trainer(),
-            object(),
-            _DM(),
-            effective_batch_size=256,
-            num_devices=1,
-            pin_path=tmp_path / "p.yaml",
-            retune=True,
-        )
-    assert pin.device_batch == 100 and pin.accumulate_grad_batches == 3
-    assert pin.effective_batch_size == 300 and pin.drift == 44
-
-
-def test_batch_safety_margin_backs_off_found_max(monkeypatch, tmp_path):
-    from mushin._tuning import tune_batch_size
-
-    # found 100, margin 0.2 -> floor(80)=80 -> min(80, 240)=80; round(240/80)=3 -> 240 (no drift)
-    _patch_scale(monkeypatch, 100)
-    pin = tune_batch_size(
-        _make_trainer(),
-        object(),
-        _DM(),
-        effective_batch_size=240,
-        num_devices=1,
-        safety_margin=0.2,
-        pin_path=tmp_path / "p.yaml",
-        retune=True,
-    )
-    assert pin.device_batch == 80 and pin.accumulate_grad_batches == 3
-    assert pin.effective_batch_size == 240 and pin.drift == 0
 
 
 def test_batch_num_devices_divides_effective(monkeypatch, tmp_path):
@@ -322,17 +293,6 @@ def test_batch_invalid_inputs(monkeypatch, tmp_path):
             pin_path=pin,
             retune=True,
         )
-    with pytest.raises(ValueError, match="safety_margin"):
-        tune_batch_size(
-            t,
-            object(),
-            dm,
-            effective_batch_size=256,
-            num_devices=1,
-            safety_margin=1.0,
-            pin_path=pin,
-            retune=True,
-        )
     with pytest.raises(ValueError, match="effective_batch_size"):
         tune_batch_size(
             t,
@@ -361,14 +321,12 @@ def test_batch_none_from_tuner_raises(monkeypatch, tmp_path):
         )
 
 
-def test_batch_pin_invalid_device_batch_raises(tmp_path):
+def test_batch_pin_invalid_found_max_raises(tmp_path):
     from mushin._tuning import _write_pin, tune_batch_size
 
     pin_path = tmp_path / "bad.yaml"
-    _write_pin(
-        pin_path, {"device_batch": 0, "effective_batch_size": 256, "num_devices": 1}
-    )
-    with pytest.raises(ValueError, match="device_batch"):
+    _write_pin(pin_path, {"found_max_device_batch": 0})
+    with pytest.raises(ValueError, match="invalid found_max_device_batch"):
         tune_batch_size(
             _make_trainer(),
             object(),
@@ -376,85 +334,6 @@ def test_batch_pin_invalid_device_batch_raises(tmp_path):
             effective_batch_size=256,
             num_devices=1,
             pin_path=pin_path,
-        )
-
-
-def test_batch_pin_context_mismatch_warns(monkeypatch, tmp_path):
-    from mushin._tuning import tune_batch_size
-
-    counter = {"n": 0}
-    _patch_scale(monkeypatch, 128, counter)
-    pin_path = tmp_path / "batch.yaml"
-    # first tune records effective_batch_size=256, num_devices=1
-    tune_batch_size(
-        _make_trainer(),
-        object(),
-        _DM(),
-        effective_batch_size=256,
-        num_devices=1,
-        pin_path=pin_path,
-    )
-    assert counter["n"] == 1
-
-    # re-run with a DIFFERENT target reuses the pinned device_batch but warns
-    with pytest.warns(UserWarning, match="was recorded for"):
-        pin = tune_batch_size(
-            _make_trainer(),
-            object(),
-            _DM(),
-            effective_batch_size=512,
-            num_devices=1,
-            pin_path=pin_path,
-        )
-    assert counter["n"] == 1  # still no new search
-    assert pin.device_batch == 128 and pin.accumulate_grad_batches == 4
-    assert pin.effective_batch_size == 512 and pin.drift == 0  # 128*4*1 == 512
-
-
-def test_batch_pin_clamped_on_scale_out(monkeypatch, tmp_path):
-    # A pin found on 1 device must be clamped to the per-device target when reused
-    # on more devices, or accumulation bottoms out at 1 and the effective overshoots.
-    from mushin._tuning import _write_pin, tune_batch_size
-
-    pin_path = tmp_path / "batch.yaml"
-    _write_pin(
-        pin_path, {"device_batch": 256, "effective_batch_size": 256, "num_devices": 1}
-    )
-
-    # reused on 4 devices: per_device_total = 256/4 = 64, so device_batch clamps to 64
-    with pytest.warns(UserWarning, match="was recorded for"):
-        pin = tune_batch_size(
-            _make_trainer(),
-            object(),
-            _DM(),
-            effective_batch_size=256,
-            num_devices=4,
-            pin_path=pin_path,
-        )
-    assert pin.device_batch == 64 and pin.accumulate_grad_batches == 1
-    assert pin.effective_batch_size == 256 and pin.drift == 0  # not 1024
-
-
-def test_batch_rejects_ambiguous_owners(monkeypatch, tmp_path):
-    # Both module and datamodule expose batch_arg -> ambiguous which one the tuner
-    # scaled; reject rather than apply to the wrong object.
-    from mushin._tuning import tune_batch_size
-
-    _patch_scale(monkeypatch, 128)
-
-    class ModWithBatch:
-        def __init__(self):
-            self.batch_size = 2
-
-    with pytest.raises(ValueError, match="both the module and datamodule"):
-        tune_batch_size(
-            _make_trainer(),
-            ModWithBatch(),
-            _DM(),
-            effective_batch_size=256,
-            num_devices=1,
-            pin_path=tmp_path / "p.yaml",
-            retune=True,
         )
 
 
@@ -464,9 +343,7 @@ def test_batch_pin_no_owner_raises(tmp_path):
     from mushin._tuning import _write_pin, tune_batch_size
 
     pin_path = tmp_path / "p.yaml"
-    _write_pin(
-        pin_path, {"device_batch": 8, "effective_batch_size": 8, "num_devices": 1}
-    )
+    _write_pin(pin_path, {"found_max_device_batch": 8})
 
     class Bare:
         pass
@@ -479,60 +356,6 @@ def test_batch_pin_no_owner_raises(tmp_path):
             effective_batch_size=8,
             num_devices=1,
             pin_path=pin_path,
-        )
-
-
-def test_batch_rejects_existing_accumulation_scheduler(monkeypatch, tmp_path):
-    # A GradientAccumulationScheduler drives accumulation; combining it with a
-    # non-1 accumulate_grad_batches makes Lightning crash at fit. Fail early.
-    import pytorch_lightning as pl
-    from pytorch_lightning.callbacks import GradientAccumulationScheduler
-
-    from mushin._tuning import tune_batch_size
-
-    _patch_scale(monkeypatch, 128)
-    trainer = pl.Trainer(
-        logger=False,
-        enable_checkpointing=False,
-        enable_progress_bar=False,
-        callbacks=[GradientAccumulationScheduler(scheduling={0: 2})],
-    )
-    with pytest.raises(ValueError, match="GradientAccumulationScheduler"):
-        tune_batch_size(
-            trainer,
-            object(),
-            _DM(),
-            effective_batch_size=256,
-            num_devices=1,
-            pin_path=tmp_path / "p.yaml",
-            retune=True,
-        )
-
-
-def test_batch_rejects_existing_batch_size_finder(monkeypatch, tmp_path):
-    # A Lightning BatchSizeFinder callback would run its own search at fit and
-    # overwrite the pinned batch; reject the combination.
-    import pytorch_lightning as pl
-    from pytorch_lightning.callbacks import BatchSizeFinder
-
-    from mushin._tuning import tune_batch_size
-
-    _patch_scale(monkeypatch, 128)
-    trainer = pl.Trainer(
-        logger=False,
-        enable_checkpointing=False,
-        enable_progress_bar=False,
-        callbacks=[BatchSizeFinder()],
-    )
-    with pytest.raises(ValueError, match="BatchSizeFinder"):
-        tune_batch_size(
-            trainer,
-            object(),
-            _DM(),
-            effective_batch_size=256,
-            num_devices=1,
-            pin_path=tmp_path / "p.yaml",
-            retune=True,
         )
 
 
@@ -724,16 +547,15 @@ def test_batch_no_pin_written_when_owner_invalid(monkeypatch, tmp_path):
 
     _patch_scale(monkeypatch, 128)
 
-    class ModWithBatch:
-        def __init__(self):
-            self.batch_size = 2
+    class Bare:
+        pass
 
     pin_path = tmp_path / "p.yaml"
-    with pytest.raises(ValueError, match="both the module and datamodule"):
+    with pytest.raises(ValueError, match="neither the module nor the datamodule"):
         tune_batch_size(
             _make_trainer(),
-            ModWithBatch(),
-            _DM(),
+            Bare(),
+            None,
             effective_batch_size=256,
             num_devices=1,
             pin_path=pin_path,
@@ -771,3 +593,102 @@ def test_largest_divisor_leq(target, cap, expected):
     assert d == expected
     assert target % d == 0  # it is always an exact divisor
     assert 1 <= d <= cap
+
+
+class _Owner:
+    """Minimal batch-size owner (module or datamodule stand-in)."""
+
+    def __init__(self, batch_size=None):
+        if batch_size is not None:
+            self.batch_size = batch_size
+
+
+class _FakeTrainer:
+    def __init__(self):
+        self.num_devices = 1
+        self.num_nodes = 1
+        self.default_root_dir = None
+        self.accumulate_grad_batches = 1
+        self.callbacks = []
+
+
+def test_batch_exact_via_divisor_when_max_not_a_divisor(monkeypatch, tmp_path):
+    _patch_scale(monkeypatch, found_max=100)
+    trainer = _FakeTrainer()
+    trainer.num_devices = 4  # -> per_device_total = 512/4 = 128
+    module = _Owner(batch_size=1)
+    pin = tune_batch_size(
+        trainer, module, effective_batch_size=512,
+        pin_path=tmp_path / "pin.yaml",
+    )
+    assert pin.device_batch == 64          # largest divisor of 128 <= 100
+    assert pin.accumulate_grad_batches == 2
+    assert pin.num_devices == 4
+    assert pin.effective_batch_size == 512  # always exact
+    assert not hasattr(pin, "drift")
+    assert module.batch_size == 64
+    assert trainer.accumulate_grad_batches == 2
+
+
+@pytest.mark.parametrize(
+    "effective, num_devices, found_max",
+    [(512, 1, 300), (512, 4, 100), (256, 2, 50), (1024, 8, 33), (128, 1, 128)],
+)
+def test_batch_effective_is_always_exact(monkeypatch, tmp_path, effective, num_devices, found_max):
+    _patch_scale(monkeypatch, found_max=found_max)
+    trainer = _FakeTrainer()
+    trainer.num_devices = num_devices
+    module = _Owner(batch_size=1)
+    pin = tune_batch_size(
+        trainer, module, effective_batch_size=effective,
+        pin_path=tmp_path / "pin.yaml",
+    )
+    assert pin.device_batch * pin.accumulate_grad_batches * pin.num_devices == effective
+    assert pin.device_batch <= found_max
+
+
+def test_batch_pin_stores_found_max_and_rederives_on_reuse(monkeypatch, tmp_path):
+    _patch_scale(monkeypatch, found_max=200)
+    pin_path = tmp_path / "pin.yaml"
+    t1 = _FakeTrainer()
+    tune_batch_size(t1, _Owner(batch_size=1), effective_batch_size=512, pin_path=pin_path)
+
+    from mushin._tuning import _read_pin
+
+    stored = _read_pin(pin_path)
+    assert stored == {"found_max_device_batch": 200}
+
+    def _boom(self, *a, **k):  # pragma: no cover - must not be called
+        raise AssertionError("scale_batch_size must not run on pin reuse")
+
+    from pytorch_lightning.tuner.tuning import Tuner
+
+    monkeypatch.setattr(Tuner, "scale_batch_size", _boom, raising=True)
+    t4 = _FakeTrainer()
+    t4.num_devices = 4
+    m4 = _Owner(batch_size=1)
+    pin = tune_batch_size(t4, m4, effective_batch_size=512, pin_path=pin_path)
+    assert pin.device_batch == 128  # largest divisor of 128 <= 200
+    assert pin.accumulate_grad_batches == 1
+    assert pin.effective_batch_size == 512
+
+
+def test_batch_poor_utilization_warns(monkeypatch, tmp_path):
+    _patch_scale(monkeypatch, found_max=64)
+    trainer = _FakeTrainer()
+    module = _Owner(batch_size=1)
+    with pytest.warns(UserWarning, match="below the .* that fits"):
+        pin = tune_batch_size(
+            trainer, module, effective_batch_size=130, pin_path=tmp_path / "pin.yaml"
+        )
+    assert pin.effective_batch_size == 130  # still exact
+
+
+def test_batch_effective_not_divisible_by_num_devices_raises(tmp_path):
+    trainer = _FakeTrainer()
+    trainer.num_devices = 3
+    with pytest.raises(ValueError, match="divisible by num_devices"):
+        tune_batch_size(
+            trainer, _Owner(batch_size=1), effective_batch_size=512,
+            pin_path=tmp_path / "pin.yaml",
+        )
