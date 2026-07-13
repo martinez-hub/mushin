@@ -15,6 +15,48 @@ list of floats.
 See [Workflows & sweeps](guides/workflows.md) and the
 [API Reference — workflows](reference/workflows.md).
 
+## Frameworks: Lightning-first, sweep layer agnostic
+
+mushin is built on [PyTorch Lightning](https://lightning.ai/) and hydra-zen, and
+that's its first-class path. But the two layers differ in how tied to Lightning
+they are:
+
+**The sweep layer is framework-agnostic.** `MultiRunMetricsWorkflow` never
+inspects your model — it only sweeps configurations and collects the `dict` your
+`task` returns. Whatever you train inside `task` is your business, so you can
+sweep scikit-learn, XGBoost, JAX, or plain NumPy and still get the labeled
+`xarray.Dataset` back:
+
+```python
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+class RidgeSweep(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(alpha: float, seed: int) -> dict:
+        from sklearn.linear_model import Ridge  # nothing here requires torch
+        model = Ridge(alpha=alpha, random_state=seed).fit(X_train, y_train)
+        return dict(r2=model.score(X_val, y_val))
+
+wf = RidgeSweep()
+wf.run(alpha=multirun([0.1, 1.0, 10.0]), seed=multirun([0, 1, 2]))
+ds = wf.to_xarray()  # dims (alpha, seed), data var r2
+```
+
+**The convenience and evaluation layers are PyTorch/Lightning-specific.** These
+assume torch models and won't apply to a scikit-learn estimator:
+
+- `HydraDDP` and `MetricsCallback` — Lightning strategy/callback.
+- Auto-tuning (`tune_batch_size` / `tune_learning_rate`) — drives Lightning's `Tuner`.
+- `compare` and the batteries (`classification`, `segmentation`, `detection`,
+  `regression`, `retrieval`, `image_quality`, `audio`) — take
+  `torch.nn.Module` models and score them with `torchmetrics`.
+
+So: use the generic sweep→dataset workflow with **any** framework; reach for the
+Lightning conveniences and the statistical `compare` batteries when you're
+training torch models. There is no scikit-learn *integration* — only the
+framework-neutral workflow that happily wraps it.
+
 ## The (method × seed) dataset
 
 Reproducible comparison requires running each method across multiple seeds.
