@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
 from .lightning import HydraDDP, MetricsCallback
-from .study import Study  # keep last of eager block: avoids circular import via .study -> _sweep
+from .study import (
+    Study,  # keep last of eager block: avoids circular import via .study -> _sweep
+)
 from .workflows import MultiRunMetricsWorkflow, hydra_list, multirun
 
 # Benchmark exports are loaded on first attribute access (see __getattr__), so a
@@ -54,7 +56,9 @@ if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
         retrieval_battery,
         segmentation_battery,
     )
-    from .workflows import BaseWorkflow, RobustnessCurve
+
+    # Not in __all__ (deprecated top-level names); kept for type-checkers only.
+    from .workflows import BaseWorkflow, RobustnessCurve  # noqa: F401
 
 
 def __getattr__(name: str):
