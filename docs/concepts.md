@@ -43,6 +43,10 @@ wf.run(alpha=multirun([0.1, 1.0, 10.0]), seed=multirun([0, 1, 2]))
 ds = wf.to_xarray()  # dims (alpha, seed), data var r2
 ```
 
+For a complete, runnable version see
+[`examples/sklearn_sweep.py`](https://github.com/martinez-hub/mushin/blob/main/examples/sklearn_sweep.py)
+(a `LogisticRegression` sweep — pure scikit-learn, no torch).
+
 **The convenience and evaluation layers are PyTorch/Lightning-specific.** These
 assume torch models and won't apply to a scikit-learn estimator:
 

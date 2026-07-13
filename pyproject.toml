@@ -132,6 +132,9 @@ dev = [
     "matplotlib >= 3.9",
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2",
+    # dev-only: powers examples/sklearn_sweep.py (a non-Lightning sweep demo) and
+    # its test. mushin itself has no scikit-learn dependency or integration.
+    "scikit-learn >= 1.3",
 ]
 # Detection deps live in the `detection` extra, not here: pycocotools is a C
 # extension whose lowest-floor wheel is ABI-incompatible with the min-versions
