@@ -121,15 +121,17 @@ task silently resolve against the wrong directory. Add:
   `hydra.utils.get_original_cwd()`, with a sensible fallback outside a Hydra run)
   so researchers can resolve paths against the launch directory explicitly.
 
-### 5. HPC branches — close/park
+### 5. HPC branches — keep open, pending cluster validation
 
 The cluster-gated distributed PRs are HPC infrastructure orthogonal to the
-sweep→dataset researcher. **Decision:** close PRs #50 (multi-node DDP), #58
-(FSDP), #59 (GPU-packing); preserve their branches for reference. `HydraDDP`
-(single-node multi-GPU, already on `main`) stays. If demand appears later,
-revisit as an opt-in `mushin[distributed]` extra or a separate package.
-
-This is a `gh` action (with an explanatory closing comment on each PR), not code.
+sweep→dataset researcher, so they are **not** part of the core's near-term
+direction. **Revised decision (2026-07-13):** do *not* close PRs #50 (multi-node
+DDP), #58 (FSDP), #59 (GPU-packing) as part of this refocus — they remain open,
+CI-green, and gated on real GPU/cluster validation, which closing would not
+advance. `HydraDDP` (single-node multi-GPU, already on `main`) stays regardless.
+Their long-term home (core vs. an opt-in `mushin[distributed]` extra vs. a
+separate package) is a decision to make *after* they are validated on hardware,
+not now.
 
 ## Sequencing / branches
 
@@ -137,7 +139,8 @@ This is a `gh` action (with an explanatory closing comment on each PR), not code
   cwd helper. Ships as its own PR.
 - **Auto-tuning strip** (item 2): applied to the existing `auto-tuning` branch,
   reshaping PR #60 in place (does not belong in `refocus-core`).
-- **HPC closures** (item 5): standalone `gh pr close` actions.
+- **HPC branches** (item 5): no action — PRs #50/#58/#59 stay open, pending
+  cluster validation (revised from the original close/park plan).
 
 ## Testing
 
