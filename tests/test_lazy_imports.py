@@ -2,6 +2,8 @@
 import subprocess
 import sys
 
+import pytest
+
 
 def _fresh_import_probe(code: str) -> str:
     """Run `code` in a fresh interpreter and return its stdout."""
@@ -49,9 +51,6 @@ def test_unknown_attribute_raises_attribute_error():
         pass
     else:  # pragma: no cover
         raise AssertionError("expected AttributeError")
-
-
-import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize("name", ["BaseWorkflow", "RobustnessCurve"])
