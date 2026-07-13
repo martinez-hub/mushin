@@ -60,6 +60,12 @@ The full runnable version is in [`examples/sweep_to_dataset.py`](examples/sweep_
 uv run python examples/sweep_to_dataset.py
 ```
 
+The sweep layer is **framework-agnostic** — your `task` just returns a `dict`, so
+you can wrap scikit-learn, XGBoost, or anything and still get a labeled
+`xarray.Dataset` back (see [`examples/sklearn_sweep.py`](examples/sklearn_sweep.py)).
+The Lightning-specific conveniences (auto-tuning, `HydraDDP`, the `compare`
+batteries) assume PyTorch.
+
 ## Compare methods, with statistics
 
 Evaluate trained models on a standard battery and get a labeled dataset *plus*
@@ -129,6 +135,10 @@ the [LLM evaluation guide](docs/guides/llm.md).
 - `benchmark.compare` — run a standard metric battery (torchmetrics) across
   trained seeds and get a labeled dataset + significance (scipy): `BenchmarkResult`
   with `.summary()`, `.comparisons`, and `.data`.
+- `register_task`, `get_task`, `list_tasks`, `Task` — first-class, reusable
+  evaluation tasks; `compare` and `Study` accept a task name or a `Task`. Built-in
+  batteries: `classification`, `segmentation`, `detection`, `regression`,
+  `retrieval`, `image_quality`, `audio`.
 - `llm.compare_llms`, `llm.llm_judge` — compare LLM systems across reproducible
   seeds with significance (callables or hydra-zen configs; plain / `torchmetrics`
   / judge metrics; optional output cache).
@@ -138,6 +148,9 @@ the [LLM evaluation guide](docs/guides/llm.md).
   `mushin.workflows.RobustnessCurve` variant) — declarative, reproducible
   experiment workflows that record configs, checkpoints, and metrics, and load
   results back as labeled `xarray` datasets.
+- `tune_batch_size`, `tune_learning_rate` — opt-in, reproducibility-preserving
+  auto-tuning: find the batch size / LR once, pin it to a sidecar file, and reuse
+  it — with an exact, hardware-independent effective batch (no drift).
 - `MetricsCallback` — a Lightning callback for capturing metrics.
 - `HydraDDP` — a Hydra/Lightning strategy for multi-GPU (DDP) launches.
 - `multirun`, `hydra_list`, `load_experiment`, `load_from_checkpoint` — helpers.
@@ -168,8 +181,9 @@ Already use [uv](https://docs.astral.sh/uv/)? `uv pip install mushin-py` (or
 > **Install name vs. import name:** the PyPI distribution is **`mushin-py`**, but
 > you `import mushin` (same pattern as `scikit-learn` → `sklearn`).
 
-Optional runtime extras: `viz` (matplotlib, for `RobustnessCurve` plotting) and
-`netcdf` (netCDF4) — e.g. `pip install "mushin-py[viz]"`.
+Optional extras: `viz` (matplotlib, for plotting results) and `netcdf` (netCDF4)
+for the core; `detection`, `image`, and `audio` for those benchmark batteries;
+and `mcp` for the MCP server — e.g. `pip install "mushin-py[viz]"`.
 
 For a development environment (runtime deps + dev tooling), this project uses
 [uv](https://docs.astral.sh/uv/): `uv sync`.
