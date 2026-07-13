@@ -1,1 +1,0 @@
-Fixed the docs example scripts surfaced in review: the Study example now trains and evaluates on separate MNIST splits and resolves its checkpoint directory to an absolute path (so it works under Hydra's per-job chdir); the custom-metrics guide no longer implies `Study` accepts `metrics`/`predict_fn` (those are `compare`-only).

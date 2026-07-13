@@ -1,1 +1,0 @@
-`mushin.llm.compare_llms` — compare LLM systems (callables or hydra-zen configs) across reproducible stochastic seeds with a metric (a plain scorer, a `torchmetrics` text metric, or the new `llm_judge` helper), reporting Holm-corrected statistical significance. Includes an on-disk output cache. Provider-agnostic: you bring the systems, data, and judge model.

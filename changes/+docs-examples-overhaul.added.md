@@ -1,1 +1,0 @@
-Overhauled the documentation: runnable, tested example scripts (MNIST) that the guides embed verbatim, deeper guides with annotated output, and new Tutorial, Core concepts, Custom metrics/predict_fn, and Statistics pages.
