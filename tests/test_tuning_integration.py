@@ -64,6 +64,7 @@ def test_applied_accumulation_and_device_batch_take_effect(monkeypatch, tmp_path
         retune=True,
     )
     assert pin.device_batch == 2 and pin.accumulate_grad_batches == 4
+    assert pin.device_batch * pin.accumulate_grad_batches * pin.num_devices == 8
     assert dm.batch_size == 2  # applied
 
     trainer.fit(module, datamodule=dm)
@@ -99,10 +100,18 @@ class _DataModule64(__import__("pytorch_lightning").LightningDataModule):
         return DataLoader(ds, batch_size=self.batch_size)
 
 
-def test_real_tuner_fit_uses_capped_batch(tmp_path):
-    """After a REAL scale_batch_size search, an immediate fit uses the applied
-    (capped) device batch, not the search's final trial batch: fit rebuilds the
-    dataloader from the datamodule's updated attribute."""
+def test_real_tuner_fit_uses_divisor_batch(tmp_path):
+    """After a REAL scale_batch_size search, tune_batch_size applies the largest
+    divisor of the per-device target that fits (not the search's own final trial
+    batch), so device_batch * accumulate_grad_batches * num_devices lands exactly
+    on effective_batch_size; an immediate fit uses that applied device batch:
+    fit rebuilds the dataloader from the datamodule's updated attribute.
+
+    found_max is deterministic here: with 64 samples and this trivial CPU model,
+    power-mode doubling from init_val=2 across max_trials=4 trials (2, 4, 8, 16)
+    never OOMs, so the search always settles on found_max=16. per_device_total =
+    8 // 1 = 8, whose largest divisor <= 16 is 8 itself (accumulate=1).
+    """
     import pytorch_lightning as pl
 
     from mushin._tuning import tune_batch_size
@@ -128,6 +137,9 @@ def test_real_tuner_fit_uses_capped_batch(tmp_path):
         steps_per_trial=1,
         init_val=2,
     )
+    assert pin.device_batch * pin.accumulate_grad_batches * pin.num_devices == 8
+    assert pin.device_batch == 8 and pin.accumulate_grad_batches == 1
+
     m.seen_batches.clear()  # isolate fit from the tuner's own trial steps
     trainer.fit(m, datamodule=dm)
     assert m.seen_batches  # fit actually ran
