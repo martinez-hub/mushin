@@ -51,8 +51,6 @@ def test_unknown_attribute_raises_attribute_error():
         raise AssertionError("expected AttributeError")
 
 
-import warnings  # noqa: E402, F401 -- appended mid-file per test-file convention
-
 import pytest  # noqa: E402
 
 
