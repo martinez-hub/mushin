@@ -1,1 +1,0 @@
-Added a `@claude` mention bot (GitHub Actions): mention `@claude` in any issue or PR comment to have Claude answer questions or make changes. PR *reviews* stay with the Codex connector.
