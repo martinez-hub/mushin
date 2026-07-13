@@ -169,3 +169,48 @@ def test_real_fit_uses_applied_learning_rate(tmp_path):
     m.step_lrs.clear()
     trainer.fit(m, datamodule=dm)
     assert m.step_lrs and all(abs(x - 0.05) < 1e-9 for x in m.step_lrs)
+
+
+def test_real_lr_find_pins_a_finite_learning_rate(tmp_path):
+    """A REAL Tuner.lr_find run (no monkeypatch, no pre-written pin) pins a finite,
+    positive learning rate and applies it. Uses signal-bearing data so lr_find has a
+    well-behaved loss curve; if it still yields no suggestion, the real path must
+    surface the documented RuntimeError (never a silent/garbage value)."""
+    import math
+
+    import pytorch_lightning as pl
+
+    from mushin._tuning import _read_pin, tune_learning_rate
+
+    class _SignalDM(pl.LightningDataModule):
+        def train_dataloader(self):
+            x = torch.randn(256, 4)
+            w = torch.tensor([[1.0], [-2.0], [0.5], [3.0]])
+            y = x @ w + 0.01 * torch.randn(256, 1)
+            return DataLoader(TensorDataset(x, y), batch_size=16)
+
+    m = _BatchRecorder(lr=0.001)
+    trainer = pl.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+    try:
+        pin = tune_learning_rate(
+            trainer,
+            m,
+            _SignalDM(),
+            pin_path=tmp_path / "lr.yaml",
+            num_training=8,
+            min_lr=1e-5,
+            max_lr=1.0,
+        )
+    except RuntimeError as e:
+        assert "no learning-rate suggestion" in str(e)
+        return
+    assert pin.learning_rate > 0 and math.isfinite(pin.learning_rate)
+    assert m.lr == pin.learning_rate
+    assert _read_pin(tmp_path / "lr.yaml")["learning_rate"] == pin.learning_rate

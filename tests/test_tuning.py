@@ -360,28 +360,145 @@ def test_batch_pin_no_owner_raises(tmp_path):
         )
 
 
-def test_lr_allows_existing_lr_finder_callback(monkeypatch, tmp_path):
-    """The LearningRateFinder-conflict guard was removed; a pre-existing callback
-    must not raise. (We still pin/apply our own found value.)"""
+def test_lr_rejects_existing_lr_finder(tmp_path):
+    # A Lightning LearningRateFinder callback would re-run its range test at fit
+    # and move off the pinned LR; reject the combination.
+    import pytorch_lightning as pl
     from pytorch_lightning.callbacks import LearningRateFinder
-    from pytorch_lightning.tuner.tuning import Tuner
 
-    class _Sugg:
-        def suggestion(self):
-            return 0.01
-
-    monkeypatch.setattr(Tuner, "lr_find", lambda self, *a, **k: _Sugg(), raising=True)
-
-    class _Mod:
+    class _M:
         def __init__(self):
             self.lr = 0.1
 
-    trainer = _FakeTrainer()
-    trainer.callbacks = [LearningRateFinder()]
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        callbacks=[LearningRateFinder()],
+    )
+    with pytest.raises(ValueError, match="LearningRateFinder"):
+        tune_learning_rate(trainer, _M(), None, pin_path=tmp_path / "lr.yaml")
+
+
+def test_batch_rejects_existing_accumulation_scheduler(monkeypatch, tmp_path):
+    # A GradientAccumulationScheduler overwrites trainer.accumulate_grad_batches at
+    # epoch start, breaking the exact effective batch. Fail early.
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import GradientAccumulationScheduler
+
+    _patch_scale(monkeypatch, 128)
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        callbacks=[GradientAccumulationScheduler(scheduling={0: 2})],
+    )
+    with pytest.raises(ValueError, match="GradientAccumulationScheduler"):
+        tune_batch_size(
+            trainer,
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+
+
+def test_batch_rejects_existing_batch_size_finder(monkeypatch, tmp_path):
+    # A Lightning BatchSizeFinder would run its own search at fit and overwrite the
+    # tuned batch; reject the combination.
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import BatchSizeFinder
+
+    _patch_scale(monkeypatch, 128)
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        callbacks=[BatchSizeFinder()],
+    )
+    with pytest.raises(ValueError, match="BatchSizeFinder"):
+        tune_batch_size(
+            trainer,
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+
+
+def test_batch_applies_to_all_holders_that_expose_batch_arg(monkeypatch, tmp_path):
+    """When BOTH module and datamodule expose batch_arg, the tuned value is written
+    to BOTH (matching Lightning's lightning_setattr) — not just one — so the object
+    the dataloader reads never keeps a stale value."""
+    _patch_scale(monkeypatch, 512)
+
+    class _Mod:
+        def __init__(self):
+            self.batch_size = 1
+
     module = _Mod()
-    pin = tune_learning_rate(trainer, module, pin_path=tmp_path / "lr.yaml")
-    assert pin.learning_rate == 0.01
-    assert module.lr == 0.01
+    dm = _DM(batch_size=2)
+    pin = tune_batch_size(
+        _make_trainer(),
+        module,
+        dm,
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
+    )
+    assert module.batch_size == pin.device_batch  # module updated
+    assert dm.batch_size == pin.device_batch  # datamodule ALSO updated (not stale)
+
+
+def test_batch_explicit_num_devices_below_one_raises(tmp_path):
+    with pytest.raises(ValueError, match="num_devices must be >= 1"):
+        tune_batch_size(
+            _make_trainer(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=0,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+
+
+def test_batch_pin_missing_key_raises(tmp_path):
+    from mushin._tuning import _write_pin
+
+    pin_path = tmp_path / "bad.yaml"
+    _write_pin(pin_path, {"some_other_key": 4})  # not found_max_device_batch
+    with pytest.raises(ValueError, match="missing 'found_max_device_batch'"):
+        tune_batch_size(
+            _make_trainer(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=pin_path,
+        )
+
+
+def test_batch_no_false_warning_when_headroom_used(monkeypatch, tmp_path):
+    """When device_batch fully uses the fit (accumulate>1 but no larger divisor
+    fits), do NOT emit the poor-utilization warning if the choice is optimal."""
+    import warnings
+
+    _patch_scale(monkeypatch, 64)  # per_device_total 256, divisor 64, accumulate 4
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any UserWarning would fail the test
+        pin = tune_batch_size(
+            _make_trainer(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
+    assert (pin.device_batch, pin.accumulate_grad_batches) == (64, 4)
 
 
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):

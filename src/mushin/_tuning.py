@@ -169,16 +169,40 @@ def tune_batch_size(
     -------
     BatchPin
     """
+    from pytorch_lightning.callbacks import (
+        BatchSizeFinder,
+        GradientAccumulationScheduler,
+    )
     from pytorch_lightning.tuner.tuning import Tuner
 
     if effective_batch_size < 1:
         raise ValueError(
             f"effective_batch_size must be >= 1; got {effective_batch_size}"
         )
+    # This helper owns trainer.accumulate_grad_batches for the exact-effective-batch
+    # invariant. A GradientAccumulationScheduler overwrites it at epoch start, and a
+    # BatchSizeFinder re-runs its own search at fit and overwrites the tuned batch —
+    # either silently breaks the pinned/exact result. Reject the combination up front.
+    callbacks = getattr(trainer, "callbacks", []) or []
+    if any(isinstance(cb, GradientAccumulationScheduler) for cb in callbacks):
+        raise ValueError(
+            "tune_batch_size sets trainer.accumulate_grad_batches, which a "
+            "GradientAccumulationScheduler callback overwrites at epoch start, "
+            "breaking the exact effective batch. Remove that callback, or do not "
+            "auto-tune the batch size for this run."
+        )
+    if any(isinstance(cb, BatchSizeFinder) for cb in callbacks):
+        raise ValueError(
+            "the Trainer already has a Lightning BatchSizeFinder callback, which "
+            "would run its own search at fit and overwrite the tuned/pinned batch. "
+            "Use tune_batch_size or that callback, not both."
+        )
     if num_devices is None:
         per_node = int(getattr(trainer, "num_devices", 1) or 1)
         nodes = int(getattr(trainer, "num_nodes", 1) or 1)
         num_devices = max(1, per_node * nodes)
+    if num_devices < 1:
+        raise ValueError(f"num_devices must be >= 1; got {num_devices}")
     if effective_batch_size % num_devices != 0:
         raise ValueError(
             f"effective_batch_size={effective_batch_size} must be divisible by "
@@ -187,8 +211,7 @@ def tune_batch_size(
     per_device_total = effective_batch_size // num_devices
 
     # Validate the batch owner up front so we never write a pin for a call that
-    # would then apply the value to a dead attribute. Apply to the SAME owner
-    # Lightning's finder scales (module first, then datamodule).
+    # would then apply the value to a dead attribute.
     module_has = _has_attr(module, batch_arg)
     dm_has = datamodule is not None and _has_attr(datamodule, batch_arg)
     if not module_has and not dm_has:
@@ -203,6 +226,11 @@ def tune_batch_size(
 
     pin = None if retune else _read_pin(pin_path)
     if pin is not None:
+        if not isinstance(pin, dict) or "found_max_device_batch" not in pin:
+            raise ValueError(
+                f"pin file {pin_path} is missing 'found_max_device_batch'; "
+                "delete it or pass retune=True to re-tune."
+            )
         found_max = int(pin["found_max_device_batch"])
         if found_max < 1:
             raise ValueError(
@@ -237,8 +265,14 @@ def tune_batch_size(
             stacklevel=2,
         )
 
-    target = module if module_has else datamodule
-    _set_attr(target, batch_arg, device_batch)
+    # Apply to EVERY holder that exposes batch_arg (module and/or datamodule),
+    # matching Lightning's lightning_setattr, which writes all holders. Applying to
+    # only one would leave a stale value on the object the dataloader actually reads,
+    # silently breaking the effective batch.
+    if module_has:
+        _set_attr(module, batch_arg, device_batch)
+    if dm_has:
+        _set_attr(datamodule, batch_arg, device_batch)
     trainer.accumulate_grad_batches = accumulate
 
     return BatchPin(
@@ -277,7 +311,20 @@ def tune_learning_rate(
     **lr_find_kwargs
         Forwarded to ``Tuner.lr_find`` (e.g. ``min_lr``, ``max_lr``, ``num_training``).
     """
+    from pytorch_lightning.callbacks import LearningRateFinder
     from pytorch_lightning.tuner.tuning import Tuner
+
+    # A LearningRateFinder callback re-runs its stochastic range test at fit and moves
+    # the model off the tuned/pinned LR, silently breaking reproducibility. Reject it.
+    if any(
+        isinstance(cb, LearningRateFinder)
+        for cb in getattr(trainer, "callbacks", []) or []
+    ):
+        raise ValueError(
+            "the Trainer already has a Lightning LearningRateFinder callback, which "
+            "would re-run its range test at fit and move the model off the tuned/"
+            "pinned learning rate. Use tune_learning_rate or that callback, not both."
+        )
 
     # Validate the LR owner up front: a misspelled/renamed lr_attr would otherwise
     # have _set_attr create a dead attribute while configure_optimizers keeps reading
