@@ -823,3 +823,38 @@ def test_to_override_element_handles_numpy_scalars():
 def test_run_defaults_are_not_rai_branded(cls, param):
     default = inspect.signature(cls.run).parameters[param].default
     assert default == "mushin_workflow"
+
+
+@pytest.mark.usefixtures("cleandir")
+@pytest.mark.filterwarnings("ignore:invalid value encountered in cast")
+def test_original_cwd_inside_real_hydra_run_returns_launch_dir(cleandir):
+    """Integration: exercise the REAL (non-monkeypatched) Hydra branch of
+    mushin.original_cwd(). Inside a Hydra job the process cwd is the per-job
+    output dir, but original_cwd() must resolve back to the launch dir."""
+    import os
+
+    import mushin
+
+    launch_dir = Path(cleandir).resolve()
+
+    class CwdCapture(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(epsilon):
+            captured = dict(
+                per_job_cwd=os.getcwd(),
+                original_cwd=str(mushin.original_cwd()),
+            )
+            tr.save(captured, "cwd_capture.pt")
+            tr.save(dict(result=float(epsilon)), "test_metrics.pt")
+            return dict(result=float(epsilon))
+
+    wf = CwdCapture()
+    wf.run(epsilon=multirun([0.0]))
+
+    job_dir = Path(wf.multirun_working_dirs[0])
+    captured = tr.load(job_dir / "cwd_capture.pt", weights_only=False)
+
+    # Inside the Hydra job the process cwd is the per-job output dir...
+    assert Path(captured["per_job_cwd"]).resolve() != launch_dir
+    # ...but original_cwd() resolves back to where .run() was invoked.
+    assert Path(captured["original_cwd"]).resolve() == launch_dir
