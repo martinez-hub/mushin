@@ -341,6 +341,11 @@ def tune_learning_rate(
 
     pin = None if retune else _read_pin(pin_path)
     if pin is not None:
+        if not isinstance(pin, dict) or "learning_rate" not in pin:
+            raise ValueError(
+                f"pin file {pin_path} is missing 'learning_rate'; "
+                "delete it or pass retune=True to re-tune."
+            )
         lr = float(pin["learning_rate"])
         if not (lr > 0 and math.isfinite(lr)):
             raise ValueError(

@@ -629,6 +629,15 @@ def test_lr_none_suggestion_raises(monkeypatch, tmp_path):
         tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=tmp_path / "lr.yaml")
 
 
+def test_lr_pin_missing_key_raises(tmp_path):
+    from mushin._tuning import _write_pin, tune_learning_rate
+
+    pin_path = tmp_path / "lr.yaml"
+    _write_pin(pin_path, {"some_other_key": 0.01})  # no learning_rate key
+    with pytest.raises(ValueError, match="missing 'learning_rate'"):
+        tune_learning_rate(_make_trainer(), _Mod(), None, pin_path=pin_path)
+
+
 def test_lr_pin_invalid_learning_rate_raises(tmp_path):
     from mushin._tuning import _write_pin, tune_learning_rate
 
