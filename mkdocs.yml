@@ -76,6 +76,7 @@ nav:
       - study: reference/study.md
       - workflows: reference/workflows.md
       - lightning: reference/lightning.md
+      - tuning: reference/tuning.md
       - utils: reference/utils.md
   - Contributing: contributing.md
   - Changelog: changelog.md
