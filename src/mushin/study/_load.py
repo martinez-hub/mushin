@@ -5,9 +5,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mushin.benchmark import BenchmarkResult, compare
+if TYPE_CHECKING:
+    # Deferred: keep `import mushin` from pulling in the benchmark subsystem.
+    # Safe here because `from __future__ import annotations` (above) means this
+    # name is only ever needed at type-check time, never at runtime.
+    from mushin.benchmark import BenchmarkResult
 
 
 def evaluate_checkpoints(
@@ -23,6 +27,8 @@ def evaluate_checkpoints(
     """Load each checkpoint via ``load_fn``, regroup into ``{method: [models]}``,
     and run ``compare`` (which warns if the test is underpowered for the seed
     count)."""
+    from mushin.benchmark import compare  # local import: see module-level note above
+
     if not checkpoints:
         raise ValueError("`checkpoints` must not be empty")
     models = {

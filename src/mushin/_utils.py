@@ -15,6 +15,11 @@ from torch import nn
 log = logging.getLogger(__name__)
 
 
+def original_cwd() -> Path:
+    """Placeholder — real implementation added in Task 3."""
+    return Path.cwd()
+
+
 def load_from_checkpoint(
     model: nn.Module,
     *,
