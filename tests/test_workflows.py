@@ -818,7 +818,9 @@ def test_to_override_element_handles_numpy_scalars():
     assert _to_override_element("a,b") == "'a,b'"
 
 
-@pytest.mark.parametrize("cls", [BaseWorkflow, MultiRunMetricsWorkflow, RobustnessCurve])
+@pytest.mark.parametrize(
+    "cls", [BaseWorkflow, MultiRunMetricsWorkflow, RobustnessCurve]
+)
 @pytest.mark.parametrize("param", ["config_name", "job_name"])
 def test_run_defaults_are_not_rai_branded(cls, param):
     default = inspect.signature(cls.run).parameters[param].default
