@@ -14,8 +14,7 @@ small sidecar YAML file and, on a later run, read it and skip the search.
 
 Pin the **effective** batch (`device_batch x accumulate_grad_batches x
 num_devices`) — the hardware-independent, scientifically meaningful quantity.
-The helper finds the largest device batch that fits, then sets
-`accumulate_grad_batches` to reach your target. Call it before `fit`:
+Call it before `fit`:
 
 ```python
 from mushin import tune_batch_size
@@ -25,16 +24,21 @@ print(pin.device_batch, pin.accumulate_grad_batches, pin.effective_batch_size)
 trainer.fit(module, datamodule=datamodule)
 ```
 
-The device batch is maximized for throughput, so the realized effective batch
-can differ slightly from the target when the device batch doesn't divide it
-evenly — the helper **records the actual value** in `pin.effective_batch_size`
-and **warns** when it drifts. The found device batch is written to
-`<trainer.default_root_dir>/mushin_batch_pin.yaml` (override with `pin_path=`); commit it
-to make re-runs deterministic. Pass `retune=True` to search again — for example
-when you deliberately move to hardware where the pinned batch no longer fits.
+The helper finds the largest device batch that fits, then reduces it to the
+largest value that **divides the per-device target exactly**, so the realized
+effective batch always equals your target on any hardware — there is no drift.
+The raw hardware probe (the largest batch that fit) is written to
+`<trainer.default_root_dir>/mushin_batch_pin.yaml` (override with `pin_path=`);
+commit it to make re-runs deterministic. On a later run the probe is read, the
+search is skipped, and `device_batch`/accumulation are re-derived for that run's
+`effective_batch_size`/`num_devices` — so the same pin works unchanged across
+different GPU counts. Pass `retune=True` to search again.
 
-Use `safety_margin=` (e.g. `0.1`) to back the found maximum off from the OOM
-edge, and `num_devices=` if it should not come from the trainer.
+Pick a rounder `effective_batch_size` (256/512/1024 — many divisors) for the best
+GPU utilization; a near-prime target may force a small device batch, and the
+helper warns when that happens.
+
+Use `num_devices=` if it should not come from the trainer.
 
 ## `tune_learning_rate`: record-and-pin the LR finder
 
