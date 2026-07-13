@@ -26,6 +26,20 @@ def test_main_writes_plot():
     assert Path("sweep_accuracy.png").exists()
 
 
+@pytest.mark.usefixtures("cleandir")
+def test_sklearn_sweep_returns_labeled_grid():
+    # The framework-agnostic sweep layer wraps a scikit-learn model (no torch).
+    import sklearn_sweep as ex
+
+    ds = ex.build_dataset()
+
+    assert set(ds.dims) == {"C", "seed"}
+    assert ds.sizes == {"C": len(ex.C_VALUES), "seed": len(ex.SEEDS)}
+    assert "accuracy" in ds.data_vars
+    assert float(ds["accuracy"].min()) >= 0.0
+    assert float(ds["accuracy"].max()) <= 1.0
+
+
 def test_compare_classifiers_example_runs_on_synthetic():
     import torch
     from compare_classifiers import run

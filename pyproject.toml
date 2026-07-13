@@ -132,6 +132,12 @@ dev = [
     "matplotlib >= 3.9",
     "netCDF4 >= 1.7.0",
     "mcp >= 1.2",
+    # dev-only: powers examples/sklearn_sweep.py (a non-Lightning sweep demo) and
+    # its test. mushin itself has no scikit-learn dependency or integration.
+    # Floor is 1.4.2 — the first release compatible with NumPy 2 (the non-Intel
+    # floor); earlier scikit-learn is ABI-incompatible with NumPy 2. The
+    # min-versions CI job (dev group at lowest-direct, NumPy-2) verifies this.
+    "scikit-learn >= 1.4.2",
 ]
 # Detection deps live in the `detection` extra, not here: pycocotools is a C
 # extension whose lowest-floor wheel is ABI-incompatible with the min-versions

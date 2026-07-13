@@ -1,0 +1,1 @@
+Added a runnable scikit-learn sweep example (`examples/sklearn_sweep.py`) demonstrating that the framework-agnostic `MultiRunMetricsWorkflow` wraps non-Lightning models (here `LogisticRegression`) and still returns a labeled `xarray.Dataset`. `scikit-learn` is a dev-only dependency for the example and its test; the package itself has no scikit-learn dependency.
