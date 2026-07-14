@@ -1036,14 +1036,30 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         from ._sweep_io import combo_key
 
+        # The grid is keyed *only* on the swept (multirun) params. Under
+        # `non_multirun_params_as_singleton_dims` `orig_coords` also carries
+        # length-1 non-multirun dims; those must be projected out of the lookup
+        # key so it matches `_combo_of_cfg` (which uses only swept names).
+        swept_names = self._swept_param_names()
+
+        def _lookup_key(combo: dict[str, Any]) -> str:
+            return combo_key({n: combo[n] for n in swept_names})
+
         # If `_metrics_by_combo` was not populated by `jobs_post_process` (e.g. a
         # workflow loaded from disk), reconstruct it from the job-aligned
-        # `self.metrics` columns and `self.cfgs`.
+        # `self.metrics` columns and `self.cfgs`. This index-based mapping is only
+        # sound when every column aligns 1:1 with `self.cfgs`; `_process_metrics`
+        # drops None jobs / absent keys, so a ragged column would mis-map. Guard
+        # against that and only reconstruct when all columns are full-length.
         if not self._metrics_by_combo and self.cfgs:
-            for i, cfg in enumerate(self.cfgs):
-                per_job = {k: col[i] for k, col in self.metrics.items() if i < len(col)}
-                if per_job:
-                    self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = per_job
+            n_jobs = len(self.cfgs)
+            if all(len(col) == n_jobs for col in self.metrics.values()):
+                for i, cfg in enumerate(self.cfgs):
+                    per_job = {k: col[i] for k, col in self.metrics.items()}
+                    if per_job:
+                        self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = (
+                            per_job
+                        )
 
         grid_names = list(orig_coords)
         grid_combos = [
@@ -1066,7 +1082,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             col: list[Any] = []
             missing: list[int] = []
             for i, combo in enumerate(grid_combos):
-                m = self._metrics_by_combo.get(combo_key(combo))
+                m = self._metrics_by_combo.get(_lookup_key(combo))
                 if m is not None and key in m:
                     val = m[key]
                     # match `_process_metrics`: unwrap length-1 lists to a scalar
@@ -1093,8 +1109,16 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             include_working_subdirs_as_data_var
             and self.multirun_working_dirs is not None
         ):
+            # Emit `working_subdir` in the SAME grid order as the metric vars so
+            # it cannot transpose relative to the data. Map each job's combo to
+            # its working dir (cfgs and working dirs are job-aligned), then look
+            # up per grid cell; a missing cell gets an empty string.
+            workdir_by_combo = {
+                combo_key(self._combo_of_cfg(cfg)): str(wd)
+                for cfg, wd in zip(self.cfgs, self.multirun_working_dirs, strict=True)
+            }
             metrics_to_add["working_subdir"] = [
-                str(p) for p in self.multirun_working_dirs
+                workdir_by_combo.get(_lookup_key(combo), "") for combo in grid_combos
             ]
 
         data = {}

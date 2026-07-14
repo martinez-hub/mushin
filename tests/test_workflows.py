@@ -882,3 +882,52 @@ def test_to_xarray_nan_fills_missing_combo(tmp_path):
     assert ds.sizes == {"a": 2, "b": 2}
     assert np.isnan(float(ds["val"].sel(a=2, b=1)))  # hole -> NaN
     assert float(ds["val"].sel(a=1, b=1)) == 11.0  # others intact
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_singleton_dim_with_real_metrics_not_nan(tmp_path):
+    # non_multirun_params_as_singleton_dims=True with a non-multirun scalar
+    # param must NOT nan-fill the (present) metric values.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=float(a * 10 + b))
+
+    wf = WF()
+    wf.run(a=multirun([1, 2]), b=5, working_dir=str(tmp_path / "s"))
+    ds = wf.to_xarray(non_multirun_params_as_singleton_dims=True)
+    assert not np.isnan(ds["val"].data).any()
+    assert_allclose(ds["val"].data, [[15.0], [25.0]])
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_non_square_grid_no_transpose(tmp_path):
+    # A non-square multi-param grid must not transpose cells.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=float(a * 100 + b))
+
+    wf = WF()
+    wf.run(
+        a=multirun([1, 2]), b=multirun([10, 20, 30]), working_dir=str(tmp_path / "s")
+    )
+    ds = wf.to_xarray()
+    assert ds.sizes == {"a": 2, "b": 3}
+    assert float(ds["val"].sel(a=1, b=30)) == 130.0
+    assert float(ds["val"].sel(a=2, b=10)) == 210.0
+    assert float(ds["val"].sel(a=2, b=30)) == 230.0
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_integer_metric_dtype_preserved(tmp_path):
+    # A clean sweep of an integer-valued metric must keep an integer dtype.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=int(a * 10 + b))
+
+    wf = WF()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    ds = wf.to_xarray()
+    assert np.issubdtype(ds["val"].dtype, np.integer)
