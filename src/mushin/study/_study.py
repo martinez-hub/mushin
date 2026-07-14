@@ -82,6 +82,11 @@ class Study:
         if self._methods is not None:
             base = Path(self.working_dir or ".").resolve()
             ckpt_dir = base / "study_checkpoints"
+            # `run_training_sweep` raises `IncompleteSweepError` itself (see
+            # mushin/study/_sweep.py) when the underlying MultiRunMetricsWorkflow
+            # finishes with `is_complete` False (recorded failures under
+            # `on_error="nan"`), so an incomplete training sweep never reaches
+            # `evaluate_checkpoints`/`compare` below.
             self.checkpoints = run_training_sweep(
                 self._methods, self._seeds, ckpt_dir, self.working_dir
             )

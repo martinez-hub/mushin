@@ -75,6 +75,44 @@ def test_run_training_sweep_uses_shutil_move(tmp_path, monkeypatch):
 
 
 @pytest.mark.usefixtures("cleandir")
+def test_run_training_sweep_raises_incomplete_sweep_error_on_failures(tmp_path):
+    """A fail-soft (on_error="nan") sweep with recorded failures must never hand
+    back checkpoints for a downstream Study to silently compare — it raises
+    IncompleteSweepError instead, before any checkpoint dict is returned."""
+    from mushin.benchmark import IncompleteSweepError
+
+    def flaky(seed):
+        if seed == 1:
+            raise RuntimeError("boom")
+        p = Path(f"_tmp_flaky_{seed}.bin")
+        p.write_text(f"flaky-{seed}")
+        return str(p.resolve())
+
+    methods = {"a": flaky}
+    with pytest.raises(IncompleteSweepError, match="fail"):
+        run_training_sweep(
+            methods, seeds=[0, 1, 2], ckpt_dir=tmp_path / "ck", on_error="nan"
+        )
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_run_training_sweep_on_error_raise_still_aborts_immediately(tmp_path):
+    """Default on_error="raise" behavior is unchanged: the original exception
+    propagates rather than being swallowed into a failures list."""
+
+    def flaky(seed):
+        if seed == 1:
+            raise RuntimeError("boom")
+        p = Path(f"_tmp_flaky2_{seed}.bin")
+        p.write_text(f"flaky2-{seed}")
+        return str(p.resolve())
+
+    methods = {"a": flaky}
+    with pytest.raises(RuntimeError, match="boom"):
+        run_training_sweep(methods, seeds=[0, 1, 2], ckpt_dir=tmp_path / "ck")
+
+
+@pytest.mark.usefixtures("cleandir")
 def test_run_training_sweep_relocates_from_separate_tmp_dir(tmp_path):
     """Train fn saves to a separate temp directory; sweep must still land checkpoints.
 
