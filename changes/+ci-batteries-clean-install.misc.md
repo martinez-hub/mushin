@@ -1,0 +1,1 @@
+CI: a batteries-clean-install job builds the wheel, installs it (non-editable) with the detection/image/audio extras into a fresh env, and runs all 7 battery examples against it — catching packaging / optional-extra issues the editable test job would miss.
