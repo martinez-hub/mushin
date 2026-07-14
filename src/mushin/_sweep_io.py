@@ -44,3 +44,52 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(path)  # atomic on POSIX/Windows
+
+
+class Manifest:
+    """Tracks each requested grid cell's status in <working_dir>/mushin_sweep_manifest.json."""
+
+    SCHEMA = 1
+
+    def __init__(self, root: Path, params: list[str], cells: dict | None = None):
+        self.root = Path(root)
+        self.params = list(params)
+        self.cells: dict[str, dict] = cells or {}
+
+    @classmethod
+    def load_or_new(cls, root, params: list[str]) -> Manifest:
+        p = Path(root) / MANIFEST_FILE
+        if p.exists():
+            d = json.loads(p.read_text())
+            return cls(root, d.get("params", params), d.get("cells", {}))
+        return cls(root, params)
+
+    def status(self, combo: dict) -> str:
+        return self.cells.get(combo_key(combo), {}).get("status", "pending")
+
+    def dir(self, combo: dict) -> str | None:
+        return self.cells.get(combo_key(combo), {}).get("dir")
+
+    def mark(
+        self, combo: dict, *, dir: str, status: str, error: str | None = None
+    ) -> None:
+        entry = {"dir": str(dir), "status": status}
+        if error is not None:
+            entry["error"] = error
+        self.cells[combo_key(combo)] = entry  # replace in place
+
+    def failed_cells(self) -> list[dict]:
+        return [
+            {"key": k, **v}
+            for k, v in self.cells.items()
+            if v.get("status") == "failed"
+        ]
+
+    def is_complete(self) -> bool:
+        return all(v.get("status") == "completed" for v in self.cells.values())
+
+    def save(self) -> None:
+        _atomic_write_json(
+            self.root / MANIFEST_FILE,
+            {"schema": self.SCHEMA, "params": self.params, "cells": self.cells},
+        )
