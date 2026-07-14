@@ -116,27 +116,50 @@ may legitimately return a NaN metric; failed-job ≠ NaN-metric).
   when called from `Study`, check the workflow's `failures`. A plain user-supplied
   dataset with no mushin attrs is treated as complete (unchanged behavior).
 
-### 1c. Resume (pre-flight grid-diff, config-keyed)
+### 1c. Resume (full-grid relaunch + per-job short-circuit, config-keyed)
 
-`run(working_dir="prev_sweep", resume=True)`:
+`run(working_dir="prev_sweep", resume=True)` **relaunches the full requested grid**
+as a normal Hydra multirun — so Hydra handles the cartesian product *and* the
+configured launcher's parallelism natively — but a task wrapper makes already-
+completed combos return instantly instead of recomputing. This sidesteps the
+"launch an arbitrary subset of a product grid" problem entirely (there is no clean
+native Hydra way to launch a non-rectangular subset in one multirun; see Risks).
+
+Mechanism:
 
 1. Parse the requested multirun grid from the `run()` call → the set of requested
    combos (anchors the dataset shape; resume can never add points or duplicate).
 2. Load `mushin_sweep_manifest.json` from `working_dir` (or rebuild it by scanning
    job dirs + sidecars if absent, e.g. a pre-manifest sweep).
-3. `remaining = requested − {combos marked completed}` (failed and never-run both
-   re-run).
-4. If `remaining` is empty → skip launch entirely; go to assembly.
-   Else **launch only `remaining`** (see Risks — arbitrary-subset launch), each new
-   job into `working_dir` with a fresh job number.
-5. **Update the manifest in place**: a re-run that succeeds overwrites that combo's
-   entry (`status: completed`, new `dir`) — it *replaces*, never appends. Combos
-   that fail again stay `failed`.
+3. Wrap the task so each job first checks the manifest for its own combo:
+
+   ```python
+   def _resume_wrapper(task, manifest):
+       def wrapped(cfg):
+           combo = _combo_of(cfg)
+           if manifest.status(combo) == "completed":
+               return _read_sidecar(manifest.dir(combo))  # ms: no training
+           return task(cfg)                                # run missing/failed
+       return wrapped
+   ```
+
+4. Launch the full grid as usual. `completed` combos short-circuit (a near-instant
+   process spawn, no training); `failed`/never-run combos actually execute.
+5. **Update the manifest in place** as jobs finish: a re-run that succeeds
+   overwrites that combo's entry (`status: completed`, new `dir`) — it *replaces*,
+   never appends. Combos that fail again stay `failed` (subject to `on_error`).
 6. Assemble (§3) over the full requested grid.
 
 Result: same-shaped `xarray` every run; resumed cells filled in place; unresolved
 cells remain NaN; no growth, no duplicates. Once the manifest has no
 `failed`/`pending` cells, `is_complete` is true and statistics run.
+
+**Overhead:** each already-completed combo still spawns a job process that returns
+in milliseconds (a manifest lookup + sidecar read, no training) — negligible next
+to training cost. If that spawn overhead ever matters (resuming a handful of
+failures out of thousands), the scale-up path is a custom Hydra sweeper that
+dispatches only the remaining combos (see Risks, Option B) — a drop-in replacement
+for the launch step that leaves the rest of this design unchanged.
 
 ## Feature 2: Provenance capture
 
@@ -221,9 +244,11 @@ dataset the order-based path produced; existing tests should pass unchanged.
 - Incomplete-stats gate: `compare`/`Study.run` on a workflow with failures raises
   `IncompleteSweepError`; on a complete one, runs normally; a plain user dataset is
   unaffected.
-- Resume: run a grid with an injected failure → resume with the fix → only the
-  failed combo re-runs (assert others' dirs unchanged), dataset is same-shaped with
-  the cell now filled, `is_complete` true. Resume with nothing missing → no launch.
+- Resume: run a grid with an injected failure → resume with the fix. Assert the
+  completed combos **short-circuit** — their `task` body does not re-execute (spy on
+  a call counter) and their sidecars are not rewritten — while only the failed combo
+  actually runs; the dataset is same-shaped with that cell now filled and
+  `is_complete` true. Resume of a fully-complete sweep re-executes no task bodies.
 - Config-keyed assembly: out-of-order / duplicate dirs resolve to one value per
   combo; equals the order-based result for a clean sweep (regression).
 - Provenance: `mushin_provenance.json` written per job with git/packages/config;
@@ -232,12 +257,19 @@ dataset the order-based path produced; existing tests should pass unchanged.
 
 ## Risks / open questions
 
-- **Arbitrary-subset launch (primary implementation risk).** Hydra `--multirun`
-  sweeps the full cartesian product; the resume `remaining` set is an arbitrary
-  subset. The plan must choose the launch mechanism: (a) loop and launch each
-  remaining combo as its own single run appended into `working_dir` (simple,
-  sequential, correct), or (b) a custom sweeper/explicit per-combo override sets.
-  Recommend (a) for the first cut; revisit for parallelism.
+- **Resume launch (resolved by the short-circuit design; scale-up path noted).**
+  Hydra `--multirun` only sweeps the full cartesian product, and the resume
+  `remaining` set is an arbitrary (non-rectangular) subset — there is no clean
+  native way to launch it directly. The chosen first cut (§1c, Option C) avoids the
+  problem: relaunch the full grid and short-circuit completed combos in the task
+  wrapper — native Hydra product + parallelism, trivial to implement, at the cost of
+  a millisecond process spawn per already-done combo. **Scale-up path (Option B),
+  if that spawn overhead ever matters:** a custom Hydra sweeper that dispatches only
+  the remaining combos in one launch. It is a drop-in replacement for the launch
+  step and leaves the manifest, assembly, and everything else unchanged — so it can
+  be added later without redesign. (A rejected alternative — a loop of one
+  single-run `launch()` per remaining combo — is correct but pays a full Hydra init
+  per combo and gets no parallelism.)
 - **Manifest ↔ dir mapping robustness** across interrupted runs (partial writes).
   Write the manifest atomically (temp + rename); rebuild-from-scan as a fallback.
 - **`ds.attrs` serialization** to netCDF (provenance/failures must be
