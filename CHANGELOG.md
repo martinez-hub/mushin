@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.5.0] - 2026-07-14
+
+### Added
+
+- Sweep resilience and provenance: `run(on_error="nan")` records failed grid cells as
+  NaN and keeps going (default stays `"raise"`); `run(working_dir=..., resume=True)`
+  re-runs only the failed/missing cells and fills them in place; `compare`/`Study`
+  refuse statistics on an incomplete sweep (`IncompleteSweepError`) until you resume;
+  every run writes per-job provenance (`mushin_provenance.json`: git SHA, versions,
+  config) with an opt-in `capture_env=True` full dependency snapshot. `Study` accepts
+  `on_error`/`resume`/`capture_env` for training sweeps.
+
+
 ## [0.4.1] - 2026-07-13
 
 ### Added
@@ -173,7 +186,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/martinez-hub/mushin/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/martinez-hub/mushin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/martinez-hub/mushin/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/martinez-hub/mushin/compare/v0.2.1...v0.3.0

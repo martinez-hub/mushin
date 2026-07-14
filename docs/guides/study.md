@@ -40,9 +40,22 @@ and stores the resulting paths.
 | `alpha` | Significance threshold (default `0.05`). |
 | `ignore_index` | For segmentation: label to exclude (e.g. void class). |
 | `working_dir` | Directory for Hydra sweep outputs (default: current directory). |
+| `on_error` | `"raise"` (default) crashes on a failed training run; `"nan"` records it and keeps going. |
+| `resume` | `True` re-runs only the failed/missing `(method, seed)` runs in `working_dir` and reuses the rest. |
+| `capture_env` | `True` writes a full dependency snapshot alongside the per-run provenance. |
 
 After `study.run()`, the checkpoint paths are stored at `study.checkpoints`
 (`dict[str, list[str]]`) and `study.working_dir` records the resolved directory.
+
+### Resilient and resumable studies
+
+A `Study` runs a real training sweep, so long runs can die partway. The same
+resilience the workflows have applies here: with `on_error="nan"` a failed
+training run is recorded rather than crashing the whole study, and
+`Study.run()` then raises `IncompleteSweepError` — you fix the cause and re-run
+with `resume=True` (same `working_dir`) to train only what's missing, then it
+proceeds to `compare`. Statistics never run on an incomplete study. See the
+[Resilient & resumable sweeps guide](resilience.md) for the full loop.
 
 ## Annotated output
 
