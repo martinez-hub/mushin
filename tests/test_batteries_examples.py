@@ -17,6 +17,19 @@ import pytest
 from mushin.benchmark import BenchmarkResult
 
 
+def test_run_walkthrough():
+    result = batteries.run_walkthrough()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["accuracy", "f1", "precision", "recall", "auroc", "ece"]:
+        assert name in result.data.data_vars
+    # Lock the "reliably significant" property the doc's pasted output depends on:
+    # at least one metric must be a real (non-NaN p-value) significant verdict.
+    comps = result.comparisons
+    sig = comps[comps["significant"]]
+    assert not sig.empty, "walkthrough produced no significant comparison"
+    assert sig["p_value"].notna().any(), "significant rows have NaN p_value"
+
+
 def test_run_classification():
     result = batteries.run_classification()
     assert isinstance(result, BenchmarkResult)

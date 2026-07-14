@@ -19,6 +19,66 @@ Run one:  python examples/batteries.py
 from __future__ import annotations
 
 
+# --8<-- [start:walkthrough]
+def run_walkthrough():
+    """Flagship classification comparison of two models that vary across seeds.
+
+    A realistic ``compare`` scenario: two classifiers whose accuracy genuinely
+    varies seed to seed (each seed corrupts a fraction of the labels with its own
+    RNG), separated by a wide enough accuracy gap that Welch's t-test is reliably
+    significant. Eight seeds per method give the test real within-method variance
+    to work with, so the reported p-value is non-trivial (not a deterministic
+    zero-variance artifact). Fully seeded, tiny, CPU-only.
+    """
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from mushin.benchmark import compare
+
+    num_classes = 4
+    n = 200
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(n, 8, generator=g)
+    y = torch.randint(0, num_classes, (n,), generator=g)
+    loader = DataLoader(TensorDataset(x, y), batch_size=32)
+
+    class NoisyClassifier(torch.nn.Module):
+        """Memorizes each row's true label, then corrupts a fraction of its
+        predictions with a per-seed RNG so accuracy varies across seeds."""
+
+        def __init__(self, error_rate: float, seed: int):
+            super().__init__()
+            gen = torch.Generator().manual_seed(seed)
+            flip = torch.rand(n, generator=gen) < error_rate
+            # map each flipped row to some *other* class (a genuine mistake)
+            offset = 1 + torch.randint(0, num_classes - 1, (n,), generator=gen)
+            wrong = (y + offset) % num_classes
+            pred = torch.where(flip, wrong, y)
+            self._map = {
+                tuple(xi.tolist()): int(pi) for xi, pi in zip(x, pred, strict=True)
+            }
+
+        def forward(self, xb):
+            idx = torch.tensor([self._map[tuple(r.tolist())] for r in xb])
+            return torch.nn.functional.one_hot(idx, num_classes).float() * 10.0
+
+    seeds = range(8)
+    methods = {
+        "strong": [NoisyClassifier(0.15, s) for s in seeds],  # ~85% accuracy
+        "weak": [NoisyClassifier(0.40, 100 + s) for s in seeds],  # ~60% accuracy
+    }
+    return compare(
+        methods,
+        data=loader,
+        task="classification",
+        num_classes=num_classes,
+        test="welch",
+    )
+
+
+# --8<-- [end:walkthrough]
+
+
 # --8<-- [start:classification]
 def run_classification():
     """Multiclass classification: accuracy/f1/precision/recall/auroc/ece.
@@ -49,6 +109,7 @@ def run_classification():
             idx = torch.tensor([self._map[tuple(r.tolist())] for r in xb])
             return torch.nn.functional.one_hot(idx, 3).float() * 10.0
 
+    torch.manual_seed(0)  # make the untrained `bad` baselines reproducible
     methods = {
         "good": [Perfect() for _ in range(3)],
         "bad": [torch.nn.Linear(4, 3) for _ in range(3)],
@@ -316,6 +377,7 @@ if __name__ == "__main__":
     from mushin.benchmark import BenchmarkResult
 
     _RUNNERS = {
+        "walkthrough": run_walkthrough,
         "classification": run_classification,
         "segmentation": run_segmentation,
         "detection": run_detection,
@@ -338,4 +400,4 @@ if __name__ == "__main__":
     if _failed:
         print(f"\n{len(_failed)} battery example(s) failed: {_failed}")
         sys.exit(1)
-    print("\nAll 7 battery examples ran cleanly.")
+    print(f"\nAll {len(_RUNNERS)} battery examples ran cleanly.")
