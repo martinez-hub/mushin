@@ -116,18 +116,91 @@ def _fail_soft(fn: Callable[[Any], T1]) -> Callable[[Any], T1 | "_FailedRun"]:
 
 def _instrument_task(task):
     """Wrap a (cfg)->result task so its returned dict is written to a
-    mushin_metrics.json sidecar in the per-job working dir (cwd)."""
+    mushin_metrics.json sidecar in the per-job working dir (cwd). Per-run
+    provenance (git/versions/config) is written first, so a failing task still
+    leaves a provenance record behind."""
     from pathlib import Path
 
+    from ._provenance import write_provenance
     from ._sweep_io import write_metrics_sidecar
 
     def wrapped(cfg):
+        try:
+            write_provenance(Path.cwd(), cfg)
+        except Exception:  # noqa: BLE001 - provenance is best-effort
+            pass
         result = task(cfg)
         if isinstance(result, dict):
             write_metrics_sidecar(Path.cwd(), result)
         return result
 
     return wrapped
+
+
+def _resume_short_circuit(inner, manifest):
+    """Outermost wrapper for a resumed sweep: for a cfg whose swept-param combo
+    the prior sweep already `completed`, return that cell's cached metrics
+    (read from the prior job dir's sidecar) WITHOUT running the inner task.
+
+    The combo is projected onto the manifest's swept params and sanitized to
+    match Task 3/5's `_combo_of_cfg`, so keys align with the manifest."""
+    from omegaconf import OmegaConf
+
+    from ._sweep_io import read_metrics_sidecar
+
+    swept = list(manifest.params)
+
+    def wrapped(cfg):
+        combo = {}
+        for n in swept:
+            val = cfg[n]
+            if OmegaConf.is_config(val):
+                val = OmegaConf.to_container(val, resolve=True)
+            combo[n] = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray(
+                _unwrap_scalar(val)
+            )
+        if manifest.status(combo) == "completed":
+            prior_dir = Path(manifest.root) / (manifest.dir(combo) or "")
+            cached = read_metrics_sidecar(prior_dir)
+            if cached is not None:
+                return cached
+        return inner(cfg)
+
+    return wrapped
+
+
+def _write_env_snapshot(working_dir: Path) -> None:
+    """Best-effort environment snapshot written once to <working_dir>/mushin_env.txt.
+
+    Tries `uv export`, then `uv pip freeze`; falls back to an
+    importlib.metadata dump so a record always lands even without `uv`."""
+    import subprocess
+
+    working_dir = Path(working_dir)
+    working_dir.mkdir(parents=True, exist_ok=True)
+    out = working_dir / "mushin_env.txt"
+
+    for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception:  # noqa: BLE001 - uv may be absent
+            continue
+        if res.returncode == 0 and res.stdout.strip():
+            out.write_text(res.stdout)
+            return
+
+    # Fallback: dump installed distributions via importlib.metadata.
+    try:
+        from importlib.metadata import distributions
+
+        lines = sorted(
+            f"{d.metadata['Name']}=={d.version}"
+            for d in distributions()
+            if d.metadata["Name"]
+        )
+        out.write_text("\n".join(lines) + "\n")
+    except Exception:  # noqa: BLE001 - env capture is best-effort
+        pass
 
 
 class BaseWorkflow:
@@ -334,6 +407,8 @@ class BaseWorkflow:
         job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
         on_error: str = "raise",
+        resume: bool = False,
+        capture_env: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -408,6 +483,9 @@ class BaseWorkflow:
             )
         self._on_error = on_error
 
+        if resume and working_dir is None:
+            raise ValueError("`resume=True` requires `working_dir` to be provided.")
+
         launch_overrides = []
 
         if overrides is not None:
@@ -469,6 +547,17 @@ class BaseWorkflow:
             # would prevent failed jobs from reaching `jobs_post_process`).
             task_call = _fail_soft(task_call)
 
+        if resume:
+            # Outermost wrapper: short-circuit combos the PRIOR sweep already
+            # completed (per its on-disk manifest), so only failed/missing cells
+            # actually execute. The manifest is loaded now and closed over.
+            from ._sweep_io import Manifest
+
+            prior_manifest = Manifest.load_or_new(working_dir, [])
+            task_call = _resume_short_circuit(task_call, prior_manifest)
+
+        self._capture_env = capture_env
+
         # Run a Multirun over epsilons
         jobs = launch(
             self.eval_task_cfg,
@@ -491,6 +580,12 @@ class BaseWorkflow:
 
         self.jobs = jobs
         self.jobs_post_process()
+
+        if getattr(self, "_capture_env", False):
+            try:
+                _write_env_snapshot(self.working_dir)
+            except Exception:  # noqa: BLE001 - env capture is best-effort
+                pass
 
     def jobs_post_process(self):  # pragma: no cover
         """Method to extract attributes and metrics relevant to the workflow."""
@@ -622,6 +717,22 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             return self._manifest.is_complete()
         return True
 
+    @property
+    def provenance(self) -> dict | None:
+        """Best-effort per-run provenance (git/versions/config) read from one
+        job's ``mushin_provenance.json``. ``None`` if no record is found."""
+        import json
+
+        dirs = self.multirun_working_dirs or []
+        for d in dirs:
+            p = Path(d) / "mushin_provenance.json"
+            if p.exists():
+                try:
+                    return json.loads(p.read_text())
+                except Exception:  # noqa: BLE001 - best-effort
+                    return None
+        return None
+
     # TODO: add target_job_dirs example
     #      Document .swap_dims({"job_dir": <...>}) and .set_index(job_dir=[...]).unstack("job_dir")
     #      for re-indexing based on overrides values
@@ -701,6 +812,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
         on_error: str = "raise",
+        resume: bool = False,
+        capture_env: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         # TODO: add docs
@@ -734,6 +847,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             job_name=job_name,
             with_log_configuration=with_log_configuration,
             on_error=on_error,
+            resume=resume,
+            capture_env=capture_env,
             **workflow_overrides,
         )
 
@@ -1282,6 +1397,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # fully-completed sweep's `attrs` is unchanged from prior behavior.
         if self.failures:
             attrs["mushin_failures"] = [f["combo"] for f in self.failures]
+        # Attach best-effort per-run provenance (git/versions/config) from one
+        # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
+        # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
+        prov = self.provenance
+        if prov is not None:
+            import json as _json
+
+            attrs["provenance"] = _json.dumps(prov)
         out = xr.Dataset(coords=coords, data_vars=data, attrs=attrs)
 
         if self._JOBDIR_NAME in set(out.coords):

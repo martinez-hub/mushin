@@ -263,7 +263,9 @@ def test_robustness_with_multidim_metrics(foo, foo_expected, bar):
     ]
     assert xarray.accuracies.shape == (2, 3)
     assert xarray.images.shape == (2, 3, 4, 1)
-    assert xarray.attrs == {"foo": foo_expected}
+    assert {k: v for k, v in xarray.attrs.items() if k != "provenance"} == {
+        "foo": foo_expected
+    }
 
     for eps, expected in zip([1.0, 2.0, 3.0], [99.0, 96.0, 91.0]):
         # test that results were organized as-expected
@@ -310,7 +312,10 @@ def test_robustness_with_multidim_metrics_with_iteration(as_tensor: bool):
     ]
     assert xarray.accuracies.shape == (3, 2, 10)
     assert xarray.images.shape == (3, 2, 10, 4, 4)
-    assert xarray.attrs == {"foo": "val", "as_tensor": as_tensor}
+    assert {k: v for k, v in xarray.attrs.items() if k != "provenance"} == {
+        "foo": "val",
+        "as_tensor": as_tensor,
+    }
 
     for eps, expected in zip([1.0, 2.0, 3.0], [99.0, 96.0, 91.0]):
         # test that results were organized as-expected
@@ -992,3 +997,36 @@ def test_on_error_nan_records_and_continues(tmp_path):
     assert np.isnan(float(ds["val"].sel(a=2, b=1)))
     assert float(ds["val"].sel(a=1, b=0)) == 10.0
     assert ds.attrs["mushin_failures"]  # non-empty list
+
+
+def test_resume_reruns_only_failed_cell(tmp_path):
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL = True
+
+        @staticmethod
+        def task(a, b):
+            CALLS["n"] += 1
+            if a == 2 and b == 1 and W.FAIL:
+                raise RuntimeError("boom")
+            return dict(val=float(a * 10 + b))
+
+    wd = str(tmp_path / "s")
+    W.FAIL = True
+    wf = W()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+    W.FAIL = False
+    CALLS["n"] = 0
+    wf2 = W()
+    wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
+    assert CALLS["n"] == 1  # only the previously-failed cell actually ran
+    assert wf2.is_complete
+    ds = wf2.to_xarray()
+    import numpy as np
+
+    assert float(ds["val"].sel(a=2, b=1)) == 21.0  # cell filled in place
+    assert ds.sizes == {"a": 2, "b": 2}  # same shape, no growth
