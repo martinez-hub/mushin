@@ -949,3 +949,46 @@ def test_run_writes_metrics_sidecar_per_job(tmp_path):
     for d in wf.multirun_working_dirs:
         assert read_metrics_sidecar(d) is not None
         assert read_metrics_sidecar(d)["y"] is not None
+
+
+def _grid_with_one_failure():
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            if a == 2 and b == 1:
+                raise RuntimeError("boom")
+            return dict(val=float(a * 10 + b))
+
+    return W
+
+
+def test_on_error_raise_is_default(tmp_path):
+    from mushin import multirun
+
+    with pytest.raises(Exception):
+        _grid_with_one_failure()().run(
+            a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s")
+        )
+
+
+def test_on_error_nan_records_and_continues(tmp_path):
+    import numpy as np
+
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    assert wf.is_complete is False
+    assert any("a=2" in f["combo"] for f in wf.failures)
+    ds = wf.to_xarray()
+    assert np.isnan(float(ds["val"].sel(a=2, b=1)))
+    assert float(ds["val"].sel(a=1, b=0)) == 10.0
+    assert ds.attrs["mushin_failures"]  # non-empty list

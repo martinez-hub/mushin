@@ -16,7 +16,7 @@ from typing import (
 import numpy as np
 import torch as tr
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from hydra.core.utils import JobReturn
+from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._compatibility import HYDRA_VERSION
 from hydra_zen._launch import _NotSet
@@ -83,6 +83,33 @@ def _task_calls(
     def wrapped(cfg: Any) -> T1:
         pre_task(cfg)
         return task(cfg)
+
+    return wrapped
+
+
+class _FailedRun:
+    """Sentinel returned by a fail-soft task wrapper in place of a raised
+    exception. Hydra's basic sweeper re-raises the first FAILED job's exception
+    from inside ``launch`` (``BasicSweeper.sweep`` accesses ``r.return_value``),
+    so a failed job never reaches ``jobs_post_process``. Under ``on_error='nan'``
+    we instead catch the exception and return this sentinel: the Hydra job then
+    completes normally and ``jobs_post_process`` can detect the failure and
+    NaN-fill its grid cell."""
+
+    __slots__ = ("exception",)
+
+    def __init__(self, exception: BaseException) -> None:
+        self.exception = exception
+
+
+def _fail_soft(fn: Callable[[Any], T1]) -> Callable[[Any], T1 | "_FailedRun"]:
+    """Wrap a task-call so an exception becomes a ``_FailedRun`` sentinel."""
+
+    def wrapped(cfg: Any) -> T1 | _FailedRun:
+        try:
+            return fn(cfg)
+        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+            return _FailedRun(exc)
 
     return wrapped
 
@@ -306,6 +333,7 @@ class BaseWorkflow:
         config_name: str = "mushin_workflow",
         job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
+        on_error: str = "raise",
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -366,7 +394,20 @@ class BaseWorkflow:
             pass the entire list as a single input.
 
             These values will be appended to the `overrides` for the Hydra job.
+
+        on_error : str (default: "raise")
+            Failure policy for the sweep. ``"raise"`` (the default) preserves the
+            existing behavior: a failing job aborts the sweep and the exception
+            propagates. ``"nan"`` enables fail-soft: a failing job is recorded
+            (in ``self.failures`` and the on-disk sweep manifest), its grid cell
+            becomes NaN, a ``UserWarning`` is emitted, and the sweep completes.
         """
+        if on_error not in {"raise", "nan"}:
+            raise ValueError(
+                f"`on_error` must be one of {{'raise', 'nan'}}, got {on_error!r}"
+            )
+        self._on_error = on_error
+
         launch_overrides = []
 
         if overrides is not None:
@@ -418,13 +459,20 @@ class BaseWorkflow:
         if pre_task_fn_wrapper is None:
             pre_task_fn_wrapper = _identity
 
+        task_call = _task_calls(
+            pre_task=pre_task_fn_wrapper(self.pre_task),
+            task=_instrument_task(task_fn_wrapper(self.task)),
+        )
+        if on_error == "nan":
+            # Convert per-job exceptions into a sentinel so Hydra's basic sweeper
+            # does not re-raise the first failure from inside `launch` (which
+            # would prevent failed jobs from reaching `jobs_post_process`).
+            task_call = _fail_soft(task_call)
+
         # Run a Multirun over epsilons
         jobs = launch(
             self.eval_task_cfg,
-            _task_calls(
-                pre_task=pre_task_fn_wrapper(self.pre_task),
-                task=_instrument_task(task_fn_wrapper(self.task)),
-            ),
+            task_call,
             overrides=launch_overrides,
             multirun=True,
             version_base=version_base,
@@ -558,9 +606,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     def __init__(self, eval_task_cfg=None, working_dir: Path | None = None) -> None:
         super().__init__(eval_task_cfg)
         self._working_dir = working_dir
+        # Per-cell failure records ({"combo", "exception", "working_dir"}) and the
+        # on-disk sweep manifest, populated by `jobs_post_process` under fail-soft.
+        self.failures: list[dict[str, Any]] = []
+        self._manifest: Any = None
 
         if self._working_dir is not None:
             self.load_from_dir(self.working_dir, metrics_filename=None)
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether every requested grid cell completed. ``True`` when no manifest
+        exists yet (e.g. a workflow loaded from disk that never swept)."""
+        if self._manifest is not None:
+            return self._manifest.is_complete()
+        return True
 
     # TODO: add target_job_dirs example
     #      Document .swap_dims({"job_dir": <...>}) and .set_index(job_dir=[...]).unstack("job_dir")
@@ -640,6 +700,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         config_name: str = "mushin_workflow",
         job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
+        on_error: str = "raise",
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         # TODO: add docs
@@ -672,6 +733,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             config_name=config_name,
             job_name=job_name,
             with_log_configuration=with_log_configuration,
+            on_error=on_error,
             **workflow_overrides,
         )
 
@@ -764,22 +826,75 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         assert hydra_cfg is not None
         self.output_subdir = hydra_cfg.hydra.output_subdir
 
-        # extract configs, overrides, and metrics
+        # extract configs
         self.cfgs = [j.cfg for j in self.jobs]
-        job_metrics = [j.return_value for j in self.jobs]
-        self.metrics = self._process_metrics(job_metrics)
 
-        # Build a combo-keyed map of each cell's metrics so that `to_xarray`
-        # can assemble the grid by config combination (resilient to missing/
-        # failed cells) rather than relying on job order.
-        from ._sweep_io import combo_key
+        # Status-aware collection: build the combo-keyed metrics map (so
+        # `to_xarray` can assemble the grid by config combination, resilient to
+        # missing/failed cells), record failures, and persist a sweep manifest.
+        from ._sweep_io import Manifest, combo_key
+
+        on_error = getattr(self, "_on_error", "raise")
+        swept_names = self._swept_param_names()
+        manifest = Manifest.load_or_new(self.working_dir, swept_names)
 
         self._metrics_by_combo = {}
-        for job, cfg in zip(self.jobs, self.cfgs, strict=True):
-            rv = job.return_value  # NOTE: Task 5 will make this status-aware.
-            if rv is None:
-                continue
-            self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = rv
+        self.failures = []
+        job_metrics: list[Any] = []
+        for job, cfg, wdir in zip(
+            self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
+        ):
+            # Project onto the swept params only, matching `to_xarray`'s
+            # `_lookup_key` so `_metrics_by_combo` and manifest keys align.
+            combo = self._combo_of_cfg(cfg)
+            swept_combo = {n: combo[n] for n in swept_names}
+            key = combo_key(swept_combo)
+
+            # Determine the raw return value / failure WITHOUT triggering a
+            # re-raise: a real Hydra FAILED job stores its exception in
+            # `_return_value`; under fail-soft, a completed job may carry a
+            # `_FailedRun` sentinel wrapping the caught exception.
+            if job.status == JobStatus.COMPLETED:
+                rv = job.return_value
+                exc = rv.exception if isinstance(rv, _FailedRun) else None
+            else:
+                rv = None
+                exc = job._return_value
+
+            if exc is not None:
+                if on_error == "raise":
+                    raise exc
+                self.failures.append(
+                    {
+                        "combo": key,
+                        "exception": repr(exc),
+                        "working_dir": str(wdir),
+                    }
+                )
+                manifest.mark(
+                    swept_combo, dir=wdir.name, status="failed", error=repr(exc)
+                )
+                job_metrics.append(None)
+            else:
+                job_metrics.append(rv)
+                if rv is not None:
+                    self._metrics_by_combo[key] = rv
+                manifest.mark(swept_combo, dir=wdir.name, status="completed")
+
+        self.metrics = self._process_metrics(job_metrics)
+
+        manifest.save()
+        self._manifest = manifest
+
+        if self.failures:
+            import warnings
+
+            warnings.warn(
+                f"{len(self.failures)} run(s) failed: "
+                f"{[f['combo'] for f in self.failures]}; grid cells set to NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _swept_param_names(self) -> list[str]:
         """Names of the multirun (grid-dimension) parameters."""
@@ -1162,6 +1277,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             data[k] = (k_coords, datum)
 
         coords.update(metric_coords)
+        # Record fail-soft failures (combo keys of NaN-filled cells) on the
+        # dataset. Only set when a fail-soft run actually recorded failures so a
+        # fully-completed sweep's `attrs` is unchanged from prior behavior.
+        if self.failures:
+            attrs["mushin_failures"] = [f["combo"] for f in self.failures]
         out = xr.Dataset(coords=coords, data_vars=data, attrs=attrs)
 
         if self._JOBDIR_NAME in set(out.coords):
@@ -1211,6 +1331,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         config_name: str = "mushin_workflow",
         job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
+        on_error: str = "raise",
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment for varying value `epsilon`.
@@ -1266,6 +1387,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             config_name=config_name,
             job_name=job_name,
             with_log_configuration=with_log_configuration,
+            on_error=on_error,
             **workflow_overrides,
             # for multiple multi-run params, epsilon should fastest-varying param;
             # i.e. epsilon should be the trailing dim in the multi-dim array of results
