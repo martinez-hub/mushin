@@ -138,6 +138,9 @@ class BaseWorkflow:
         self._multirun_task_overrides = {}
         self.jobs = []
         self._working_dir = None
+        # combo_key(sanitized swept-param combo) -> that cell's metrics dict.
+        # Populated for resilient, config-keyed grid assembly in `to_xarray`.
+        self._metrics_by_combo: dict[str, Any] = {}
 
     @property
     def working_dir(self) -> Path:
@@ -448,6 +451,15 @@ def _coerce_list_of_arraylikes(v: list[Any]):
     return v
 
 
+def _unwrap_scalar(item: Any) -> Any:
+    """Unwrap a NumPy/torch 0-d scalar (e.g. from ``np.arange``) to its Python
+    scalar. Mirrors the unwrapping in ``_to_override_element`` so that a swept
+    value read back from a config keys identically to its override element."""
+    if hasattr(item, "item") and getattr(item, "ndim", None) == 0:
+        return item.item()
+    return item
+
+
 class MultiRunMetricsWorkflow(BaseWorkflow):
     """Abstract class for workflows that record metrics using Hydra multirun.
 
@@ -741,6 +753,43 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         job_metrics = [j.return_value for j in self.jobs]
         self.metrics = self._process_metrics(job_metrics)
 
+        # Build a combo-keyed map of each cell's metrics so that `to_xarray`
+        # can assemble the grid by config combination (resilient to missing/
+        # failed cells) rather than relying on job order.
+        from ._sweep_io import combo_key
+
+        self._metrics_by_combo = {}
+        for job, cfg in zip(self.jobs, self.cfgs, strict=True):
+            rv = job.return_value  # NOTE: Task 5 will make this status-aware.
+            if rv is None:
+                continue
+            self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = rv
+
+    def _swept_param_names(self) -> list[str]:
+        """Names of the multirun (grid-dimension) parameters."""
+        return [
+            k
+            for k, v in self.multirun_task_overrides.items()
+            if isinstance(v, multirun)
+        ]
+
+    def _combo_of_cfg(self, cfg: Any) -> dict[str, Any]:
+        """The sanitized swept-parameter combination for a single job config.
+
+        Values are unwrapped (0-d scalars), converted out of OmegaConf
+        containers, and passed through `_sanitize_coordinate_for_xarray` so
+        they key identically to the (already-sanitized) coordinate values used
+        to build the grid in `to_xarray`."""
+        from omegaconf import OmegaConf
+
+        combo = {}
+        for n in self._swept_param_names():
+            val = cfg[n]
+            if OmegaConf.is_config(val):
+                val = OmegaConf.to_container(val, resolve=True)
+            combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
+        return combo
+
     @staticmethod
     def _process_metrics(job_metrics: list[dict[str, Any]]) -> dict[str, Any]:
         metrics = defaultdict(list)
@@ -980,7 +1029,66 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         coords: dict[str, Any] = orig_coords.copy()
         shape = tuple(len(v) for v in coords.values())
 
-        metrics_to_add = self.metrics.copy()
+        # Assemble the metric data in *grid order*, keyed by each cell's config
+        # combination, so that a missing/failed cell yields a full-shaped array
+        # with NaN rather than mis-sizing a job-ordered reshape.
+        import itertools
+
+        from ._sweep_io import combo_key
+
+        # If `_metrics_by_combo` was not populated by `jobs_post_process` (e.g. a
+        # workflow loaded from disk), reconstruct it from the job-aligned
+        # `self.metrics` columns and `self.cfgs`.
+        if not self._metrics_by_combo and self.cfgs:
+            for i, cfg in enumerate(self.cfgs):
+                per_job = {k: col[i] for k, col in self.metrics.items() if i < len(col)}
+                if per_job:
+                    self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = per_job
+
+        grid_names = list(orig_coords)
+        grid_combos = [
+            dict(zip(grid_names, vals, strict=True))
+            for vals in itertools.product(*[orig_coords[n] for n in grid_names])
+        ]
+
+        # Union of metric keys across all present cells, preserving first-seen order.
+        metric_keys: list[str] = []
+        _seen: set[str] = set()
+        for m in self._metrics_by_combo.values():
+            if not isinstance(m, Mapping):
+                continue
+            for k in m:
+                if k not in _seen:
+                    _seen.add(k)
+                    metric_keys.append(k)
+
+        def _grid_column(key: str) -> list[Any]:
+            col: list[Any] = []
+            missing: list[int] = []
+            for i, combo in enumerate(grid_combos):
+                m = self._metrics_by_combo.get(combo_key(combo))
+                if m is not None and key in m:
+                    val = m[key]
+                    # match `_process_metrics`: unwrap length-1 lists to a scalar
+                    if isinstance(val, list) and len(val) == 1:
+                        val = val[0]
+                    col.append(val)
+                else:
+                    col.append(None)
+                    missing.append(i)
+            # NaN-fill missing cells, broadcasting to the metric's per-cell shape
+            missing_set = set(missing)
+            per_cell_shape: tuple[int, ...] = ()
+            for i, c in enumerate(col):
+                if i not in missing_set:
+                    per_cell_shape = np.asarray(c).shape
+                    break
+            fill = np.nan if per_cell_shape == () else np.full(per_cell_shape, np.nan)
+            for i in missing:
+                col[i] = fill
+            return col
+
+        metrics_to_add = {k: _grid_column(k) for k in metric_keys}
         if (
             include_working_subdirs_as_data_var
             and self.multirun_working_dirs is not None

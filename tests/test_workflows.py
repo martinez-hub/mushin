@@ -860,3 +860,25 @@ def test_original_cwd_inside_real_hydra_run_returns_launch_dir(cleandir):
     assert Path(captured["per_job_cwd"]).resolve() != launch_dir
     # ...but original_cwd() resolves back to where .run() was invoked.
     assert Path(captured["original_cwd"]).resolve() == launch_dir
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_to_xarray_nan_fills_missing_combo(tmp_path):
+    import numpy as np
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class Holey(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            if a == 2 and b == 1:  # emulate a missing result for this cell
+                return None
+            return dict(val=float(a * 10 + b))
+
+    wf = Holey()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    ds = wf.to_xarray()
+    assert ds.sizes == {"a": 2, "b": 2}
+    assert np.isnan(float(ds["val"].sel(a=2, b=1)))  # hole -> NaN
+    assert float(ds["val"].sel(a=1, b=1)) == 11.0  # others intact
