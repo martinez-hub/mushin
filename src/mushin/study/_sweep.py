@@ -26,6 +26,8 @@ def run_training_sweep(
     ckpt_dir: str | os.PathLike[str],
     working_dir: str | None = None,
     on_error: str = "raise",
+    resume: bool = False,
+    capture_env: bool = False,
 ) -> dict[str, list[str]]:
     """Run ``methods[name](seed)`` for every (name, seed) via a Hydra sweep.
 
@@ -46,6 +48,11 @@ def run_training_sweep(
     any recorded failures (``wf.is_complete`` is ``False``), it raises
     ``IncompleteSweepError`` instead, so ``Study.run`` can never proceed to
     evaluate/compare checkpoints from a sweep that did not fully complete.
+
+    ``resume`` and ``capture_env`` are forwarded to the workflow's ``run`` as
+    well: ``resume=True`` (requires a stable ``working_dir``) re-executes only
+    the failed/missing cells of a prior sweep, and ``capture_env=True`` writes a
+    full dependency snapshot alongside the per-job provenance records.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +79,8 @@ def run_training_sweep(
         seed=multirun(seeds),
         working_dir=working_dir,
         on_error=on_error,
+        resume=resume,
+        capture_env=capture_env,
     )
 
     if not wf.is_complete:

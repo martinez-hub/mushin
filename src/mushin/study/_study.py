@@ -47,11 +47,17 @@ class Study:
         alpha: float = 0.05,
         ignore_index: int | None = None,
         working_dir: str | None = None,
+        on_error: str = "raise",
+        resume: bool = False,
+        capture_env: bool = False,
     ):
         self._init_common(load_fn, data, num_classes, task, test, alpha, ignore_index)
         self._methods = methods
         self._seeds = list(seeds)
         self.working_dir = working_dir
+        self._on_error = on_error
+        self._resume = resume
+        self._capture_env = capture_env
         self.checkpoints: dict[str, list[str]] | None = None
 
     @classmethod
@@ -88,7 +94,13 @@ class Study:
             # `on_error="nan"`), so an incomplete training sweep never reaches
             # `evaluate_checkpoints`/`compare` below.
             self.checkpoints = run_training_sweep(
-                self._methods, self._seeds, ckpt_dir, self.working_dir
+                self._methods,
+                self._seeds,
+                ckpt_dir,
+                self.working_dir,
+                on_error=self._on_error,
+                resume=self._resume,
+                capture_env=self._capture_env,
             )
             # reflect the resolved directory the sweep ran in (was possibly None)
             self.working_dir = str(base)

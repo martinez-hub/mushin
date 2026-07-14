@@ -1026,7 +1026,5 @@ def test_resume_reruns_only_failed_cell(tmp_path):
     assert CALLS["n"] == 1  # only the previously-failed cell actually ran
     assert wf2.is_complete
     ds = wf2.to_xarray()
-    import numpy as np
-
     assert float(ds["val"].sel(a=2, b=1)) == 21.0  # cell filled in place
     assert ds.sizes == {"a": 2, "b": 2}  # same shape, no growth
