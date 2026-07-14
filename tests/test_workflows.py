@@ -832,6 +832,15 @@ def test_run_defaults_are_not_rai_branded(cls, param):
     assert default == "mushin_workflow"
 
 
+@pytest.mark.parametrize("param", ["resume", "capture_env"])
+def test_robustnesscurve_run_forwards_resilience_params(param):
+    # RobustnessCurve.run must expose (and forward) resume/capture_env, mirroring
+    # on_error, so these resilience knobs are reachable on the public subclass.
+    params = inspect.signature(RobustnessCurve.run).parameters
+    assert param in params
+    assert params[param].default is False
+
+
 @pytest.mark.usefixtures("cleandir")
 @pytest.mark.filterwarnings("ignore:invalid value encountered in cast")
 def test_original_cwd_inside_real_hydra_run_returns_launch_dir(cleandir):
@@ -1028,3 +1037,75 @@ def test_resume_reruns_only_failed_cell(tmp_path):
     ds = wf2.to_xarray()
     assert float(ds["val"].sel(a=2, b=1)) == 21.0  # cell filled in place
     assert ds.sizes == {"a": 2, "b": 2}  # same shape, no growth
+
+
+def test_resume_with_relative_working_dir_reruns_only_failed_cell(
+    tmp_path, monkeypatch
+):
+    # Regression: a RELATIVE working_dir must still short-circuit completed cells
+    # on resume. The short-circuit's sidecar read runs INSIDE the chdir'd Hydra
+    # job, so an unresolved (relative) manifest root resolves against the job cwd
+    # and finds no sidecar -> every completed cell silently re-executes. The main
+    # process must resolve working_dir to absolute before wrapping.
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    monkeypatch.chdir(tmp_path)
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL = True
+
+        @staticmethod
+        def task(a, b):
+            CALLS["n"] += 1
+            if a == 2 and b == 1 and W.FAIL:
+                raise RuntimeError("boom")
+            return dict(val=float(a * 10 + b))
+
+    wd = "rel_sweep"  # RELATIVE to the (monkeypatched) cwd
+    W.FAIL = True
+    wf = W()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+
+    W.FAIL = False
+    CALLS["n"] = 0
+    wf2 = W()
+    wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
+    # Only the previously-failed cell re-ran; the 3 completed cells short-circuited.
+    assert CALLS["n"] == 1
+    assert wf2.is_complete
+    ds = wf2.to_xarray()
+    assert float(ds["val"].sel(a=2, b=1)) == 21.0
+
+
+def test_narrowed_grid_reusing_dir_is_complete(tmp_path):
+    # Regression: a fresh sweep that reuses a working_dir with a NARROWED grid
+    # must not inherit stale failed cells from the prior sweep's manifest. Cells
+    # absent from the current grid must be pruned so `is_complete` reflects only
+    # the current grid.
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL_SEED = 1
+
+        @staticmethod
+        def task(seed):
+            if seed == W.FAIL_SEED:
+                raise RuntimeError("boom")
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "D")
+
+    # pass 1: seed in {0,1,2}, seed=1 fails -> incomplete
+    wf = W()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(seed=multirun([0, 1, 2]), working_dir=wd, on_error="nan")
+    assert wf.is_complete is False
+
+    # pass 2: NEW sweep, SAME dir, narrowed grid {0,2}; all succeed -> complete
+    wf2 = W()
+    wf2.run(seed=multirun([0, 2]), working_dir=wd)
+    assert wf2.is_complete is True

@@ -18,6 +18,13 @@ def test_metrics_sidecar_roundtrip(tmp_path):
     assert read_metrics_sidecar(tmp_path / "nope") is None  # absent -> None
 
 
+def test_read_metrics_sidecar_corrupt_returns_none(tmp_path):
+    # A corrupt (non-JSON) sidecar must be treated like a missing one (None),
+    # not raise, so a resume can proceed and simply re-run that cell.
+    (tmp_path / "mushin_metrics.json").write_text("{not: valid json,,,")
+    assert read_metrics_sidecar(tmp_path) is None
+
+
 def test_metrics_sidecar_coerces_numpy_and_tensors(tmp_path):
     import numpy as np
 

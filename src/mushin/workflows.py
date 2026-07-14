@@ -553,7 +553,11 @@ class BaseWorkflow:
             # actually execute. The manifest is loaded now and closed over.
             from ._sweep_io import Manifest
 
-            prior_manifest = Manifest.load_or_new(working_dir, [])
+            # Resolve to absolute in the MAIN process: the short-circuit's
+            # sidecar read runs INSIDE the chdir'd Hydra job, so a relative
+            # `manifest.root` would resolve against the job cwd and never find
+            # the prior cell's sidecar (silently re-running every completed cell).
+            prior_manifest = Manifest.load_or_new(Path(working_dir).resolve(), [])
             task_call = _resume_short_circuit(task_call, prior_manifest)
 
         self._capture_env = capture_env
@@ -951,7 +955,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         on_error = getattr(self, "_on_error", "raise")
         swept_names = self._swept_param_names()
-        manifest = Manifest.load_or_new(self.working_dir, swept_names)
+        # Scope the manifest to the CURRENT grid: constructing a fresh Manifest
+        # (rather than load_or_new) drops stale cells left by a prior sweep that
+        # reused this dir with a different/narrowed grid, so `is_complete()` does
+        # not AND over cells absent from the current grid. Every current-grid
+        # combo is re-marked in the loop below, and resume reads prior state from
+        # its own `prior_manifest` (loaded in `run()` before this file is rewritten).
+        manifest = Manifest(self.working_dir, swept_names)
 
         self._metrics_by_combo = {}
         self.failures = []
@@ -1455,6 +1465,8 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         job_name: str = "mushin_workflow",
         with_log_configuration: bool = True,
         on_error: str = "raise",
+        resume: bool = False,
+        capture_env: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment for varying value `epsilon`.
@@ -1511,6 +1523,8 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             job_name=job_name,
             with_log_configuration=with_log_configuration,
             on_error=on_error,
+            resume=resume,
+            capture_env=capture_env,
             **workflow_overrides,
             # for multiple multi-run params, epsilon should fastest-varying param;
             # i.e. epsilon should be the trailing dim in the multi-dim array of results

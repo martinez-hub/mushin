@@ -36,7 +36,12 @@ def read_metrics_sidecar(job_dir) -> dict | None:
     p = Path(job_dir) / METRICS_FILE
     if not p.exists():
         return None
-    return json.loads(p.read_text())
+    # A corrupt/unreadable sidecar is treated like a missing one (return None ->
+    # the cell re-runs) rather than aborting an otherwise-resumable sweep.
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
