@@ -1,0 +1,1 @@
+Documentation: add a top-level Examples page indexing all runnable example scripts (sweep_to_dataset, sklearn_sweep, compare_classifiers, study_mnist, segmentation_demo, compare_llms_demo, batteries), each with a one-line description and a link, plus a pointer to the batteries guide.
