@@ -84,6 +84,68 @@ def test_full_motion_trains_then_compares(tmp_path):
     assert result.data.coords["seed"].values.tolist() == explicit_seeds
 
 
+def test_study_on_error_nan_raises_incomplete_sweep(tmp_path):
+    """A training sweep requested with on_error="nan" whose train_fn fails for one
+    seed must surface as IncompleteSweepError from Study.run (the gate lives in
+    run_training_sweep), never a silently-compared partial result."""
+    import pytest
+
+    from mushin.benchmark import IncompleteSweepError
+
+    def make_train(name):
+        def train(seed):
+            if name == "m1" and seed == 9:
+                raise RuntimeError("boom")
+            torch.manual_seed(hash((name, seed)) % 1000)
+            p = tmp_path / f"{name}_seed{seed}_raw.pt"
+            torch.save(torch.nn.Linear(4, 3), p)
+            return str(p)
+
+        return train
+
+    study = Study(
+        methods={"m1": make_train("m1"), "m2": make_train("m2")},
+        load_fn=lambda p: torch.load(p, weights_only=False),
+        seeds=[5, 9],
+        data=_loader(),
+        num_classes=3,
+        test="welch",
+        working_dir=str(tmp_path / "run"),
+        on_error="nan",
+    )
+    with pytest.raises(IncompleteSweepError):
+        study.run()
+
+
+def test_study_default_on_error_raise_propagates(tmp_path):
+    """Default on_error="raise" is unchanged: the train_fn's own exception
+    propagates (not swallowed into an IncompleteSweepError)."""
+    import pytest
+
+    def make_train(name):
+        def train(seed):
+            if name == "m1" and seed == 9:
+                raise RuntimeError("boom")
+            torch.manual_seed(hash((name, seed)) % 1000)
+            p = tmp_path / f"{name}_seed{seed}_raw.pt"
+            torch.save(torch.nn.Linear(4, 3), p)
+            return str(p)
+
+        return train
+
+    study = Study(
+        methods={"m1": make_train("m1"), "m2": make_train("m2")},
+        load_fn=lambda p: torch.load(p, weights_only=False),
+        seeds=[5, 9],
+        data=_loader(),
+        num_classes=3,
+        test="welch",
+        working_dir=str(tmp_path / "run"),
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        study.run()
+
+
 class _PerfectSegmenter(torch.nn.Module):
     """Returns logits that perfectly reproduce the provided mask (clamped to num_classes)."""
 

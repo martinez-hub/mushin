@@ -102,6 +102,10 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
         )
 
 
+class IncompleteSweepError(RuntimeError):
+    """Raised when statistics are requested on a sweep that has failed/missing runs."""
+
+
 def _is_constant(values) -> bool:
     """True if values have no meaningful within-group variance (``np.allclose`` to
     the first), so they form no sampling distribution. Mirrors the between-group
@@ -123,7 +127,25 @@ def compare_methods(
     ``False`` — rather than reporting a duplicated-point p-value of ~0 and a
     meaningless ±huge effect size; Holm is then applied over the surviving pairs.
     Emits a warning when ``test`` cannot reach ``alpha`` at the dataset's seed
-    count, and when a method is constant across seeds in *every* metric."""
+    count, and when a method is constant across seeds in *every* metric.
+
+    Raises
+    ------
+    IncompleteSweepError
+        If ``ds.attrs["mushin_failures"]`` is a non-empty list, meaning the sweep
+        that produced ``ds`` had failed/missing runs (recorded under
+        ``on_error="nan"``). A dataset without the attr — a plain user dataset or
+        a clean (failure-free) sweep — is unaffected. This is keyed purely on the
+        completeness signal, never on raw NaN values in the data, so a metric that
+        is legitimately NaN for other reasons does not trigger it.
+    """
+    failures = ds.attrs.get("mushin_failures")
+    if failures:
+        raise IncompleteSweepError(
+            f"{len(failures)} run(s) failed ({', '.join(map(str, failures))}); "
+            "fix the cause and re-run with resume=True to complete the sweep "
+            "before comparing."
+        )
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
     n_seeds = int(ds.sizes["seed"])

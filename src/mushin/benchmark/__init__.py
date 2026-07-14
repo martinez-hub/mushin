@@ -12,11 +12,14 @@ from ._metrics import (
     segmentation_battery,
 )
 from ._result import BenchmarkResult
+from ._stats import IncompleteSweepError, compare_methods
 from ._tasks import Task, get_task, list_tasks, register_task
 from .compare import compare
 
 __all__ = [
     "compare",
+    "compare_methods",
+    "IncompleteSweepError",
     "BenchmarkResult",
     "Task",
     "register_task",

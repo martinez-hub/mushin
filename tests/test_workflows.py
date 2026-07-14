@@ -263,7 +263,9 @@ def test_robustness_with_multidim_metrics(foo, foo_expected, bar):
     ]
     assert xarray.accuracies.shape == (2, 3)
     assert xarray.images.shape == (2, 3, 4, 1)
-    assert xarray.attrs == {"foo": foo_expected}
+    assert {k: v for k, v in xarray.attrs.items() if k != "provenance"} == {
+        "foo": foo_expected
+    }
 
     for eps, expected in zip([1.0, 2.0, 3.0], [99.0, 96.0, 91.0]):
         # test that results were organized as-expected
@@ -310,7 +312,10 @@ def test_robustness_with_multidim_metrics_with_iteration(as_tensor: bool):
     ]
     assert xarray.accuracies.shape == (3, 2, 10)
     assert xarray.images.shape == (3, 2, 10, 4, 4)
-    assert xarray.attrs == {"foo": "val", "as_tensor": as_tensor}
+    assert {k: v for k, v in xarray.attrs.items() if k != "provenance"} == {
+        "foo": "val",
+        "as_tensor": as_tensor,
+    }
 
     for eps, expected in zip([1.0, 2.0, 3.0], [99.0, 96.0, 91.0]):
         # test that results were organized as-expected
@@ -827,6 +832,15 @@ def test_run_defaults_are_not_rai_branded(cls, param):
     assert default == "mushin_workflow"
 
 
+@pytest.mark.parametrize("param", ["resume", "capture_env"])
+def test_robustnesscurve_run_forwards_resilience_params(param):
+    # RobustnessCurve.run must expose (and forward) resume/capture_env, mirroring
+    # on_error, so these resilience knobs are reachable on the public subclass.
+    params = inspect.signature(RobustnessCurve.run).parameters
+    assert param in params
+    assert params[param].default is False
+
+
 @pytest.mark.usefixtures("cleandir")
 @pytest.mark.filterwarnings("ignore:invalid value encountered in cast")
 def test_original_cwd_inside_real_hydra_run_returns_launch_dir(cleandir):
@@ -860,3 +874,238 @@ def test_original_cwd_inside_real_hydra_run_returns_launch_dir(cleandir):
     assert Path(captured["per_job_cwd"]).resolve() != launch_dir
     # ...but original_cwd() resolves back to where .run() was invoked.
     assert Path(captured["original_cwd"]).resolve() == launch_dir
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_to_xarray_nan_fills_missing_combo(tmp_path):
+    import numpy as np
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class Holey(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            if a == 2 and b == 1:  # emulate a missing result for this cell
+                return None
+            return dict(val=float(a * 10 + b))
+
+    wf = Holey()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    ds = wf.to_xarray()
+    assert ds.sizes == {"a": 2, "b": 2}
+    assert np.isnan(float(ds["val"].sel(a=2, b=1)))  # hole -> NaN
+    assert float(ds["val"].sel(a=1, b=1)) == 11.0  # others intact
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_singleton_dim_with_real_metrics_not_nan(tmp_path):
+    # non_multirun_params_as_singleton_dims=True with a non-multirun scalar
+    # param must NOT nan-fill the (present) metric values.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=float(a * 10 + b))
+
+    wf = WF()
+    wf.run(a=multirun([1, 2]), b=5, working_dir=str(tmp_path / "s"))
+    ds = wf.to_xarray(non_multirun_params_as_singleton_dims=True)
+    assert not np.isnan(ds["val"].data).any()
+    assert_allclose(ds["val"].data, [[15.0], [25.0]])
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_non_square_grid_no_transpose(tmp_path):
+    # A non-square multi-param grid must not transpose cells.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=float(a * 100 + b))
+
+    wf = WF()
+    wf.run(
+        a=multirun([1, 2]), b=multirun([10, 20, 30]), working_dir=str(tmp_path / "s")
+    )
+    ds = wf.to_xarray()
+    assert ds.sizes == {"a": 2, "b": 3}
+    assert float(ds["val"].sel(a=1, b=30)) == 130.0
+    assert float(ds["val"].sel(a=2, b=10)) == 210.0
+    assert float(ds["val"].sel(a=2, b=30)) == 230.0
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_integer_metric_dtype_preserved(tmp_path):
+    # A clean sweep of an integer-valued metric must keep an integer dtype.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=int(a * 10 + b))
+
+    wf = WF()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    ds = wf.to_xarray()
+    assert np.issubdtype(ds["val"].dtype, np.integer)
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_run_writes_metrics_sidecar_per_job(tmp_path):
+    from mushin import multirun
+    from mushin._sweep_io import read_metrics_sidecar
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(y=float(x) * 2)
+
+    wf = W()
+    wf.run(x=multirun([1, 2, 3]), working_dir=str(tmp_path / "s"))
+    for d in wf.multirun_working_dirs:
+        assert read_metrics_sidecar(d) is not None
+        assert read_metrics_sidecar(d)["y"] is not None
+
+
+def _grid_with_one_failure():
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            if a == 2 and b == 1:
+                raise RuntimeError("boom")
+            return dict(val=float(a * 10 + b))
+
+    return W
+
+
+def test_on_error_raise_is_default(tmp_path):
+    from mushin import multirun
+
+    with pytest.raises(Exception):
+        _grid_with_one_failure()().run(
+            a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s")
+        )
+
+
+def test_on_error_nan_records_and_continues(tmp_path):
+    import numpy as np
+
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    assert wf.is_complete is False
+    assert any("a=2" in f["combo"] for f in wf.failures)
+    ds = wf.to_xarray()
+    assert np.isnan(float(ds["val"].sel(a=2, b=1)))
+    assert float(ds["val"].sel(a=1, b=0)) == 10.0
+    assert ds.attrs["mushin_failures"]  # non-empty list
+
+
+def test_resume_reruns_only_failed_cell(tmp_path):
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL = True
+
+        @staticmethod
+        def task(a, b):
+            CALLS["n"] += 1
+            if a == 2 and b == 1 and W.FAIL:
+                raise RuntimeError("boom")
+            return dict(val=float(a * 10 + b))
+
+    wd = str(tmp_path / "s")
+    W.FAIL = True
+    wf = W()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+    W.FAIL = False
+    CALLS["n"] = 0
+    wf2 = W()
+    wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
+    assert CALLS["n"] == 1  # only the previously-failed cell actually ran
+    assert wf2.is_complete
+    ds = wf2.to_xarray()
+    assert float(ds["val"].sel(a=2, b=1)) == 21.0  # cell filled in place
+    assert ds.sizes == {"a": 2, "b": 2}  # same shape, no growth
+
+
+def test_resume_with_relative_working_dir_reruns_only_failed_cell(
+    tmp_path, monkeypatch
+):
+    # Regression: a RELATIVE working_dir must still short-circuit completed cells
+    # on resume. The short-circuit's sidecar read runs INSIDE the chdir'd Hydra
+    # job, so an unresolved (relative) manifest root resolves against the job cwd
+    # and finds no sidecar -> every completed cell silently re-executes. The main
+    # process must resolve working_dir to absolute before wrapping.
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    monkeypatch.chdir(tmp_path)
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL = True
+
+        @staticmethod
+        def task(a, b):
+            CALLS["n"] += 1
+            if a == 2 and b == 1 and W.FAIL:
+                raise RuntimeError("boom")
+            return dict(val=float(a * 10 + b))
+
+    wd = "rel_sweep"  # RELATIVE to the (monkeypatched) cwd
+    W.FAIL = True
+    wf = W()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+
+    W.FAIL = False
+    CALLS["n"] = 0
+    wf2 = W()
+    wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
+    # Only the previously-failed cell re-ran; the 3 completed cells short-circuited.
+    assert CALLS["n"] == 1
+    assert wf2.is_complete
+    ds = wf2.to_xarray()
+    assert float(ds["val"].sel(a=2, b=1)) == 21.0
+
+
+def test_narrowed_grid_reusing_dir_is_complete(tmp_path):
+    # Regression: a fresh sweep that reuses a working_dir with a NARROWED grid
+    # must not inherit stale failed cells from the prior sweep's manifest. Cells
+    # absent from the current grid must be pruned so `is_complete` reflects only
+    # the current grid.
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL_SEED = 1
+
+        @staticmethod
+        def task(seed):
+            if seed == W.FAIL_SEED:
+                raise RuntimeError("boom")
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "D")
+
+    # pass 1: seed in {0,1,2}, seed=1 fails -> incomplete
+    wf = W()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(seed=multirun([0, 1, 2]), working_dir=wd, on_error="nan")
+    assert wf.is_complete is False
+
+    # pass 2: NEW sweep, SAME dir, narrowed grid {0,2}; all succeed -> complete
+    wf2 = W()
+    wf2.run(seed=multirun([0, 2]), working_dir=wd)
+    assert wf2.is_complete is True
