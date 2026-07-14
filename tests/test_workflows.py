@@ -931,3 +931,21 @@ def test_integer_metric_dtype_preserved(tmp_path):
     wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
     ds = wf.to_xarray()
     assert np.issubdtype(ds["val"].dtype, np.integer)
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_run_writes_metrics_sidecar_per_job(tmp_path):
+    from mushin import multirun
+    from mushin._sweep_io import read_metrics_sidecar
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(y=float(x) * 2)
+
+    wf = W()
+    wf.run(x=multirun([1, 2, 3]), working_dir=str(tmp_path / "s"))
+    for d in wf.multirun_working_dirs:
+        assert read_metrics_sidecar(d) is not None
+        assert read_metrics_sidecar(d)["y"] is not None

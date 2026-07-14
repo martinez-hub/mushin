@@ -87,6 +87,22 @@ def _task_calls(
     return wrapped
 
 
+def _instrument_task(task):
+    """Wrap a (cfg)->result task so its returned dict is written to a
+    mushin_metrics.json sidecar in the per-job working dir (cwd)."""
+    from pathlib import Path
+
+    from ._sweep_io import write_metrics_sidecar
+
+    def wrapped(cfg):
+        result = task(cfg)
+        if isinstance(result, dict):
+            write_metrics_sidecar(Path.cwd(), result)
+        return result
+
+    return wrapped
+
+
 class BaseWorkflow:
     """Provides an interface for creating a reusable workflow: encapsulated
     "boilerplate" for running, aggregating, and analyzing one or more Hydra jobs.
@@ -407,7 +423,7 @@ class BaseWorkflow:
             self.eval_task_cfg,
             _task_calls(
                 pre_task=pre_task_fn_wrapper(self.pre_task),
-                task=task_fn_wrapper(self.task),
+                task=_instrument_task(task_fn_wrapper(self.task)),
             ),
             overrides=launch_overrides,
             multirun=True,
