@@ -148,6 +148,12 @@ the [LLM evaluation guide](docs/guides/llm.md).
   `mushin.workflows.RobustnessCurve` variant) — declarative, reproducible
   experiment workflows that record configs, checkpoints, and metrics, and load
   results back as labeled `xarray` datasets.
+- **Sweep resilience + provenance** — `run(on_error="nan")` records a failed grid
+  cell as NaN and keeps going; `run(working_dir=..., resume=True)` re-runs only the
+  failed/missing cells; `compare`/`Study` refuse statistics on an incomplete sweep
+  (`IncompleteSweepError`) until you fix and resume; every run captures per-run
+  provenance (`mushin_provenance.json`: git SHA, versions, config). See the
+  [resilience guide](https://martinez-hub.github.io/mushin/guides/resilience/).
 - `tune_batch_size`, `tune_learning_rate` — opt-in, reproducibility-preserving
   auto-tuning: find the batch size / LR once, pin it to a sidecar file, and reuse
   it — with an exact, hardware-independent effective batch (no drift).
