@@ -311,5 +311,31 @@ def run_audio():
 
 
 if __name__ == "__main__":
-    result = run_classification()
-    print(result.summary().to_string(index=False))
+    import sys
+
+    from mushin.benchmark import BenchmarkResult
+
+    _RUNNERS = {
+        "classification": run_classification,
+        "segmentation": run_segmentation,
+        "detection": run_detection,
+        "regression": run_regression,
+        "retrieval": run_retrieval,
+        "image_quality": run_image_quality,
+        "audio": run_audio,
+    }
+    _failed = []
+    for _name, _fn in _RUNNERS.items():
+        try:
+            _result = _fn()
+            assert isinstance(_result, BenchmarkResult), "not a BenchmarkResult"
+            _keys = list(_result.data.data_vars)
+            assert _keys, "no metrics produced"
+            print(f"  {_name}: OK  metrics={_keys}")
+        except Exception as _exc:  # noqa: BLE001
+            _failed.append(_name)
+            print(f"  {_name}: FAIL  {_exc!r}")
+    if _failed:
+        print(f"\n{len(_failed)} battery example(s) failed: {_failed}")
+        sys.exit(1)
+    print("\nAll 7 battery examples ran cleanly.")

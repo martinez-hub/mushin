@@ -53,6 +53,26 @@ jobs:
       - name: Run tests
         run: uv run --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
+  batteries-clean-install:
+    # Install the BUILT wheel (not the editable repo) with the battery extras into
+    # a fresh environment and run the battery examples against it — catches
+    # packaging / optional-extra resolution issues the editable `test` job misses.
+    # Linux only (the C-extension extras pycocotools/pystoi are win32-gated).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Build wheel
+        run: uv build --wheel
+      - name: Clean-env install (wheel + battery extras) and run the examples
+        run: |
+          uv venv /tmp/clean-batteries
+          uv pip install --python /tmp/clean-batteries/bin/python \
+            "$(ls dist/*.whl)[detection,image,audio]"
+          /tmp/clean-batteries/bin/python examples/batteries.py
+
   changelog:
     runs-on: ubuntu-latest
     # PRs only (the check diffs the base branch); never on push to main, and
