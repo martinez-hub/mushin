@@ -64,6 +64,7 @@ nav:
       - Workflows & sweeps: guides/workflows.md
       - Auto-tuning batch & LR: guides/auto-tuning.md
       - Comparing methods: guides/compare.md
+      - Built-in batteries: guides/batteries.md
       - LLM evaluation: guides/llm.md
       - Studies: guides/study.md
       - Resilient & resumable sweeps: guides/resilience.md

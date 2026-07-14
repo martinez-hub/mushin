@@ -132,6 +132,7 @@ Install the extra: `pip install mushin-py[detection]` (torchvision + pycocotools
 
 ## See also
 
+- [Built-in batteries](batteries.md) — all seven registered tasks (classification, segmentation, detection, regression, retrieval, image_quality, audio) with real-model recipes and runnable toys
 - [Segmentation guide](segmentation.md) — `task="segmentation"` and `ignore_index`
 - [Studies guide](study.md) — run training + compare in one call
 - [Custom metrics & predict_fn](custom.md) — override the metric battery

@@ -1,0 +1,1 @@
+Documentation: a Built-in batteries guide covering all 7 benchmark batteries (classification, segmentation, detection, regression, retrieval, image_quality, audio) with real-model recipes and CI-tested runnable toys.
