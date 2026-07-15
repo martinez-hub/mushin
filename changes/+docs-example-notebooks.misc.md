@@ -1,0 +1,1 @@
+Added six runnable EQUINE-style example notebooks (sweeps, compare + batteries, Study, resilient sweeps, LLM evaluation, scikit-learn) under an "Example notebooks" section of the docs, executed in CI via nbmake so they stay current.

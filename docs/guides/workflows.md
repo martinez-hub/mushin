@@ -5,6 +5,9 @@ define your experiment as a method, run it once with swept parameters, and
 mushin handles config logging, output directories, and assembling results into
 a labeled `xarray.Dataset`.
 
+> **Prefer to follow along?** [Notebook 01 — Sweeps → datasets](../notebooks/01_sweep_to_dataset.ipynb)
+> builds a sweep end to end and plots the result.
+
 ## The mental model
 
 A mushin workflow has three steps:

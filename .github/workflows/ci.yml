@@ -73,6 +73,21 @@ jobs:
             "$(ls dist/*.whl)[detection,image,audio]"
           /tmp/clean-batteries/bin/python examples/batteries.py
 
+  notebooks:
+    # Execute every docs/notebooks/*.ipynb with nbmake so the example notebooks
+    # can never rot. nbmake checks that cells RUN (not output equality), so
+    # numerical drift never makes this flaky; committed outputs are for display.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Register python3 kernel
+        run: uv run python -m ipykernel install --user --name python3 --display-name "Python 3"
+      - name: Execute example notebooks
+        run: uv run --extra viz pytest --nbmake docs/notebooks/ -p no:cacheprovider
+
   changelog:
     runs-on: ubuntu-latest
     # PRs only (the check diffs the base branch); never on push to main, and

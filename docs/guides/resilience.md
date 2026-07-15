@@ -6,6 +6,9 @@ already spent on the runs that *did* succeed — and it must never let you quiet
 compute statistics on a half-finished grid. mushin gives you three tools for
 this: **fail-soft** runs, **resume**, and **provenance**.
 
+> **Prefer to follow along?** [Notebook 04 — Resilient sweeps](../notebooks/04_resilience.ipynb)
+> runs this whole fail-soft → resume loop end to end with live output.
+
 ## Fail-soft: `on_error="nan"`
 
 By default a failing job aborts the whole sweep and re-raises the exception
