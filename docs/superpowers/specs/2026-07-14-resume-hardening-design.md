@@ -187,6 +187,12 @@ working_dir/
 - **No directory-naming change** — dirs stay positional/numeric (`working_dir/0,1,2…`),
   so downstream code that references those paths is unaffected. The only new
   on-disk artifact is the per-cell `mushin_cell_status.json` sidecar.
+- **Resuming a pre-upgrade sweep still works.** A sweep dir created by the shipped
+  mushin has the end-of-run `mushin_sweep_manifest.json` but no per-cell status
+  sidecars. `Manifest.from_cell_status` therefore *seeds from the legacy manifest*
+  and overlays any per-cell sidecars (sidecars authoritative), so upgrading and
+  then `resume=True` on an old dir still skips its completed cells rather than
+  recomputing the whole sweep. Covered by a dedicated backward-compat test.
 
 ## Testing strategy
 
