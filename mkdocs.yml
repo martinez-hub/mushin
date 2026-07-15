@@ -79,6 +79,7 @@ nav:
   - Example notebooks:
       - Sweeps → datasets: notebooks/01_sweep_to_dataset.ipynb
       - Compare & batteries: notebooks/02_compare_and_batteries.ipynb
+      - Studies: notebooks/03_study.ipynb
   - API Reference:
       - benchmark: reference/benchmark.md
       - llm: reference/llm.md
