@@ -37,10 +37,21 @@ Replaces the unpicklable `_bind_resume_kwarg` closure.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_workflows.py`:
+Append to `tests/test_workflows.py`. The helper tasks MUST be module-level —
+stdlib pickle serializes functions by reference, so a local/nested task cannot be
+pickled (this mirrors what production always has: module-level or qualname-tricked
+functions):
 
 ```python
-def test_resume_injector_is_picklable_and_hides_param(tmp_path):
+def _task_with_resume(seed, mushin_resume=None):
+    return {"v": float(seed), "got": mushin_resume}
+
+
+def _plain_task(seed):
+    return {"v": float(seed)}
+
+
+def test_resume_injector_is_picklable_and_hides_param():
     import inspect
     import pickle
 
@@ -48,11 +59,9 @@ def test_resume_injector_is_picklable_and_hides_param(tmp_path):
 
     from mushin.workflows import _ResumeInjector, _prepare_task
 
-    def task(seed, mushin_resume=None):
-        return {"v": float(seed), "got": mushin_resume}
-
-    prepared, wants = _prepare_task(task)
+    prepared, wants = _prepare_task(_task_with_resume)
     assert wants is True
+    assert isinstance(prepared, _ResumeInjector)
     # hidden from the signature zen inspects:
     assert list(inspect.signature(prepared).parameters) == ["seed"]
     # picklable, and zen(prepared) picklable:
@@ -60,11 +69,8 @@ def test_resume_injector_is_picklable_and_hides_param(tmp_path):
     pickle.loads(pickle.dumps(zen(prepared)))
 
     # a task WITHOUT mushin_resume is returned unchanged:
-    def plain(seed):
-        return {"v": float(seed)}
-
-    prepared2, wants2 = _prepare_task(plain)
-    assert wants2 is False and prepared2 is plain
+    prepared2, wants2 = _prepare_task(_plain_task)
+    assert wants2 is False and prepared2 is _plain_task
 ```
 
 - [ ] **Step 2: Run — verify it fails**
