@@ -16,6 +16,7 @@ env/
 .hypothesis/
 .mypy_cache/
 .tox/
+.cache/
 .coverage
 htmlcov/
 
