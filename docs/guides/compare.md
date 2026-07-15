@@ -6,6 +6,9 @@ writing evaluation loops and statistical boilerplate yourself, you hand mushin
 a dict of model lists — one list per method, one model per seed — and get back
 a publication-ready result.
 
+> **Prefer to follow along?** [Notebook 02 — Compare & batteries](../notebooks/02_compare_and_batteries.ipynb)
+> runs a full `compare` example end to end with outputs and a CI bar chart.
+
 ## Runnable example
 
 The following example trains a small CNN and MLP across seeds on MNIST and
