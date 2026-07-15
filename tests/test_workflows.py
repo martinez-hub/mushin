@@ -1027,7 +1027,10 @@ def test_resume_reruns_only_failed_cell(tmp_path):
     wd = str(tmp_path / "s")
     W.FAIL = True
     wf = W()
-    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+    # fail-soft emits a UserWarning naming the failed cell — assert it (this also
+    # keeps it out of the pytest warnings summary), matching the sibling test.
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
     W.FAIL = False
     CALLS["n"] = 0
     wf2 = W()
