@@ -153,6 +153,9 @@ dev = [
     "ipykernel >= 6.0",
     "nbstripout >= 0.7",
     "nbmake >= 1.5",
+    # Exercises out-of-process dispatch (loky/processes backend) so the picklable
+    # _TaskRunner is verified against a real launcher, not just pickle.dumps.
+    "hydra-joblib-launcher >= 1.2",
 ]
 # Detection deps live in the `detection` extra, not here: pycocotools is a C
 # extension whose lowest-floor wheel is ABI-incompatible with the min-versions

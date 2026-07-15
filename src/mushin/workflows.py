@@ -77,16 +77,6 @@ def _to_override_element(item: Any) -> str:
     return "'" + str(item).replace("'", "\\'") + "'"
 
 
-def _task_calls(
-    pre_task: Callable[[Any], None], task: Callable[[Any], T1]
-) -> Callable[[Any], T1]:
-    def wrapped(cfg: Any) -> T1:
-        pre_task(cfg)
-        return task(cfg)
-
-    return wrapped
-
-
 class _FailedRun:
     """Sentinel returned by a fail-soft task wrapper in place of a raised
     exception. Hydra's basic sweeper re-raises the first FAILED job's exception
@@ -102,118 +92,132 @@ class _FailedRun:
         self.exception = exception
 
 
-def _fail_soft(fn: Callable[[Any], T1]) -> Callable[[Any], T1 | "_FailedRun"]:
-    """Wrap a task-call so an exception becomes a ``_FailedRun`` sentinel."""
+class _TaskRunner:
+    """Picklable per-cell dispatch. Collapses the old closure chain
+    (_task_calls / _instrument_task / _fail_soft / _resume_short_circuit) into one
+    object so out-of-process launchers (joblib/submitit) can pickle it. Holds only
+    picklable state; imports module-level helpers inside __call__ (never captures
+    the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain exactly —
+    see the spec's Semantics Mapping."""
 
-    def wrapped(cfg: Any) -> T1 | _FailedRun:
-        try:
-            return fn(cfg)
-        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
-            return _FailedRun(exc)
+    def __init__(
+        self,
+        *,
+        task,
+        pre_task,
+        swept_names,
+        base_provenance,
+        on_error,
+        inject_resume,
+        prior_manifest,
+    ):
+        self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
+        self.pre_task = pre_task  # zen(self.pre_task)
+        self.swept_names = tuple(swept_names)
+        self.base_provenance = base_provenance
+        self.on_error = on_error
+        self.inject_resume = inject_resume
+        self.prior_manifest = prior_manifest
 
-    return wrapped
+    @staticmethod
+    def _combo(cfg, names):
+        from omegaconf import OmegaConf
 
-
-def _instrument_task(
-    task, combo_of_cfg=None, inject_resume=False, base_provenance=None
-):
-    """Wrap a (cfg)->result task so its returned dict is written to a
-    mushin_metrics.json sidecar in the per-job working dir (cwd), and a durable
-    mushin_cell_status.json records running->completed/failed from inside the job
-    (so completion survives a hard process kill). When ``inject_resume`` is set,
-    the current cell's ResumeContext is published to a contextvar for the duration
-    of the task call. Per-run provenance is written first — reusing the
-    sweep-constant ``base_provenance`` (git/versions, captured once in ``run()``)
-    so a sweep does not spawn git subprocesses per cell."""
-    from pathlib import Path
-
-    from ._provenance import write_provenance
-    from ._resume import _CURRENT_RESUME, build_resume_context, write_cell_status
-    from ._sweep_io import write_metrics_sidecar
-
-    def wrapped(cfg):
-        cwd = Path.cwd()
-        combo = combo_of_cfg(cfg) if combo_of_cfg is not None else {}
-        # Compute BEFORE the "running" write overwrites the prior status, so
-        # is_resume/attempt reflect the previous attempt (combo-match guarded).
-        rc = build_resume_context(cwd, combo)
-        try:
-            write_provenance(cwd, cfg, base=base_provenance)
-        except Exception:  # noqa: BLE001 - provenance is best-effort
-            pass
-        token = _CURRENT_RESUME.set(rc) if inject_resume else None
-        write_cell_status(cwd, status="running", combo=combo, attempt=rc.attempt)
-        try:
-            result = task(cfg)
-        except Exception:  # noqa: BLE001 - record failure durably, then re-raise
-            write_cell_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
-            raise
-        finally:
-            if token is not None:
-                _CURRENT_RESUME.reset(token)
-        if isinstance(result, dict):
-            write_metrics_sidecar(cwd, result)
-        write_cell_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
-        return result
-
-    return wrapped
-
-
-def _bind_resume_kwarg(task):
-    """If ``task`` declares a ``mushin_resume`` parameter, return a wrapper that
-    (a) hides that parameter from hydra-zen's `zen` (which would otherwise try to
-    resolve it from config) by stripping it from the exposed signature, and
-    (b) injects the current cell's ResumeContext from a contextvar at call time.
-    Returns ``(task, False)`` unchanged if the task does not opt in."""
-    import functools
-    import inspect
-
-    sig = inspect.signature(task)
-    if "mushin_resume" not in sig.parameters:
-        return task, False
-
-    from ._resume import current_resume
-
-    exposed = [p for n, p in sig.parameters.items() if n != "mushin_resume"]
-
-    @functools.wraps(task)
-    def _wrapper(*args, **kwargs):
-        return task(*args, **kwargs, mushin_resume=current_resume())
-
-    _wrapper.__signature__ = sig.replace(parameters=exposed)
-    return _wrapper, True
-
-
-def _resume_short_circuit(inner, manifest):
-    """Outermost wrapper for a resumed sweep: for a cfg whose swept-param combo
-    the prior sweep already `completed`, return that cell's cached metrics
-    (read from the prior job dir's sidecar) WITHOUT running the inner task.
-
-    The combo is projected onto the manifest's swept params and sanitized to
-    match Task 3/5's `_combo_of_cfg`, so keys align with the manifest."""
-    from omegaconf import OmegaConf
-
-    from ._sweep_io import read_metrics_sidecar
-
-    swept = list(manifest.params)
-
-    def wrapped(cfg):
         combo = {}
-        for n in swept:
+        for n in names:
             val = cfg[n]
             if OmegaConf.is_config(val):
                 val = OmegaConf.to_container(val, resolve=True)
             combo[n] = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray(
                 _unwrap_scalar(val)
             )
-        if manifest.status(combo) == "completed":
-            prior_dir = Path(manifest.root) / (manifest.dir(combo) or "")
-            cached = read_metrics_sidecar(prior_dir)
-            if cached is not None:
-                return cached
-        return inner(cfg)
+        return combo
 
-    return wrapped
+    def __call__(self, cfg):
+        from pathlib import Path
+
+        from ._provenance import write_provenance
+        from ._resume import (
+            _CURRENT_RESUME,
+            build_resume_context,
+            write_cell_status,
+        )
+        from ._sweep_io import read_metrics_sidecar, write_metrics_sidecar
+
+        # (1) resume short-circuit — before pre_task/instrument, only when resuming
+        if self.prior_manifest is not None:
+            sc = self._combo(cfg, self.prior_manifest.params)
+            if self.prior_manifest.status(sc) == "completed":
+                cached = read_metrics_sidecar(
+                    Path(self.prior_manifest.root) / (self.prior_manifest.dir(sc) or "")
+                )
+                if cached is not None:
+                    return cached
+
+        # (2) fail-soft wraps everything below, only when on_error == "nan"
+        try:
+            self.pre_task(cfg)
+            cwd = Path.cwd()
+            combo = self._combo(cfg, self.swept_names)
+            rc = build_resume_context(cwd, combo)
+            try:
+                write_provenance(cwd, cfg, base=self.base_provenance)
+            except Exception:  # noqa: BLE001 - provenance is best-effort
+                pass
+            token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
+            write_cell_status(cwd, status="running", combo=combo, attempt=rc.attempt)
+            try:
+                result = self.task(cfg)
+            except Exception:  # noqa: BLE001 - durable failed status, then re-raise
+                write_cell_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
+                raise
+            finally:
+                if token is not None:
+                    _CURRENT_RESUME.reset(token)
+            if isinstance(result, dict):
+                write_metrics_sidecar(cwd, result)
+            write_cell_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
+            return result
+        except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
+            if self.on_error == "nan":
+                return _FailedRun(exc)
+            raise
+
+
+class _ResumeInjector:
+    """Picklable replacement for the old `_bind_resume_kwarg` closure. Hides a
+    task's `mushin_resume` parameter from hydra-zen's `zen` (via a stripped
+    __signature__, so zen never tries to resolve it from config) and injects the
+    current cell's ResumeContext from a contextvar at call time. Unlike a closure,
+    an instance holding a module-level task + a Signature is stdlib-picklable."""
+
+    def __init__(self, task):
+        import inspect
+
+        self._task = task
+        sig = inspect.signature(task)
+        self._sig = sig.replace(
+            parameters=[p for n, p in sig.parameters.items() if n != "mushin_resume"]
+        )
+
+    @property
+    def __signature__(self):  # inspect.signature / zen read this
+        return self._sig
+
+    def __call__(self, *args, **kwargs):
+        from ._resume import current_resume
+
+        return self._task(*args, **kwargs, mushin_resume=current_resume())
+
+
+def _prepare_task(task):
+    """If `task` declares a `mushin_resume` parameter, wrap it in a picklable
+    `_ResumeInjector`; otherwise return it unchanged. Returns `(prepared, wants)`."""
+    import inspect
+
+    if "mushin_resume" in inspect.signature(task).parameters:
+        return _ResumeInjector(task), True
+    return task, False
 
 
 def _write_env_snapshot(working_dir: Path) -> None:
@@ -593,75 +597,40 @@ class BaseWorkflow:
         if pre_task_fn_wrapper is None:
             pre_task_fn_wrapper = _identity
 
-        # Swept (multirun) dimension names, derived from the FINAL override list
-        # via Hydra's own sweep detection — available before launch without the
-        # sweep's on-disk yaml. Used to record each cell's combo in its durable
-        # status sidecar, keyed identically to jobs_post_process / _resume_short_circuit.
+        # Swept dimension names for the per-cell combo (unchanged).
         _swept_names = tuple(
             k
             for k, v in self._parse_overrides(launch_overrides).items()
             if isinstance(v, multirun)
         )
+        # BaseWorkflow (no sanitizer) records an empty combo, as before.
+        _runner_swept = (
+            _swept_names if hasattr(self, "_sanitize_coordinate_for_xarray") else ()
+        )
 
-        _combo_of_cell = None
-        if hasattr(self, "_sanitize_coordinate_for_xarray"):
-
-            def _combo_of_cell(cfg, _names=_swept_names):
-                from omegaconf import OmegaConf
-
-                combo = {}
-                for n in _names:
-                    val = cfg[n]
-                    if OmegaConf.is_config(val):
-                        val = OmegaConf.to_container(val, resolve=True)
-                    combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
-                return combo
-
-        # Capture the sweep-constant provenance (git state + package versions)
-        # ONCE here rather than per cell: `_git()` spawns three git subprocesses,
-        # and the result is identical for every cell in the sweep. Each cell then
-        # writes its record reusing this base (only timestamp/config vary), so an
-        # N-cell sweep spawns 3 git subprocesses instead of 3N.
         from ._provenance import capture_base
+        from ._sweep_io import Manifest
 
         _base_provenance = capture_base()
 
-        _task_fn, _wants_resume = _bind_resume_kwarg(self.task)
-        task_call = _task_calls(
-            pre_task=pre_task_fn_wrapper(self.pre_task),
-            task=_instrument_task(
-                task_fn_wrapper(_task_fn),
-                combo_of_cfg=_combo_of_cell,
-                inject_resume=_wants_resume,
-                base_provenance=_base_provenance,
-            ),
-        )
-        if on_error == "nan":
-            # Convert per-job exceptions into a sentinel so Hydra's basic sweeper
-            # does not re-raise the first failure from inside `launch` (which
-            # would prevent failed jobs from reaching `jobs_post_process`).
-            task_call = _fail_soft(task_call)
-
+        # Kill-durable resume manifest (only when resuming) — built here so the
+        # runner can hold it.
+        _prior_manifest = None
         if resume:
-            # Outermost wrapper: short-circuit combos the PRIOR sweep already
-            # completed (per its on-disk manifest), so only failed/missing cells
-            # actually execute. The manifest is loaded now and closed over.
-            from ._sweep_io import Manifest
-
-            # Resolve to absolute in the MAIN process: the short-circuit's
-            # sidecar read runs INSIDE the chdir'd Hydra job, so a relative
-            # `manifest.root` would resolve against the job cwd and never find
-            # the prior cell's sidecar (silently re-running every completed cell).
-            # Kill-durable: reconstruct prior completion from the per-cell status
-            # sidecars (written from inside each job), not the end-of-run manifest
-            # (which a hard kill would have prevented). Pass the current run's swept
-            # names so the manifest carries the sweep dimensions even when no prior
-            # manifest file survived — otherwise `_resume_short_circuit` would
-            # project onto an empty param set and mis-key every cell.
-            prior_manifest = Manifest.from_cell_status(
+            _prior_manifest = Manifest.from_cell_status(
                 Path(working_dir).resolve(), list(_swept_names)
             )
-            task_call = _resume_short_circuit(task_call, prior_manifest)
+
+        _task_fn, _wants_resume = _prepare_task(self.task)
+        task_call = _TaskRunner(
+            task=task_fn_wrapper(_task_fn),
+            pre_task=pre_task_fn_wrapper(self.pre_task),
+            swept_names=_runner_swept,
+            base_provenance=_base_provenance,
+            on_error=on_error,
+            inject_resume=_wants_resume,
+            prior_manifest=_prior_manifest,
+        )
 
         self._capture_env = capture_env
 

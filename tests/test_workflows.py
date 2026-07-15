@@ -1278,3 +1278,62 @@ def test_task_without_mushin_resume_param_is_unaffected(tmp_path):
     wf = W()
     wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "s"))
     assert wf.to_xarray().sizes == {"seed": 2}
+
+
+def _task_with_resume(seed, mushin_resume=None):
+    return {"v": float(seed), "got": mushin_resume}
+
+
+def _plain_task(seed):
+    return {"v": float(seed)}
+
+
+def test_resume_injector_is_picklable_and_hides_param():
+    import inspect
+    import pickle
+
+    from hydra_zen import zen
+
+    from mushin.workflows import _prepare_task, _ResumeInjector
+
+    prepared, wants = _prepare_task(_task_with_resume)
+    assert wants is True
+    assert isinstance(prepared, _ResumeInjector)
+    # hidden from the signature zen inspects:
+    assert list(inspect.signature(prepared).parameters) == ["seed"]
+    # picklable, and zen(prepared) picklable:
+    pickle.loads(pickle.dumps(prepared))
+    pickle.loads(pickle.dumps(zen(prepared)))
+
+    # a task WITHOUT mushin_resume is returned unchanged:
+    prepared2, wants2 = _prepare_task(_plain_task)
+    assert wants2 is False and prepared2 is _plain_task
+
+
+class _PicklableRunnerWF(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(seed):
+        return dict(v=float(seed))
+
+
+def test_task_runner_is_picklable(tmp_path):
+    import pickle
+
+    import mushin.workflows as wf_mod
+
+    captured = {}
+    orig = wf_mod.launch
+
+    def capture(cfg, task_call, **k):  # launch(cfg, task_call, **kwargs)
+        captured["task_call"] = task_call
+        return orig(cfg, task_call, **k)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wf_mod, "launch", capture)
+        _PicklableRunnerWF().run(
+            seed=multirun([0, 1]), working_dir=str(tmp_path / "s"), on_error="nan"
+        )
+
+    tc = captured["task_call"]
+    assert isinstance(tc, wf_mod._TaskRunner)
+    pickle.loads(pickle.dumps(tc))  # the whole dispatch object is picklable

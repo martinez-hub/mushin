@@ -1,0 +1,1 @@
+Sweeps can now use out-of-process Hydra launchers (e.g. `hydra-joblib-launcher`, submitit): per-cell dispatch is stdlib-picklable, so `run(..., launcher="joblib")` parallelizes across worker processes. Previously any process-backed launcher failed with a `PicklingError`. Resilience, resume, and provenance semantics are unchanged in-process and preserved out-of-process.
