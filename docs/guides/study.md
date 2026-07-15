@@ -5,6 +5,9 @@ define your training functions once, specify seeds and evaluation data, and get
 back a `BenchmarkResult` — no intermediate bookkeeping, no manual checkpoint
 management.
 
+> **Prefer to follow along?** [Notebook 03 — Studies](../notebooks/03_study.ipynb)
+> runs a full `Study` (train + compare) end to end with outputs and a plot.
+
 ## Full motion: train + compare
 
 The example below trains a CNN and MLP across seeds using `Study`, writing

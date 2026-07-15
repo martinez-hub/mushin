@@ -23,3 +23,9 @@ repos:
     hooks:
       - id: codespell
         additional_dependencies: ["tomli"]
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+        args: ["--keep-output"]

@@ -120,6 +120,11 @@ Changelog = "https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md"
 docs = [
     "mkdocs-material >= 9.5, < 10",
     "mkdocstrings[python]>=0.26,<2",
+    # Renders committed .ipynb notebooks under docs/notebooks/ into the site.
+    # execute:false in mkdocs.yml — the build shows the committed outputs and
+    # never runs torch. Notebooks are executed separately by the `notebooks` CI
+    # job (nbmake) to prevent rot.
+    "mkdocs-jupyter >= 0.24",
 ]
 dev = [
     "ruff >= 0.6",
@@ -138,6 +143,16 @@ dev = [
     # floor); earlier scikit-learn is ABI-incompatible with NumPy 2. The
     # min-versions CI job (dev group at lowest-direct, NumPy-2) verifies this.
     "scikit-learn >= 1.4.2",
+    # Example-notebook toolchain (docs/notebooks/). jupytext converts the
+    # percent-format .py sources into .ipynb and executes them; nbstripout keeps
+    # outputs but strips nondeterministic metadata; nbmake (a pytest plugin)
+    # re-executes every notebook in CI so they can't rot. nbconvert+ipykernel
+    # provide the execution kernel.
+    "jupytext >= 1.16",
+    "nbconvert >= 7.0",
+    "ipykernel >= 6.0",
+    "nbstripout >= 0.7",
+    "nbmake >= 1.5",
 ]
 # Detection deps live in the `detection` extra, not here: pycocotools is a C
 # extension whose lowest-floor wheel is ABI-incompatible with the min-versions

@@ -16,6 +16,7 @@ env/
 .hypothesis/
 .mypy_cache/
 .tox/
+.cache/
 .coverage
 htmlcov/
 
@@ -30,3 +31,6 @@ multirun/
 
 # MkDocs build output
 site/
+
+# Jupyter
+.ipynb_checkpoints/

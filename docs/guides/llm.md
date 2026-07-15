@@ -8,6 +8,9 @@ user-supplied metric, and reports Holm-corrected pairwise significance. The
 same statistical spine that powers `mushin.benchmark.compare` for torch
 models works here — you just bring the systems, data, and metric.
 
+> **Prefer to follow along?** [Notebook 05 — LLM evaluation](../notebooks/05_llm_eval.ipynb)
+> runs a full `compare_llms` example with outputs and a per-seed score plot.
+
 ## Quickstart
 
 ```python
