@@ -83,12 +83,15 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     Combo-match guard: a prior status sidecar is honored ONLY if its recorded
     combo equals ``combo``. This makes numeric-dir reuse safe — if a grid change
     reused this dir for a different cell, we neither resume nor surface that
-    cell's checkpoint."""
+    cell's checkpoint. (Resume is only meaningful for a workflow that records a
+    non-degenerate per-cell combo; an empty combo cannot distinguish cells.)"""
     cell_dir = Path(cell_dir)
     prior = read_cell_status(cell_dir)
     matches = prior is not None and prior.get("combo") == combo
     last = discover_last_ckpt(cell_dir) if matches else None
-    attempt = (prior["attempt"] + 1) if matches else 1
+    # `.get(..., 0)` so a malformed/older-schema sidecar (combo but no attempt)
+    # degrades to attempt=1 instead of raising inside the task wrapper.
+    attempt = (prior.get("attempt", 0) + 1) if matches else 1
     return ResumeContext(
         dir=cell_dir, is_resume=matches, last_ckpt=last, attempt=attempt
     )

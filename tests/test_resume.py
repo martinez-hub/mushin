@@ -68,3 +68,18 @@ def test_resume_context_is_public():
     import mushin
 
     assert mushin.ResumeContext is not None
+
+
+def test_build_resume_context_tolerates_sidecar_missing_attempt(tmp_path):
+    # A malformed / older-schema sidecar (has combo, lacks attempt) must not crash
+    # the task wrapper — attempt degrades to 1.
+    import json
+
+    from mushin._resume import STATUS_FILE, build_resume_context
+
+    (tmp_path / STATUS_FILE).write_text(
+        json.dumps({"status": "failed", "combo": {"seed": 0}})
+    )
+    rc = build_resume_context(tmp_path, {"seed": 0})
+    assert rc.is_resume is True
+    assert rc.attempt == 1  # missing attempt -> 0 + 1
