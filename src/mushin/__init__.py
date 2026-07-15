@@ -6,6 +6,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 from ._resume import ResumeContext
+from ._sweep_decorator import sweep
 from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
 from .study import (
@@ -108,6 +109,7 @@ __all__ = [
     "load_experiment",
     "load_from_checkpoint",
     "original_cwd",
+    "sweep",
     "tune_batch_size",
     "tune_learning_rate",
     "MetricsCallback",

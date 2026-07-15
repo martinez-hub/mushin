@@ -5,11 +5,33 @@ results back as a labeled `xarray.Dataset`.
 
 The full runnable script is at `examples/sweep_to_dataset.py` in the repository.
 
-## Define the workflow
+Decorate a function with `@mushin.sweep`, sweep it over a grid, and get results
+back as a labeled `xarray.Dataset` — no subclassing, no callbacks. Whatever the
+function returns as a `dict` becomes data variables in the output dataset.
 
-Subclass `MultiRunMetricsWorkflow` and implement a static `task` method.
-Whatever the method returns becomes a data variable in the output dataset —
-no callbacks, no logging framework, just a plain dict.
+```python
+import mushin
+
+@mushin.sweep
+def experiment(lr, seed):
+    ...  # train, evaluate
+    return dict(accuracy=acc)          # returned dict -> dataset variables
+
+ds = experiment.run(
+    lr=mushin.multirun([0.01, 0.1, 1.0]),
+    seed=mushin.multirun([0, 1, 2]),
+)
+```
+
+Need the full tool — `.failures`, `.plot()`, provenance, custom `to_xarray`? Drop
+to `experiment.workflow` (the last-run instance), or use the `MultiRunMetricsWorkflow`
+class directly (shown next).
+
+## Going deeper: the workflow class
+
+For advanced control (custom `pre_task`, `jobs_post_process`, subclassing like
+`RobustnessCurve`), subclass `MultiRunMetricsWorkflow` and implement a static
+`task` method — this is exactly what `@mushin.sweep` builds for you:
 
 ```python
 import torch as tr
