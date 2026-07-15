@@ -114,24 +114,40 @@ def _fail_soft(fn: Callable[[Any], T1]) -> Callable[[Any], T1 | "_FailedRun"]:
     return wrapped
 
 
-def _instrument_task(task):
+def _instrument_task(task, combo_of_cfg=None):
     """Wrap a (cfg)->result task so its returned dict is written to a
-    mushin_metrics.json sidecar in the per-job working dir (cwd). Per-run
-    provenance (git/versions/config) is written first, so a failing task still
-    leaves a provenance record behind."""
+    mushin_metrics.json sidecar in the per-job working dir (cwd), and a durable
+    mushin_cell_status.json records running->completed/failed from inside the job
+    (so completion survives a hard process kill). Per-run provenance is written
+    first, so a failing task still leaves a provenance record behind."""
     from pathlib import Path
 
     from ._provenance import write_provenance
+    from ._resume import read_cell_status, write_cell_status
     from ._sweep_io import write_metrics_sidecar
 
     def wrapped(cfg):
+        cwd = Path.cwd()
+        combo = combo_of_cfg(cfg) if combo_of_cfg is not None else {}
+        prior = read_cell_status(cwd)
+        # attempt increments only for a prior attempt of the SAME combo (a numeric
+        # dir reused by a different combo after a grid change resets to 1).
+        attempt = (
+            (prior["attempt"] + 1) if (prior and prior.get("combo") == combo) else 1
+        )
         try:
-            write_provenance(Path.cwd(), cfg)
+            write_provenance(cwd, cfg)
         except Exception:  # noqa: BLE001 - provenance is best-effort
             pass
-        result = task(cfg)
+        write_cell_status(cwd, status="running", combo=combo, attempt=attempt)
+        try:
+            result = task(cfg)
+        except Exception:  # noqa: BLE001 - record failure durably, then re-raise
+            write_cell_status(cwd, status="failed", combo=combo, attempt=attempt)
+            raise
         if isinstance(result, dict):
-            write_metrics_sidecar(Path.cwd(), result)
+            write_metrics_sidecar(cwd, result)
+        write_cell_status(cwd, status="completed", combo=combo, attempt=attempt)
         return result
 
     return wrapped
@@ -546,9 +562,35 @@ class BaseWorkflow:
         if pre_task_fn_wrapper is None:
             pre_task_fn_wrapper = _identity
 
+        # Swept (multirun) dimension names, derived from the FINAL override list
+        # via Hydra's own sweep detection — available before launch without the
+        # sweep's on-disk yaml. Used to record each cell's combo in its durable
+        # status sidecar, keyed identically to jobs_post_process / _resume_short_circuit.
+        _swept_names = tuple(
+            k
+            for k, v in self._parse_overrides(launch_overrides).items()
+            if isinstance(v, multirun)
+        )
+
+        _combo_of_cell = None
+        if hasattr(self, "_sanitize_coordinate_for_xarray"):
+
+            def _combo_of_cell(cfg, _names=_swept_names):
+                from omegaconf import OmegaConf
+
+                combo = {}
+                for n in _names:
+                    val = cfg[n]
+                    if OmegaConf.is_config(val):
+                        val = OmegaConf.to_container(val, resolve=True)
+                    combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
+                return combo
+
         task_call = _task_calls(
             pre_task=pre_task_fn_wrapper(self.pre_task),
-            task=_instrument_task(task_fn_wrapper(self.task)),
+            task=_instrument_task(
+                task_fn_wrapper(self.task), combo_of_cfg=_combo_of_cell
+            ),
         )
         if on_error == "nan":
             # Convert per-job exceptions into a sentinel so Hydra's basic sweeper

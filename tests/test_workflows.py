@@ -1172,3 +1172,63 @@ def test_run_does_not_duplicate_a_caller_hydra_chdir_override(tmp_path):
         o for o in captured["overrides"] if o.split("=", 1)[0] == "hydra.job.chdir"
     ]
     assert chdir_overrides == ["hydra.job.chdir=True"]  # exactly one, not duplicated
+
+
+def test_cell_status_sidecar_written_completed(tmp_path):
+    from mushin._resume import read_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    W().run(seed=multirun([0, 1]), working_dir=wd)
+    statuses = [
+        read_cell_status(d)
+        for d in Path(wd).iterdir()
+        if d.is_dir() and (d / "mushin_cell_status.json").exists()
+    ]
+    assert statuses and all(s["status"] == "completed" for s in statuses)
+
+
+def test_cell_status_sidecar_written_failed_under_fail_soft(tmp_path):
+    from mushin._resume import read_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            if seed == 1:
+                raise RuntimeError("boom")
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="fail"):
+        W().run(seed=multirun([0, 1]), working_dir=wd, on_error="nan")
+    got = {
+        read_cell_status(d)["combo"]["seed"]: read_cell_status(d)["status"]
+        for d in Path(wd).iterdir()
+        if d.is_dir() and (d / "mushin_cell_status.json").exists()
+    }
+    assert got == {0: "completed", 1: "failed"}
+
+
+def test_cell_status_combo_for_override_string_multirun(tmp_path):
+    # A multirun supplied via `overrides=[...]` (not the multirun() kwarg) must
+    # still record distinct, correctly-projected combos in the status sidecars —
+    # no crash, no collapse to an empty combo.
+    from mushin._resume import read_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    W().run(working_dir=wd, overrides=["+seed=0,1,2"])
+    combos = [
+        read_cell_status(d)["combo"]
+        for d in Path(wd).iterdir()
+        if d.is_dir() and (d / "mushin_cell_status.json").exists()
+    ]
+    assert sorted(c["seed"] for c in combos) == [0, 1, 2]
