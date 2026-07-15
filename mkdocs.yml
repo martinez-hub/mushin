@@ -81,6 +81,7 @@ nav:
       - Compare & batteries: notebooks/02_compare_and_batteries.ipynb
       - Studies: notebooks/03_study.ipynb
       - Resilient sweeps: notebooks/04_resilience.ipynb
+      - LLM evaluation: notebooks/05_llm_eval.ipynb
   - API Reference:
       - benchmark: reference/benchmark.md
       - llm: reference/llm.md
