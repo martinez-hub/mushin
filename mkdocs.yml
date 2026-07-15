@@ -32,6 +32,9 @@ theme:
 
 plugins:
   - search
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
   - mkdocstrings:
       handlers:
         python:
@@ -73,6 +76,8 @@ nav:
       - Understanding the statistics: guides/statistics.md
       - Analyzing from Claude Code: guides/mcp.md
   - Examples: examples.md
+  - Example notebooks:
+      - Sweeps → datasets: notebooks/01_sweep_to_dataset.ipynb
   - API Reference:
       - benchmark: reference/benchmark.md
       - llm: reference/llm.md
