@@ -147,6 +147,40 @@ importable (module-level). Keeping tasks module-level is the portable choice.
 Resilience (`on_error="nan"`, `resume=True`) and provenance behave identically
 out-of-process.
 
+### Two axes of parallelism: launchers vs. `HydraDDP`
+
+A launcher and [`HydraDDP`](../reference/lightning.md) are **not** alternatives —
+they parallelize different things and compose:
+
+| | Parallelizes | What it is | Where it goes |
+|---|---|---|---|
+| `launcher="joblib"` / `submitit` | the sweep's **cells** — each `(lr, seed)` combo runs in its own worker process / node | a Hydra **launcher** | passed to `run(...)` |
+| `HydraDDP` | **one cell's training** — a single model trained data-parallel across multiple GPUs | a Lightning **`DDPStrategy`** | passed to a `Trainer` **inside your `task`** |
+
+So `launcher=` distributes the *grid*, while `HydraDDP` uses the GPUs *within a
+single cell*. The `parallel_sweep.py` example above shows only the launcher axis
+(its toy task does no training). Use `HydraDDP` inside the task, and the two stack
+— e.g. submit each cell to a SLURM node, and let `HydraDDP` use that node's GPUs:
+
+```python
+import pytorch_lightning as pl
+from mushin import HydraDDP
+
+@mushin.sweep
+def experiment(lr, seed):
+    trainer = pl.Trainer(strategy=HydraDDP(), devices=4)   # 4 GPUs per cell
+    trainer.fit(model, ...)
+    return dict(accuracy=...)
+
+experiment.run(                                            # each cell -> a SLURM node
+    lr=mushin.multirun([0.01, 0.1]), seed=mushin.multirun([0, 1]),
+    launcher="submitit_slurm",
+)
+```
+
+`HydraDDP` (single-node multi-GPU) needs real GPUs, so it isn't exercised by the
+CPU-only examples/CI; see the [lightning reference](../reference/lightning.md).
+
 ## See also
 
 - [Tutorial](../tutorial.md) — end-to-end: sweep → dataset → compare
