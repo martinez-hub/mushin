@@ -1109,3 +1109,65 @@ def test_narrowed_grid_reusing_dir_is_complete(tmp_path):
     wf2 = W()
     wf2.run(seed=multirun([0, 2]), working_dir=wd)
     assert wf2.is_complete is True
+
+
+def test_run_sets_hydra_chdir_explicitly_and_silences_deprecation(tmp_path):
+    # Regression: under version_base "1.1" Hydra emits a UserWarning that future
+    # versions will no longer change the job working directory by default. The
+    # workflow depends on the chdir behavior (each job reads/writes its metrics
+    # sidecar in its own dir), so `run` sets `hydra.job.chdir=True` explicitly —
+    # preserving behavior and silencing the warning (which fires only while the
+    # setting is left implicit).
+    import warnings
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wf = W()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "d"))
+
+    chdir_warnings = [
+        w
+        for w in caught
+        if "no longer change working directory" in str(w.message)
+    ]
+    assert not chdir_warnings, [str(w.message) for w in chdir_warnings]
+    # behavior preserved: the sweep still assembles a labeled dataset
+    assert wf.to_xarray().sizes == {"seed": 2}
+
+
+def test_run_does_not_duplicate_a_caller_hydra_chdir_override(tmp_path):
+    # A caller who passes their own `hydra.job.chdir` override wins — `run` must
+    # not append a second, conflicting one. (Use `=True`, which matches the
+    # workflow's required behavior, so the sweep still completes normally.)
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    captured = {}
+
+    import mushin.workflows as _wf_mod
+
+    orig_launch = _wf_mod.launch
+
+    def _spy_launch(*args, **kwargs):
+        captured["overrides"] = list(kwargs.get("overrides", []))
+        return orig_launch(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_wf_mod, "launch", _spy_launch)
+        W().run(
+            seed=multirun([0, 1]),
+            working_dir=str(tmp_path / "d"),
+            overrides=["hydra.job.chdir=True"],
+        )
+
+    chdir_overrides = [
+        o for o in captured["overrides"] if o.split("=", 1)[0] == "hydra.job.chdir"
+    ]
+    assert chdir_overrides == ["hydra.job.chdir=True"]  # exactly one, not duplicated

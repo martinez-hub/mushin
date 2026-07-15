@@ -500,6 +500,15 @@ class BaseWorkflow:
         if launcher is not None:
             launch_overrides.append(f"hydra/launcher={launcher}")
 
+        # Under version_base "1.1" Hydra changes the working directory per job at
+        # runtime, and the workflow depends on it: each job writes and reads its
+        # metrics sidecar in its own chdir'd directory. Set `hydra.job.chdir`
+        # explicitly to preserve that behavior AND silence Hydra's 1.1->1.2
+        # deprecation warning, which fires only while the setting is left
+        # implicit. A caller who passes their own `hydra.job.chdir` override wins.
+        if not any(o.split("=", 1)[0] == "hydra.job.chdir" for o in launch_overrides):
+            launch_overrides.append("hydra.job.chdir=True")
+
         for k, v in workflow_overrides.items():
             value_check(k, v, type_=(int, float, bool, str, multirun, hydra_list))
 

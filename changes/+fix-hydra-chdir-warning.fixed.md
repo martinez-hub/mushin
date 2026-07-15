@@ -1,0 +1,1 @@
+Sweeps no longer emit Hydra's "Future Hydra versions will no longer change working directory at job runtime" deprecation warning: `MultiRunMetricsWorkflow.run` now sets `hydra.job.chdir=True` explicitly (the behavior the workflow already relies on).
