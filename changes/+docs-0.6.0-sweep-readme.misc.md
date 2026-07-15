@@ -1,0 +1,1 @@
+Docs: README and the workflows guide now lead with the `@mushin.sweep` decorator, and `mushin.sweep`, out-of-process launchers, and hard-kill-durable resume are covered in the README feature list + API reference.
