@@ -5,6 +5,11 @@ from mushin import multirun
 from mushin.workflows import MultiRunMetricsWorkflow
 
 
+@mushin.sweep
+def _oop_experiment(seed):
+    return dict(v=float(seed))
+
+
 def test_decorated_sweep_returns_labeled_dataset(tmp_path):
     @mushin.sweep
     def experiment(a, b):
@@ -107,3 +112,33 @@ def test_decorated_sweep_receives_mushin_resume(tmp_path):
     experiment.run(seed=multirun([0, 1]), working_dir=wd, resume=True)
     assert 1 not in seen  # seed 1 completed -> short-circuited
     assert seen[0].is_resume is True and seen[0].last_ckpt.name == "last.ckpt"
+
+
+def test_decorated_sklearn_sweep_no_torch(tmp_path):
+    import pytest
+
+    pytest.importorskip("sklearn")
+    from sklearn.datasets import make_classification
+    from sklearn.linear_model import LogisticRegression
+
+    @mushin.sweep
+    def experiment(C, seed):
+        x, y = make_classification(n_samples=200, random_state=seed)
+        m = LogisticRegression(C=C, max_iter=500).fit(x, y)
+        return dict(accuracy=float(m.score(x, y)))
+
+    ds = experiment.run(
+        C=multirun([0.1, 1.0]), seed=multirun([0, 1]), working_dir=str(tmp_path / "s")
+    )
+    assert ds.sizes == {"C": 2, "seed": 2}
+
+
+def test_decorated_sweep_out_of_process_joblib(tmp_path):
+    import pytest
+
+    pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
+    ds = _oop_experiment.run(
+        seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), launcher="joblib"
+    )
+    assert ds.sizes == {"seed": 3}
+    assert float(ds["v"].sel(seed=2)) == 2.0
