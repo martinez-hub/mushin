@@ -561,6 +561,18 @@ class BaseWorkflow:
             launch_overrides.append("hydra.job.chdir=True")
 
         for k, v in workflow_overrides.items():
+            # A bare list/tuple is the most common new-user slip (forgetting to
+            # wrap sweep values). Give an actionable error instead of the generic
+            # type-list one — `multirun`/`hydra_list` are UserList, not list/tuple,
+            # so a real sweep argument is not caught here.
+            if isinstance(v, (list, tuple)):
+                raise TypeError(
+                    f"`{k}` was given a bare {type(v).__name__}, {list(v)!r}. To "
+                    f"sweep over these values, wrap them: "
+                    f"`{k}=mushin.multirun({list(v)!r})`. To pass the list as a "
+                    f"single (non-swept) argument value, use "
+                    f"`mushin.hydra_list({list(v)!r})`."
+                )
             value_check(k, v, type_=(int, float, bool, str, multirun, hydra_list))
 
             prefix = ""
