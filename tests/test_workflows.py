@@ -1337,3 +1337,20 @@ def test_task_runner_is_picklable(tmp_path):
     tc = captured["task_call"]
     assert isinstance(tc, wf_mod._TaskRunner)
     pickle.loads(pickle.dumps(tc))  # the whole dispatch object is picklable
+
+
+def test_bare_list_sweep_arg_gives_actionable_multirun_error():
+    # A new user's most likely slip: forgetting multirun() and passing a bare list.
+    # The error must point at the fix (multirun) and the escape hatch (hydra_list),
+    # not just list the internal accepted types.
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr):
+            return dict(v=float(lr))
+
+    with pytest.raises(TypeError, match=r"mushin\.multirun\("):
+        W().run(lr=[0.01, 0.1, 1.0])
+    with pytest.raises(TypeError, match=r"mushin\.hydra_list\("):
+        W().run(lr=[0.01, 0.1, 1.0])
+    # a legitimate multirun still works (must NOT be caught by the bare-list guard)
+    W().run(lr=multirun([0.01, 0.1]), working_dir=None)
