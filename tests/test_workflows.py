@@ -1134,9 +1134,7 @@ def test_run_sets_hydra_chdir_explicitly_and_silences_deprecation(tmp_path):
         wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "d"))
 
     chdir_warnings = [
-        w
-        for w in caught
-        if "no longer change working directory" in str(w.message)
+        w for w in caught if "no longer change working directory" in str(w.message)
     ]
     assert not chdir_warnings, [str(w.message) for w in chdir_warnings]
     # behavior preserved: the sweep still assembles a labeled dataset
