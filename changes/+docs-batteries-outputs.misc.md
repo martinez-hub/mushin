@@ -1,1 +1,0 @@
-Documentation: the Built-in batteries guide now shows real captured outputs under every battery, plus a flagship notebook-style walkthrough (comparing two classifiers) with the actual summary table, significant p-values, and interpretation.
