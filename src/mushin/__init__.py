@@ -8,11 +8,17 @@ from typing import TYPE_CHECKING
 from ._resume import ResumeContext
 from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
-from .lightning import HydraDDP, MetricsCallback
 from .study import (
     Study,  # keep last of eager block: avoids circular import via .study -> _sweep
 )
 from .workflows import MultiRunMetricsWorkflow, hydra_list, multirun
+
+# The Lightning integration (`HydraDDP`, `MetricsCallback`) is loaded on first
+# attribute access (see __getattr__): `mushin.lightning.callbacks` imports
+# pytorch_lightning, which alone accounts for ~1.1s (~65%) of a cold `import
+# mushin` and is unused by the sweep -> xarray core. `_tuning`/`_study` import
+# pytorch_lightning only inside functions, so they stay eager and cheap.
+_LAZY_LIGHTNING = frozenset({"HydraDDP", "MetricsCallback"})
 
 # Benchmark exports are loaded on first attribute access (see __getattr__), so a
 # bare `import mushin` does not pull torchmetrics-heavy battery code.
@@ -58,6 +64,7 @@ if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
         retrieval_battery,
         segmentation_battery,
     )
+    from .lightning import HydraDDP, MetricsCallback  # noqa: F401
 
     # Not in __all__ (deprecated top-level names); kept for type-checkers only.
     from .workflows import BaseWorkflow, RobustnessCurve  # noqa: F401
@@ -70,6 +77,10 @@ def __getattr__(name: str):
         return module
     if name in _LAZY_BENCHMARK:
         value = getattr(importlib.import_module("mushin.benchmark"), name)
+        globals()[name] = value  # cache so later lookups skip __getattr__
+        return value
+    if name in _LAZY_LIGHTNING:
+        value = getattr(importlib.import_module("mushin.lightning"), name)
         globals()[name] = value  # cache so later lookups skip __getattr__
         return value
     if name in _DEPRECATED:
