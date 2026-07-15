@@ -189,3 +189,33 @@ def test_resume_of_legacy_sweep_without_status_sidecars(tmp_path):
     wf.run(seed=multirun([0, 1, 2]), working_dir=str(wd), resume=True)
     assert calls["n"] == 0  # all three completed cells skipped via the legacy manifest
     assert wf.is_complete
+
+
+class _OOPWorkflow(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(seed):
+        if seed == 1:
+            raise RuntimeError("boom")
+        return dict(v=float(seed))
+
+
+def test_sweep_runs_out_of_process_with_joblib(tmp_path):
+    # The picklable _TaskRunner must survive being shipped to a separate worker
+    # process by the joblib (loky) launcher, and fail-soft must still work.
+    import numpy as np
+    import pytest
+
+    pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
+
+    wf = _OOPWorkflow()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            seed=multirun([0, 1, 2]),
+            working_dir=str(tmp_path / "s"),
+            launcher="joblib",
+            on_error="nan",
+        )
+    ds = wf.to_xarray()
+    assert ds.sizes == {"seed": 3}
+    vals = {int(s): float(ds["v"].sel(seed=s)) for s in ds["seed"].values}
+    assert np.isnan(vals[1]) and vals[0] == 0.0 and vals[2] == 2.0

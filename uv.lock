@@ -1282,6 +1282,19 @@ wheels = [
 ]
 
 [[package]]
+name = "hydra-joblib-launcher"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "hydra-core" },
+    { name = "joblib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/94/6d81cd0858295b6efaa420624f120a594a90e54f36b165de8b47b62e0f76/hydra-joblib-launcher-1.2.0.tar.gz", hash = "sha256:b4dc8b990221a0df048c094954356c6532585557e708e8198c46a877b379a6d5", size = 4647, upload-time = "2022-05-17T22:18:42.076Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/50/40613fdf65f9227bc0b073c1ee9db2e2298f7b6cd248e8b4825eedc292eb/hydra_joblib_launcher-1.2.0-py3-none-any.whl", hash = "sha256:57bfd042b015056157297de93e8ec1c6bc75fd39bd3b300e1599db0c5d992eee", size = 5203, upload-time = "2022-05-17T22:18:40.304Z" },
+]
+
+[[package]]
 name = "hydra-zen"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2454,6 +2467,7 @@ viz = [
 [package.dev-dependencies]
 dev = [
     { name = "codespell" },
+    { name = "hydra-joblib-launcher" },
     { name = "hypothesis" },
     { name = "ipykernel" },
     { name = "jupytext" },
@@ -2510,6 +2524,7 @@ provides-extras = ["viz", "netcdf", "mcp", "detection", "image", "audio"]
 [package.metadata.requires-dev]
 dev = [
     { name = "codespell", specifier = ">=2.3" },
+    { name = "hydra-joblib-launcher", specifier = ">=1.2" },
     { name = "hypothesis", specifier = ">=6.28.0" },
     { name = "ipykernel", specifier = ">=6.0" },
     { name = "jupytext", specifier = ">=1.16" },
