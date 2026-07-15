@@ -8,6 +8,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.6.0] - 2026-07-15
+
+### Added
+
+- New `@mushin.sweep` decorator: turn a plain `task`-style function into a runnable sweep with no subclassing — `experiment.run(lr=multirun([...]), seed=multirun([...]))` returns the labeled `xarray.Dataset` directly. Drop to `experiment.workflow` (the last-run `MultiRunMetricsWorkflow`) or `experiment.workflow_cls` for power features; `mushin_resume` and all `run()` resilience options carry through. The `MultiRunMetricsWorkflow` subclass form is unchanged.
+- Resumable sweeps now survive a hard process kill (OOM, SLURM preemption): each cell records its completion durably from inside its own job, so `resume=True` never recomputes finished cells. A task may also declare a `mushin_resume` parameter to receive a `ResumeContext` (the cell's directory, `is_resume`, and the last checkpoint) and resume its own training mid-run.
+- Sweeps can now use out-of-process Hydra launchers (e.g. `hydra-joblib-launcher`, submitit): per-cell dispatch is stdlib-picklable, so `run(..., launcher="joblib")` parallelizes across worker processes. Previously any process-backed launcher failed with a `PicklingError`. Resilience, resume, and provenance semantics are unchanged in-process and preserved out-of-process.
+
+### Changed
+
+- Provenance capture no longer spawns git subprocesses per sweep cell. The sweep-constant part of the record (git state + package versions — three `git` subprocesses via `_git()`) is now captured **once** per `run()` and reused for every cell, instead of being recomputed per cell. An N-cell sweep now spawns 3 git subprocesses instead of 3N (e.g. ~30s less git overhead on a 1000-cell sweep). Each cell's `mushin_provenance.json` is byte-for-byte equivalent (only `timestamp`/`config` vary per cell, as before).
+- `import mushin` is now ~65% faster (~1.7s → ~0.6s on a cold import): the Lightning integration (`HydraDDP`, `MetricsCallback`) and its heavy `pytorch_lightning` dependency (which also transitively pulled in matplotlib and scipy) now load lazily on first attribute access instead of at import time. The sweep → `xarray` core no longer pays for Lightning it never uses. All public names resolve unchanged; `_tuning`/`Study` still work (they import pytorch_lightning only inside functions).
+
+### Fixed
+
+- Sweeps no longer emit Hydra's "Future Hydra versions will no longer change working directory at job runtime" deprecation warning: `MultiRunMetricsWorkflow.run` now sets `hydra.job.chdir=True` explicitly (the behavior the workflow already relies on).
+
+### Misc
+
+- Added six runnable EQUINE-style example notebooks (sweeps, compare + batteries, Study, resilient sweeps, LLM evaluation, scikit-learn) under an "Example notebooks" section of the docs, executed in CI via nbmake so they stay current.
+- CI: a batteries-clean-install job builds the wheel, installs it (non-editable) with the detection/image/audio extras into a fresh env, and runs all 7 battery examples against it — catching packaging / optional-extra issues the editable test job would miss.
+- Documentation: a Built-in batteries guide covering all 7 benchmark batteries (classification, segmentation, detection, regression, retrieval, image_quality, audio) with real-model recipes and CI-tested runnable toys.
+- Documentation: add a top-level Examples page indexing all runnable example scripts (sweep_to_dataset, sklearn_sweep, compare_classifiers, study_mnist, segmentation_demo, compare_llms_demo, batteries), each with a one-line description and a link, plus a pointer to the batteries guide.
+- Documentation: add sweep resilience + provenance (0.5.0) to the README "What it provides" list.
+- Documentation: the Built-in batteries guide now shows real captured outputs under every battery, plus a flagship notebook-style walkthrough (comparing two classifiers) with the actual summary table, significant p-values, and interpretation.
+
+
 ## [0.5.0] - 2026-07-14
 
 ### Added
@@ -186,7 +213,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/martinez-hub/mushin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/martinez-hub/mushin/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/martinez-hub/mushin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/martinez-hub/mushin/compare/v0.3.0...v0.4.0
