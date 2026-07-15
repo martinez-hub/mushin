@@ -110,10 +110,14 @@ pip install hydra-joblib-launcher     # local multiprocessing
 wf.run(..., launcher="joblib")        # loky/processes backend
 ```
 
-Out-of-process launchers pickle each cell's task to ship it to a worker, so your
-`task` (and any custom `pre_task`) must be importable (module-level) — the normal
-case. Nested/lambda tasks run only in-process. Resilience (`on_error="nan"`,
-`resume=True`) and provenance behave identically out-of-process.
+Out-of-process launchers serialize each cell's task to ship it to a worker. The
+default joblib (loky) and submitit backends use `cloudpickle`, which handles most
+tasks — including lambdas and nested functions. Some backends (joblib's
+`multiprocessing` backend, or a pickle-based submitit setup) use the standard
+library's `pickle`, which requires your `task` (and any custom `pre_task`) to be
+importable (module-level). Keeping tasks module-level is the portable choice.
+Resilience (`on_error="nan"`, `resume=True`) and provenance behave identically
+out-of-process.
 
 ## See also
 
