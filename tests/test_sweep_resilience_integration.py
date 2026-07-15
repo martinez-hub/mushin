@@ -101,3 +101,91 @@ def test_fail_soft_resume_compare_end_to_end(tmp_path):
     # stats now succeed on the completed dataset
     result = compare_methods(ds2, test="welch")
     assert result is not None
+
+
+def test_resume_after_hard_kill_skips_completed_cells(tmp_path):
+    # A sweep is SIGKILLed after some cells finish (no manifest write happens).
+    # Resume must skip the finished cells using the durable per-cell sidecars.
+    import subprocess
+    import sys
+    import textwrap
+    import time
+
+    from mushin._resume import read_cell_status
+
+    wd = tmp_path / "s"
+    marker = tmp_path / "ran.log"
+    script = tmp_path / "sweep.py"
+    script.write_text(
+        textwrap.dedent(f"""
+        import time
+        from mushin import multirun
+        from mushin.workflows import MultiRunMetricsWorkflow
+        class W(MultiRunMetricsWorkflow):
+            @staticmethod
+            def task(seed):
+                open(r"{marker}", "a").write(f"{{seed}}\\n")
+                if seed == 2:
+                    time.sleep(30)   # hang so the parent can SIGKILL mid-cell
+                return dict(val=float(seed))
+        W().run(seed=multirun([0,1,2,3]), working_dir=r"{wd}")
+        """)
+    )
+    p = subprocess.Popen([sys.executable, str(script)])
+    done = set()
+    for _ in range(600):
+        for d in list(wd.glob("*")) if wd.exists() else []:
+            s = read_cell_status(d) if d.is_dir() else None
+            if s and s["status"] == "completed":
+                done.add(s["combo"]["seed"])
+        if {0, 1} <= done:
+            break
+        time.sleep(0.1)
+    p.kill()
+    p.wait()
+    assert {0, 1} <= done  # at least these two finished before the kill
+
+    marker.write_text("")  # reset the ran log
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W2(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            open(str(marker), "a").write(f"{seed}\n")
+            return dict(val=float(seed))
+
+    wf = W2()
+    wf.run(seed=multirun([0, 1, 2, 3]), working_dir=str(wd), resume=True)
+    reran = {int(x) for x in marker.read_text().split()}
+    assert 0 not in reran and 1 not in reran  # durable completion survived the kill
+    assert wf.is_complete
+
+
+def test_resume_of_legacy_sweep_without_status_sidecars(tmp_path):
+    # Backward compat: a sweep dir created by pre-feature mushin has an end-of-run
+    # manifest + metrics sidecars but NO per-cell status sidecars. Resume must
+    # still skip completed cells (via the legacy-manifest seed), not recompute all.
+
+    from mushin import multirun
+    from mushin._resume import STATUS_FILE
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    calls = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            calls["n"] += 1
+            return dict(val=float(seed))
+
+    wd = tmp_path / "s"
+    W().run(seed=multirun([0, 1, 2]), working_dir=str(wd))
+    for p in wd.rglob(STATUS_FILE):
+        p.unlink()
+
+    calls["n"] = 0
+    wf = W()
+    wf.run(seed=multirun([0, 1, 2]), working_dir=str(wd), resume=True)
+    assert calls["n"] == 0  # all three completed cells skipped via the legacy manifest
+    assert wf.is_complete

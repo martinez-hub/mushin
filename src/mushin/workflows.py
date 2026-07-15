@@ -608,7 +608,15 @@ class BaseWorkflow:
             # sidecar read runs INSIDE the chdir'd Hydra job, so a relative
             # `manifest.root` would resolve against the job cwd and never find
             # the prior cell's sidecar (silently re-running every completed cell).
-            prior_manifest = Manifest.load_or_new(Path(working_dir).resolve(), [])
+            # Kill-durable: reconstruct prior completion from the per-cell status
+            # sidecars (written from inside each job), not the end-of-run manifest
+            # (which a hard kill would have prevented). Pass the current run's swept
+            # names so the manifest carries the sweep dimensions even when no prior
+            # manifest file survived — otherwise `_resume_short_circuit` would
+            # project onto an empty param set and mis-key every cell.
+            prior_manifest = Manifest.from_cell_status(
+                Path(working_dir).resolve(), list(_swept_names)
+            )
             task_call = _resume_short_circuit(task_call, prior_manifest)
 
         self._capture_env = capture_env

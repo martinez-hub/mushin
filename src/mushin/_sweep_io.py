@@ -69,6 +69,35 @@ class Manifest:
             return cls(root, d.get("params", params), d.get("cells", {}))
         return cls(root, params)
 
+    @classmethod
+    def from_cell_status(cls, root, params: list[str]) -> Manifest:
+        """Reconstruct a manifest, kill-durably, by scanning per-cell status
+        sidecars under ``root/*/`` (each written from inside its own job, so a
+        mid-sweep process kill cannot lose completed cells).
+
+        Backward compatible: seeds from the legacy end-of-run manifest first, so a
+        sweep dir created before per-cell sidecars existed still resumes; per-cell
+        sidecars (when present) are authoritative and overlay the seed."""
+        from ._resume import read_cell_status
+
+        root = Path(root)
+        # Seed from the legacy manifest (empty if none) -> pre-upgrade sweeps still
+        # resume their completed cells.
+        m = cls.load_or_new(root, params)
+        if not root.exists():
+            return m
+        for d in root.iterdir():
+            if not d.is_dir():
+                continue
+            s = read_cell_status(d)
+            if s is None or "combo" not in s:
+                continue
+            m.cells[combo_key(s["combo"])] = {
+                "dir": d.name,
+                "status": s.get("status", "pending"),
+            }
+        return m
+
     def status(self, combo: dict) -> str:
         return self.cells.get(combo_key(combo), {}).get("status", "pending")
 
