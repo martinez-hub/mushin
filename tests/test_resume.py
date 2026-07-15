@@ -42,3 +42,23 @@ def test_resume_context_is_frozen():
         assert "cannot assign" in str(e).lower() or "frozen" in str(e).lower()
     else:  # pragma: no cover
         raise AssertionError("ResumeContext must be frozen")
+
+
+def test_build_resume_context_combo_match_guard(tmp_path):
+    from mushin._resume import build_resume_context, write_cell_status
+
+    # first attempt of combo {"seed": 0}: fresh
+    rc = build_resume_context(tmp_path, {"seed": 0})
+    assert rc.is_resume is False and rc.attempt == 1 and rc.last_ckpt is None
+
+    # a prior attempt of the SAME combo left a checkpoint -> resume it
+    write_cell_status(tmp_path, status="failed", combo={"seed": 0}, attempt=1)
+    (tmp_path / "last.ckpt").write_text("state")
+    rc = build_resume_context(tmp_path, {"seed": 0})
+    assert rc.is_resume is True and rc.attempt == 2
+    assert rc.last_ckpt is not None and rc.last_ckpt.name == "last.ckpt"
+
+    # SAME dir now queried for a DIFFERENT combo (numeric dir reused after a grid
+    # change) -> must NOT resume or surface the other cell's checkpoint
+    rc = build_resume_context(tmp_path, {"seed": 9})
+    assert rc.is_resume is False and rc.attempt == 1 and rc.last_ckpt is None

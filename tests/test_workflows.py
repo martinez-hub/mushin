@@ -1232,3 +1232,49 @@ def test_cell_status_combo_for_override_string_multirun(tmp_path):
         if d.is_dir() and (d / "mushin_cell_status.json").exists()
     ]
     assert sorted(c["seed"] for c in combos) == [0, 1, 2]
+
+
+def test_task_receives_resume_context_on_reexecution(tmp_path):
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL = True
+
+        @staticmethod
+        def task(seed, mushin_resume=None):
+            seen[seed] = mushin_resume
+            if mushin_resume is not None and mushin_resume.dir is not None:
+                (mushin_resume.dir / "last.ckpt").write_text("state")
+            if seed == 0 and W.FAIL:
+                raise RuntimeError("boom")
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    W.FAIL = True
+    with pytest.warns(UserWarning, match="fail"):
+        W().run(seed=multirun([0, 1]), working_dir=wd, on_error="nan")
+    assert seen[0] is not None and seen[0].is_resume is False and seen[0].attempt == 1
+
+    W.FAIL = False
+    seen.clear()
+    wf = W()
+    wf.run(seed=multirun([0, 1]), working_dir=wd, resume=True)
+    assert 1 not in seen  # seed 1 completed -> short-circuited (task not called)
+    rc = seen[0]
+    assert rc.is_resume is True
+    assert rc.attempt == 2
+    assert rc.last_ckpt is not None and rc.last_ckpt.name == "last.ckpt"
+    assert wf.is_complete
+
+
+def test_task_without_mushin_resume_param_is_unaffected(tmp_path):
+    # Introspection gate: a task NOT declaring mushin_resume is called as today,
+    # with no Hydra/zen config error.
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wf = W()
+    wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    assert wf.to_xarray().sizes == {"seed": 2}

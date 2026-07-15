@@ -114,43 +114,70 @@ def _fail_soft(fn: Callable[[Any], T1]) -> Callable[[Any], T1 | "_FailedRun"]:
     return wrapped
 
 
-def _instrument_task(task, combo_of_cfg=None):
+def _instrument_task(task, combo_of_cfg=None, inject_resume=False):
     """Wrap a (cfg)->result task so its returned dict is written to a
     mushin_metrics.json sidecar in the per-job working dir (cwd), and a durable
     mushin_cell_status.json records running->completed/failed from inside the job
-    (so completion survives a hard process kill). Per-run provenance is written
-    first, so a failing task still leaves a provenance record behind."""
+    (so completion survives a hard process kill). When ``inject_resume`` is set,
+    the current cell's ResumeContext is published to a contextvar for the duration
+    of the task call. Per-run provenance is written first."""
     from pathlib import Path
 
     from ._provenance import write_provenance
-    from ._resume import read_cell_status, write_cell_status
+    from ._resume import _CURRENT_RESUME, build_resume_context, write_cell_status
     from ._sweep_io import write_metrics_sidecar
 
     def wrapped(cfg):
         cwd = Path.cwd()
         combo = combo_of_cfg(cfg) if combo_of_cfg is not None else {}
-        prior = read_cell_status(cwd)
-        # attempt increments only for a prior attempt of the SAME combo (a numeric
-        # dir reused by a different combo after a grid change resets to 1).
-        attempt = (
-            (prior["attempt"] + 1) if (prior and prior.get("combo") == combo) else 1
-        )
+        # Compute BEFORE the "running" write overwrites the prior status, so
+        # is_resume/attempt reflect the previous attempt (combo-match guarded).
+        rc = build_resume_context(cwd, combo)
         try:
             write_provenance(cwd, cfg)
         except Exception:  # noqa: BLE001 - provenance is best-effort
             pass
-        write_cell_status(cwd, status="running", combo=combo, attempt=attempt)
+        token = _CURRENT_RESUME.set(rc) if inject_resume else None
+        write_cell_status(cwd, status="running", combo=combo, attempt=rc.attempt)
         try:
             result = task(cfg)
         except Exception:  # noqa: BLE001 - record failure durably, then re-raise
-            write_cell_status(cwd, status="failed", combo=combo, attempt=attempt)
+            write_cell_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
             raise
+        finally:
+            if token is not None:
+                _CURRENT_RESUME.reset(token)
         if isinstance(result, dict):
             write_metrics_sidecar(cwd, result)
-        write_cell_status(cwd, status="completed", combo=combo, attempt=attempt)
+        write_cell_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
         return result
 
     return wrapped
+
+
+def _bind_resume_kwarg(task):
+    """If ``task`` declares a ``mushin_resume`` parameter, return a wrapper that
+    (a) hides that parameter from hydra-zen's `zen` (which would otherwise try to
+    resolve it from config) by stripping it from the exposed signature, and
+    (b) injects the current cell's ResumeContext from a contextvar at call time.
+    Returns ``(task, False)`` unchanged if the task does not opt in."""
+    import functools
+    import inspect
+
+    sig = inspect.signature(task)
+    if "mushin_resume" not in sig.parameters:
+        return task, False
+
+    from ._resume import current_resume
+
+    exposed = [p for n, p in sig.parameters.items() if n != "mushin_resume"]
+
+    @functools.wraps(task)
+    def _wrapper(*args, **kwargs):
+        return task(*args, **kwargs, mushin_resume=current_resume())
+
+    _wrapper.__signature__ = sig.replace(parameters=exposed)
+    return _wrapper, True
 
 
 def _resume_short_circuit(inner, manifest):
@@ -586,10 +613,13 @@ class BaseWorkflow:
                     combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
                 return combo
 
+        _task_fn, _wants_resume = _bind_resume_kwarg(self.task)
         task_call = _task_calls(
             pre_task=pre_task_fn_wrapper(self.pre_task),
             task=_instrument_task(
-                task_fn_wrapper(self.task), combo_of_cfg=_combo_of_cell
+                task_fn_wrapper(_task_fn),
+                combo_of_cfg=_combo_of_cell,
+                inject_resume=_wants_resume,
             ),
         )
         if on_error == "nan":

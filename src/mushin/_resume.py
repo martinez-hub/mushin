@@ -6,6 +6,7 @@ opts in via a ``mushin_resume`` parameter (see the resume-hardening design)."""
 
 from __future__ import annotations
 
+import contextvars
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,3 +65,30 @@ def discover_last_ckpt(cell_dir) -> Path | None:
     if not ckpts:
         return None
     return max(ckpts, key=lambda p: p.stat().st_mtime)
+
+
+_CURRENT_RESUME: contextvars.ContextVar[ResumeContext | None] = contextvars.ContextVar(
+    "mushin_current_resume", default=None
+)
+
+
+def current_resume() -> ResumeContext | None:
+    """The ResumeContext for the cell currently executing, or None."""
+    return _CURRENT_RESUME.get()
+
+
+def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
+    """Compute the ResumeContext for a cell about to (re-)execute in ``cell_dir``.
+
+    Combo-match guard: a prior status sidecar is honored ONLY if its recorded
+    combo equals ``combo``. This makes numeric-dir reuse safe — if a grid change
+    reused this dir for a different cell, we neither resume nor surface that
+    cell's checkpoint."""
+    cell_dir = Path(cell_dir)
+    prior = read_cell_status(cell_dir)
+    matches = prior is not None and prior.get("combo") == combo
+    last = discover_last_ckpt(cell_dir) if matches else None
+    attempt = (prior["attempt"] + 1) if matches else 1
+    return ResumeContext(
+        dir=cell_dir, is_resume=matches, last_ckpt=last, attempt=attempt
+    )
