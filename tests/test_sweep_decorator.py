@@ -56,3 +56,54 @@ def test_fresh_instance_per_run_no_state_leak(tmp_path):
     assert experiment.workflow.failures  # this run failed
     experiment.run(seed=multirun([0]), working_dir=str(tmp_path / "b"))
     assert experiment.workflow.failures == []
+
+
+def test_decorated_sweep_resilience_and_resume(tmp_path):
+    import numpy as np
+    import pytest
+
+    FAIL = {"on": True}
+
+    @mushin.sweep
+    def experiment(seed):
+        if seed == 1 and FAIL["on"]:
+            raise RuntimeError("boom")
+        return dict(v=float(seed))
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="fail"):
+        ds = experiment.run(seed=multirun([0, 1, 2]), working_dir=wd, on_error="nan")
+    assert np.isnan(float(ds["v"].sel(seed=1)))
+    assert ds.attrs["mushin_failures"]  # carried on the dataset
+
+    FAIL["on"] = False
+    ds2 = experiment.run(seed=multirun([0, 1, 2]), working_dir=wd, resume=True)
+    assert float(ds2["v"].sel(seed=1)) == 1.0  # filled on resume
+    assert not ds2.attrs.get("mushin_failures")
+
+
+def test_decorated_sweep_receives_mushin_resume(tmp_path):
+    import pytest
+
+    seen = {}
+    FAIL = {"on": True}
+
+    @mushin.sweep
+    def experiment(seed, mushin_resume=None):
+        seen[seed] = mushin_resume
+        if mushin_resume is not None and mushin_resume.dir is not None:
+            (mushin_resume.dir / "last.ckpt").write_text("state")
+        if seed == 0 and FAIL["on"]:
+            raise RuntimeError("boom")
+        return dict(v=float(seed))
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="fail"):
+        experiment.run(seed=multirun([0, 1]), working_dir=wd, on_error="nan")
+    assert seen[0].is_resume is False
+
+    FAIL["on"] = False
+    seen.clear()
+    experiment.run(seed=multirun([0, 1]), working_dir=wd, resume=True)
+    assert 1 not in seen  # seed 1 completed -> short-circuited
+    assert seen[0].is_resume is True and seen[0].last_ckpt.name == "last.ckpt"
