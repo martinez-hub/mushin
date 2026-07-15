@@ -97,6 +97,24 @@ from mushin import multirun, hydra_list
     - **Output directories:** Hydra writes each job's output to a timestamped
       subdirectory. Pass `working_dir=...` to control the root.
 
+## Parallel & out-of-process launchers
+
+By default a sweep runs its cells in-process, sequentially (Hydra's `basic`
+launcher). Install a Hydra launcher plugin and pass `launcher=` to parallelize
+across cores or submit to a scheduler:
+
+```bash
+pip install hydra-joblib-launcher     # local multiprocessing
+```
+```python
+wf.run(..., launcher="joblib")        # loky/processes backend
+```
+
+Out-of-process launchers pickle each cell's task to ship it to a worker, so your
+`task` (and any custom `pre_task`) must be importable (module-level) — the normal
+case. Nested/lambda tasks run only in-process. Resilience (`on_error="nan"`,
+`resume=True`) and provenance behave identically out-of-process.
+
 ## See also
 
 - [Tutorial](../tutorial.md) — end-to-end: sweep → dataset → compare
