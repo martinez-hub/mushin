@@ -184,6 +184,42 @@ def _bind_resume_kwarg(task):
     return _wrapper, True
 
 
+class _ResumeInjector:
+    """Picklable replacement for the old `_bind_resume_kwarg` closure. Hides a
+    task's `mushin_resume` parameter from hydra-zen's `zen` (via a stripped
+    __signature__, so zen never tries to resolve it from config) and injects the
+    current cell's ResumeContext from a contextvar at call time. Unlike a closure,
+    an instance holding a module-level task + a Signature is stdlib-picklable."""
+
+    def __init__(self, task):
+        import inspect
+
+        self._task = task
+        sig = inspect.signature(task)
+        self._sig = sig.replace(
+            parameters=[p for n, p in sig.parameters.items() if n != "mushin_resume"]
+        )
+
+    @property
+    def __signature__(self):  # inspect.signature / zen read this
+        return self._sig
+
+    def __call__(self, *args, **kwargs):
+        from ._resume import current_resume
+
+        return self._task(*args, **kwargs, mushin_resume=current_resume())
+
+
+def _prepare_task(task):
+    """If `task` declares a `mushin_resume` parameter, wrap it in a picklable
+    `_ResumeInjector`; otherwise return it unchanged. Returns `(prepared, wants)`."""
+    import inspect
+
+    if "mushin_resume" in inspect.signature(task).parameters:
+        return _ResumeInjector(task), True
+    return task, False
+
+
 def _resume_short_circuit(inner, manifest):
     """Outermost wrapper for a resumed sweep: for a cfg whose swept-param combo
     the prior sweep already `completed`, return that cell's cached metrics
