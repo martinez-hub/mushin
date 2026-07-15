@@ -47,20 +47,36 @@ def _versions() -> dict:
     return out
 
 
-def capture(config: Any = None) -> dict:
+def capture_base() -> dict:
+    """The sweep-constant part of a provenance record: python/platform plus the
+    git state and package versions. This is identical for every cell in a sweep
+    but expensive to compute (``_git()`` spawns three git subprocesses), so a
+    sweep captures it ONCE and reuses it for all cells rather than paying it per
+    cell (3N git subprocesses for an N-cell sweep)."""
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "git": _git(),
         "packages": _versions(),
+    }
+
+
+def capture(config: Any = None, base: dict | None = None) -> dict:
+    """A full provenance record. ``base`` is the sweep-constant part from
+    ``capture_base()``; when omitted it is computed fresh (so a standalone call
+    still works). Only ``timestamp`` and ``config`` vary per cell."""
+    if base is None:
+        base = capture_base()
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **base,
         "config": _to_plain(config) if config is not None else None,
     }
 
 
-def write_provenance(job_dir, config: Any = None) -> None:
+def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> None:
     (Path(job_dir) / "mushin_provenance.json").write_text(
-        json.dumps(capture(config), indent=2)
+        json.dumps(capture(config, base), indent=2)
     )
 
 

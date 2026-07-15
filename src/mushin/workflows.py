@@ -114,13 +114,17 @@ def _fail_soft(fn: Callable[[Any], T1]) -> Callable[[Any], T1 | "_FailedRun"]:
     return wrapped
 
 
-def _instrument_task(task, combo_of_cfg=None, inject_resume=False):
+def _instrument_task(
+    task, combo_of_cfg=None, inject_resume=False, base_provenance=None
+):
     """Wrap a (cfg)->result task so its returned dict is written to a
     mushin_metrics.json sidecar in the per-job working dir (cwd), and a durable
     mushin_cell_status.json records running->completed/failed from inside the job
     (so completion survives a hard process kill). When ``inject_resume`` is set,
     the current cell's ResumeContext is published to a contextvar for the duration
-    of the task call. Per-run provenance is written first."""
+    of the task call. Per-run provenance is written first — reusing the
+    sweep-constant ``base_provenance`` (git/versions, captured once in ``run()``)
+    so a sweep does not spawn git subprocesses per cell."""
     from pathlib import Path
 
     from ._provenance import write_provenance
@@ -134,7 +138,7 @@ def _instrument_task(task, combo_of_cfg=None, inject_resume=False):
         # is_resume/attempt reflect the previous attempt (combo-match guarded).
         rc = build_resume_context(cwd, combo)
         try:
-            write_provenance(cwd, cfg)
+            write_provenance(cwd, cfg, base=base_provenance)
         except Exception:  # noqa: BLE001 - provenance is best-effort
             pass
         token = _CURRENT_RESUME.set(rc) if inject_resume else None
@@ -613,6 +617,15 @@ class BaseWorkflow:
                     combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
                 return combo
 
+        # Capture the sweep-constant provenance (git state + package versions)
+        # ONCE here rather than per cell: `_git()` spawns three git subprocesses,
+        # and the result is identical for every cell in the sweep. Each cell then
+        # writes its record reusing this base (only timestamp/config vary), so an
+        # N-cell sweep spawns 3 git subprocesses instead of 3N.
+        from ._provenance import capture_base
+
+        _base_provenance = capture_base()
+
         _task_fn, _wants_resume = _bind_resume_kwarg(self.task)
         task_call = _task_calls(
             pre_task=pre_task_fn_wrapper(self.pre_task),
@@ -620,6 +633,7 @@ class BaseWorkflow:
                 task_fn_wrapper(_task_fn),
                 combo_of_cfg=_combo_of_cell,
                 inject_resume=_wants_resume,
+                base_provenance=_base_provenance,
             ),
         )
         if on_error == "nan":
