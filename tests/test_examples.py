@@ -111,3 +111,25 @@ def test_segmentation_demo_example_runs_on_synthetic():
     assert isinstance(result, BenchmarkResult)
     assert result.data.sizes["seed"] == 2
     assert "miou" in result.data.data_vars
+
+
+def test_parallel_sweep_runs_out_of_process(tmp_path):
+    # The parallel example must actually run OUT OF PROCESS (joblib/loky), as a
+    # user would invoke it — a subprocess run, so the loky workers pickle the
+    # decorated task cleanly (matching real usage, not an in-process import).
+    import subprocess
+    import sys
+
+    import pytest
+
+    pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
+
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, str(repo / "examples" / "parallel_sweep.py")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "Dimensions" in result.stdout  # it printed the labeled xarray dataset
