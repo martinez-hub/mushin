@@ -142,3 +142,23 @@ def test_decorated_sweep_out_of_process_joblib(tmp_path):
     )
     assert ds.sizes == {"seed": 3}
     assert float(ds["v"].sel(seed=2)) == 2.0
+
+
+def _pristine_task(seed):
+    return dict(v=float(seed))
+
+
+def test_sweep_does_not_mutate_the_original_function():
+    # Regression: sweep() must NOT mutate the caller's function object. Previously
+    # it re-pointed fn.__qualname__ in place, corrupting fn's repr/picklability in
+    # the assignment form. Now it mangles a COPY, leaving fn pristine.
+    import pickle
+
+    before = _pristine_task.__qualname__
+    handle = mushin.sweep(_pristine_task)
+
+    assert _pristine_task.__qualname__ == before  # untouched
+    pickle.loads(pickle.dumps(_pristine_task))  # original still picklable
+    # the synthesized task is a distinct copy carrying the mangled qualname
+    assert handle.workflow_cls().task is not _pristine_task
+    assert handle.workflow_cls().task.__qualname__ == before + ".__mushin_task__"
