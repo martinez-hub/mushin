@@ -62,3 +62,9 @@ def test_build_resume_context_combo_match_guard(tmp_path):
     # change) -> must NOT resume or surface the other cell's checkpoint
     rc = build_resume_context(tmp_path, {"seed": 9})
     assert rc.is_resume is False and rc.attempt == 1 and rc.last_ckpt is None
+
+
+def test_resume_context_is_public():
+    import mushin
+
+    assert mushin.ResumeContext is not None

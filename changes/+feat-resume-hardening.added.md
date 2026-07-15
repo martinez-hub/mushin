@@ -1,0 +1,1 @@
+Resumable sweeps now survive a hard process kill (OOM, SLURM preemption): each cell records its completion durably from inside its own job, so `resume=True` never recomputes finished cells. A task may also declare a `mushin_resume` parameter to receive a `ResumeContext` (the cell's directory, `is_resume`, and the last checkpoint) and resume its own training mid-run.
