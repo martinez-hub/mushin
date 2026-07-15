@@ -48,38 +48,38 @@ modes are not covered:
   resume signal; the task loads its own checkpoint (e.g. `ckpt_path="last"`).
 - **Signal delivery:** an **introspected optional `mushin_resume` kwarg** — injected
   only if the task's signature declares it; tasks without it are called unchanged.
-- **Directory layout:** **combo-named directories** (user-visible, a strict
-  improvement over positional numeric dirs).
+- **Directory layout:** **keep Hydra's positional numeric dirs** (`working_dir/0,1,2…`)
+  — no user-visible naming change. Correctness under grid changes is preserved by
+  a combo-match guard (below), not by dir naming.
 - **`last_ckpt`:** **best-effort** discovery (newest `*.ckpt` / `last.ckpt` in the
   cell dir), with a documented convention.
 
 ## Architecture (5 components)
 
-### 1. Stable per-combo directories
+### 1. Directories: keep Hydra's positional numeric dirs (no naming change)
 
-Replace Hydra's positional multirun subdir (`working_dir/0,1,2…`, from the default
-`hydra.sweep.subdir=${hydra.job.num}`) with a combo-keyed one:
+Cells keep landing in `working_dir/0,1,2…` (Hydra's default
+`hydra.sweep.subdir=${hydra.job.num}`). No new subdir override is added. Why this is
+sufficient:
 
-```
-hydra.sweep.subdir=${hydra.job.override_dirname}
-```
+- **Completion-skip (Gap 1) is dir-name-independent.** The durable status sidecar
+  (component 2) records each cell's *combo*; `Manifest.from_cell_status` keys cells
+  by `combo_key(combo)` and stores whatever dir the cell ran in. So resume maps
+  combo→recorded-dir correctly no matter how dirs are named or numbered.
+- **Intra-cell checkpoint reuse (Gap 2) relies on stable launch order.** For a
+  resume of the *same* sweep (identical multirun spec — the SLURM requeue /
+  re-run-same-command case), Hydra expands the grid deterministically, so each
+  combo gets the same `job.num` → the same numeric dir → its prior checkpoint is
+  right there. This is the dominant resume scenario.
+- **Grid-change safety via the combo-match guard.** If the user *narrows or reorders*
+  the grid on resume, numeric dir `0` can be reused by a different combo. To avoid a
+  cell loading another cell's checkpoint, `build_resume_context` only treats a dir
+  as resumable when the **prior status sidecar's `combo` equals the current cell's
+  combo**; on a mismatch it reports `is_resume=False, last_ckpt=None` and the cell
+  starts fresh. Safe in all cases (worst case: a checkpoint isn't reused, never a
+  wrong one loaded).
 
-so cell `(method=cnn, seed=3)` always lands in
-`working_dir/method=cnn,seed=3/` on every run. `override_dirname` is derived from the
-job's task overrides — which, for a mushin sweep, are exactly the swept params —
-so it is deterministic and stable across runs.
-
-- This override is appended in `run()` alongside `hydra.sweep.dir`, **only when
-  `working_dir` is set** (a stable location is required for any of this to work;
-  without `working_dir` behavior is unchanged). A caller who supplies their own
-  `hydra.sweep.subdir` override wins (same guard pattern as the `hydra.job.chdir`
-  fix).
-- `to_xarray()` / `jobs_post_process` discover per-cell dirs from the returned
-  `jobs` objects, so the dir *naming* does not affect dataset assembly.
-- **Alignment note:** the plan must confirm `override_dirname`'s string form maps
-  1:1 onto `combo_key(combo)` (the existing key used by `Manifest`), or add a small
-  translation so the two agree. Hydra offers `hydra.job.config.override_dirname`
-  knobs (kv-sep, item-sep, exclude keys) if sanitization is needed.
+This keeps the on-disk layout exactly as today — no backward-incompatible change.
 
 ### 2. Durable per-cell status sidecar
 
@@ -122,8 +122,10 @@ Injection happens in mushin's own task wrapper layer (around
 
 - The wrapper inspects the *underlying* task's signature (`inspect.signature`). If it
   declares a parameter named `mushin_resume`, the wrapper computes a `ResumeContext`
-  for the current cell (from its stable dir + prior status sidecar + checkpoint
-  scan) and passes it. Otherwise the task is called exactly as today.
+  for the current cell (from its dir + prior status sidecar + checkpoint scan,
+  **gated by the combo-match guard** — a prior sidecar whose recorded combo differs
+  from the current cell's is ignored, so a reused numeric dir never yields another
+  cell's checkpoint) and passes it. Otherwise the task is called exactly as today.
 - **Critical integration constraint:** `mushin_resume` must be invisible to
   hydra-zen's `zen` config population — it is not a swept param and has no config
   entry. The wrapper must present zen a call surface that excludes `mushin_resume`
@@ -159,16 +161,19 @@ that wants intra-cell resume should write its checkpoint into `mushin_resume.dir
 
 ## On-disk layout (after)
 
+Numeric dirs are unchanged from today; only the `mushin_cell_status.json` sidecar
+(and any checkpoint the task writes) are new:
+
 ```
 working_dir/
-  method=cnn,seed=0/
-    mushin_cell_status.json     # {"status": "completed", "attempt": 1, "dir": "...", ...}
+  0/
+    mushin_cell_status.json     # {"status": "completed", "attempt": 1, "combo": {...}}
     mushin_metrics.json         # cached metrics (existing)
     mushin_provenance.json      # existing
     last.ckpt                   # written by the task, if it checkpoints
     .hydra/ …                   # existing hydra job output
-  method=mlp,seed=3/
-    mushin_cell_status.json     # {"status": "running", ...}  ← killed mid-training
+  1/
+    mushin_cell_status.json     # {"status": "running", "combo": {...}}  ← killed mid-training
     last.ckpt                   # epoch-50 checkpoint the task left behind
   mushin_sweep_manifest.json    # end-of-sweep snapshot (read view; not source of truth)
 ```
@@ -179,10 +184,9 @@ working_dir/
 - Sweeps without `working_dir` are unaffected (stable dirs / status sidecars are
   only engaged with a stable location).
 - The `resume=True` public API is unchanged; it just becomes robust to kills.
-- **Directory naming changes** for any `working_dir` sweep (numeric → combo-named).
-  This is the one visible behavior change; it is a strict improvement (stable,
-  human-readable) but any downstream code that hard-codes `working_dir/0` paths
-  would need updating. Called out in the changelog as a behavior change.
+- **No directory-naming change** — dirs stay positional/numeric (`working_dir/0,1,2…`),
+  so downstream code that references those paths is unaffected. The only new
+  on-disk artifact is the per-cell `mushin_cell_status.json` sidecar.
 
 ## Testing strategy
 
@@ -197,10 +201,12 @@ Every failure mode is unit-testable **without a cluster**:
   `is_resume is True`, `last_ckpt` points at that file, `attempt == 2`.
 - **Introspection gate:** a task with `mushin_resume` runs without a zen/Hydra
   config error; a task without it is called unchanged.
-- **Stable dirs:** two runs of the same grid write to identical combo-named dirs;
-  `to_xarray()` assembles correctly regardless of naming.
-- **No-op guards:** no `working_dir` → no status sidecars, numeric-free behavior
-  unchanged; caller-supplied `hydra.sweep.subdir` wins.
+- **Combo-match guard:** a cell whose stable dir holds a prior status sidecar for a
+  *different* combo gets `is_resume=False, last_ckpt=None` (never loads the wrong
+  checkpoint).
+- **Same-grid checkpoint reuse:** a resume of the same grid re-executes a failed
+  cell in the same numeric dir and its `ResumeContext.last_ckpt` points at the
+  checkpoint the prior attempt wrote.
 
 ## Validation caveat
 
@@ -212,29 +218,27 @@ sign-off before being called production-ready. Do not merge to a release as
 
 ## Risks / open questions
 
-- **`override_dirname` ↔ `combo_key` alignment.** The single most important
-  implementation detail; the plan must verify the mapping empirically and add a
-  translation if the string forms differ (separators, escaping, long names).
-- **`override_dirname` length / illegal chars** for large grids or string values
-  with commas/slashes. Mitigation: Hydra's override_dirname sanitization + the
-  `exclude_keys` knob; if still unsafe, fall back to a hashed combo slug (keep it
-  deterministic).
+- **Numeric-dir reuse across grid changes** (the reason for the combo-match guard).
+  With positional dirs, narrowing/reordering the grid on resume can point a cell at
+  a dir a *different* cell used. The guard (component 3: `build_resume_context`
+  ignores a prior sidecar whose recorded combo ≠ the current combo) makes this safe
+  — a cell never loads another cell's checkpoint; worst case it starts fresh. This
+  is now an essential correctness invariant, and must have a dedicated test.
+- **`zen` must not see `mushin_resume`.** The signature-strip wrapper is the load-
+  bearing seam; a test must assert a task declaring `mushin_resume` runs without a
+  Hydra/zen config error.
 - **Parallel launchers.** Per-cell sidecars avoid shared-file contention, but the
   aggregate manifest snapshot and `to_xarray` assembly must tolerate a partially
   populated tree (some cells `running`/absent). MVP targets serial + submitit
   (one task per job); joblib parallelism should work via the same per-cell files
   but is a secondary test target.
-- **`is_resume` on an unrelated dir collision.** If a user reuses a `working_dir`
-  across *different* grids, a combo dir could carry stale artifacts. Mitigation:
-  the status sidecar records the combo; a mismatch (or a `mushin_provenance` config
-  mismatch) means "not a valid resume of this cell" → treat as fresh. The plan
-  decides how strict to be.
 
 ## Rollout
 
-Additive and backward-compatible except the directory-naming change. Ships as one
-feature branch: `_sweep_io.py` (ResumeContext, per-cell status sidecar read/write,
-Manifest-as-read-view), `workflows.py` (stable-subdir override, wrapper injection,
-resume-semantics update), tests, docs (resilience guide + a note in notebook 04),
-changelog. No dependency changes. Version bump: minor (new public `ResumeContext`
-surface + behavior change), decided at release time.
+Additive and fully backward-compatible (no directory-naming change). Ships as one
+feature branch: new `_resume.py` (ResumeContext, per-cell status sidecar read/write,
+checkpoint discovery, contextvar), `_sweep_io.py` (Manifest-as-read-view via
+`from_cell_status`), `workflows.py` (durable status writes, combo-match-guarded
+ResumeContext injection, resume-semantics update), tests, docs (resilience guide +
+a note in notebook 04), changelog. No dependency changes. Version bump: minor (new
+public `ResumeContext` surface), decided at release time.
