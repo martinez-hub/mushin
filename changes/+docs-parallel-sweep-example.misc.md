@@ -1,0 +1,1 @@
+Added a runnable `examples/parallel_sweep.py` showing how to submit a sweep out-of-process (`run(..., launcher="joblib")`), wired into the workflows guide and examples index — the missing runnable counterpart to 0.6.0's out-of-process launcher support.

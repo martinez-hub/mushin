@@ -15,6 +15,7 @@ uv run python examples/<name>.py
 |---|---|
 | [`sweep_to_dataset.py`](https://github.com/martinez-hub/mushin/blob/main/examples/sweep_to_dataset.py) | The flagship flow: define `task(...)`, sweep with `multirun`, get results back as a labeled `xarray.Dataset`. |
 | [`sklearn_sweep.py`](https://github.com/martinez-hub/mushin/blob/main/examples/sklearn_sweep.py) | The sweep layer is **framework-agnostic** — a scikit-learn `LogisticRegression` sweep (no torch) still returns a labeled dataset. |
+| [`parallel_sweep.py`](https://github.com/martinez-hub/mushin/blob/main/examples/parallel_sweep.py) | Submit a sweep **out-of-process** — `run(..., launcher="joblib")` runs cells across worker processes (needs `hydra-joblib-launcher`); the docstring shows the submitit/SLURM variant. |
 
 ## Compare & Study, with statistics
 

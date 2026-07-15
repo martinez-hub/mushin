@@ -122,15 +122,21 @@ from mushin import multirun, hydra_list
 ## Parallel & out-of-process launchers
 
 By default a sweep runs its cells in-process, sequentially (Hydra's `basic`
-launcher). Install a Hydra launcher plugin and pass `launcher=` to parallelize
-across cores or submit to a scheduler:
+launcher). Install a Hydra launcher plugin and pass `launcher=` to run the cells
+across worker processes — locally with joblib, or on a scheduler with submitit:
 
 ```bash
-pip install hydra-joblib-launcher     # local multiprocessing
+pip install hydra-joblib-launcher     # local multiprocessing (loky backend)
 ```
+
 ```python
-wf.run(..., launcher="joblib")        # loky/processes backend
+--8<-- "examples/parallel_sweep.py:parallel"
 ```
+
+Run it end to end with
+[`examples/parallel_sweep.py`](https://github.com/martinez-hub/mushin/blob/main/examples/parallel_sweep.py)
+(`python examples/parallel_sweep.py`); the `run_parallel` docstring shows the
+`submitit_slurm` variant for a SLURM cluster.
 
 Out-of-process launchers serialize each cell's task to ship it to a worker. The
 default joblib (loky) and submitit backends use `cloudpickle`, which handles most
