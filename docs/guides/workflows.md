@@ -8,11 +8,33 @@ a labeled `xarray.Dataset`.
 > **Prefer to follow along?** [Notebook 01 — Sweeps → datasets](../notebooks/01_sweep_to_dataset.ipynb)
 > builds a sweep end to end and plots the result.
 
+## The quick path: `@mushin.sweep`
+
+For most sweeps, skip the subclass entirely — decorate a `task`-style function and
+call `.run(...)`, which returns the labeled dataset in one step:
+
+```python
+import mushin
+
+@mushin.sweep
+def experiment(lr, seed):
+    ...
+    return dict(accuracy=acc)
+
+ds = experiment.run(lr=mushin.multirun([0.01, 0.1]), seed=mushin.multirun([0, 1]))
+```
+
+`@mushin.sweep` synthesizes the `MultiRunMetricsWorkflow` subclass below for you.
+Reach the full workflow via `experiment.workflow` (last-run instance) or
+`experiment.workflow_cls`, or subclass directly when you need `pre_task` /
+`jobs_post_process` / a custom `to_xarray`. The rest of this guide uses the class
+form to show what is happening under the hood.
+
 ## The mental model
 
 A mushin workflow has three steps:
 
-1. **Define** — subclass `MultiRunMetricsWorkflow` and implement a `task(...)` method that returns a dict of metrics.
+1. **Define** — subclass `MultiRunMetricsWorkflow` and implement a `task(...)` method that returns a dict of metrics (or decorate a function with `@mushin.sweep`).
 2. **Run** — call `.run(...)` with `multirun(...)` wrapped arguments to launch a Hydra sweep.
 3. **Collect** — call `.to_xarray()` to get a labeled dataset keyed by swept dimensions.
 

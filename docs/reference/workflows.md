@@ -1,5 +1,7 @@
 # workflows
 
+::: mushin.sweep
+
 ::: mushin.workflows.BaseWorkflow
 
 ::: mushin.workflows.MultiRunMetricsWorkflow

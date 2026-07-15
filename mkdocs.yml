@@ -83,6 +83,7 @@ nav:
       - Resilient sweeps: notebooks/04_resilience.ipynb
       - LLM evaluation: notebooks/05_llm_eval.ipynb
       - scikit-learn (framework-agnostic): notebooks/06_sklearn_framework_agnostic.ipynb
+      - Analyzing your results: notebooks/07_analyzing_results.ipynb
   - API Reference:
       - benchmark: reference/benchmark.md
       - llm: reference/llm.md

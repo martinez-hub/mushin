@@ -28,31 +28,33 @@ used on its own.
 
 ## Quickstart: run a sweep, get a dataset
 
-Define your experiment as a function, sweep over parameters, and get the results
-back as a labeled `xarray.Dataset` — not rows in a dashboard you have to export.
+Decorate your experiment with [`@mushin.sweep`](https://martinez-hub.github.io/mushin/quickstart/),
+sweep over parameters, and get the results back as a labeled `xarray.Dataset` —
+not rows in a dashboard you have to export. No subclassing, no callbacks:
 
 ```python
-import torch as tr
-from mushin import multirun
-from mushin.workflows import MultiRunMetricsWorkflow
+import mushin
 
-class LRSweep(MultiRunMetricsWorkflow):
-    @staticmethod
-    def task(lr: float, seed: int) -> dict:
-        tr.manual_seed(seed)
-        # ... train a model with this lr/seed, then evaluate it ...
-        acc = ...  # your validation accuracy
-        return dict(accuracy=acc)  # whatever you return becomes a data variable
+@mushin.sweep
+def experiment(lr, seed):
+    # ... train a model with this lr/seed, then evaluate it ...
+    acc = ...  # your validation accuracy
+    return dict(accuracy=acc)  # whatever you return becomes a data variable
 
-wf = LRSweep()
-wf.run(lr=multirun([0.01, 0.1, 1.0]), seed=multirun([0, 1, 2]))  # 9 runs
-
-ds = wf.to_xarray()
+ds = experiment.run(
+    lr=mushin.multirun([0.01, 0.1, 1.0]),
+    seed=mushin.multirun([0, 1, 2]),
+)  # 9 runs, returned as a labeled xarray.Dataset
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
 #   Data variables: accuracy (lr, seed)
 
 ds["accuracy"].mean("seed")   # average over seeds, per learning rate
 ```
+
+Need the full tool — `.failures`, `.plot()`, provenance, custom analysis? Drop to
+`experiment.workflow` (the last-run instance), or subclass `MultiRunMetricsWorkflow`
+directly for advanced control (custom `pre_task`, `jobs_post_process`) — which is
+exactly what `@mushin.sweep` builds for you.
 
 The full runnable version is in [`examples/sweep_to_dataset.py`](examples/sweep_to_dataset.py):
 
@@ -132,6 +134,11 @@ the [LLM evaluation guide](docs/guides/llm.md).
 
 ## What it provides
 
+- `@mushin.sweep` — the boilerplate-free core: decorate a `task`-style function
+  and `experiment.run(lr=multirun([...]), seed=multirun([...]))` returns the
+  labeled `xarray.Dataset` directly. Drop to `experiment.workflow` /
+  `experiment.workflow_cls` for the full workflow, or subclass
+  `MultiRunMetricsWorkflow` for advanced control.
 - `benchmark.compare` — run a standard metric battery (torchmetrics) across
   trained seeds and get a labeled dataset + significance (scipy): `BenchmarkResult`
   with `.summary()`, `.comparisons`, and `.data`.
@@ -150,10 +157,17 @@ the [LLM evaluation guide](docs/guides/llm.md).
   results back as labeled `xarray` datasets.
 - **Sweep resilience + provenance** — `run(on_error="nan")` records a failed grid
   cell as NaN and keeps going; `run(working_dir=..., resume=True)` re-runs only the
-  failed/missing cells; `compare`/`Study` refuse statistics on an incomplete sweep
+  failed/missing cells and is **durable across a hard process kill** (OOM, SLURM
+  preemption) — completed cells are never recomputed; a task can declare a
+  `mushin_resume` parameter to resume its own training mid-run from the last
+  checkpoint; `compare`/`Study` refuse statistics on an incomplete sweep
   (`IncompleteSweepError`) until you fix and resume; every run captures per-run
   provenance (`mushin_provenance.json`: git SHA, versions, config). See the
   [resilience guide](https://martinez-hub.github.io/mushin/guides/resilience/).
+- **Out-of-process launchers** — dispatch is stdlib-picklable, so sweeps run
+  across cores or a scheduler with a standard Hydra launcher plugin:
+  `run(..., launcher="joblib")` (or submitit). See the
+  [workflows guide](https://martinez-hub.github.io/mushin/guides/workflows/#parallel--out-of-process-launchers).
 - `tune_batch_size`, `tune_learning_rate` — opt-in, reproducibility-preserving
   auto-tuning: find the batch size / LR once, pin it to a sidecar file, and reuse
   it — with an exact, hardware-independent effective batch (no drift).
