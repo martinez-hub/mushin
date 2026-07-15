@@ -1172,3 +1172,109 @@ def test_run_does_not_duplicate_a_caller_hydra_chdir_override(tmp_path):
         o for o in captured["overrides"] if o.split("=", 1)[0] == "hydra.job.chdir"
     ]
     assert chdir_overrides == ["hydra.job.chdir=True"]  # exactly one, not duplicated
+
+
+def test_cell_status_sidecar_written_completed(tmp_path):
+    from mushin._resume import read_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    W().run(seed=multirun([0, 1]), working_dir=wd)
+    statuses = [
+        read_cell_status(d)
+        for d in Path(wd).iterdir()
+        if d.is_dir() and (d / "mushin_cell_status.json").exists()
+    ]
+    assert statuses and all(s["status"] == "completed" for s in statuses)
+
+
+def test_cell_status_sidecar_written_failed_under_fail_soft(tmp_path):
+    from mushin._resume import read_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            if seed == 1:
+                raise RuntimeError("boom")
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="fail"):
+        W().run(seed=multirun([0, 1]), working_dir=wd, on_error="nan")
+    got = {
+        read_cell_status(d)["combo"]["seed"]: read_cell_status(d)["status"]
+        for d in Path(wd).iterdir()
+        if d.is_dir() and (d / "mushin_cell_status.json").exists()
+    }
+    assert got == {0: "completed", 1: "failed"}
+
+
+def test_cell_status_combo_for_override_string_multirun(tmp_path):
+    # A multirun supplied via `overrides=[...]` (not the multirun() kwarg) must
+    # still record distinct, correctly-projected combos in the status sidecars —
+    # no crash, no collapse to an empty combo.
+    from mushin._resume import read_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    W().run(working_dir=wd, overrides=["+seed=0,1,2"])
+    combos = [
+        read_cell_status(d)["combo"]
+        for d in Path(wd).iterdir()
+        if d.is_dir() and (d / "mushin_cell_status.json").exists()
+    ]
+    assert sorted(c["seed"] for c in combos) == [0, 1, 2]
+
+
+def test_task_receives_resume_context_on_reexecution(tmp_path):
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        FAIL = True
+
+        @staticmethod
+        def task(seed, mushin_resume=None):
+            seen[seed] = mushin_resume
+            if mushin_resume is not None and mushin_resume.dir is not None:
+                (mushin_resume.dir / "last.ckpt").write_text("state")
+            if seed == 0 and W.FAIL:
+                raise RuntimeError("boom")
+            return dict(val=float(seed))
+
+    wd = str(tmp_path / "s")
+    W.FAIL = True
+    with pytest.warns(UserWarning, match="fail"):
+        W().run(seed=multirun([0, 1]), working_dir=wd, on_error="nan")
+    assert seen[0] is not None and seen[0].is_resume is False and seen[0].attempt == 1
+
+    W.FAIL = False
+    seen.clear()
+    wf = W()
+    wf.run(seed=multirun([0, 1]), working_dir=wd, resume=True)
+    assert 1 not in seen  # seed 1 completed -> short-circuited (task not called)
+    rc = seen[0]
+    assert rc.is_resume is True
+    assert rc.attempt == 2
+    assert rc.last_ckpt is not None and rc.last_ckpt.name == "last.ckpt"
+    assert wf.is_complete
+
+
+def test_task_without_mushin_resume_param_is_unaffected(tmp_path):
+    # Introspection gate: a task NOT declaring mushin_resume is called as today,
+    # with no Hydra/zen config error.
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    wf = W()
+    wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    assert wf.to_xarray().sizes == {"seed": 2}

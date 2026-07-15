@@ -5,6 +5,7 @@
 import importlib
 from typing import TYPE_CHECKING
 
+from ._resume import ResumeContext
 from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
 from .lightning import HydraDDP, MetricsCallback
@@ -92,6 +93,7 @@ def __dir__():
 
 __all__ = [
     "llm",
+    "ResumeContext",
     "load_experiment",
     "load_from_checkpoint",
     "original_cwd",

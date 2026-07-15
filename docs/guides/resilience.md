@@ -98,6 +98,37 @@ run(on_error="nan")  ──►  inspect wf.failures  ──►  fix the cause
    (once is_complete)
 ```
 
+## Surviving a hard kill & resuming mid-training
+
+`resume=True` is durable across a **hard process kill** (OOM, SLURM preemption,
+node death), not just handled Python exceptions. Each cell records its status
+(`running` → `completed`/`failed`) from inside its own job, so a mid-sweep kill
+never loses the cells that already finished — resuming re-runs only the unfinished
+ones.
+
+A long-running cell can also resume its **own** training. Declare a
+`mushin_resume` parameter on your `task`; mushin injects a `ResumeContext`:
+
+```python
+from mushin.workflows import MultiRunMetricsWorkflow
+
+class Train(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr, seed, mushin_resume=None):
+        # mushin_resume.dir       -> this cell's directory (write your checkpoint here)
+        # mushin_resume.is_resume -> True when a prior attempt of THIS cell left artifacts
+        # mushin_resume.last_ckpt -> newest checkpoint in dir, or None
+        ckpt = mushin_resume.last_ckpt if mushin_resume else None
+        trainer.fit(model, ckpt_path=ckpt)  # Lightning: default_root_dir=mushin_resume.dir
+        return dict(accuracy=...)
+```
+
+Write your checkpoint into `mushin_resume.dir` (Lightning: set
+`default_root_dir=mushin_resume.dir` with `ModelCheckpoint(save_last=True)`).
+Re-running the **same** sweep (same grid) reuses each cell's directory, so a
+resumed cell finds its own checkpoint; a cell is never handed a checkpoint from a
+different cell. Tasks that don't declare `mushin_resume` are unaffected.
+
 ## Provenance
 
 Every run — fail-soft or not — writes a per-job provenance record,
