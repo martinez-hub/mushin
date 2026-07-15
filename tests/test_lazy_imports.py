@@ -25,6 +25,25 @@ def test_import_mushin_does_not_load_benchmark_or_llm():
     assert out == "False False"
 
 
+def test_import_mushin_does_not_load_pytorch_lightning():
+    # The Lightning integration (and pytorch_lightning, ~1.1s of a cold import)
+    # must load only on first use, not on a bare `import mushin`.
+    out = _fresh_import_probe(
+        "import sys, mushin;"
+        "print('pytorch_lightning' in sys.modules, 'mushin.lightning' in sys.modules)"
+    )
+    assert out == "False False"
+
+
+def test_lightning_names_resolve_lazily():
+    out = _fresh_import_probe(
+        "import sys, mushin;"
+        "obj = mushin.HydraDDP;"
+        "print(obj.__name__, 'pytorch_lightning' in sys.modules)"
+    )
+    assert out == "HydraDDP True"
+
+
 def test_benchmark_names_resolve_lazily():
     out = _fresh_import_probe(
         "import sys, mushin;"
