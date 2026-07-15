@@ -454,11 +454,17 @@ In `src/mushin/workflows.py` `run()`, in the `if resume:` block, replace
 ```python
             # Kill-durable: reconstruct prior completion from the per-cell status
             # sidecars (written from inside each job), not the end-of-run manifest
-            # (which a hard kill would have prevented).
+            # (which a hard kill would have prevented). Pass the current run's swept
+            # names (computed above as `_swept_names`) so the manifest carries the
+            # sweep dimensions even when no prior manifest file survived — otherwise
+            # `_resume_short_circuit` would project onto an empty param set and
+            # mis-key every cell.
             prior_manifest = Manifest.from_cell_status(
-                Path(working_dir).resolve(), []
+                Path(working_dir).resolve(), list(_swept_names)
             )
 ```
+
+Note: `_swept_names` is the tuple `run()` computes in Task 2 (from `_parse_overrides(launch_overrides)`); it is in scope here because the `if resume:` block follows the task-wrapping block where `_swept_names` is defined.
 
 - [ ] **Step 5: Run — verify pass (durability + backward compat)**
 
