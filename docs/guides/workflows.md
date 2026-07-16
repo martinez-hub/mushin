@@ -149,37 +149,64 @@ out-of-process.
 
 ### Two axes of parallelism: launchers vs. `HydraDDP`
 
-A launcher and [`HydraDDP`](../reference/lightning.md) are **not** alternatives —
-they parallelize different things and compose:
+A launcher and [`HydraDDP`](../reference/lightning.md) parallelize different
+things:
 
 | | Parallelizes | What it is | Where it goes |
 |---|---|---|---|
 | `launcher="joblib"` / `submitit` | the sweep's **cells** — each `(lr, seed)` combo runs in its own worker process / node | a Hydra **launcher** | passed to `run(...)` |
-| `HydraDDP` | **one cell's training** — a single model trained data-parallel across multiple GPUs | a Lightning **`DDPStrategy`** | passed to a `Trainer` **inside your `task`** |
+| `HydraDDP` / `HydraFSDP` | **one training run** — a single model trained data-parallel (DDP) or sharded (FSDP) across multiple GPUs | a Lightning **`DDPStrategy`** | passed to a `Trainer` **inside your `task`** |
 
-So `launcher=` distributes the *grid*, while `HydraDDP` uses the GPUs *within a
-single cell*. The `parallel_sweep.py` example above shows only the launcher axis
-(its toy task does no training). Use `HydraDDP` inside the task, and the two stack
-— e.g. submit each cell to a SLURM node, and let `HydraDDP` use that node's GPUs:
+`launcher=` distributes the *grid* (the `parallel_sweep.py` example above shows
+only this axis — its toy task does no training). `HydraDDP` / `HydraFSDP` train a
+*single* model across GPUs.
 
-```python
-import pytorch_lightning as pl
-from mushin import HydraDDP
+!!! warning "`HydraDDP` needs the launcher to provide its ranks"
+    `HydraDDP` / `HydraFSDP` do **not** spawn extra GPU workers by themselves from
+    an imperative `@mushin.sweep` task. Writing
+    `pl.Trainer(strategy=HydraDDP(), devices=2)` and running with the default
+    (local) launcher **silently trains on a single GPU** — Lightning reports a
+    `1/1` world. The strategy's self-launch path rebuilds each extra rank from a
+    Hydra `config.yaml` that must contain declarative `trainer` and `module` keys,
+    which an imperative task never writes.
 
-@mushin.sweep
-def experiment(lr, seed):
-    trainer = pl.Trainer(strategy=HydraDDP(), devices=4)   # 4 GPUs per cell
-    trainer.fit(model, ...)
-    return dict(accuracy=...)
+    To actually train across GPUs, launch with **submitit** so the scheduler
+    starts one process per GPU. Set the launcher's `tasks_per_node` equal to
+    `Trainer(devices=...)` (both equal the GPUs per node) and set `num_nodes`; the
+    world size is `nodes × gpus_per_node`. Each SLURM task then becomes one DDP /
+    FSDP rank:
 
-experiment.run(                                            # each cell -> a SLURM node
-    lr=mushin.multirun([0.01, 0.1]), seed=mushin.multirun([0, 1]),
-    launcher="submitit_slurm",
-)
-```
+    ```python
+    import pytorch_lightning as pl
+    from mushin import HydraDDP
 
-`HydraDDP` (single-node multi-GPU) needs real GPUs, so it isn't exercised by the
-CPU-only examples/CI; see the [lightning reference](../reference/lightning.md).
+    @mushin.sweep
+    def experiment(seed):
+        trainer = pl.Trainer(
+            strategy=HydraDDP(),
+            devices=1,            # GPUs per node (== launcher tasks_per_node)
+            num_nodes=2,
+            accelerator="gpu",
+            max_epochs=1,
+        )
+        trainer.fit(model, ...)
+        return dict(accuracy=...)
+
+    experiment.run(
+        seed=mushin.multirun([0]),
+        launcher="submitit_slurm",
+        # via Hydra overrides: hydra.launcher.nodes=2,
+        #   hydra.launcher.tasks_per_node=1, hydra.launcher.gpus_per_node=1
+    )
+    ```
+
+    If the launcher's process count doesn't match `num_nodes × devices`, the run
+    fails fast with a clear `DDP world size mismatch` error rather than hanging.
+
+Because these strategies need real multi-GPU / multi-node hardware, they aren't
+exercised by the CPU-only examples or CI. See the
+[lightning reference](../reference/lightning.md) for the fully declarative
+`builds(Trainer, module)` form.
 
 ## See also
 
