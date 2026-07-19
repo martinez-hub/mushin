@@ -1,0 +1,28 @@
+name: Paper PDF
+
+# Compiles paper/mushin.tex into a PDF on any change to the preprint, so the
+# arXiv draft can be previewed without a local TeX toolchain.
+on:
+  push:
+    paths:
+      - paper/**
+      - .github/workflows/paper-pdf.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile LaTeX
+        uses: xu-cheng/latex-action@v3
+        with:
+          working_directory: paper
+          root_file: mushin.tex
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mushin-preprint
+          path: paper/mushin.pdf
