@@ -21,7 +21,13 @@ from .workflows import MultiRunMetricsWorkflow, hydra_list, multirun
 # mushin` and is unused by the sweep -> xarray core. `_tuning`/`_study` import
 # pytorch_lightning only inside functions, so they stay eager and cheap.
 _LAZY_LIGHTNING = frozenset(
-    {"HydraDDP", "MetricsCallback", "submitit_slurm_config", "seed_everything_per_rank"}
+    {
+        "HydraDDP",
+        "HydraFSDP",
+        "MetricsCallback",
+        "submitit_slurm_config",
+        "seed_everything_per_rank",
+    }
 )
 
 # Benchmark exports are loaded on first attribute access (see __getattr__), so a
@@ -70,6 +76,7 @@ if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
     )
     from .lightning import (  # noqa: F401
         HydraDDP,
+        HydraFSDP,
         MetricsCallback,
         seed_everything_per_rank,
         submitit_slurm_config,
@@ -124,6 +131,7 @@ __all__ = [
     "MultiRunMetricsWorkflow",
     "HydraDDP",
     "pin_gpu_round_robin",
+    "HydraFSDP",
     "submitit_slurm_config",
     "seed_everything_per_rank",
     "multirun",

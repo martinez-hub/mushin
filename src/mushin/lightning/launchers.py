@@ -54,7 +54,7 @@ def _validate_external_world_size(
     actual = int(cluster_environment.world_size())
     if actual != expected:
         raise RuntimeError(
-            f"DDP world size mismatch: the launcher started {actual} process(es), "
+            f"distributed world size mismatch: the launcher started {actual} process(es), "
             f"but the Trainer expects num_nodes={num_nodes} x devices={num_processes} "
             f"= {expected}. For DDP, set the launcher's tasks-per-node equal to "
             f"GPUs-per-node (== Trainer `devices`). See the multi-node guide."
@@ -131,11 +131,45 @@ def _subprocess_call(
 
 if PL_VERSION >= Version(1, 6, 0):
     from pytorch_lightning.strategies.ddp import DDPStrategy
+    from pytorch_lightning.strategies.fsdp import FSDPStrategy
     from pytorch_lightning.strategies.launchers.subprocess_script import (
         _SubprocessScriptLauncher,
     )
 
-    class HydraDDP(DDPStrategy):  # type: ignore
+    class _HydraReattachMixin:
+        """Hydra-aware launcher behavior shared by ``HydraDDP`` and ``HydraFSDP``:
+        reattach each rank via the job's saved ``config.yaml`` (not ``sys.argv``,
+        which in a Hydra sweep would re-run the wrong job), fail fast on an external
+        world-size mismatch, and scope env-var teardown to what mushin set so
+        consecutive multirun jobs start clean without stomping scheduler-owned vars.
+        """
+
+        def setup_environment(self) -> None:
+            _setup_environment()
+            # Validate BEFORE super().setup_environment(): that is where Lightning
+            # initializes the process group / rendezvous, which is exactly what
+            # hangs when the launcher started the wrong number of ranks. Failing
+            # fast here turns a hang into a legible error.
+            _validate_external_world_size(
+                self.num_nodes, self.num_processes, self.cluster_environment
+            )
+            super().setup_environment()
+
+        def _configure_launcher(self) -> None:
+            if self.cluster_environment is None:  # pragma: no cover
+                raise TypeError(f"{type(self).__name__}.cluster_environment is None")
+            if not self.cluster_environment.creates_processes_externally:
+                self._launcher = _HydraReattachLauncher(
+                    self.cluster_environment, self.num_processes, self.num_nodes
+                )
+                self._rank_0_will_call_children_scripts = True
+
+        def teardown(self) -> None:
+            """Additional teardown so consecutive Hydra multirun jobs start fresh."""
+            super().teardown()
+            _teardown()
+
+    class HydraDDP(_HydraReattachMixin, DDPStrategy):  # type: ignore
         """DDP Strategy that supports Hydra run and multirun jobs.
 
         This strategy assumes a PyTorch Lightning `Trainer.fit` or `Trainer.test` has been configured
@@ -211,33 +245,23 @@ if PL_VERSION >= Version(1, 6, 0):
         >>> job = launch(Config, task_function)
         """
 
-        def setup_environment(self) -> None:
-            _setup_environment()
-            # Validate BEFORE super().setup_environment(): that is where Lightning
-            # initializes the process group / rendezvous, which is exactly what
-            # hangs when the launcher started the wrong number of ranks. Failing
-            # fast here turns a hang into a legible error.
-            _validate_external_world_size(
-                self.num_nodes, self.num_processes, self.cluster_environment
-            )
-            super().setup_environment()
+    class HydraFSDP(_HydraReattachMixin, FSDPStrategy):  # type: ignore
+        """Fully-Sharded Data Parallel strategy that works under Hydra ``--multirun``.
 
-        def _configure_launcher(self) -> None:
-            if self.cluster_environment is None:  # pragma: no cover
-                raise TypeError("HydraDDP.cluster_environment is None")
+        Like :class:`HydraDDP`, but for sharded training: it replaces Lightning's
+        stock ``FSDPStrategy`` subprocess launcher (which re-execs the script with
+        ``sys.argv`` and, in a sweep, spawns the wrong job) with mushin's launcher,
+        which reattaches each rank via the job's saved ``config.yaml``. FSDP shards
+        parameters/gradients/optimizer state across ranks; mushin's results and
+        significance analysis are unchanged from a single-GPU run.
 
-            if not self.cluster_environment.creates_processes_externally:
-                self._launcher = _HydraDDPLauncher(
-                    self.cluster_environment, self.num_processes, self.num_nodes
-                )
-                self._rank_0_will_call_children_scripts = True
+        Requires Hydra to save a ``config.yaml`` (with ``trainer`` and ``module``
+        keys) in the job's output dir — the same contract as :class:`HydraDDP`.
+        Configure it with hydra-zen, e.g. ``strategy=builds(HydraFSDP)`` on a
+        ``builds(pl.Trainer, ...)`` config.
+        """
 
-        def teardown(self) -> None:
-            """Performs additional teardown steps for PL to allow for Hydra multirun jobs."""
-            super().teardown()
-            _teardown()
-
-    class _HydraDDPLauncher(_SubprocessScriptLauncher):
+    class _HydraReattachLauncher(_SubprocessScriptLauncher):
         @property
         def is_interactive_compatible(self) -> bool:  # pragma: no cover
             return True
