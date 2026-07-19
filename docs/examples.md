@@ -1,9 +1,10 @@
 # Examples
 
-Every example below is a **runnable, CI-tested** script in the
-[`examples/`](https://github.com/martinez-hub/mushin/tree/main/examples) directory.
-The guides embed pieces of them; this page indexes them all. Clone the repo and run
-any one with:
+Every example below is a **runnable** script in the
+[`examples/`](https://github.com/martinez-hub/mushin/tree/main/examples) directory —
+CI-tested, except the multi-GPU scaling examples (which need real GPUs, so they run
+on a cluster rather than in CI). The guides embed pieces of them; this page indexes
+them all. Clone the repo and run any one with:
 
 ```bash
 uv run python examples/<name>.py
@@ -35,6 +36,17 @@ uv run python examples/<name>.py
 For the full per-battery walkthrough — real-model recipes (SAM 3.1, YOLO-World, CLIP,
 …) alongside each of these toys — see the
 [Built-in batteries guide](guides/batteries.md).
+
+## Scaling across GPUs & nodes
+
+These need real multi-GPU / multi-node hardware, so they run on a cluster rather
+than in CI. See the linked guides for the full recipe and validation runbook.
+
+| Example | What it shows |
+|---|---|
+| [`gpu_packing.py`](https://github.com/martinez-hub/mushin/blob/main/examples/gpu_packing.py) | Pack several small sweep jobs onto each GPU with `pin_gpu_round_robin` (needs ≥2 GPUs + `hydra-joblib-launcher`). See the [GPU packing guide](guides/packing.md). |
+| [`multinode_ddp.py`](https://github.com/martinez-hub/mushin/blob/main/examples/multinode_ddp.py) | Multi-node DDP with `HydraDDP` + `submitit_slurm_config` — one process per GPU across SLURM nodes, with a fail-fast world-size guard. See the [Multi-node training guide](guides/multinode.md). |
+| [`sharding_fsdp_multirun.py`](https://github.com/martinez-hub/mushin/blob/main/examples/sharding_fsdp_multirun.py) | Shard one model across GPUs with `HydraFSDP` under a Hydra `--multirun` sweep (needs ≥2 GPUs). See the [Sharded training guide](guides/sharding.md). |
 
 ## See also
 
