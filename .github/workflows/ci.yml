@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: every job here only reads the repo (checkout, test, build
+# docs). No job writes contents, issues, or PRs.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
