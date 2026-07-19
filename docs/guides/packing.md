@@ -8,6 +8,17 @@ runs **several small jobs per GPU** to use each device's full potential.
 mushin does not assign GPUs — placement is decided by your **launcher** and by
 Lightning/torch inside each job. So packing is a launcher/environment recipe.
 
+!!! tip "Which tool: `pin_gpu_round_robin` or Ray?"
+    - **`pin_gpu_round_robin`** (built in, no extra dependency) — when your jobs are
+      small and you just want to *spread* them one-per-GPU round-robin. Lightweight,
+      but you size `jobs_per_gpu` yourself and an overpacked GPU OOMs.
+    - **Ray** — when you want *true fractional-GPU sharing* with memory-aware
+      scheduling (many jobs time-slicing a device). This is an **opt-in launcher
+      plugin**, not a mushin dependency: `pip install hydra-ray-launcher` and pass
+      `hydra/launcher=ray` (see [below](#ray-true-fractional-gpu-sharing-recommended-for-heavier-sharing)).
+      mushin deliberately does not vendor Ray — it plugs in through Hydra like any
+      other launcher.
+
 ## joblib launcher: `pin_gpu_round_robin`
 
 Pin each job to one GPU round-robin, and run more jobs concurrently than you have
