@@ -42,11 +42,11 @@ For the full per-battery walkthrough — real-model recipes (SAM 3.1, YOLO-World
 These need real multi-GPU / multi-node hardware, so they run on a cluster rather
 than in CI. See the linked guides for the full recipe and validation runbook.
 
-| Example / guide | What it shows |
+| Example | What it shows |
 |---|---|
+| [`gpu_packing.py`](https://github.com/martinez-hub/mushin/blob/main/examples/gpu_packing.py) | Pack several small sweep jobs onto each GPU with `pin_gpu_round_robin` (needs ≥2 GPUs + `hydra-joblib-launcher`). See the [GPU packing guide](guides/packing.md). |
+| [`multinode_ddp.py`](https://github.com/martinez-hub/mushin/blob/main/examples/multinode_ddp.py) | Multi-node DDP with `HydraDDP` + `submitit_slurm_config` — one process per GPU across SLURM nodes, with a fail-fast world-size guard. See the [Multi-node training guide](guides/multinode.md). |
 | [`sharding_fsdp_multirun.py`](https://github.com/martinez-hub/mushin/blob/main/examples/sharding_fsdp_multirun.py) | Shard one model across GPUs with `HydraFSDP` under a Hydra `--multirun` sweep (needs ≥2 GPUs). See the [Sharded training guide](guides/sharding.md). |
-| [Multi-node training guide](guides/multinode.md) | `HydraDDP` + `submitit_slurm_config` across SLURM nodes — one process per GPU, with a fail-fast world-size guard. |
-| [GPU packing guide](guides/packing.md) | `pin_gpu_round_robin` to co-locate small sweep jobs on shared GPUs (or Ray for fractional sharing). |
 
 ## See also
 
