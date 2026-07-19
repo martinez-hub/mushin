@@ -1,1 +1,0 @@
-Docs: the workflows guide now explains the two axes of sweep parallelism — a Hydra `launcher=` (distributes the sweep across cells/nodes) vs. `HydraDDP` (multi-GPU training within one cell) — and how they compose (e.g. submitit + HydraDDP).

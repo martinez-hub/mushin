@@ -1,1 +1,0 @@
-A bare `list`/`tuple` passed as a sweep argument (the common slip of forgetting `multirun`) now raises an actionable error — ``lr=mushin.multirun([...])`` to sweep, or `mushin.hydra_list([...])` to pass the list as a single value — instead of a generic type-list `TypeError`.

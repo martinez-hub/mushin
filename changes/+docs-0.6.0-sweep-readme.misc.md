@@ -1,1 +1,0 @@
-Docs: README and the workflows guide now lead with the `@mushin.sweep` decorator; `mushin.sweep`, out-of-process launchers, and hard-kill-durable resume are covered in the README feature list + API reference; and a new "Analyzing your results" example notebook shows the common `xarray.Dataset` recipes (reduce over seeds, pick the best config, slice, tabulate, plot, save/reload).
