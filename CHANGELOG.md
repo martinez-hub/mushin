@@ -8,6 +8,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.7.0] - 2026-07-18
+
+### Added
+
+- Multi-node DDP support: `submitit_slurm_config` (derives `tasks_per_node` from
+  `gpus_per_node`) and `seed_everything_per_rank` helpers, a fail-fast check that the
+  launched world size matches `num_nodes x devices`, `MetricsCallback` now writes only
+  on global rank 0, and `_teardown` clears only mushin-set env vars (leaving
+  scheduler-owned vars alone under SLURM/torchrun). See the new multi-node guide.
+- `HydraFSDP`: a Fully-Sharded Data Parallel strategy that works under Hydra
+  `--multirun`. Like `HydraDDP`, it reattaches ranks via the job's saved
+  `config.yaml` instead of re-executing with `sys.argv` (which a sweep would run as
+  the wrong job), so FSDP sharded training composes with Hydra sweeps. Exported from
+  `mushin`; see the new "Sharded training under Hydra" guide.
+- `pin_gpu_round_robin(num_gpus)`: an opt-in helper to pack several small sweep jobs
+  onto each GPU. Called at the top of a Hydra task, it sets `CUDA_VISIBLE_DEVICES`
+  to `job_index % num_gpus` so jobs round-robin across devices; run
+  `num_gpus * jobs_per_gpu` jobs concurrently (via your launcher's `n_jobs`) to
+  co-locate them. New "Packing small jobs onto GPUs" guide covers the joblib recipe,
+  Ray fractional-GPU, and MPS/MIG.
+
+### Fixed
+
+- `HydraDDP`/`HydraFSDP` docs now show the working launcher-provided-ranks pattern; an imperative `@mushin.sweep` task with `strategy=HydraDDP(), devices=N` on the local launcher silently trains on one GPU. (#95)
+- A bare `list`/`tuple` passed as a sweep argument (the common slip of forgetting `multirun`) now raises an actionable error — ``lr=mushin.multirun([...])`` to sweep, or `mushin.hydra_list([...])` to pass the list as a single value — instead of a generic type-list `TypeError`.
+
+### Misc
+
+- Added a runnable `examples/parallel_sweep.py` showing how to submit a sweep out-of-process (`run(..., launcher="joblib")`), wired into the workflows guide and examples index — the missing runnable counterpart to 0.6.0's out-of-process launcher support.
+- Added an internal cluster-gated validation runbook (`docs/superpowers/cluster-validation-runbook.md`): a self-contained, per-PR checklist (Phase 1 single-node multi-GPU, Phase 2 multi-node/SLURM) that anyone with HPC access can run to validate HydraDDP, GPU-packing (#59), HydraFSDP (#58), multi-node DDP (#50), submitit dispatch (#86), and resume hard-kill/preemption durability (#83).
+- Docs: README and the workflows guide now lead with the `@mushin.sweep` decorator; `mushin.sweep`, out-of-process launchers, and hard-kill-durable resume are covered in the README feature list + API reference; and a new "Analyzing your results" example notebook shows the common `xarray.Dataset` recipes (reduce over seeds, pick the best config, slice, tabulate, plot, save/reload).
+- Docs: the workflows guide now explains the two axes of sweep parallelism — a Hydra `launcher=` (distributes the sweep across cells/nodes) vs. `HydraDDP` (multi-GPU training within one cell) — and how they compose (e.g. submitit + HydraDDP).
+
+
 ## [0.6.0] - 2026-07-15
 
 ### Added
@@ -213,7 +247,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/martinez-hub/mushin/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/martinez-hub/mushin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/martinez-hub/mushin/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/martinez-hub/mushin/compare/v0.4.0...v0.4.1
