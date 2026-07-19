@@ -1,5 +1,11 @@
 # Cluster-gated validation runbook
 
+> **Status (2026-07-18): COMPLETE.** All features below were validated on real
+> SLURM/GPU hardware (`mantis`: L40S single-node + A100 multi-node) and merged —
+> multi-node DDP (#50), HydraFSDP (#58), GPU packing (#59); resume (#83) and
+> out-of-process submitit (#86) were covered too. This document is retained as a
+> reusable template for validating future HPC features.
+
 **Purpose:** a self-contained checklist to validate the mushin features that are
 unit-/adversarially-verified but never run on real GPU/SLURM hardware. Anyone with
 HPC access can run this — no mushin knowledge required. Run a test, record the
