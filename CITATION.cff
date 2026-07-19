@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+title: "mushin: boilerplate-free, reproducible machine-learning experiment sweeps"
+message: "If you use this software, please cite it using the metadata in this file."
+type: software
+authors:
+  - given-names: Josué
+    family-names: Martínez-Martínez
+    # orcid: "https://orcid.org/0000-0000-0000-0000"  # TODO: add your ORCID
+repository-code: "https://github.com/martinez-hub/mushin"
+url: "https://martinez-hub.github.io/mushin/"
+license: MIT
+version: "0.6.0"
+date-released: "2026-07-15"
+# doi: "10.5281/zenodo.XXXXXXX"   # TODO: add the Zenodo concept DOI after the
+#                                 # one-time GitHub–Zenodo setup (see PR description).
+keywords:
+  - machine learning
+  - reproducibility
+  - experiment management
+  - hyperparameter sweeps
+  - PyTorch
+  - xarray
+abstract: >-
+  mushin runs reproducible machine-learning experiment sweeps with minimal
+  boilerplate: decorate a function with @mushin.sweep, declare the swept
+  parameters, and get the results back as a labeled xarray.Dataset. Built on
+  PyTorch Lightning and hydra-zen, it captures per-run provenance, resumes
+  durably after interruption (including cluster preemption), and scales from a
+  laptop to a multi-node SLURM cluster by changing only the launcher.
+references:
+  - type: software
+    title: "responsible-ai-toolbox"
+    abbreviation: "rai-toolbox"
+    notes: >-
+      mushin is a maintained, standalone carve-out of the rai_toolbox.mushin
+      subpackage; the original workflow layer originates from this toolbox.
+    authors:
+      - given-names: Ryan
+        family-names: Soklaski
+      - given-names: Justin
+        family-names: Goodwin
+      - given-names: Olivia
+        family-names: Brown
+      - given-names: Michael
+        family-names: Yee
+      - given-names: Jason
+        family-names: Matterer
+    repository-code: "https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox"
