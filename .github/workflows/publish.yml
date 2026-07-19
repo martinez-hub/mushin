@@ -7,6 +7,11 @@ on:
   release:
     types: [published]
 
+# Default to read-only; the `publish` job elevates to id-token: write for
+# Trusted Publishing (see its own permissions block below).
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
