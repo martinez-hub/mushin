@@ -11,6 +11,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mushin-py.svg)](https://pypi.org/project/mushin-py/)
 [![Python versions](https://img.shields.io/pypi/pyversions/mushin-py.svg)](https://pypi.org/project/mushin-py/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21436444.svg)](https://doi.org/10.5281/zenodo.21436444)
 
 **Docs:** https://martinez-hub.github.io/mushin/
 
