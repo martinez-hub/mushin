@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.8.0] - 2026-07-20
+
+### Changed
+
+- The evaluation layer (`compare`, the metric batteries, LLM evaluation, and `Study`) now requires the optional `eval` extra: `pip install mushin-py[eval]`. This keeps the core sweep→dataset install lean — `torchmetrics` and `scipy` are no longer base dependencies. Accessing these features without the extra raises a clear install hint. The `detection`/`image`/`audio` battery extras now imply `eval`.
+
 ## [0.7.0] - 2026-07-18
 
 ### Added
@@ -247,7 +253,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/martinez-hub/mushin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/martinez-hub/mushin/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/martinez-hub/mushin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/martinez-hub/mushin/compare/v0.4.1...v0.5.0
