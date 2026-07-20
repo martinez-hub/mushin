@@ -4,6 +4,11 @@ This tutorial walks you through the full mushin workflow end to end: define a
 sweep, collect a labeled dataset, compare methods with statistical significance,
 and interpret the result.
 
+!!! note "The comparison steps need the `eval` extra"
+    The sweep → dataset steps run on the core install. The later `compare` +
+    significance steps use mushin's optional evaluation layer:
+    `pip install "mushin-py[eval]"`. See [Installation](install.md#optional-extras).
+
 ## Step 1: Define a sweep
 
 mushin workflows are subclasses of `MultiRunMetricsWorkflow`. You implement a

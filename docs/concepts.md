@@ -56,6 +56,10 @@ assume torch models and won't apply to a scikit-learn estimator:
   `regression`, `retrieval`, `image_quality`, `audio`) — take
   `torch.nn.Module` models and score them with `torchmetrics`.
 
+The evaluation layer (`compare`, the batteries, LLM eval, `Study`) is the
+optional [`eval` extra](install.md#optional-extras) —
+`pip install "mushin-py[eval]"` — so the core sweep→dataset install stays lean.
+
 So: use the generic sweep→dataset workflow with **any** framework; reach for the
 Lightning conveniences and the statistical `compare` batteries when you're
 training torch models. There is no scikit-learn *integration* — only the

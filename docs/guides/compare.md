@@ -1,5 +1,10 @@
 # Comparing methods
 
+!!! note "Requires the `eval` extra"
+    `compare` and the metric batteries are mushin's optional evaluation layer —
+    install them with `pip install "mushin-py[eval]"`. Importing them without it
+    raises a clear install hint. See [Installation](../install.md#optional-extras).
+
 `mushin.benchmark.compare` evaluates a set of trained models on a standard
 metric battery and runs pairwise significance tests across methods. Instead of
 writing evaluation loops and statistical boilerplate yourself, you hand mushin

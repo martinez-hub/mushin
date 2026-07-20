@@ -130,7 +130,9 @@ jobs:
       - name: Register python3 kernel
         run: uv run python -m ipykernel install --user --name python3 --display-name "Python 3"
       - name: Execute example notebooks
-        run: uv run --extra viz pytest --nbmake docs/notebooks/ -p no:cacheprovider
+        # --extra eval: notebooks 02/03/05 use compare / Study / LLM eval, which
+        # live in the eval extra; --extra viz for the plotting cells.
+        run: uv run --extra eval --extra viz pytest --nbmake docs/notebooks/ -p no:cacheprovider
 
   changelog:
     runs-on: ubuntu-latest
