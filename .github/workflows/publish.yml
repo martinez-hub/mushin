@@ -32,6 +32,14 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
 
+      - name: Smoke-test the built wheel
+        # A broken/unimportable wheel must never reach PyPI: install it into a
+        # clean venv and import the package before the publish job runs.
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/python -c "import mushin; print('wheel imports ok:', mushin.__name__)"
+
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -49,4 +57,7 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to a full commit SHA (v1.14.1): this step holds the OIDC
+        # id-token, and a mutable tag/branch ref would let a retagged action
+        # exfiltrate it or publish tampered artifacts.
+        uses: pypa/gh-action-pypi-publish@2834a314042ef964da07689278dd1e9d773e8afd # v1.14.1

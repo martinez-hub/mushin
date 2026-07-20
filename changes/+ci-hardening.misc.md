@@ -1,0 +1,1 @@
+CI now tests macOS (Apple Silicon + the Intel dependency branch), validates the battery extras' floors in the min-versions job, executes notebooks with the netCDF engine they recommend, and the publish workflow smoke-tests the built wheel and SHA-pins the OIDC publish action; the Python 3.14 classifier is withheld until its CI leg is required to pass.
