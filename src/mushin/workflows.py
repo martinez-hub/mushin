@@ -180,6 +180,15 @@ class _TaskRunner:
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
             if self.on_error == "nan":
+                # The sentinel keeps only repr(exc); persist the full stack in
+                # the cell dir so a fail-soft sweep stays debuggable. (Hydra's
+                # job cwd IS the cell dir here.)
+                import traceback
+
+                try:
+                    Path("mushin_error.txt").write_text(traceback.format_exc())
+                except OSError:
+                    pass  # a full disk must not break fail-soft itself
                 return _FailedRun(exc)
             raise
 

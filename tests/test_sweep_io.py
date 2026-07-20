@@ -51,3 +51,49 @@ def test_manifest_tracks_and_replaces_cells(tmp_path):
     m2.mark({"lr": 1.0, "seed": 1}, dir="3", status="failed", error="boom")
     assert not m2.is_complete()
     assert {"lr=1.0,seed=1"} == {c["key"] for c in m2.failed_cells()}
+
+
+def test_manifest_load_or_new_corrupt_returns_fresh(tmp_path):
+    """A manifest truncated by a mid-write kill must not make the sweep
+    un-resumable: treat it like a missing manifest (the per-cell status
+    sidecars are the durable source of truth)."""
+    from mushin._sweep_io import MANIFEST_FILE, Manifest
+
+    (tmp_path / MANIFEST_FILE).write_text('{"schema": 1, "cells": {tru')
+    m = Manifest.load_or_new(tmp_path, ["a", "b"])
+    assert m.cells == {}
+    assert m.params == ["a", "b"]
+
+
+def test_from_cell_status_survives_corrupt_manifest(tmp_path):
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import MANIFEST_FILE, Manifest, combo_key
+
+    cell = tmp_path / "0"
+    cell.mkdir()
+    write_cell_status(cell, status="completed", combo={"a": 1}, attempt=1)
+    (tmp_path / MANIFEST_FILE).write_text("not json at all")
+    m = Manifest.from_cell_status(tmp_path, ["a"])
+    assert m.cells[combo_key({"a": 1})]["status"] == "completed"
+
+
+def test_atomic_write_uses_unique_temp_names(tmp_path, monkeypatch):
+    """Two writers of the same file must not share a temp name -- a fixed
+    <path>.tmp lets concurrent processes truncate each other mid-write and
+    rename half-written content over the target."""
+    from pathlib import Path
+
+    from mushin._sweep_io import _atomic_write_json
+
+    seen = []
+    orig = Path.replace
+
+    def spy(self, target):
+        seen.append(self.name)
+        return orig(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy)
+    _atomic_write_json(tmp_path / "m.json", {"a": 1})
+    _atomic_write_json(tmp_path / "m.json", {"a": 2})
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert not list(tmp_path.glob("*.tmp"))  # no residue

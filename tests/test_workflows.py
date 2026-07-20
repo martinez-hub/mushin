@@ -1380,3 +1380,23 @@ def test_failures_attr_survives_netcdf_roundtrip(tmp_path):
     ds.to_netcdf(p)
     back = xr.load_dataset(p)
     assert json.loads(back.attrs["mushin_failures"]) == combos
+
+
+def test_on_error_nan_preserves_traceback_on_disk(tmp_path):
+    """on_error='nan' must not discard the failure's stack trace: the repr in
+    wf.failures is one line; the full traceback is written into the cell dir."""
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    (failure,) = wf.failures
+    err_file = Path(failure["working_dir"]) / "mushin_error.txt"
+    assert err_file.exists()
+    text = err_file.read_text()
+    assert "RuntimeError" in text and "boom" in text and "Traceback" in text
