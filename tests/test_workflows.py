@@ -1354,3 +1354,29 @@ def test_bare_list_sweep_arg_gives_actionable_multirun_error():
         W().run(lr=[0.01, 0.1, 1.0])
     # a legitimate multirun still works (must NOT be caught by the bare-list guard)
     W().run(lr=multirun([0.01, 0.1]), working_dir=None)
+
+
+def test_failures_attr_survives_netcdf_roundtrip(tmp_path):
+    # attrs["mushin_failures"] must be netCDF-portable: a raw list of strings
+    # collapses to a scalar str for 1-element lists (netCDF4) or fails to write
+    # (scipy engine), so it is stored as a JSON string like `provenance`.
+    import json
+
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    ds = wf.to_xarray()
+    combos = json.loads(ds.attrs["mushin_failures"])
+    assert any("a=2" in c for c in combos)
+
+    p = tmp_path / "roundtrip.nc"
+    ds.to_netcdf(p)
+    back = xr.load_dataset(p)
+    assert json.loads(back.attrs["mushin_failures"]) == combos

@@ -325,7 +325,7 @@ class BaseWorkflow:
 
         if not path.is_dir():
             raise FileNotFoundError(
-                f"`path` point to an existing directory, got {path}"
+                f"`path` must point to an existing directory, got {path}"
             )
 
         self._working_dir = path
@@ -1486,18 +1486,23 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             data[k] = (k_coords, datum)
 
         coords.update(metric_coords)
+        import json as _json
+
         # Record fail-soft failures (combo keys of NaN-filled cells) on the
         # dataset. Only set when a fail-soft run actually recorded failures so a
         # fully-completed sweep's `attrs` is unchanged from prior behavior.
+        # Stored as a JSON string: a raw list of strings is not a portable
+        # netCDF attr (the scipy engine rejects it, and netCDF4 collapses a
+        # 1-element list to a bare str on reload).
         if self.failures:
-            attrs["mushin_failures"] = [f["combo"] for f in self.failures]
+            attrs["mushin_failures"] = _json.dumps(
+                [f["combo"] for f in self.failures]
+            )
         # Attach best-effort per-run provenance (git/versions/config) from one
         # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
         # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
         prov = self.provenance
         if prov is not None:
-            import json as _json
-
             attrs["provenance"] = _json.dumps(prov)
         out = xr.Dataset(coords=coords, data_vars=data, attrs=attrs)
 

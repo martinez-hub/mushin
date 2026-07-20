@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import warnings
 
 import numpy as np
@@ -54,6 +55,50 @@ def cohens_d(a, b) -> float:
             return 0.0
         return float("inf") if diff > 0 else float("-inf")
     return diff / pooled_sd
+
+
+def cohens_dz(a, b) -> float:
+    """Paired-samples Cohen's :math:`d_z`: ``mean(a - b) / std(a - b)``.
+
+    The effect size matching the paired tests (``wilcoxon``, ``ttest_rel``);
+    the pooled-variance :func:`cohens_d` ignores the pairing and understates
+    the effect when the per-seed differences are consistent.
+    """
+    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    sd = float(d.std(ddof=1))
+    mean = float(d.mean())
+    if sd == 0.0:
+        # identical differences every seed: zero effect only if that constant
+        # difference is itself ~0; otherwise the shift is perfectly consistent
+        # (d_z is undefined/infinite) and 0.0 would hide a real difference.
+        if np.isclose(mean, 0.0):
+            return 0.0
+        return float("inf") if mean > 0 else float("-inf")
+    return mean / sd
+
+
+def _normalize_failures(val) -> list[str]:
+    """``attrs['mushin_failures']`` as a list of combo strings, any vintage.
+
+    Current writers store a JSON string. Legacy in-memory datasets used a raw
+    list, a legacy 1-element list round-trips netCDF4 as a bare string, and a
+    multi-element one comes back as an ndarray.
+    """
+    if val is None:
+        return []
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+        except ValueError:
+            return [val]  # legacy scalar: a single combo string
+        if isinstance(parsed, list):
+            return [str(c) for c in parsed]
+        return [str(parsed)]
+    if isinstance(val, np.ndarray):
+        return [str(c) for c in val.tolist()]
+    if isinstance(val, (list, tuple)):
+        return [str(c) for c in val]
+    return [str(val)]
 
 
 def holm_correction(pvalues) -> list[float]:
@@ -139,7 +184,7 @@ def compare_methods(
         completeness signal, never on raw NaN values in the data, so a metric that
         is legitimately NaN for other reasons does not trigger it.
     """
-    failures = ds.attrs.get("mushin_failures")
+    failures = _normalize_failures(ds.attrs.get("mushin_failures"))
     if failures:
         raise IncompleteSweepError(
             f"{len(failures)} run(s) failed ({', '.join(map(str, failures))}); "
@@ -150,7 +195,7 @@ def compare_methods(
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
     n_seeds = int(ds.sizes["seed"])
     warn_if_underpowered(test, n_seeds, alpha)
-    func, _ = _TESTS[test]
+    func, is_paired = _TESTS[test]
     methods = [str(m) for m in ds["method"].values]
 
     rows = []
@@ -166,7 +211,9 @@ def compare_methods(
         recs, pvals = [], []
         for a, b in itertools.combinations(methods, 2):
             va, vb = vals[a], vals[b]
-            eff = cohens_d(va, vb)
+            # Match the effect size to the test: paired tests get d_z over the
+            # per-seed differences; unpaired tests get the pooled-variance d.
+            eff = cohens_dz(va, vb) if is_paired else cohens_d(va, vb)
             if a in constant or b in constant:
                 # A method with zero within-group variance has no valid sampling
                 # distribution, so any comparison involving it is masked (regardless
