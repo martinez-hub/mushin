@@ -1,5 +1,10 @@
 # LLM evaluation
 
+!!! note "Requires the `eval` extra"
+    LLM evaluation (`compare_llms`, `llm_judge`) is part of mushin's optional
+    evaluation layer — install it with `pip install "mushin-py[eval]"`. See
+    [Installation](../install.md#optional-extras).
+
 The "vibes eval" problem: it's common to eyeball a handful of outputs and
 declare a new prompt or model "better" — but that impression may be pure
 sampling noise. `mushin.llm.compare_llms` runs each system across

@@ -33,7 +33,8 @@ dashboard you have to export.
 metrics, and assembles them into a labeled `xarray.Dataset` keyed by
 the swept parameters.
 
-**`compare` with statistics.**
+**`compare` with statistics.** *(optional [`eval` extra](install.md#optional-extras):
+`pip install "mushin-py[eval]"`)*
 `benchmark.compare` evaluates a set of trained models on a standard metric
 battery (torchmetrics), then runs pairwise significance tests (scipy) with
 Holm correction. The result is a `BenchmarkResult` with a paper-ready
