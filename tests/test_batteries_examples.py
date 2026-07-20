@@ -14,7 +14,10 @@ with ``pytest.importorskip`` so they skip cleanly when the extra is absent.
 import batteries
 import pytest
 
-from mushin.benchmark import BenchmarkResult
+# The metric batteries are part of the optional 'eval' extra.
+pytest.importorskip("torchmetrics")
+
+from mushin.benchmark import BenchmarkResult  # noqa: E402
 
 
 def test_run_walkthrough():

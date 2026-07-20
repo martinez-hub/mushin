@@ -52,12 +52,10 @@ dependencies = [
     # `np.unicode_`, removed in NumPy 2). Verified by the min-version CI job.
     "xarray >= 2024.6.0",
     "typing-extensions >= 4.1.0",
-    "torchmetrics >= 1.0",
-    # scipy 1.13 is the first release compatible with NumPy 2 (the non-Intel
-    # floor); it still supports NumPy 1.x for the Intel-mac branch. Lower floors
-    # are ABI-incompatible with NumPy 2 (`_ARRAY_API not found`). Verified by the
-    # min-version CI job.
-    "scipy >= 1.13",
+    # pandas is required transitively by xarray (a core dep) and is also used by
+    # the eval layer, so it stays in base — gating it would be cosmetic since
+    # xarray installs it regardless. `torchmetrics` and `scipy`, by contrast, are
+    # used ONLY by the eval layer and move to the `eval` extra below.
     # pandas 2.2.2 is the first release officially compatible with NumPy 2 (the
     # non-Intel floor); older pandas imports under NumPy 2 only by luck (ABI
     # "size changed" warning). Verified by the min-version CI job.
@@ -72,12 +70,23 @@ dependencies = [
 viz = ["matplotlib >= 3.9"]
 netcdf = ["netCDF4 >= 1.7.0"]
 mcp = ["mcp >= 1.2"]
+# The evaluation layer: `compare`, the metric batteries, LLM evaluation, and
+# `Study`. Kept out of the core install (whose identity is sweep -> dataset) so a
+# plain `pip install mushin-py` stays lean. torchmetrics/scipy are used ONLY here.
+# Floors: scipy 1.13 is the first NumPy-2-compatible release (lower floors are ABI-
+# incompatible, `_ARRAY_API not found`); it still supports NumPy 1.x for Intel-mac.
+# Verified by the min-version CI job.
+eval = [
+    "torchmetrics >= 1.0",
+    "scipy >= 1.13",
+]
 # Detection metrics (MeanAveragePrecision + IoU variants) need torchvision and
 # pycocotools; gated so the core install stays lean. torchvision floors pair with
 # the platform-split torch floors above (0.17 ↔ torch 2.2 on Intel-mac, 0.19 ↔
 # torch 2.4 elsewhere). pycocotools floor is 2.0.7 — the first release with wheels
 # (2.0.0 has no Cython build-dep and fails to build under the min-versions job).
 detection = [
+    "mushin-py[eval]",  # metric batteries live in the eval layer (torchmetrics)
     "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     # pycocotools is a C extension that is painful to build on Windows; gate it so
@@ -90,6 +99,7 @@ detection = [
 # this extra as a whole. torchvision floors pair with the platform-split torch
 # floors above.
 image = [
+    "mushin-py[eval]",  # metric batteries live in the eval layer (torchmetrics)
     "torchvision >= 0.17,<0.18 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "torchvision >= 0.19 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "lpips >= 0.1.4",
@@ -100,6 +110,7 @@ image = [
 # only released `pesq` (0.0.4) fails to import under NumPy 2 and has no fixed
 # release, so it would crash on the supported non-Intel platforms.
 audio = [
+    "mushin-py[eval]",  # metric batteries live in the eval layer (torchmetrics)
     "pystoi >= 0.3.3 ; sys_platform != 'win32'",
 ]
 

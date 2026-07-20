@@ -87,11 +87,11 @@ jobs:
         # C-extension deps (pycocotools, pesq, pystoi) are win32-gated, so on
         # Windows those metrics are absent and the corresponding tests skip via
         # importorskip; SSIM/PSNR/MS-SSIM/SI-SDR core paths still run.
-        run: uv sync --extra detection --extra image --extra audio --python ${{ matrix.python-version }}
+        run: uv sync --extra eval --extra detection --extra image --extra audio --python ${{ matrix.python-version }}
       - name: Show resolved environment
         run: uv pip list
       - name: Run tests
-        run: uv run --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
+        run: uv run --extra eval --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
   batteries-clean-install:
     needs: changes
@@ -174,7 +174,7 @@ jobs:
         with:
           enable-cache: true
       - name: Sync lowest-direct dependency versions (Python 3.10)
-        run: uv sync --resolution lowest-direct --python 3.10
+        run: uv sync --resolution lowest-direct --extra eval --python 3.10
       # Some deps at their floor still `import pkg_resources` at import time; uv's
       # minimal venv omits setuptools, which typical user environments include.
       # Provide it so this job tests dependency-version compatibility, not
@@ -199,12 +199,52 @@ jobs:
       - name: Build docs (strict)
         run: uv run --group docs mkdocs build --strict
 
+  core-only:
+    # Guards the eval-extra split: a core install (NO extras) must import, run a
+    # real sweep, and give a clear install hint when the eval layer is accessed.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install core only (no extras) and smoke-test
+        run: |
+          uv venv /tmp/core
+          uv pip install --python /tmp/core/bin/python .
+          /tmp/core/bin/python - <<'PY'
+          import mushin
+
+          # 1. Core import must not pull torchmetrics/scipy.
+          import sys
+          assert "torchmetrics" not in sys.modules, "core import pulled torchmetrics"
+
+          # 2. A real sweep -> dataset works with the core install alone.
+          @mushin.sweep
+          def experiment(x):
+              return dict(y=float(x) * 2)
+
+          ds = experiment.run(x=mushin.multirun([1, 2, 3]))
+          assert ds.sizes == {"x": 3} and float(ds["y"].sel(x=2)) == 4.0
+
+          # 3. Accessing the (lazy) eval layer gives an actionable install hint.
+          for name in ("compare", "classification_battery", "llm"):
+              try:
+                  getattr(mushin, name)
+                  raise SystemExit(f"expected ImportError accessing mushin.{name}")
+              except ImportError as e:
+                  assert "mushin-py[eval]" in str(e), f"unhelpful error for {name}: {e}"
+          print("core-only smoke test passed")
+          PY
+
   # Single required status check. Passes when no needed job failed or was
   # cancelled — skipped jobs (e.g. the test matrix on a docs-only PR) are fine.
   # Set branch protection to require ONLY this check.
   ci-ok:
     if: always()
-    needs: [changes, lint, test, batteries-clean-install, notebooks, changelog, min-versions, docs]
+    needs: [changes, lint, test, batteries-clean-install, notebooks, changelog, min-versions, docs, core-only]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled

@@ -91,13 +91,17 @@ Each links to a guide with a runnable example:
 ## Installation
 
 ```bash
-pip install mushin-py
+pip install mushin-py           # the sweep -> dataset core
+pip install "mushin-py[eval]"   # + compare, metric batteries, LLM eval, Study
 ```
 
 The PyPI distribution is **`mushin-py`**, but you `import mushin` (like
-`scikit-learn` → `sklearn`). Optional extras: `viz`, `netcdf`, `detection`,
-`image`, `audio`, `mcp` — e.g. `pip install "mushin-py[viz]"`. Supported Python:
-3.10 – 3.14.
+`scikit-learn` → `sklearn`). The **`eval`** extra adds the evaluation layer
+(`compare`, the metric batteries, LLM evaluation, `Study`) and its heavier
+dependencies (torchmetrics, scipy) — keeping the core install lean; accessing
+those features without it raises a clear install hint. Other optional extras:
+`viz`, `netcdf`, `detection`, `image`, `audio`, `mcp` (the battery extras imply
+`eval`) — e.g. `pip install "mushin-py[eval,viz]"`. Supported Python: 3.10 – 3.14.
 
 ## Citation
 
