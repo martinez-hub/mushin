@@ -9,22 +9,23 @@ hydra-zen. Define your experiment as a function, sweep over parameters with
 Hydra, and get results back as a labeled `xarray.Dataset` — not rows in a
 dashboard you have to export.
 
-!!! tip "What's new in 0.4.0"
-    - **Auto-tuning** — [`tune_batch_size` / `tune_learning_rate`](guides/auto-tuning.md):
-      find the batch size / LR once, pin it to a sidecar file, and reuse it — with an
-      exact, hardware-independent effective batch (no drift).
-    - **Task API + more batteries** — first-class, reusable evaluation tasks
-      (`register_task` / `get_task` / `list_tasks`) plus regression, image-quality,
-      audio, retrieval, and detection batteries for [`compare`](guides/compare.md).
-    - **LLM evaluation** — [`compare_llms`](guides/llm.md): compare LLM systems across
-      reproducible seeds with statistical significance.
-    - **Lighter import** — `import mushin` no longer pulls the benchmark/LLM machinery
-      until you use it, and the new [`mushin.original_cwd()`](concepts.md#working-directories)
-      anchors relative paths inside `task()`.
-    - **Deprecation** — `BaseWorkflow` and `RobustnessCurve` moved out of the top-level
-      namespace; import them from `mushin.workflows` (they still work, with a warning).
+!!! tip "Highlights"
+    - **`@mushin.sweep`** — the boilerplate-free core: decorate a function and
+      `experiment.run(...)` returns the labeled dataset. See the
+      [quickstart](quickstart.md).
+    - **Resilient & resumable sweeps** — `on_error="nan"` fail-soft plus a durable
+      `resume=True` that survives a hard process kill or SLURM preemption without
+      recomputing finished cells. See [resilience](guides/resilience.md).
+    - **Laptop → cluster, one code path** — out-of-process launchers
+      (`launcher="joblib"` / submitit) and multi-GPU / multi-node training
+      (`HydraDDP` / `HydraFSDP`, GPU packing), validated on real cluster hardware.
+      See [multi-node training](guides/multinode.md).
+    - **Lean core, opt-in eval** — the evaluation layer (`compare`, the batteries,
+      LLM eval, `Study`) is the optional
+      [`eval` extra](install.md#optional-extras); a plain install is just the
+      sweep → dataset core.
 
-    See the full [changelog](changelog.md) for every change.
+    See the full [changelog](changelog.md) for every release.
 
 ## Three pillars
 
