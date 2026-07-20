@@ -119,6 +119,26 @@ from mushin import multirun, hydra_list
     - **Output directories:** Hydra writes each job's output to a timestamped
       subdirectory. Pass `working_dir=...` to control the root.
 
+## Sweep-axis support and limits
+
+`to_xarray` assembles a **Cartesian grid**: every sweep axis must be a discrete
+list of values, and every combination is one cell.
+
+- **Nested (dotted) params** work as axes: `wf.run(**{"model.width":
+  multirun([4, 8])})` sweeps a nested config path and becomes a normal
+  dimension (select it with `ds.sel({"model.width": 8})`).
+- **Config groups** work as axes when the config declares the target field:
+  register your options (e.g. `cs.store(group="model", name="small", ...)`),
+  give the workflow `eval_task_cfg=make_config(model=None)`, and sweep
+  `model=multirun(["small", "big"])`. The dataset coordinate is the chosen
+  option *name*.
+- **`range(1,5)`-style overrides** (e.g. in a sweep dir you re-load) expand to
+  their discrete values.
+- **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
+  plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
+  grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
+  than producing an all-NaN dataset.
+
 ## Parallel & out-of-process launchers
 
 By default a sweep runs its cells in-process, sequentially (Hydra's `basic`

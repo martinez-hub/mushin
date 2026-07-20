@@ -91,6 +91,52 @@ class _FailedRun:
         self.exception = exception
 
 
+_MISSING_SWEPT = object()
+
+
+def _read_swept_value(cfg, name: str):
+    """Read swept param ``name`` from a job config. A literal flat key wins;
+    otherwise ``name`` is treated as a nested config *path* (``model.width``),
+    which a plain ``cfg[name]`` subscription would reject."""
+    try:
+        return cfg[name]
+    except Exception:  # noqa: BLE001 - fall through to path lookup
+        from omegaconf import OmegaConf
+
+        val = OmegaConf.select(cfg, name, default=_MISSING_SWEPT)
+        if val is _MISSING_SWEPT:
+            raise KeyError(
+                f"swept override {name!r} not found in the job config, neither "
+                "as a literal key nor as a nested path"
+            ) from None
+        return val
+
+
+def _current_group_choice(name: str) -> str | None:
+    """The Hydra config-group option chosen for ``name`` in the current job
+    (from ``runtime.choices``), or None when ``name`` is not a group axis or
+    no Hydra context is active."""
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        if HydraConfig.initialized():
+            choices = HydraConfig.get().runtime.choices
+            if name in choices and choices[name] is not None:
+                return str(choices[name])
+    except Exception:  # noqa: BLE001 - best-effort; fall back to the raw value
+        pass
+    return None
+
+
+def _group_choices_of_job(job) -> dict | None:
+    """``runtime.choices`` recorded in a job's hydra config, or None."""
+    try:
+        choices = job.hydra_cfg.hydra.runtime.choices
+        return None if choices is None else dict(choices)
+    except Exception:  # noqa: BLE001 - jobs loaded without hydra_cfg
+        return None
+
+
 class _TaskRunner:
     """Picklable per-cell dispatch. Collapses the old closure chain
     (_task_calls / _instrument_task / _fail_soft / _resume_short_circuit) into one
@@ -124,9 +170,16 @@ class _TaskRunner:
 
         combo = {}
         for n in names:
-            val = cfg[n]
+            val = _read_swept_value(cfg, n)
             if OmegaConf.is_config(val):
-                val = OmegaConf.to_container(val, resolve=True)
+                # A config-GROUP axis (model=small,big): the coordinate is the
+                # chosen option name, not the composed sub-config. Inside a job
+                # Hydra records the choice in runtime.choices.
+                choice = _current_group_choice(n)
+                if choice is not None:
+                    val = choice
+                else:
+                    val = OmegaConf.to_container(val, resolve=True)
             combo[n] = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray(
                 _unwrap_scalar(val)
             )
@@ -351,7 +404,21 @@ class BaseWorkflow:
             param_name = override.get_key_element()
             val = override.value()
             if override.is_sweep_override():
-                val = multirun(val.list)  # type: ignore
+                if hasattr(val, "list"):  # ChoiceSweep (also glob results)
+                    val = multirun(val.list)  # type: ignore
+                elif hasattr(val, "range"):  # RangeSweep: discrete -> a grid axis
+                    val = multirun(list(val.range()))  # type: ignore
+                else:
+                    # e.g. IntervalSweep: continuous Bayesian-sweeper syntax
+                    # cannot form the Cartesian grid to_xarray assembles.
+                    raise ValueError(
+                        f"unsupported sweep override for {param_name!r}: "
+                        f"{type(val).__name__}. mushin assembles a Cartesian "
+                        "grid, so sweep axes must be discrete — use "
+                        "`param=a,b,c`, `choice(...)`, or `range(...)`; "
+                        "`interval(...)`/adaptive-sweeper syntax is not "
+                        "supported."
+                    )
 
             param_name = param_name.split("+")[-1]
             output[param_name] = val
@@ -1065,7 +1132,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         ):
             # Project onto the swept params only, matching `to_xarray`'s
             # `_lookup_key` so `_metrics_by_combo` and manifest keys align.
-            combo = self._combo_of_cfg(cfg)
+            combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             swept_combo = {n: combo[n] for n in swept_names}
             key = combo_key(swept_combo)
 
@@ -1123,22 +1190,36 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if isinstance(v, multirun)
         ]
 
-    def _combo_of_cfg(self, cfg: Any) -> dict[str, Any]:
+    def _combo_of_cfg(self, cfg: Any, choices: dict | None = None) -> dict[str, Any]:
         """The sanitized swept-parameter combination for a single job config.
 
         Values are unwrapped (0-d scalars), converted out of OmegaConf
         containers, and passed through `_sanitize_coordinate_for_xarray` so
         they key identically to the (already-sanitized) coordinate values used
-        to build the grid in `to_xarray`."""
+        to build the grid in `to_xarray`. Swept names may be nested config
+        paths (``model.width``). ``choices`` is the job's
+        ``hydra.runtime.choices``; a config-GROUP axis keys by its chosen
+        option name (matching the grid coordinate), not the composed
+        sub-config."""
         from omegaconf import OmegaConf
 
         combo = {}
         for n in self._swept_param_names():
-            val = cfg[n]
+            val = _read_swept_value(cfg, n)
             if OmegaConf.is_config(val):
-                val = OmegaConf.to_container(val, resolve=True)
+                if choices and choices.get(n) is not None:
+                    val = str(choices[n])
+                else:
+                    val = OmegaConf.to_container(val, resolve=True)
             combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
         return combo
+
+    def _job_choices(self, i: int) -> dict | None:
+        """``runtime.choices`` for job ``i``, when jobs align with cfgs."""
+        jobs = getattr(self, "jobs", None)
+        if jobs and len(jobs) == len(self.cfgs):
+            return _group_choices_of_job(jobs[i])
+        return None
 
     @staticmethod
     def _process_metrics(job_metrics: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1407,9 +1488,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 for i, cfg in enumerate(self.cfgs):
                     per_job = {k: col[i] for k, col in self.metrics.items()}
                     if per_job:
-                        self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = (
-                            per_job
-                        )
+                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        self._metrics_by_combo[combo_key(combo)] = per_job
 
         grid_names = list(orig_coords)
         grid_combos = [
@@ -1464,8 +1544,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # its working dir (cfgs and working dirs are job-aligned), then look
             # up per grid cell; a missing cell gets an empty string.
             workdir_by_combo = {
-                combo_key(self._combo_of_cfg(cfg)): str(wd)
-                for cfg, wd in zip(self.cfgs, self.multirun_working_dirs, strict=True)
+                combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i))): str(
+                    wd
+                )
+                for i, (cfg, wd) in enumerate(
+                    zip(self.cfgs, self.multirun_working_dirs, strict=True)
+                )
             }
             metrics_to_add["working_subdir"] = [
                 workdir_by_combo.get(_lookup_key(combo), "") for combo in grid_combos

@@ -1,0 +1,1 @@
+Sweep axes got first-class support for nested (dotted) params and Hydra config groups (the dataset coordinate is the chosen option name), `range(...)` overrides expand to their values, and unsupported continuous/adaptive sweeps (`interval(...)`) raise a clear error instead of crashing or yielding an all-NaN grid.
