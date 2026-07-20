@@ -11,23 +11,23 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-sync: ## Create/update the dev environment from uv.lock
-	uv sync
+sync: ## Create/update the dev environment (incl. the eval extra) from uv.lock
+	uv sync --extra eval
 
-test: ## Run the full test suite
-	uv run pytest tests/ --hypothesis-profile $(HYPOTHESIS_PROFILE) -p no:cacheprovider
+test: ## Run the full test suite (eval extra on, so benchmark/LLM/Study tests run)
+	uv run --extra eval pytest tests/ --hypothesis-profile $(HYPOTHESIS_PROFILE) -p no:cacheprovider
 
 test-fast: ## Run tests with the fast hypothesis profile (alias of default)
 	$(MAKE) test HYPOTHESIS_PROFILE=fast
 
 test-py: ## Run tests on a specific Python version, e.g. `make test-py PYTHON=3.12`
-	uv run --python $(PYTHON) pytest tests/ --hypothesis-profile $(HYPOTHESIS_PROFILE) -p no:cacheprovider
+	uv run --extra eval --python $(PYTHON) pytest tests/ --hypothesis-profile $(HYPOTHESIS_PROFILE) -p no:cacheprovider
 
 test-lowest: ## Run the suite against the LOWEST declared dep versions (x86_64 Linux via Docker; mirrors the min-versions CI job)
 	docker run --rm --platform linux/amd64 -v "$(PWD)":/app -w /app \
 		-e UV_PROJECT_ENVIRONMENT=/opt/venv -e UV_LINK_MODE=copy \
 		ghcr.io/astral-sh/uv:python3.10-bookworm-slim \
-		bash -c "uv sync --resolution lowest-direct && uv run pytest tests/ --hypothesis-profile fast"
+		bash -c "uv sync --resolution lowest-direct --extra eval && uv run pytest tests/ --hypothesis-profile fast"
 
 lint: ## Lint with ruff
 	uv run ruff check .
