@@ -184,10 +184,12 @@ jobs:
         with:
           enable-cache: true
       - name: Sync lowest-direct dependency versions (Python 3.10)
-        # Battery extras included so their floors (torchvision, pycocotools,
-        # lpips, pystoi) are actually resolved at lowest-direct, not just the
-        # eval floors (Linux job, so the win32-gated C extensions install).
-        run: uv sync --resolution lowest-direct --extra eval --extra detection --extra image --extra audio --python 3.10
+        # Deliberately NO battery extras here: pycocotools' floor wheel is
+        # ABI-incompatible with the numpy floor at lowest-direct (see the note
+        # above [tool.setuptools.packages.find] in pyproject.toml). The battery
+        # extras are exercised at latest versions by the `test` and
+        # `batteries-clean-install` jobs instead.
+        run: uv sync --resolution lowest-direct --extra eval --python 3.10
       # Some deps at their floor still `import pkg_resources` at import time; uv's
       # minimal venv omits setuptools, which typical user environments include.
       # Provide it so this job tests dependency-version compatibility, not
