@@ -2,15 +2,18 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import torch
 from hydra_zen import load_from_yaml
 from omegaconf import DictConfig, ListConfig
-from torch import nn
+
+if TYPE_CHECKING:
+    from torch import nn
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +86,8 @@ def load_from_checkpoint(
     """
     if ckpt is None:
         return model
+
+    import torch
 
     ckpt = Path(str(ckpt))
     if not ckpt.exists():
@@ -168,6 +173,8 @@ def load_experiment(
         cfg = load_from_yaml(config_path) if config_path.exists() else None
 
         # Load metrics files
+        import torch
+
         files = path.parent.glob("*.pt")
         metrics = dict()
         for f in files:

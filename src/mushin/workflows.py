@@ -14,7 +14,6 @@ from typing import (
 )
 
 import numpy as np
-import torch as tr
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
@@ -889,6 +888,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         dict(a=[1, 2, 3], b=[False, False, False])"""
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
+        import torch as tr
+
         return tr.load(file_path, weights_only=False)
 
     def run(
