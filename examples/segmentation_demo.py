@@ -3,6 +3,7 @@
 No heavy data needed — uses synthetic (N, C, H, W) inputs and (N, H, W) masks.
 
 Run it:  python examples/segmentation_demo.py
+Requires the eval extra:  pip install "mushin-py[eval]"
 
 The reusable `run()` core is exercised by the test suite on tiny synthetic data.
 """

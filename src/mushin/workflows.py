@@ -981,8 +981,41 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         capture_env: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
-        # TODO: add docs
+        """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
 
+        Extends :meth:`BaseWorkflow.run` (see it for the launcher/sweeper/
+        Hydra parameters) with metrics-workflow behavior:
+
+        Parameters
+        ----------
+        target_job_dirs : Sequence[str | Path] | None (default: None)
+            Existing job directories to evaluate over: each directory becomes
+            one cell of a ``job_dir`` sweep dimension, and the task receives
+            that cell's directory as its ``job_dir`` argument. Use this to
+            post-process completed runs (e.g. evaluate saved checkpoints)
+            instead of sweeping parameter values.
+        on_error : str (default: "raise")
+            ``"raise"`` propagates the first failing cell. ``"nan"`` records
+            the failure (``self.failures``, the sweep manifest, and a
+            ``mushin_error.txt`` traceback in the cell dir), fills that cell's
+            metrics with NaN, and keeps sweeping.
+        resume : bool (default: False)
+            Skip cells already recorded as completed in ``working_dir`` (their
+            metrics are read from the sidecar) and re-run the rest. Note that
+            completed cells are matched by their swept-parameter combination
+            only — if you changed the task body, a non-swept default, or your
+            environment since the original run, re-run from a fresh
+            ``working_dir`` instead of resuming into the old one.
+        capture_env : bool (default: False)
+            Record a ``pip freeze`` snapshot to ``working_dir/mushin_env.txt``
+            after the sweep.
+        **workflow_overrides
+            The sweep itself: ``param=value`` fixes a value,
+            ``param=multirun([...])`` makes a grid dimension. Nested config
+            paths (``**{"model.width": multirun([4, 8])}``) and config groups
+            are supported — see the workflows guide's "Sweep-axis support"
+            section.
+        """
         if target_job_dirs is not None:
             if isinstance(target_job_dirs, str):
                 raise TypeError(
@@ -1637,7 +1670,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         | None = zen,
         pre_task_fn_wrapper: Callable[[Callable[..., None]], Callable[[Any], None]]
         | None = zen,
-        target_job_dirs: Sequence[str | Path] | None = None,  # TODO: add docs
+        target_job_dirs: Sequence[str | Path] | None = None,
         version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
         working_dir: str | None = None,
         sweeper: str | None = None,
@@ -1800,6 +1833,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         """
         import matplotlib.pyplot as plt
 
+        created_fig = ax is None
         if ax is None:
             _, ax = plt.subplots()
 
@@ -1819,5 +1853,11 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
 
         if save_filename is not None:
             plt.savefig(save_filename)
+
+        if created_fig and save_filename is not None:
+            # We created the figure and the caller asked for a file, not a live
+            # figure: close it so repeated plotting in one process doesn't
+            # accumulate open figures (matplotlib warns past 20).
+            plt.close(ax.figure)
 
         return plots

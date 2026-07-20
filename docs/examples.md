@@ -10,6 +10,14 @@ them all. Clone the repo and run any one with:
 uv run python examples/<name>.py
 ```
 
+!!! note "Some examples need the `eval` extra"
+    The comparison/Study/battery/LLM examples (`compare_classifiers`,
+    `study_mnist`, `segmentation_demo`, `compare_llms_demo`, `batteries`) use
+    mushin's optional evaluation layer. On a plain `pip install mushin-py` they
+    raise an install hint — run them with `pip install "mushin-py[eval]"`
+    (`uv run` in this repo already includes it). `batteries.py` additionally
+    wants the `detection`/`image`/`audio` extras for those batteries.
+
 ## Sweeps → datasets
 
 | Example | What it shows |

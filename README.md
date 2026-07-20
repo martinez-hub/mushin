@@ -57,10 +57,12 @@ ds = experiment.run(
 ds["accuracy"].mean("seed")        # average over seeds, per learning rate
 ```
 
-The full runnable version is
-[`examples/sweep_to_dataset.py`](examples/sweep_to_dataset.py). Need the full
-tool (`.failures`, provenance, custom analysis)? Drop to `experiment.workflow`,
-or subclass `MultiRunMetricsWorkflow`.
+The decorator version above runs as
+[`examples/parallel_sweep.py`](examples/parallel_sweep.py);
+[`examples/sweep_to_dataset.py`](examples/sweep_to_dataset.py) is the same flow
+written with the class API. Need the full tool (`.failures`, provenance, custom
+analysis)? Drop to `experiment.workflow`, or subclass
+`MultiRunMetricsWorkflow`.
 
 ## What else it does
 
@@ -102,6 +104,19 @@ dependencies (torchmetrics, scipy) — keeping the core install lean; accessing
 those features without it raises a clear install hint. Other optional extras:
 `viz`, `netcdf`, `detection`, `image`, `audio`, `mcp` (the battery extras imply
 `eval`) — e.g. `pip install "mushin-py[eval,viz]"`. Supported Python: 3.10 – 3.14.
+
+## Versioning & scope
+
+mushin follows SemVer with pre-1.0 semantics: **a minor bump (0.8 → 0.9) may
+contain breaking changes**, always listed with migration notes in the
+[changelog](CHANGELOG.md); patch releases never break. The public API is the
+top-level `mushin` namespace plus the documented `mushin.benchmark` /
+`mushin.llm` symbols — underscore modules are internal. The project's scope is
+deliberately narrow: **boilerplate-free, reproducible sweep → dataset**, with
+an optional evaluation layer behind the `eval` extra. It complements — and
+does not replace — experiment trackers like W&B or TensorBoard (see the
+[workflows guide](https://martinez-hub.github.io/mushin/guides/workflows/) for
+using both together).
 
 ## Citation
 
