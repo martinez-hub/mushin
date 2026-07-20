@@ -7,31 +7,36 @@
 
 <h1 align="center">mushin</h1>
 
-[![CI](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml/badge.svg)](https://github.com/martinez-hub/mushin/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/mushin-py.svg)](https://pypi.org/project/mushin-py/)
-[![Python versions](https://img.shields.io/pypi/pyversions/mushin-py.svg)](https://pypi.org/project/mushin-py/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21436444.svg)](https://doi.org/10.5281/zenodo.21436444)
+<p align="center">
+  <a href="https://github.com/martinez-hub/mushin/actions/workflows/ci.yml"><img src="https://github.com/martinez-hub/mushin/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/mushin-py/"><img src="https://img.shields.io/pypi/v/mushin-py.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/mushin-py/"><img src="https://img.shields.io/pypi/pyversions/mushin-py.svg" alt="Python versions"></a>
+  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://doi.org/10.5281/zenodo.21436444"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.21436444.svg" alt="DOI"></a>
+</p>
 
-**Docs:** https://martinez-hub.github.io/mushin/
+<p align="center">
+  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b><br>
+  built on <a href="https://lightning.ai/">PyTorch Lightning</a> and
+  <a href="https://github.com/mit-ll-responsible-ai/hydra-zen">hydra-zen</a>.
+</p>
 
-Boilerplate-free, reproducible machine-learning experiment workflows built on
-[PyTorch Lightning](https://lightning.ai/) and
-[hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen).
+<p align="center"><a href="https://martinez-hub.github.io/mushin/"><b>Documentation</b></a></p>
 
-`mushin` is a standalone carve-out of the `rai_toolbox.mushin` subpackage from
-MIT Lincoln Laboratory's
-[responsible-ai-toolbox](https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox).
-The upstream toolbox is no longer maintained (last release May 2023), but the
-`mushin` workflow layer still works against current versions of its
-dependencies. This package extracts just that layer so it can be maintained and
-used on its own.
+Decorate an experiment, sweep over parameters, and get the results back as a
+labeled `xarray.Dataset` — not rows in a dashboard you have to export.
 
-## Quickstart: run a sweep, get a dataset
+- **Boilerplate-free** — one decorator, no subclassing or callbacks; results come
+  back as a labeled dataset you can slice and plot.
+- **Reproducible** — every run captures its config + provenance, sweeps resume
+  durably after a hard kill or cluster preemption, and auto-tuning pins a
+  hardware-independent effective batch size.
+- **Scalable** — the *same* task runs in-process, across cores, or on a multi-node
+  SLURM cluster (validated on real GPU hardware); change only the launcher.
+- **Framework-agnostic** — your task just returns a `dict`, so scikit-learn,
+  XGBoost, or any Python model works, not only PyTorch.
 
-Decorate your experiment with [`@mushin.sweep`](https://martinez-hub.github.io/mushin/quickstart/),
-sweep over parameters, and get the results back as a labeled `xarray.Dataset` —
-not rows in a dashboard you have to export. No subclassing, no callbacks:
+## Quickstart
 
 ```python
 import mushin
@@ -39,8 +44,8 @@ import mushin
 @mushin.sweep
 def experiment(lr, seed):
     # ... train a model with this lr/seed, then evaluate it ...
-    acc = ...  # your validation accuracy
-    return dict(accuracy=acc)  # whatever you return becomes a data variable
+    acc = ...                      # your validation accuracy
+    return dict(accuracy=acc)      # whatever you return becomes a data variable
 
 ds = experiment.run(
     lr=mushin.multirun([0.01, 0.1, 1.0]),
@@ -49,183 +54,90 @@ ds = experiment.run(
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
 #   Data variables: accuracy (lr, seed)
 
-ds["accuracy"].mean("seed")   # average over seeds, per learning rate
+ds["accuracy"].mean("seed")        # average over seeds, per learning rate
 ```
 
-Need the full tool — `.failures`, `.plot()`, provenance, custom analysis? Drop to
-`experiment.workflow` (the last-run instance), or subclass `MultiRunMetricsWorkflow`
-directly for advanced control (custom `pre_task`, `jobs_post_process`) — which is
-exactly what `@mushin.sweep` builds for you.
+The full runnable version is
+[`examples/sweep_to_dataset.py`](examples/sweep_to_dataset.py). Need the full
+tool (`.failures`, provenance, custom analysis)? Drop to `experiment.workflow`,
+or subclass `MultiRunMetricsWorkflow`.
 
-The full runnable version is in [`examples/sweep_to_dataset.py`](examples/sweep_to_dataset.py):
+## What else it does
 
-```bash
-uv run python examples/sweep_to_dataset.py
-```
+Each links to a guide with a runnable example:
 
-The sweep layer is **framework-agnostic** — your `task` just returns a `dict`, so
-you can wrap scikit-learn, XGBoost, or anything and still get a labeled
-`xarray.Dataset` back (see [`examples/sklearn_sweep.py`](examples/sklearn_sweep.py)).
-The Lightning-specific conveniences (auto-tuning, `HydraDDP`, the `compare`
-batteries) assume PyTorch.
+- **[Compare methods with statistics](https://martinez-hub.github.io/mushin/guides/compare/)** —
+  `benchmark.compare` runs a metric battery (torchmetrics) across seeds and returns
+  a labeled dataset *plus* significance (scipy); `Study` runs the training sweep and
+  feeds it straight in.
+- **[Compare LLM systems](https://martinez-hub.github.io/mushin/guides/llm/)** —
+  the same significance spine for LLM evals, with Holm-corrected p-values and an
+  optional output cache.
+- **[Built-in batteries](https://martinez-hub.github.io/mushin/guides/batteries/)** —
+  classification, segmentation, detection, regression, retrieval, image-quality, audio.
+- **[Resilient & resumable sweeps](https://martinez-hub.github.io/mushin/guides/resilience/)** —
+  `on_error="nan"`, durable `resume=True` across hard kills/preemption, and per-run
+  provenance.
+- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel--out-of-process-launchers)** —
+  `run(..., launcher="joblib")` or submitit; stdlib-picklable dispatch.
+- **[Multi-node & sharded training](https://martinez-hub.github.io/mushin/guides/multinode/)** —
+  `HydraDDP` / `HydraFSDP` and `pin_gpu_round_robin` GPU packing, validated on a real
+  SLURM cluster.
+- **[Auto-tuning](https://martinez-hub.github.io/mushin/guides/auto-tuning/)** —
+  `tune_batch_size` / `tune_learning_rate`, pinned for reproducibility.
+- **[Analyze from Claude Code (MCP)](https://martinez-hub.github.io/mushin/guides/mcp/)** —
+  an optional read-only MCP server to load and inspect completed runs.
 
-## Compare methods, with statistics
-
-Evaluate trained models on a standard battery and get a labeled dataset *plus*
-significance — metrics delegated to torchmetrics, statistics to scipy:
-
-```python
-from mushin.benchmark import compare
-
-result = compare(
-    methods={"ours": [m0, m1, m2], "baseline": [b0, b1, b2]},  # one trained model per seed
-    data=test_loader, task="classification", num_classes=10, test="welch",
-)
-
-result.summary()       # mean ± CI per method, with significance markers — paper-ready
-result.comparisons     # tidy DataFrame: pairwise p-values + effect sizes
-result.data            # the labeled xarray (method × seed) to slice and plot
-```
-
-Don't have the trained models in memory yet? `Study` runs the multi-seed training
-sweep (via Hydra) and feeds the results straight into `compare` — define → train →
-evaluate → report in one call:
-
-```python
-from mushin import Study
-
-study = Study(
-    methods={"cnn": train_cnn, "mlp": train_mlp},   # train_fn(seed) -> checkpoint path
-    load_fn=LitClassifier.load_from_checkpoint,       # path -> model
-    seeds=[0, 1, 2], data=test_loader, num_classes=10, test="welch",
-)
-result = study.run()                                  # -> BenchmarkResult
-
-# ...or compare checkpoints you already have, no training:
-Study.from_checkpoints(
-    checkpoints={"cnn": ["cnn_0.ckpt", ...], "mlp": ["mlp_0.ckpt", ...]},
-    load_fn=LitClassifier.load_from_checkpoint,
-    data=test_loader, num_classes=10, test="welch",
-).run()
-```
-
-## Compare LLM systems, with statistics
-
-The same significance spine extends to **LLM systems** — the one eval setting
-where "is this difference real, or just sampling noise?" is most often skipped.
-Bring your own systems, data, and metric; mushin runs each across reproducible
-seeds and reports Holm-corrected significance:
-
-```python
-from mushin.llm import compare_llms, llm_judge
-
-result = compare_llms(
-    systems={"prompt_a": system_a, "prompt_b": system_b},  # system(inputs, seed) -> outputs
-    data=eval_data,                                         # [{"input": ..., "reference": ...}, ...]
-    metric=llm_judge(my_judge, rubric="Is the answer correct?"),  # or any callable / torchmetric
-    seeds=range(5), test="welch",
-)
-result.summary()       # same paper-ready table as the torch path
-```
-
-Systems can be plain callables or hydra-zen configs (instantiated once, reused
-across seeds); metrics can be a plain scorer, a `torchmetrics` text metric, or a
-named battery. An optional on-disk output cache makes reruns/resumes free. See
-the [LLM evaluation guide](docs/guides/llm.md).
-
-## What it provides
-
-- `@mushin.sweep` — the boilerplate-free core: decorate a `task`-style function
-  and `experiment.run(lr=multirun([...]), seed=multirun([...]))` returns the
-  labeled `xarray.Dataset` directly. Drop to `experiment.workflow` /
-  `experiment.workflow_cls` for the full workflow, or subclass
-  `MultiRunMetricsWorkflow` for advanced control.
-- `benchmark.compare` — run a standard metric battery (torchmetrics) across
-  trained seeds and get a labeled dataset + significance (scipy): `BenchmarkResult`
-  with `.summary()`, `.comparisons`, and `.data`.
-- `register_task`, `get_task`, `list_tasks`, `Task` — first-class, reusable
-  evaluation tasks; `compare` and `Study` accept a task name or a `Task`. Built-in
-  batteries: `classification`, `segmentation`, `detection`, `regression`,
-  `retrieval`, `image_quality`, `audio`.
-- `llm.compare_llms`, `llm.llm_judge` — compare LLM systems across reproducible
-  seeds with significance (callables or hydra-zen configs; plain / `torchmetrics`
-  / judge metrics; optional output cache).
-- `Study` — orchestrate a multi-seed training sweep and route the trained models
-  into `compare`, in one call; `Study.from_checkpoints(...)` for eval-only.
-- `MultiRunMetricsWorkflow` (plus its base `mushin.workflows.BaseWorkflow` and the
-  `mushin.workflows.RobustnessCurve` variant) — declarative, reproducible
-  experiment workflows that record configs, checkpoints, and metrics, and load
-  results back as labeled `xarray` datasets.
-- **Sweep resilience + provenance** — `run(on_error="nan")` records a failed grid
-  cell as NaN and keeps going; `run(working_dir=..., resume=True)` re-runs only the
-  failed/missing cells and is **durable across a hard process kill** (OOM, SLURM
-  preemption) — completed cells are never recomputed; a task can declare a
-  `mushin_resume` parameter to resume its own training mid-run from the last
-  checkpoint; `compare`/`Study` refuse statistics on an incomplete sweep
-  (`IncompleteSweepError`) until you fix and resume; every run captures per-run
-  provenance (`mushin_provenance.json`: git SHA, versions, config). See the
-  [resilience guide](https://martinez-hub.github.io/mushin/guides/resilience/).
-- **Out-of-process launchers** — dispatch is stdlib-picklable, so sweeps run
-  across cores or a scheduler with a standard Hydra launcher plugin:
-  `run(..., launcher="joblib")` (or submitit). See the
-  [workflows guide](https://martinez-hub.github.io/mushin/guides/workflows/#parallel--out-of-process-launchers).
-- `tune_batch_size`, `tune_learning_rate` — opt-in, reproducibility-preserving
-  auto-tuning: find the batch size / LR once, pin it to a sidecar file, and reuse
-  it — with an exact, hardware-independent effective batch (no drift).
-- `MetricsCallback` — a Lightning callback for capturing metrics.
-- `HydraDDP` — a Hydra/Lightning strategy for multi-GPU (DDP) launches.
-- `multirun`, `hydra_list`, `load_experiment`, `load_from_checkpoint` — helpers.
-
-## Analyze experiments from Claude Code (MCP)
-
-`mushin` ships an optional read-only [MCP](https://modelcontextprotocol.io)
-server so Claude Code (or any MCP client) can load and analyze your completed
-runs — list experiments, summarize swept parameters and metrics, and inspect
-saved datasets — without launching anything.
-
-```bash
-pip install "mushin-py[mcp]"          # requires Python >= 3.10
-claude mcp add mushin -- mushin-mcp --root ./outputs
-```
-
-See the [MCP guide](https://martinez-hub.github.io/mushin/guides/mcp/) for the full tool list and example prompts.
-
-## Install
+## Installation
 
 ```bash
 pip install mushin-py
 ```
 
-Already use [uv](https://docs.astral.sh/uv/)? `uv pip install mushin-py` (or
-`uv add mushin-py` inside a project) is faster.
+The PyPI distribution is **`mushin-py`**, but you `import mushin` (like
+`scikit-learn` → `sklearn`). Optional extras: `viz`, `netcdf`, `detection`,
+`image`, `audio`, `mcp` — e.g. `pip install "mushin-py[viz]"`. Supported Python:
+3.10 – 3.14.
 
-> **Install name vs. import name:** the PyPI distribution is **`mushin-py`**, but
-> you `import mushin` (same pattern as `scikit-learn` → `sklearn`).
+## Citation
 
-Optional extras: `viz` (matplotlib, for plotting results) and `netcdf` (netCDF4)
-for the core; `detection`, `image`, and `audio` for those benchmark batteries;
-and `mcp` for the MCP server — e.g. `pip install "mushin-py[viz]"`.
+If you use mushin in your research, please cite it (the concept DOI always
+resolves to the latest release):
 
-For a development environment (runtime deps + dev tooling), this project uses
-[uv](https://docs.astral.sh/uv/): `uv sync`.
-
-## Develop
-
-```bash
-uv run pytest tests/ --hypothesis-profile fast   # tests (DDP test needs >=2 GPUs)
-uv run ruff check .                              # lint
-uv run ruff format .                             # format
-uv run codespell src tests                       # spell check
+```bibtex
+@software{martinez_mushin,
+  author  = {Martínez-Martínez, Josué},
+  title   = {mushin: boilerplate-free, reproducible machine-learning experiment sweeps},
+  year    = {2026},
+  version = {0.7.0},
+  doi     = {10.5281/zenodo.21436444},
+  url     = {https://github.com/martinez-hub/mushin}
+}
 ```
 
-Or use the `make` shortcuts (`make help` to list them): `make check` runs
-lint + format-check + spell + tests (what CI runs); `make test-py PYTHON=3.12`
-runs the suite on a specific Python version.
+GitHub's "Cite this repository" button (from [`CITATION.cff`](CITATION.cff))
+generates this for you.
 
-Supported Python versions: 3.10 – 3.14.
+## Contributing
 
-## Relationship to upstream
+Issues and pull requests are welcome. Local development uses
+[uv](https://docs.astral.sh/uv/):
 
-This is a fork/extraction, not a replacement endorsed by MIT-LL. The configuration
-engine it depends on, `hydra-zen`, is actively maintained by the same group. See
-`LICENSE.txt` for attribution; the original MIT copyright is retained.
+```bash
+uv sync
+uv run pytest tests/ --hypothesis-profile fast   # tests (DDP test needs >=2 GPUs)
+uv run ruff check . && uv run ruff format --check .
+```
+
+Or `make check` (lint + format + spell + tests, as CI runs). See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Disclaimer
+
+`mushin` is a maintained, standalone carve-out of the `rai_toolbox.mushin`
+subpackage from MIT Lincoln Laboratory's
+[responsible-ai-toolbox](https://github.com/mit-ll-responsible-ai/responsible-ai-toolbox)
+(no longer maintained). This is a fork/extraction, not a replacement endorsed by
+MIT-LL; the original MIT copyright is retained (see [`LICENSE.txt`](LICENSE.txt)).
+The configuration engine it builds on, `hydra-zen`, is actively maintained by the
+same group.
