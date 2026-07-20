@@ -113,7 +113,7 @@ resolves to the latest release):
   author  = {Martínez-Martínez, Josué},
   title   = {mushin: boilerplate-free, reproducible machine-learning experiment sweeps},
   year    = {2026},
-  version = {0.7.0},
+  version = {0.8.0},
   doi     = {10.5281/zenodo.21436444},
   url     = {https://github.com/martinez-hub/mushin}
 }
