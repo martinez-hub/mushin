@@ -342,9 +342,7 @@ def test_explicit_prob_metrics_routes_probabilities():
         prob_metrics={"brier"},
     )
     # probabilities: float, (batch, num_classes)
-    assert all(
-        dtype.is_floating_point and shape[-1] == 3 for dtype, shape in spy.seen
-    )
+    assert all(dtype.is_floating_point and shape[-1] == 3 for dtype, shape in spy.seen)
 
 
 def test_prob_metrics_outside_battery_raises():

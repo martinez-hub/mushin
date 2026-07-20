@@ -1622,9 +1622,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # netCDF attr (the scipy engine rejects it, and netCDF4 collapses a
         # 1-element list to a bare str on reload).
         if self.failures:
-            attrs["mushin_failures"] = _json.dumps(
-                [f["combo"] for f in self.failures]
-            )
+            attrs["mushin_failures"] = _json.dumps([f["combo"] for f in self.failures])
         # Attach best-effort per-run provenance (git/versions/config) from one
         # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
         # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
