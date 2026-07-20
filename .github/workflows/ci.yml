@@ -11,7 +11,40 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded run on the same ref (e.g. when a PR branch is updated)
+# instead of letting redundant matrices pile up.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Detect whether the change touches code, so docs-only PRs can skip the heavy
+  # test matrix. The `ci-ok` summary job (bottom) is the single required status
+  # check, so jobs that are skipped here never block a merge.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      notebooks: ${{ steps.filter.outputs.notebooks }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'examples/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/**'
+            notebooks:
+              - 'docs/notebooks/**'
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -29,6 +62,8 @@ jobs:
         run: uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
 
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -59,6 +94,8 @@ jobs:
         run: uv run --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
   batteries-clean-install:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # Install the BUILT wheel (not the editable repo) with the battery extras into
     # a fresh environment and run the battery examples against it — catches
     # packaging / optional-extra resolution issues the editable `test` job misses.
@@ -79,6 +116,8 @@ jobs:
           /tmp/clean-batteries/bin/python examples/batteries.py
 
   notebooks:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.notebooks == 'true'
     # Execute every docs/notebooks/*.ipynb with nbmake so the example notebooks
     # can never rot. nbmake checks that cells RUN (not output equality), so
     # numerical drift never makes this flaky; committed outputs are for display.
@@ -123,6 +162,8 @@ jobs:
         run: uv run towncrier check --compare-with origin/${{ github.base_ref }}
 
   min-versions:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # Resolves the *lowest* declared dependency versions and runs the suite, so
     # the floors in pyproject.toml stay honest. Runs on the oldest supported
     # Python (3.10). Reproduce locally with `make test-lowest` (amd64 Docker).
@@ -157,3 +198,19 @@ jobs:
           enable-cache: true
       - name: Build docs (strict)
         run: uv run --group docs mkdocs build --strict
+
+  # Single required status check. Passes when no needed job failed or was
+  # cancelled — skipped jobs (e.g. the test matrix on a docs-only PR) are fine.
+  # Set branch protection to require ONLY this check.
+  ci-ok:
+    if: always()
+    needs: [changes, lint, test, batteries-clean-install, notebooks, changelog, min-versions, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "A required job did not pass: ${{ join(needs.*.result, ', ') }}"
+          exit 1
+      - name: Success
+        run: echo "All required jobs passed or were skipped."
