@@ -553,3 +553,42 @@ def test_reduce_metrics_summarizes_list_metrics(tmp_path):
     out = _get_metrics(base, reduce="mean")
     # mean of final-epoch accuracy across runs: mean(0.8, 1.0) == 0.9
     assert out["reduced"]["fit_metrics.accuracy"] == pytest.approx(0.9, abs=1e-6)
+
+
+def _make_workflow_experiment(base: Path, accs=(0.8, 0.9)) -> Path:
+    """Hydra multirun layout whose metrics live in the workflow JSON sidecar
+    (mushin_metrics.json) rather than MetricsCallback .pt files."""
+    import json
+
+    for i, acc in enumerate(accs):
+        run = base / str(i)
+        (run / ".hydra").mkdir(parents=True)
+        OmegaConf.save(
+            OmegaConf.create({"lr": float(i)}), run / ".hydra" / "config.yaml"
+        )
+        (run / "mushin_metrics.json").write_text(json.dumps({"acc": acc}))
+    return base
+
+
+def test_get_metrics_reads_workflow_json_sidecar(tmp_path):
+    # The resilient-sweep path stores metrics in mushin_metrics.json; the MCP
+    # server must surface them, not report an empty per_run.
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_workflow_experiment(tmp_path / "exp")
+    out = _get_metrics(base, reduce="mean")
+    assert out["num_runs"] == 2
+    assert out["per_run"][0]["mushin_metrics"]["acc"] == pytest.approx(0.8)
+    assert out["reduced"]["mushin_metrics.acc"] == pytest.approx(0.85)
+
+
+def test_one_corrupt_config_does_not_kill_experiment(tmp_path):
+    # A single half-written config.yaml (e.g. from a killed job) must not make
+    # every query for the whole experiment raise.
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    (base / "1" / ".hydra" / "config.yaml").write_text(":\n- [broken")
+    out = _get_metrics(base, reduce=None)
+    assert out["num_runs"] == 2
+    assert out["per_run"][0]["metrics"]["accuracy"] == pytest.approx(0.8, abs=1e-5)
