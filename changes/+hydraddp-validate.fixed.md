@@ -1,0 +1,1 @@
+Fixed `trainer.validate()` under `HydraDDP`/`HydraFSDP`: the child ranks were told to run `fit` (train) while rank 0 validated — a collective mismatch that hangs or crashes. The launcher now maps Lightning's `_validate_impl` to a `pl_validating` flag and `_pl_main` dispatches `trainer.validate` accordingly, alongside the existing test/predict paths.
