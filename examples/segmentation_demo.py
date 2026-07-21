@@ -1,6 +1,10 @@
-"""Synthetic segmentation demo: compare two tiny segmentation models.
+"""Synthetic segmentation demo: exercise the compare() pipeline end-to-end.
 
 No heavy data needed — uses synthetic (N, C, H, W) inputs and (N, H, W) masks.
+Because the masks are random, the two tiny models score near chance and no
+significant difference is expected: this is a *pipeline smoke test* (does the
+segmentation battery + compare run and return a dataset), not a demonstration
+of a real accuracy gap. See the batteries guide for an engineered comparison.
 
 Run it:  python examples/segmentation_demo.py
 Requires the eval extra:  pip install "mushin-py[eval]"

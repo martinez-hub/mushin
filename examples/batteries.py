@@ -13,8 +13,9 @@ The detection, image_quality, and audio batteries need optional extras
 ``compare`` (not at module import time), so this module always imports cleanly
 and the tests ``pytest.importorskip`` the extra to skip when it is absent.
 
-Run one:  python examples/batteries.py
-Requires the eval extra (plus detection/image/audio for those batteries):  pip install "mushin-py[eval]"
+Run:  python examples/batteries.py  (runs every battery walkthrough)
+Requires the eval extra:  pip install "mushin-py[eval]"  — batteries whose
+optional extra (detection/image/audio) is not installed are skipped, not failed.
 """
 
 from __future__ import annotations
@@ -387,7 +388,7 @@ if __name__ == "__main__":
         "image_quality": run_image_quality,
         "audio": run_audio,
     }
-    _failed = []
+    _failed, _skipped = [], []
     for _name, _fn in _RUNNERS.items():
         try:
             _result = _fn()
@@ -395,10 +396,17 @@ if __name__ == "__main__":
             _keys = list(_result.data.data_vars)
             assert _keys, "no metrics produced"
             print(f"  {_name}: OK  metrics={_keys}")
+        except ImportError as _exc:
+            # A missing optional extra (detection/image/audio) is a skip, not a
+            # failure: `pip install "mushin-py[eval]"` should still exit 0.
+            _skipped.append(_name)
+            print(f"  {_name}: SKIP (optional extra not installed) {_exc}")
         except Exception as _exc:  # noqa: BLE001
             _failed.append(_name)
             print(f"  {_name}: FAIL  {_exc!r}")
+    if _skipped:
+        print(f"\nSkipped (optional extra not installed): {_skipped}")
     if _failed:
         print(f"\n{len(_failed)} battery example(s) failed: {_failed}")
         sys.exit(1)
-    print(f"\nAll {len(_RUNNERS)} battery examples ran cleanly.")
+    print(f"\n{len(_RUNNERS) - len(_skipped)} battery example(s) ran cleanly.")

@@ -39,7 +39,7 @@ format-check: ## Check formatting without modifying files
 	uv run ruff format --check .
 
 spell: ## Spell-check with codespell
-	uv run codespell src tests README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
+	uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
 
 check: lint format-check spell test ## Run all checks (what CI runs)
 

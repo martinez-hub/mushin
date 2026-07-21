@@ -8,10 +8,19 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
-from mushin.mcp.server import create_server
+try:  # the `mcp` package ships in the optional `mcp` extra
+    from mushin.mcp.server import create_server
+except ImportError:
+    create_server = None  # kept module-level so main() can give a clear hint
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    if create_server is None:
+        raise SystemExit(
+            "the MCP server requires the optional `mcp` extra: "
+            'pip install "mushin-py[mcp]"'
+        )
+
     parser = argparse.ArgumentParser(
         prog="mushin-mcp",
         description="Read-only MCP server for analyzing mushin experiments.",

@@ -2,9 +2,11 @@
 
 `MultiRunMetricsWorkflow` never inspects your model — it sweeps configurations
 and collects the ``dict`` your ``task`` returns. So you can train a
-**scikit-learn** model inside ``task`` (no torch, no Lightning) and still get
-results back as a labeled ``xarray.Dataset``, exactly as with a torch model.
-mushin needs no scikit-learn integration for this — the sweep layer is neutral.
+**scikit-learn** model inside ``task`` (no torch, no Lightning in *your* code)
+and still get results back as a labeled ``xarray.Dataset``, exactly as with a
+torch model. mushin needs no scikit-learn integration for this — the sweep
+layer is neutral. (mushin itself still imports torch for provenance if it is
+installed; only your task body is framework-free.)
 
 This sweeps ``LogisticRegression``'s inverse-regularization strength ``C`` across
 seeds on a fixed synthetic 2-class dataset, recording held-out accuracy, and
