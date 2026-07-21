@@ -1,1 +1,0 @@
-Resume now verifies a config fingerprint before reusing a completed cell -- changing a non-swept value and resuming re-runs the affected cells (with a warning) instead of silently mixing two configurations into one dataset; resuming also no longer ships the full manifest to every worker.

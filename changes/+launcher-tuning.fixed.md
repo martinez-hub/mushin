@@ -1,1 +1,0 @@
-HydraDDP/HydraFSDP rank startup is staggered by a deterministic, tunable delay (`MUSHIN_DDP_LAUNCH_DELAY`, default 1s) instead of a hard-coded random 1-5s per rank, and the re-launch command builds a Windows-safe `hydra.run.dir` override.

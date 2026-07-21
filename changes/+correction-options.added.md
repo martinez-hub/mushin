@@ -1,1 +1,0 @@
-`compare`/`compare_methods`/`compare_llms` accept `correction=` -- `holm` (default), `bonferroni`, `fdr_bh` (Benjamini-Hochberg), or `none`; the statistics guide documents the per-metric family scope.

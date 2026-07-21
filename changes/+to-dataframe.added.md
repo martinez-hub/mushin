@@ -1,1 +1,0 @@
-`MultiRunMetricsWorkflow.to_dataframe()` (and `experiment.workflow.to_dataframe()`) returns the sweep as a tidy pandas DataFrame in one call; README and quickstart show the pandas path alongside the dataset.

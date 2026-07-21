@@ -1,1 +1,0 @@
-Paired tests now report the paired effect size (Cohen's d_z) instead of the pooled-variance d; `mushin_failures` is stored as a JSON attr so failed-sweep datasets survive a netCDF round-trip; a custom `metrics=` battery no longer inherits the task's probability routing silently (pass `prob_metrics=` explicitly, unknown names now raise).
