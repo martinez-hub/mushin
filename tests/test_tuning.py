@@ -283,7 +283,7 @@ def test_batch_invalid_inputs(monkeypatch, tmp_path):
     # validation raises before any pin I/O, so the path is never written
     _patch_scale(monkeypatch, 128)
     t, dm, pin = _make_trainer(), _DM(), tmp_path / "p.yaml"
-    with pytest.raises(ValueError, match="divisible"):
+    with pytest.raises(ValueError, match="divisible by num_devices"):
         tune_batch_size(
             t,
             object(),
@@ -745,26 +745,6 @@ class _FakeTrainer:
         self.callbacks = []
 
 
-def test_batch_exact_via_divisor_when_max_not_a_divisor(monkeypatch, tmp_path):
-    _patch_scale(monkeypatch, found_max=100)
-    trainer = _FakeTrainer()
-    trainer.num_devices = 4  # -> per_device_total = 512/4 = 128
-    module = _Owner(batch_size=1)
-    pin = tune_batch_size(
-        trainer,
-        module,
-        effective_batch_size=512,
-        pin_path=tmp_path / "pin.yaml",
-    )
-    assert pin.device_batch == 64  # largest divisor of 128 <= 100
-    assert pin.accumulate_grad_batches == 2
-    assert pin.num_devices == 4
-    assert pin.effective_batch_size == 512  # always exact
-    assert not hasattr(pin, "drift")
-    assert module.batch_size == 64
-    assert trainer.accumulate_grad_batches == 2
-
-
 @pytest.mark.parametrize(
     "effective, num_devices, found_max",
     [(512, 1, 300), (512, 4, 100), (256, 2, 50), (1024, 8, 33), (128, 1, 128)],
@@ -784,6 +764,14 @@ def test_batch_effective_is_always_exact(
     )
     assert pin.device_batch * pin.accumulate_grad_batches * pin.num_devices == effective
     assert pin.device_batch <= found_max
+    # device_batch is the LARGEST divisor of per_device_total that fits under
+    # found_max (exact-divisor selection), not merely *some* divisor <= found_max.
+    per_device_total = effective // num_devices
+    assert per_device_total % pin.device_batch == 0
+    assert not any(
+        per_device_total % d == 0 and d <= found_max
+        for d in range(pin.device_batch + 1, per_device_total + 1)
+    )
 
 
 def test_batch_pin_stores_found_max_and_rederives_on_reuse(monkeypatch, tmp_path):
@@ -823,15 +811,3 @@ def test_batch_poor_utilization_warns(monkeypatch, tmp_path):
             trainer, module, effective_batch_size=130, pin_path=tmp_path / "pin.yaml"
         )
     assert pin.effective_batch_size == 130  # still exact
-
-
-def test_batch_effective_not_divisible_by_num_devices_raises(tmp_path):
-    trainer = _FakeTrainer()
-    trainer.num_devices = 3
-    with pytest.raises(ValueError, match="divisible by num_devices"):
-        tune_batch_size(
-            trainer,
-            _Owner(batch_size=1),
-            effective_batch_size=512,
-            pin_path=tmp_path / "pin.yaml",
-        )

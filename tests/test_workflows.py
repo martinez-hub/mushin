@@ -1008,9 +1008,21 @@ def test_on_error_nan_records_and_continues(tmp_path):
     assert ds.attrs["mushin_failures"]  # non-empty list
 
 
-def test_resume_reruns_only_failed_cell(tmp_path):
+@pytest.mark.parametrize("relative", [False, True])
+def test_resume_reruns_only_failed_cell(tmp_path, monkeypatch, relative):
+    # Resume must re-run ONLY the previously-failed cell and short-circuit the
+    # completed ones. `relative=True` is a regression guard: a RELATIVE working_dir
+    # must still short-circuit — the short-circuit's sidecar read runs INSIDE the
+    # chdir'd Hydra job, so the main process must resolve working_dir to absolute
+    # before wrapping, else every completed cell silently re-executes.
     from mushin import multirun
     from mushin.workflows import MultiRunMetricsWorkflow
+
+    if relative:
+        monkeypatch.chdir(tmp_path)
+        wd = "rel_sweep"  # RELATIVE to the (monkeypatched) cwd
+    else:
+        wd = str(tmp_path / "s")
 
     CALLS = {"n": 0}
 
@@ -1024,11 +1036,10 @@ def test_resume_reruns_only_failed_cell(tmp_path):
                 raise RuntimeError("boom")
             return dict(val=float(a * 10 + b))
 
-    wd = str(tmp_path / "s")
     W.FAIL = True
     wf = W()
     # fail-soft emits a UserWarning naming the failed cell — assert it (this also
-    # keeps it out of the pytest warnings summary), matching the sibling test.
+    # keeps it out of the pytest warnings summary).
     with pytest.warns(UserWarning, match="fail"):
         wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
     W.FAIL = False
@@ -1040,47 +1051,6 @@ def test_resume_reruns_only_failed_cell(tmp_path):
     ds = wf2.to_xarray()
     assert float(ds["val"].sel(a=2, b=1)) == 21.0  # cell filled in place
     assert ds.sizes == {"a": 2, "b": 2}  # same shape, no growth
-
-
-def test_resume_with_relative_working_dir_reruns_only_failed_cell(
-    tmp_path, monkeypatch
-):
-    # Regression: a RELATIVE working_dir must still short-circuit completed cells
-    # on resume. The short-circuit's sidecar read runs INSIDE the chdir'd Hydra
-    # job, so an unresolved (relative) manifest root resolves against the job cwd
-    # and finds no sidecar -> every completed cell silently re-executes. The main
-    # process must resolve working_dir to absolute before wrapping.
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
-
-    monkeypatch.chdir(tmp_path)
-    CALLS = {"n": 0}
-
-    class W(MultiRunMetricsWorkflow):
-        FAIL = True
-
-        @staticmethod
-        def task(a, b):
-            CALLS["n"] += 1
-            if a == 2 and b == 1 and W.FAIL:
-                raise RuntimeError("boom")
-            return dict(val=float(a * 10 + b))
-
-    wd = "rel_sweep"  # RELATIVE to the (monkeypatched) cwd
-    W.FAIL = True
-    wf = W()
-    with pytest.warns(UserWarning, match="fail"):
-        wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
-
-    W.FAIL = False
-    CALLS["n"] = 0
-    wf2 = W()
-    wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
-    # Only the previously-failed cell re-ran; the 3 completed cells short-circuited.
-    assert CALLS["n"] == 1
-    assert wf2.is_complete
-    ds = wf2.to_xarray()
-    assert float(ds["val"].sel(a=2, b=1)) == 21.0
 
 
 def test_narrowed_grid_reusing_dir_is_complete(tmp_path):
