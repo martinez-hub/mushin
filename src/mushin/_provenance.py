@@ -17,11 +17,13 @@ _PKGS = ("mushin-py", "torch", "numpy", "pytorch-lightning", "hydra-core", "hydr
 
 _REDACTED = "***REDACTED***"
 # Config keys whose values are secrets (redacted regardless of their content).
-_SECRET_KEY = re.compile(
+_REDACT_KEY_RE = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|passwd|credential|auth)"
 )
 # Secret-shaped values that may hide under an innocent key (provider tokens).
-_SECRET_VALUE = re.compile(r"(?:sk-|hf_|ghp_|gho_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{8,}")
+_REDACT_VALUE_RE = re.compile(
+    r"(?:sk-|hf_|ghp_|gho_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{8,}"
+)
 
 
 def _git() -> dict:
@@ -114,7 +116,7 @@ def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> N
     )
 
 
-def _scrub_secrets(obj: Any) -> Any:
+def _redact_config(obj: Any) -> Any:
     """Redact secret-shaped config values before they are written to disk.
 
     A value under a secret-named key (``api_key``, ``token``, ...) is redacted
@@ -124,12 +126,12 @@ def _scrub_secrets(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         return {
-            k: (_REDACTED if _SECRET_KEY.search(str(k)) else _scrub_secrets(v))
+            k: (_REDACTED if _REDACT_KEY_RE.search(str(k)) else _redact_config(v))
             for k, v in obj.items()
         }
     if isinstance(obj, list):
-        return [_scrub_secrets(v) for v in obj]
-    if isinstance(obj, str) and _SECRET_VALUE.search(obj):
+        return [_redact_config(v) for v in obj]
+    if isinstance(obj, str) and _REDACT_VALUE_RE.search(obj):
         return _REDACTED
     return obj
 
@@ -144,4 +146,4 @@ def _to_plain(cfg):
         plain = OmegaConf.to_container(cfg, resolve=False)
     except Exception:
         return None
-    return _scrub_secrets(plain)
+    return _redact_config(plain)
