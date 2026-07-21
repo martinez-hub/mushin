@@ -1735,3 +1735,37 @@ def test_resume_dir_reuse_keeps_metrics_consistent_with_config(tmp_path):
     assert float(ds["v"].sel(a=3)) == 3.0
     assert float(ds["v"].sel(a=5)) == 5.0
     assert float(ds["v"].sel(a=6)) == 6.0
+
+
+def test_default_metric_load_fn_reads_json_sidecar(tmp_path):
+    # A task returning a dict writes a JSON sidecar (mushin_metrics.json). The
+    # DEFAULT metric_load_fn must read it -- previously it was torch.load, which
+    # crashed on JSON, so offline reload of a @mushin.sweep/decorator sweep was
+    # broken unless the user overrode metric_load_fn.
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2, 3]), working_dir=str(wd))
+
+    wf = MultiRunMetricsWorkflow()  # fresh instance, DEFAULT loader
+    wf.load_from_dir(str(wd), "mushin_metrics.json")
+    ds = wf.to_xarray()
+    assert float(ds["v"].sel(a=2)) == 2.0
+    assert set(ds["v"].sizes) == {"a"}
+
+
+def test_default_metric_load_fn_still_reads_torch_files(tmp_path):
+    # The torch.save path (MetricsCallback .pt files) must still load.
+    import torch
+
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    p = tmp_path / "fit_metrics.pt"
+    torch.save({"loss": [0.5, 0.4]}, p)
+    assert MultiRunMetricsWorkflow.metric_load_fn(p) == {"loss": [0.5, 0.4]}

@@ -1125,7 +1125,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         """Loads a metric file and returns a dictionary of metric-name -> metric-value
         mappings.
 
-        The default metric load function is `torch.load`.
+        The default loader sniffs the file: a JSON metrics sidecar (the
+        ``mushin_metrics.json`` a task writes by returning a dict) is read with
+        ``json``; anything else with ``torch.load`` (the ``MetricsCallback``
+        ``.pt`` path). Override this method for a custom format.
 
         Parameters
         ----------
@@ -1155,11 +1158,26 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         ...         with open("./metrics.pkl", "wb") as f:
         ...             pickle.dump(dict(a=a, b=b), f)
         >>>
-        >>> wf = PickleWorkFlow()
+        >>> wf = PickledWorkFlow()
         >>> wf.run(a=multirun([1, 2, 3]), b=False)
         >>> wf.load_metrics("metrics.pkl")
         >>> wf.metrics
         dict(a=[1, 2, 3], b=[False, False, False])"""
+        file_path = Path(file_path)
+        # Sniff the content (not the extension): a JSON metrics sidecar starts
+        # with `{`/`[`; a torch pickle/zip starts with other bytes. This lets
+        # the default loader read the JSON sidecar written by dict-returning
+        # tasks without the caller overriding metric_load_fn.
+        try:
+            with open(file_path, "rb") as f:
+                head = f.read(64).lstrip()
+        except OSError:
+            head = b""
+        if head[:1] in (b"{", b"["):
+            import json
+
+            with open(file_path) as f:
+                return json.load(f)
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
         import torch as tr
@@ -1581,8 +1599,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         [2022-06-01 12:35:51,715][HYDRA] 	#1 : +a=2 +b=False
         [2022-06-01 12:35:51,780][HYDRA] 	#2 : +a=3 +b=False
 
-        `~MultiRunMetricsWorkflow` uses `torch.load` by default to load metrics files
-        (refer to `~MultiRunMetricsWorkflow.metric_load_fn` to change this behavior).
+        `~MultiRunMetricsWorkflow.metric_load_fn` reads the JSON metrics sidecar
+        or a torch file by default (refer to it to change this behavior).
 
         >>> wf.load_metrics("metrics.pt")
         defaultdict(list, {'a': [1, 2, 3], 'b': [False, False, False]})
