@@ -212,6 +212,15 @@ class _FailedRun:
         self.exception = exception
 
 
+class _SkippedRun:
+    """Sentinel returned in place of a cell skipped because the wall-clock budget
+    (``max_total_seconds``) was exhausted. Like ``_FailedRun`` it lets the Hydra
+    job complete normally, so ``jobs_post_process`` can NaN-fill and record the
+    skipped cell; unlike it, no exception occurred — the cell simply never ran."""
+
+    __slots__ = ()
+
+
 class _PriorCells:
     """What a resuming `_TaskRunner` needs from the prior sweep, and nothing
     more: the sweep root, the swept param names, and the completed
@@ -300,6 +309,7 @@ class _TaskRunner:
         inject_resume,
         prior_manifest,
         code_hash=None,
+        max_total_seconds=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -309,6 +319,12 @@ class _TaskRunner:
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
         self.code_hash = code_hash  # hash of the task source (resume guard)
+        # Wall-clock budget: the deadline is set lazily at the first COMPUTED
+        # cell (below), so launch/import overhead and resume cache hits don't
+        # consume it. None resets on pickle -> each worker process observes its
+        # own budget (the feature targets the default sequential launcher).
+        self.max_total_seconds = max_total_seconds
+        self._deadline = None
 
     @staticmethod
     def _combo(cfg, names):
@@ -410,6 +426,31 @@ class _TaskRunner:
                             code_hash=self.code_hash,
                         )
                         return cached
+
+        # (1.5) wall-clock budget: once the deadline passes, skip the remaining
+        # cells (no compute) so a long sweep ends gracefully instead of running
+        # to completion. The clock starts at THIS, the first computed cell (cache
+        # hits above returned before here), so at least one cell always runs. A
+        # skipped cell is 'skipped', not 'completed', so a later resume with more
+        # time finishes it. A cell already running is never interrupted.
+        if self.max_total_seconds is not None:
+            import time
+
+            now = time.time()
+            if self._deadline is None:
+                self._deadline = now + self.max_total_seconds
+            elif now >= self._deadline:
+                cwd = Path.cwd()
+                combo = self._combo(cfg, self.swept_names)
+                write_cell_status(
+                    cwd,
+                    status="skipped",
+                    combo=combo,
+                    attempt=1,
+                    config_hash=chash,
+                    code_hash=self.code_hash,
+                )
+                return _SkippedRun()
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
         try:
@@ -775,6 +816,7 @@ class BaseWorkflow:
         capture_env: bool = False,
         dry_run: bool = False,
         confirm_above: int | None = None,
+        max_total_seconds: float | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -843,6 +885,11 @@ class BaseWorkflow:
             Refuse to launch a sweep with more than this many cells (raising a
             ``ValueError``). ``MUSHIN_MAX_CELLS`` supplies a default ceiling.
 
+        max_total_seconds : float | None (default: None)
+            Graceful wall-clock budget: once exhausted, remaining cells are
+            skipped (NaN, ``self.skipped``) and a later ``resume=True`` finishes
+            them.
+
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
             existing behavior: a failing job aborts the sweep and the exception
@@ -858,6 +905,12 @@ class BaseWorkflow:
 
         if resume and working_dir is None:
             raise ValueError("`resume=True` requires `working_dir` to be provided.")
+
+        if max_total_seconds is not None and max_total_seconds <= 0:
+            raise ValueError(
+                f"`max_total_seconds` must be a positive number of seconds, got "
+                f"{max_total_seconds!r}."
+            )
 
         launch_overrides = []
 
@@ -1151,6 +1204,7 @@ class BaseWorkflow:
             inject_resume=_wants_resume,
             prior_manifest=_prior_manifest,
             code_hash=code_fingerprint(self.task),
+            max_total_seconds=max_total_seconds,
         )
 
         self._capture_env = capture_env
@@ -1308,6 +1362,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # Per-cell failure records ({"combo", "exception", "working_dir"}) and the
         # on-disk sweep manifest, populated by `jobs_post_process` under fail-soft.
         self.failures: list[dict[str, Any]] = []
+        # Cells skipped because the max_total_seconds budget was exhausted
+        # ({"combo", "working_dir"}); populated by `jobs_post_process`.
+        self.skipped: list[dict[str, Any]] = []
         self._manifest: Any = None
 
         if self._working_dir is not None:
@@ -1440,6 +1497,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         capture_env: bool = False,
         dry_run: bool = False,
         confirm_above: int | None = None,
+        max_total_seconds: float | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -1488,6 +1546,16 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             huge grid. The ``MUSHIN_MAX_CELLS`` environment variable supplies a
             default ceiling when this is not set (an explicit value wins). Use
             ``dry_run=True`` to preview an over-limit sweep.
+        max_total_seconds : float | None (default: None)
+            A graceful wall-clock budget. Once it is exhausted the remaining
+            cells are skipped (recorded ``'skipped'``, NaN in the dataset,
+            surfaced in ``self.skipped``) instead of the sweep running to the
+            end. The clock starts at the first computed cell, so at least one
+            cell always runs and resume cache hits do not consume it; a cell
+            already running is never interrupted. Skipped cells are not
+            completed, so a later ``resume=True`` with more time finishes them.
+            Measured per launcher process — best with the default sequential
+            launcher.
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -1528,6 +1596,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             capture_env=capture_env,
             dry_run=dry_run,
             confirm_above=confirm_above,
+            max_total_seconds=max_total_seconds,
             **workflow_overrides,
         )
 
@@ -1640,6 +1709,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         self._metrics_by_combo = {}
         self.failures = []
+        self.skipped = []
         job_metrics: list[Any] = []
         for job, cfg, wdir in zip(
             self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
@@ -1649,6 +1719,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             swept_combo = {n: combo[n] for n in swept_names}
             key = combo_key(swept_combo)
+
+            # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
+            # sentinel: it never ran, so NaN-fill it (like a failure) but record
+            # it as 'skipped' rather than 'failed' — no error occurred, and a
+            # resume with more time will finish it.
+            if job.status == JobStatus.COMPLETED and isinstance(
+                job.return_value, _SkippedRun
+            ):
+                self.skipped.append({"combo": key, "working_dir": str(wdir)})
+                manifest.mark(swept_combo, dir=wdir.name, status="skipped")
+                job_metrics.append(None)
+                continue
 
             # Determine the raw return value / failure WITHOUT triggering a
             # re-raise: a real Hydra FAILED job stores its exception in
@@ -1692,6 +1774,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             warnings.warn(
                 f"{len(self.failures)} run(s) failed: "
                 f"{[f['combo'] for f in self.failures]}; grid cells set to NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if self.skipped:
+            import warnings
+
+            warnings.warn(
+                f"{len(self.skipped)} cell(s) skipped after the max_total_seconds "
+                f"budget was exhausted: {[s['combo'] for s in self.skipped]}; grid "
+                "cells set to NaN. Resume with more time to finish them.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -2122,6 +2215,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # 1-element list to a bare str on reload).
         if self.failures:
             attrs["mushin_failures"] = _json.dumps([f["combo"] for f in self.failures])
+        # Budget-skipped cells (NaN-filled, not errors) carry their own signal so
+        # a reloaded dataset knows the sweep is incomplete-by-budget, distinct
+        # from failures.
+        if getattr(self, "skipped", None):
+            attrs["mushin_skipped"] = _json.dumps([s["combo"] for s in self.skipped])
         # Attach best-effort per-run provenance (git/versions/config) from one
         # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
         # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
