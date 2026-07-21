@@ -89,3 +89,11 @@ def test_deprecated_names_absent_from_all(name):
     import mushin
 
     assert name not in mushin.__all__
+
+
+def test_import_mushin_does_not_load_torch():
+    # torch is ~80% of a cold `import mushin` (~490ms of ~610ms) and the core
+    # sweep -> dataset path only needs it at runtime (torch.load); it must not
+    # load at import time.
+    out = _fresh_import_probe("import sys, mushin; print('torch' in sys.modules)")
+    assert out == "False"

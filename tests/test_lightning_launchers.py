@@ -98,3 +98,41 @@ def test_global_rank_computation():
     assert _global_rank(node_rank=0, num_processes=2, local_rank=1) == 1
     assert _global_rank(node_rank=1, num_processes=2, local_rank=0) == 2
     assert _global_rank(node_rank=1, num_processes=2, local_rank=1) == 3
+
+
+def test_call_children_scripts_tracks_procs_and_launch_wires_observer(monkeypatch):
+    """The launcher must own its children like PL's base class: track Popen
+    handles in self.procs (so kill()/signal forwarding work) and start the
+    process observer (so children are reaped if rank 0 dies)."""
+    import mushin.lightning.launchers as L
+
+    fake_procs = []
+
+    def fake_subprocess_call(local_rank, global_rank, testing, predicting):
+        proc = object()
+        fake_procs.append(proc)
+        return proc
+
+    observed = {}
+    monkeypatch.setattr(L, "_subprocess_call", fake_subprocess_call)
+    monkeypatch.setattr(L, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        L, "_launch_process_observer", lambda procs: observed.setdefault("obs", procs)
+    )
+    monkeypatch.setattr(
+        L,
+        "_set_num_threads_if_needed",
+        lambda num_processes: observed.setdefault("threads", num_processes),
+    )
+
+    from lightning_fabric.plugins.environments import LightningEnvironment
+
+    launcher = L._HydraReattachLauncher(
+        cluster_environment=LightningEnvironment(), num_processes=3, num_nodes=1
+    )
+    result = launcher.launch(lambda: "ran", trainer=None)
+
+    assert result == "ran"
+    assert launcher.procs == fake_procs and len(launcher.procs) == 2
+    assert observed["obs"] is launcher.procs
+    assert observed["threads"] == 3

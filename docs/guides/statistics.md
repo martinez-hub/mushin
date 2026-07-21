@@ -35,8 +35,11 @@ The family-wise error rate is controlled at your chosen `alpha` (default 0.05).
 
 ## Effect size
 
-In addition to the p-value, mushin reports **Cohen's d** (pooled-variance) as
-`result.comparisons["effect_size"]`. This measures the magnitude of the
+In addition to the p-value, mushin reports **Cohen's d** as
+`result.comparisons["effect_size"]`, matched to the test: paired tests
+(`wilcoxon`, `ttest_rel`) report the paired *d<sub>z</sub>* — mean of the
+per-seed differences over their standard deviation — while unpaired tests
+report the classic pooled-variance d. Both measure the magnitude of the
 difference in units of standard deviations:
 
 | |d| | Interpretation |

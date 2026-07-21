@@ -3,7 +3,9 @@
 This page walks through the flagship example: run a parameter sweep and get the
 results back as a labeled `xarray.Dataset`.
 
-The full runnable script is at `examples/sweep_to_dataset.py` in the repository.
+The decorator flow below runs as `examples/parallel_sweep.py` in the
+repository; `examples/sweep_to_dataset.py` is the same flow written with the
+class API (`MultiRunMetricsWorkflow`), which this page introduces further down.
 
 Decorate a function with `@mushin.sweep`, sweep it over a grid, and get results
 back as a labeled `xarray.Dataset` — no subclassing, no callbacks. Whatever the

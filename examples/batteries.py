@@ -14,6 +14,7 @@ The detection, image_quality, and audio batteries need optional extras
 and the tests ``pytest.importorskip`` the extra to skip when it is absent.
 
 Run one:  python examples/batteries.py
+Requires the eval extra (plus detection/image/audio for those batteries):  pip install "mushin-py[eval]"
 """
 
 from __future__ import annotations

@@ -22,8 +22,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    # 3.14 intentionally not classified: its CI leg is experimental
+    # (continue-on-error) while torch/Lightning wheels stabilize; advertise it
+    # only once that leg is required to pass.
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -176,6 +178,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# PEP 561: ship the py.typed marker so type checkers see our annotations.
+mushin = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["examples"]
@@ -189,7 +195,9 @@ filterwarnings = [
     # results back; this deprecation is about that behavior changing upstream.
     "ignore:Future Hydra versions will no longer change working directory:UserWarning",
     # matplotlib internals call deprecated pyparsing APIs; not fixable from here.
-    "ignore:.* deprecated - use .*",
+    # Scoped to pyparsing so real deprecations from torch/lightning/xarray are
+    # not silently swallowed suite-wide.
+    "ignore:.* deprecated - use .*:DeprecationWarning:pyparsing",
 ]
 
 [tool.ruff]

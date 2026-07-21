@@ -72,6 +72,12 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         experimental: [false]
         include:
+          # macOS: researchers' most common dev platform, and the platform-split
+          # dependency branches in pyproject.toml (Intel-mac torch<2.3/numpy<2 vs
+          # arm64 NumPy-2) are exercised nowhere else. One arm64 leg on the newest
+          # supported Python, one x86_64 (macos-13) leg on the oldest.
+          - { os: macos-latest, python-version: "3.13", experimental: false }
+          - { os: macos-15-intel, python-version: "3.10", experimental: false }
           # torch / Lightning may not ship 3.14 wheels yet; don't fail CI on it.
           - { os: ubuntu-latest, python-version: "3.14", experimental: true }
           - { os: windows-latest, python-version: "3.14", experimental: true }
@@ -132,7 +138,9 @@ jobs:
       - name: Execute example notebooks
         # --extra eval: notebooks 02/03/05 use compare / Study / LLM eval, which
         # live in the eval extra; --extra viz for the plotting cells.
-        run: uv run --extra eval --extra viz pytest --nbmake docs/notebooks/ -p no:cacheprovider
+        # --extra netcdf: notebook 07 recommends the netCDF4 engine; without it
+        # the to_netcdf cell silently exercises only scipy's netCDF3 fallback.
+        run: uv run --extra eval --extra viz --extra netcdf pytest --nbmake docs/notebooks/ -p no:cacheprovider
 
   changelog:
     runs-on: ubuntu-latest
@@ -176,6 +184,11 @@ jobs:
         with:
           enable-cache: true
       - name: Sync lowest-direct dependency versions (Python 3.10)
+        # Deliberately NO battery extras here: pycocotools' floor wheel is
+        # ABI-incompatible with the numpy floor at lowest-direct (see the note
+        # above [tool.setuptools.packages.find] in pyproject.toml). The battery
+        # extras are exercised at latest versions by the `test` and
+        # `batteries-clean-install` jobs instead.
         run: uv sync --resolution lowest-direct --extra eval --python 3.10
       # Some deps at their floor still `import pkg_resources` at import time; uv's
       # minimal venv omits setuptools, which typical user environments include.

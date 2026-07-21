@@ -36,8 +36,13 @@ wf.is_complete        # False — at least one cell failed
 wf.failures           # [{"combo": "method=mlp,seed=3", "exception": "...", "working_dir": "..."}]
 ds = wf.to_xarray()
 ds["accuracy"].sel({"method": "mlp", "seed": 3})   # nan
-ds.attrs["mushin_failures"]                         # ["method=mlp,seed=3"]
+ds.attrs["mushin_failures"]                         # JSON list: ["method=mlp,seed=3"]
 ```
+
+To debug a failed cell, look inside its `working_dir`: mushin writes the full
+stack trace to `mushin_error.txt` there (the one-line `exception` above is just
+the repr), alongside Hydra's own `.hydra/` config snapshot and job log for that
+cell.
 
 The failed cells are also written to a **sweep manifest**,
 `<working_dir>/mushin_sweep_manifest.json`, which records every requested cell's

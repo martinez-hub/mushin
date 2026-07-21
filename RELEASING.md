@@ -20,7 +20,9 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
    make changelog-draft VERSION=X.Y.Z
    ```
 3. Bump the version in `pyproject.toml` to `X.Y.Z`, then `uv sync` to update
-   `uv.lock`.
+   `uv.lock`. Also bump `version:`/`date-released:` in `CITATION.cff` and the
+   `version = {...}` in the README BibTeX block — these are what researchers
+   cite, and they go stale silently.
 4. Update the `[Unreleased]`/version link-reference footer at the bottom of
    `CHANGELOG.md`.
 5. Commit on a branch and open a PR. Because this PR rewrites `CHANGELOG.md`

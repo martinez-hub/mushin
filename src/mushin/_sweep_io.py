@@ -6,6 +6,8 @@ the per-job metrics sidecar + sweep manifest (see the sweep-resilience design)."
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -46,9 +48,15 @@ def read_metrics_sidecar(job_dir) -> dict | None:
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
-    tmp.replace(path)  # atomic on POSIX/Windows
+    # Unique temp name: a fixed `<path>.tmp` would let two concurrent writers
+    # (e.g. two resume runs on the same working_dir) truncate each other
+    # mid-write and rename half-written content over the target.
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(path)  # atomic on POSIX/Windows
+    finally:
+        tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
 
 
 class Manifest:
@@ -65,7 +73,14 @@ class Manifest:
     def load_or_new(cls, root, params: list[str]) -> Manifest:
         p = Path(root) / MANIFEST_FILE
         if p.exists():
-            d = json.loads(p.read_text())
+            # A manifest truncated by a mid-write kill is treated like a
+            # missing one (same policy as the metrics sidecar): the per-cell
+            # status sidecars remain the durable source of truth, so resume
+            # reconstructs from them instead of aborting the whole sweep.
+            try:
+                d = json.loads(p.read_text())
+            except (json.JSONDecodeError, OSError):
+                return cls(root, params)
             return cls(root, d.get("params", params), d.get("cells", {}))
         return cls(root, params)
 

@@ -54,11 +54,15 @@ class MetricsCallback(Callback):
 
     def _record(self, stored, metrics, epoch=None):
         """Append one round of metrics, keeping every series aligned to the same
-        length (== number of rounds recorded) so `list index == epoch` holds. A
-        metric absent this round is padded with NaN; a newly-seen metric is
-        backfilled with NaN for prior rounds. When `epoch` is given the callback
-        owns the `epoch` series, so a user metric literally named `epoch` is
-        skipped (it must not collide with the epoch axis)."""
+        length (== number of validation rounds recorded). With one validation
+        per epoch (the default) `list index == epoch`; with intra-epoch or
+        every-N-epoch validation the saved `epoch` series is the authoritative
+        round -> epoch mapping (e.g. `val_check_interval=0.5` records
+        `epoch == [0, 0, 1, 1, ...]`). A metric absent this round is padded
+        with NaN; a newly-seen metric is backfilled with NaN for prior rounds.
+        When `epoch` is given the callback owns the `epoch` series, so a user
+        metric literally named `epoch` is skipped (it must not collide with
+        the epoch axis)."""
         incoming = {}
         if epoch is not None:
             incoming["epoch"] = epoch
@@ -79,7 +83,7 @@ class MetricsCallback(Callback):
     def on_validation_end(self, trainer: Trainer, pl_module: LightningModule):
         # Make sure PL is not doing its sanity check run
         if trainer.sanity_checking:
-            return self.val_metrics
+            return
         self._record(
             self.val_metrics, trainer.callback_metrics, pl_module.current_epoch
         )
@@ -87,10 +91,8 @@ class MetricsCallback(Callback):
         # so N ranks don't clobber the same file on a shared filesystem.
         if trainer.is_global_zero:
             torch.save(self.val_metrics, self._get_filename("fit"))
-        return self.val_metrics
 
     def on_test_end(self, trainer: Trainer, pl_module: LightningModule):
         self._record(self.test_metrics, trainer.callback_metrics)
         if trainer.is_global_zero:
             torch.save(self.test_metrics, self._get_filename("test"))
-        return self.test_metrics

@@ -102,3 +102,21 @@ def test_parse_yes_no_requires_word_boundary():
         parse_score("nope")
     with pytest.raises(ValueError):  # "yesterday" must not match "yes"
         parse_score("yesterday's answer is better")
+
+
+def test_parse_rejects_incidental_leading_integer():
+    """'0 issues found...' is a count, not a score -- it must raise loudly
+    rather than silently scoring a praising reply as 0.0."""
+    from mushin.llm._judge import parse_score
+
+    with pytest.raises(ValueError, match="could not parse"):
+        parse_score("0 issues found, the answer is excellent")
+    with pytest.raises(ValueError, match="could not parse"):
+        parse_score("1 thing to note: this is perfect")
+    # a reply that IS the number still parses
+    assert parse_score("0") == 0.0
+    assert parse_score("1") == 1.0
+    assert parse_score(" 1. ") == 1.0
+    # decimal / fraction scores with a rationale keep working
+    assert parse_score("0.4 because ...") == 0.4
+    assert parse_score("8/10, well reasoned") == 0.8

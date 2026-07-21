@@ -1354,3 +1354,112 @@ def test_bare_list_sweep_arg_gives_actionable_multirun_error():
         W().run(lr=[0.01, 0.1, 1.0])
     # a legitimate multirun still works (must NOT be caught by the bare-list guard)
     W().run(lr=multirun([0.01, 0.1]), working_dir=None)
+
+
+def test_failures_attr_survives_netcdf_roundtrip(tmp_path):
+    # attrs["mushin_failures"] must be netCDF-portable: a raw list of strings
+    # collapses to a scalar str for 1-element lists (netCDF4) or fails to write
+    # (scipy engine), so it is stored as a JSON string like `provenance`.
+    import json
+
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    ds = wf.to_xarray()
+    combos = json.loads(ds.attrs["mushin_failures"])
+    assert any("a=2" in c for c in combos)
+
+    p = tmp_path / "roundtrip.nc"
+    ds.to_netcdf(p)
+    back = xr.load_dataset(p)
+    assert json.loads(back.attrs["mushin_failures"]) == combos
+
+
+def test_on_error_nan_preserves_traceback_on_disk(tmp_path):
+    """on_error='nan' must not discard the failure's stack trace: the repr in
+    wf.failures is one line; the full traceback is written into the cell dir."""
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    (failure,) = wf.failures
+    err_file = Path(failure["working_dir"]) / "mushin_error.txt"
+    assert err_file.exists()
+    text = err_file.read_text()
+    assert "RuntimeError" in text and "boom" in text and "Traceback" in text
+
+
+def test_dotted_override_sweep_axis(tmp_path):
+    """A nested (dotted) override like model.width=4,8 must be usable as a
+    sweep axis: combo extraction reads it as a config *path*, not a literal
+    key, and it becomes a normal xarray dimension."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model={"width": 4}):  # noqa: B006 - config template, not mutated
+            return dict(w=float(model["width"]))
+
+    wf = W()
+    wf.run(
+        working_dir=str(tmp_path / "s"),
+        **{"model.width": multirun([4, 8])},
+    )
+    ds = wf.to_xarray()
+    assert sorted(ds["model.width"].values.tolist()) == [4, 8]
+    assert float(ds["w"].sel({"model.width": 8})) == 8.0
+
+
+def test_config_group_sweep_coords_are_choice_names(tmp_path):
+    """Sweeping a Hydra config GROUP (model=small,big) must key the xarray
+    dimension by the chosen option name, not a stringified sub-config."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import make_config
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model=None):
+            return dict(w=float(model["width"]))
+
+    # The group's target field must exist on the config for Hydra to compose
+    # into it; declaring it None is the supported pattern.
+    wf = W(make_config(model=None))
+    wf.run(working_dir=str(tmp_path / "s"), model=multirun(["small", "big"]))
+    ds = wf.to_xarray()
+    assert sorted(str(v) for v in ds["model"].values) == ["big", "small"]
+    assert float(ds["w"].sel(model="big")) == 8.0
+
+
+def test_parse_overrides_expands_range_and_rejects_interval():
+    """Hydra range(...) sweeps form a grid and are expanded; continuous
+    interval(...) (Bayesian-sweeper syntax) cannot and must raise a clear
+    error instead of AttributeError."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    out = MultiRunMetricsWorkflow._parse_overrides(["x=range(1,5)"])
+    assert isinstance(out["x"], multirun) and list(out["x"]) == [1, 2, 3, 4]
+
+    with pytest.raises(ValueError, match="interval"):
+        MultiRunMetricsWorkflow._parse_overrides(["x=interval(0,1)"])

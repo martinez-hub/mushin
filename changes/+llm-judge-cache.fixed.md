@@ -1,0 +1,1 @@
+`parse_score` no longer misreads an incidental leading integer ("0 issues found...") as a 0.0 score -- a bare integer with trailing text now raises; the LLM guide documents cache-invalidation rules and when paired tests are valid.

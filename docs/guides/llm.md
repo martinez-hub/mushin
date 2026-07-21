@@ -53,6 +53,14 @@ has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
 below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
 at the given seed count.
 
+!!! warning "Paired tests need a *shared* per-seed random effect"
+    `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
+    other. That pairing is only meaningful when seed *k* induces a shared
+    random effect across systems (e.g. both score the same seed-*k* data
+    subsample). For independent systems whose seed only drives their own
+    sampling — the typical API-backed setup — the trials are uncorrelated and
+    the pairing assumption does not hold; stick with the default `welch`.
+
 ## Metric options
 
 ### Plain callable
@@ -193,6 +201,13 @@ result = compare_llms(
 
 The cache stores **outputs only** (not metric scores) so you can freely change
 the metric and re-run without re-calling the systems.
+
+!!! warning "The cache cannot see inside your system"
+    The key is the *dict name* plus seed and input — nothing about what the
+    callable actually does. If you change the model, prompt template, or
+    decoding parameters behind a name and reuse the same `cache=` dir, the old
+    outputs are replayed and your comparison is silently stale. Any change to
+    a system means a fresh cache directory (or a new system name).
 
 ## Pitfalls
 

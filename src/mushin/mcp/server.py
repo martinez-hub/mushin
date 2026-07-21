@@ -18,6 +18,7 @@ import torch
 from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
+from mushin._sweep_io import METRICS_FILE, read_metrics_sidecar
 from mushin._utils import Experiment
 
 # Globals an MCP-loaded metrics file may legitimately reference. Everything here
@@ -186,11 +187,14 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
     for hydra_dir in sorted(p.glob("**/.hydra"), key=lambda h: _job_sort_key(h, rootp)):
         run_dir = hydra_dir.parent
         cfg_file = hydra_dir / "config.yaml"
-        cfg = (
-            load_from_yaml(cfg_file)
-            if cfg_file.exists() and _within_root(cfg_file, rootp)
-            else None
-        )
+        cfg = None
+        if cfg_file.exists() and _within_root(cfg_file, rootp):
+            try:
+                cfg = load_from_yaml(cfg_file)
+            except Exception:
+                # A half-written config (killed job) must not make the whole
+                # experiment unqueryable; the run just reports no config.
+                cfg = None
         metrics: dict = {}
         # Only MetricsCallback-style metric files; never model weights (model.pt,
         # state_dict.pt, ...), which the server must not load.
@@ -203,6 +207,13 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
                 # Fail closed: never fall back to unsafe (pickle-executing)
                 # loading; just skip metrics we cannot safely read.
                 continue
+        # Workflow sweeps store their metrics in a JSON sidecar, not .pt files;
+        # read_metrics_sidecar is corrupt-guarded (returns None) and pure JSON,
+        # so no unpickling is involved.
+        if _within_root(run_dir / METRICS_FILE, rootp):
+            sidecar = read_metrics_sidecar(run_dir)
+            if sidecar is not None:
+                metrics[Path(METRICS_FILE).stem] = sidecar
         ckpts = [
             str(c.resolve())
             for c in run_dir.glob("**/*.ckpt")

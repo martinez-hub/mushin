@@ -102,7 +102,11 @@ def _subprocess_call(
 
     # Validate that minimal configuration requirements
     config = Path(hydra_output) / "config.yaml"
-    assert config.exists()
+    if not config.exists():
+        raise FileNotFoundError(
+            f"{config} not found; HydraDDP re-launches each rank from the "
+            "job's saved Hydra config and cannot proceed without it."
+        )
     cfg = load_from_yaml(config)
     if "trainer" not in cfg or "module" not in cfg:
         raise ConfigAttributeError(
@@ -126,7 +130,7 @@ def _subprocess_call(
         f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
         f"hydra.job.name={hydra_cfg.job.name}",
     ]
-    subprocess.Popen(command, env=env_copy, cwd=cwd)
+    return subprocess.Popen(command, env=env_copy, cwd=cwd)
 
 
 if PL_VERSION >= Version(1, 6, 0):
@@ -135,6 +139,24 @@ if PL_VERSION >= Version(1, 6, 0):
     from pytorch_lightning.strategies.launchers.subprocess_script import (
         _SubprocessScriptLauncher,
     )
+
+    # Private Lightning helpers mirrored from the base launcher's lifecycle:
+    # the observer reaps child ranks if rank 0 dies (no orphaned GPU
+    # processes), and the thread cap stops N ranks from each spawning
+    # cpu_count() OMP/torch threads. Guarded so a future PL relocation
+    # degrades to the old behavior instead of breaking imports.
+    try:
+        from pytorch_lightning.strategies.launchers.subprocess_script import (
+            _launch_process_observer,
+        )
+    except ImportError:  # pragma: no cover
+        _launch_process_observer = None
+    try:
+        from lightning_fabric.utilities.distributed import (
+            _set_num_threads_if_needed,
+        )
+    except ImportError:  # pragma: no cover
+        _set_num_threads_if_needed = None
 
     class _HydraReattachMixin:
         """Hydra-aware launcher behavior shared by ``HydraDDP`` and ``HydraFSDP``:
@@ -295,18 +317,27 @@ if PL_VERSION >= Version(1, 6, 0):
             ReturnType
             """
             del trainer  # unused
-            if (
-                not self.cluster_environment.creates_processes_externally
-            ):  # pragma: no cover
+            if not self.cluster_environment.creates_processes_externally:
                 testing = function.__name__ == "_test_impl"
                 predicting = function.__name__ == "_predict_impl"
                 self._call_children_scripts(testing=testing, predicting=predicting)
+                # Reap child ranks if this (rank 0) process dies, instead of
+                # leaving them orphaned holding GPU memory.
+                if _launch_process_observer is not None:
+                    _launch_process_observer(self.procs)
+            # Cap intra-op threads so N ranks don't each spawn cpu_count()
+            # thread pools (mirrors the base launcher).
+            if _set_num_threads_if_needed is not None:
+                _set_num_threads_if_needed(num_processes=self.num_processes)
 
             return function(*args, **kwargs)
 
         def _call_children_scripts(self, testing: bool, predicting: bool):
             # bookkeeping of spawned processes
             self._check_can_spawn_children()
+            # Track the children like the base class: kill()/signal forwarding
+            # iterate self.procs, and the process observer watches it.
+            self.procs = []
 
             # DDP Environment variables (tracked so _teardown clears only these)
             _set_env("MASTER_ADDR", self.cluster_environment.main_address)
@@ -317,12 +348,13 @@ if PL_VERSION >= Version(1, 6, 0):
 
             node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
-                _subprocess_call(
+                proc = _subprocess_call(
                     local_rank,
                     _global_rank(node_rank, self.num_processes, local_rank),
                     testing,
                     predicting,
                 )
+                self.procs.append(proc)
 
                 # starting all processes at once can cause issues
                 # with dataloaders delay between 1-10 seconds

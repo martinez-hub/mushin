@@ -159,3 +159,29 @@ def test_compare_methods_warns_on_method_constant_in_every_metric():
     )
     with pytest.warns(UserWarning, match="identical scores across all"):
         compare_methods(ds, test="welch")
+
+
+def test_paired_test_reports_paired_effect_size():
+    # For paired tests the effect size must be Cohen's d_z = mean(diff)/std(diff),
+    # not the pooled independent-samples d (which ignores the pairing).
+    a = np.array([1.0, 2.0, 3.0, 4.0])
+    diffs = np.array([0.5, 0.6, 0.4, 0.5])
+    b = a - diffs
+    results = {
+        "A": [{"m": float(v)} for v in a],
+        "B": [{"m": float(v)} for v in b],
+    }
+    df = compare_methods(to_dataset(results), test="ttest_rel", alpha=0.05)
+    expected = diffs.mean() / diffs.std(ddof=1)
+    assert np.isclose(df["effect_size"].iloc[0], expected)
+
+
+def test_unpaired_test_keeps_pooled_effect_size():
+    a = [1.0, 2.0, 3.0, 4.0]
+    b = [0.5, 1.4, 2.6, 3.5]
+    results = {
+        "A": [{"m": v} for v in a],
+        "B": [{"m": v} for v in b],
+    }
+    df = compare_methods(to_dataset(results), test="welch", alpha=0.05)
+    assert np.isclose(df["effect_size"].iloc[0], cohens_d(a, b))
