@@ -47,6 +47,40 @@ def _numeric_dir_key(name: str):
         return (1, name)
 
 
+def _read_cells(root) -> list[dict]:
+    """Scan a sweep ``root`` and return one dict per cell:
+    ``{"combo", "status", "metrics", "dir"}`` (``dir`` is the job dir Path).
+    Reads only the per-cell JSON sidecars — no Hydra/xarray. Raises
+    ``FileNotFoundError`` if ``root`` is not a directory."""
+    from ._resume import read_cell_status
+    from ._sweep_io import read_metrics_sidecar
+
+    root = Path(root)
+    if not root.is_dir():
+        raise FileNotFoundError(f"sweep directory not found: {root}")
+
+    cells: list[dict] = []
+    for d in sorted(
+        (p for p in root.iterdir() if p.is_dir()),
+        key=lambda p: _numeric_dir_key(p.name),
+    ):
+        s = read_cell_status(d)
+        if s is None or not isinstance(s.get("combo"), dict):
+            continue
+        m = read_metrics_sidecar(d) or {}
+        if not isinstance(m, dict):
+            m = {}
+        cells.append(
+            {
+                "combo": s["combo"],
+                "status": s.get("status", "pending"),
+                "metrics": m,
+                "dir": d,
+            }
+        )
+    return cells
+
+
 class ShowResult:
     """The result of :func:`show`: ``rows`` (one dict per cell, with raw swept
     params, ``status``, and metric values) plus a rendered ``table``. ``str()``
@@ -90,27 +124,7 @@ def show(
         ``.rows`` (one dict per cell) and ``.table`` (the rendered string); the
         table is also printed.
     """
-    from ._resume import read_cell_status
-    from ._sweep_io import read_metrics_sidecar
-
-    root = Path(root)
-    if not root.is_dir():
-        raise FileNotFoundError(f"sweep directory not found: {root}")
-
-    cells: list[dict] = []
-    for d in sorted(
-        (p for p in root.iterdir() if p.is_dir()),
-        key=lambda p: _numeric_dir_key(p.name),
-    ):
-        s = read_cell_status(d)
-        if s is None or not isinstance(s.get("combo"), dict):
-            continue
-        m = read_metrics_sidecar(d) or {}
-        if not isinstance(m, dict):
-            m = {}
-        cells.append(
-            {"combo": s["combo"], "status": s.get("status", "pending"), "metrics": m}
-        )
+    cells = _read_cells(root)
 
     param_cols = _ordered_union([c["combo"] for c in cells])
     metric_cols = _ordered_union([c["metrics"] for c in cells])
@@ -143,6 +157,84 @@ def _sortable(v: Any):
     if isinstance(v, int | float):
         return (0, float(v))
     return (1, str(v))
+
+
+class BestResult:
+    """The winning cell of a sweep (see :func:`best`): its swept-param ``combo``,
+    the optimized metric ``value``, the full ``metrics`` dict, its ``status``,
+    and its job ``dir`` (for locating checkpoints/artifacts)."""
+
+    def __init__(self, combo: dict, status: str, metrics: dict, value: float, dir):
+        self.combo = combo
+        self.status = status
+        self.metrics = metrics
+        self.value = value
+        self.dir = dir
+
+    def __repr__(self) -> str:
+        return (
+            f"BestResult(combo={self.combo!r}, value={self.value!r}, dir={self.dir!r})"
+        )
+
+
+def _finite_number(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and v == v
+
+
+def best(root, metric: str, *, mode: str = "max") -> BestResult:
+    """Return the completed cell that optimizes ``metric`` across the sweep.
+
+    Parameters
+    ----------
+    root :
+        A sweep ``working_dir``.
+    metric :
+        The metric to optimize; it must be a finite scalar in each cell.
+    mode : str
+        ``"max"`` (default) or ``"min"``.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is invalid, or no completed cell has ``metric`` as a finite
+        scalar (the error lists the scalar metrics that are available).
+    FileNotFoundError
+        If ``root`` is not a directory.
+    """
+    if mode not in ("max", "min"):
+        raise ValueError(f"`mode` must be 'max' or 'min', got {mode!r}")
+
+    cells = _read_cells(root)
+    candidates = [
+        c
+        for c in cells
+        if c["status"] == "completed" and _finite_number(c["metrics"].get(metric))
+    ]
+    if not candidates:
+        available = sorted(
+            {
+                k
+                for c in cells
+                if c["status"] == "completed"
+                for k, v in c["metrics"].items()
+                if _finite_number(v)
+            }
+        )
+        raise ValueError(
+            f"no completed cell has a finite scalar metric {metric!r}. "
+            f"Available scalar metrics: {', '.join(available) or '(none)'}."
+        )
+
+    pick = (max if mode == "max" else min)(
+        candidates, key=lambda c: c["metrics"][metric]
+    )
+    return BestResult(
+        combo=dict(pick["combo"]),
+        status=pick["status"],
+        metrics=dict(pick["metrics"]),
+        value=pick["metrics"][metric],
+        dir=pick["dir"],
+    )
 
 
 def _render(columns: list[str], rows: list[dict]) -> str:
