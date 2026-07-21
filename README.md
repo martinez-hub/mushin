@@ -107,7 +107,7 @@ The PyPI distribution is **`mushin-py`**, but you `import mushin` (like
 dependencies (torchmetrics, scipy) — keeping the core install lean; accessing
 those features without it raises a clear install hint. Other optional extras:
 `viz`, `netcdf`, `detection`, `image`, `audio`, `mcp` (the battery extras imply
-`eval`) — e.g. `pip install "mushin-py[eval,viz]"`. Supported Python: 3.10 – 3.14.
+`eval`) — e.g. `pip install "mushin-py[eval,viz]"`. Supported Python: 3.10 – 3.13.
 
 ## Versioning & scope
 

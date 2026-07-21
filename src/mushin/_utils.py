@@ -69,20 +69,22 @@ def load_from_checkpoint(
         The path to the file containing the model weights. If no path is provided
         the model will not be updated.
 
-    weights_key : Optional[str] (default: "state_dict")
-        (load_module=False) The key from the checkpoint file containing the model
-        weights.
+    weights_key : Optional[str] (default: None)
+        The key from the checkpoint file containing the model weights. When
+        None, the checkpoint dict is loaded into ``model`` directly.
 
-    weights_key_strip : Optional[str] (default: "model")
-        (load_module=False) The prefix to remove from each weight's key prior
-        to loading the module.
+    weights_key_strip : Optional[str] (default: None)
+        A prefix to remove from each weight's key prior to loading. When None,
+        keys are used as-is.
 
-    model_attr : Optional[str] (default: "model")
-        (load_module=False) The attribute of the module containing the `torch.nn.Module`
+    model_attr : Optional[str] (default: None)
+        The attribute of ``model`` to load the weights into. When None, they
+        are loaded into ``model`` itself.
 
     Returns
     -------
-    module : LightningModule
+    model : Module
+        The same ``model`` instance, with its weights loaded.
     """
     if ckpt is None:
         return model

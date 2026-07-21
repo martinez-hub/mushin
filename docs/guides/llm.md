@@ -9,7 +9,8 @@ The "vibes eval" problem: it's common to eyeball a handful of outputs and
 declare a new prompt or model "better" — but that impression may be pure
 sampling noise. `mushin.llm.compare_llms` runs each system across
 reproducible stochastic seeds, scores every `(system, seed)` pair with a
-user-supplied metric, and reports Holm-corrected pairwise significance. The
+user-supplied metric, and reports pairwise significance (Holm-corrected by
+default; pass `correction=` for Bonferroni, Benjamini–Hochberg FDR, or none). The
 same statistical spine that powers `mushin.benchmark.compare` for torch
 models works here — you just bring the systems, data, and metric.
 
