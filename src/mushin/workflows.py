@@ -112,6 +112,32 @@ def _cfg_missing_or_none(cfg, key: str) -> bool:
     return val is _missing or val is None
 
 
+def _format_dry_run(summary: Mapping[str, Any]) -> str:
+    """Render a `dry_run=True` summary as a human-readable preview: the cell
+    count, each swept axis with its values (a range typo shows up here as an
+    unexpectedly wide axis), and the fixed parameters."""
+    axes = summary.get("axes", {})
+    fixed = summary.get("fixed", {})
+    n = summary.get("num_cells", 0)
+    lines = [f"Dry run — {n} cell{'s' if n != 1 else ''}, no jobs launched."]
+    wd = summary.get("working_dir")
+    lines.append(f"  working_dir: {wd if wd else '(Hydra default)'}")
+    if axes:
+        shape = " x ".join(str(len(v)) for v in axes.values())
+        width = max(len(k) for k in axes)
+        lines.append(f"  swept axes ({shape}):")
+        for k, v in axes.items():
+            lines.append(f"    {k:<{width}} = {list(v)!r}")
+    else:
+        lines.append("  swept axes: (none — a single cell)")
+    if fixed:
+        width = max(len(k) for k in fixed)
+        lines.append("  fixed:")
+        for k, v in fixed.items():
+            lines.append(f"    {k:<{width}} = {v!r}")
+    return "\n".join(lines)
+
+
 def _override_name_targets(task_fn) -> set[str] | None:
     """The top-level override names a task's signature accepts, or ``None`` to
     allow any name (the task declares ``**kwargs``, or its signature can't be
@@ -714,6 +740,7 @@ class BaseWorkflow:
         on_error: str = "raise",
         resume: bool = False,
         capture_env: bool = False,
+        dry_run: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -773,6 +800,10 @@ class BaseWorkflow:
             pass the entire list as a single input.
 
             These values will be appended to the `overrides` for the Hydra job.
+
+        dry_run : bool (default: False)
+            Preview the grid (cell count + per-axis values) and return a summary
+            dict without launching any job.
 
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
@@ -931,6 +962,32 @@ class BaseWorkflow:
                 raise TypeError(
                     f"{type(self).__name__}.{_name} must be a static method"
                 )
+
+        if dry_run:
+            # Preview the grid and return WITHOUT launching. Sourced from the
+            # user's own overrides (not launch_overrides) so the `hydra.*`
+            # plumbing is excluded and axes/fixed are cleanly separated.
+            axes = {
+                k: list(v)
+                for k, v in workflow_overrides.items()
+                if isinstance(v, multirun)
+            }
+            fixed = {
+                k: (list(v) if isinstance(v, hydra_list) else v)
+                for k, v in workflow_overrides.items()
+                if not isinstance(v, multirun)
+            }
+            num_cells = 1
+            for vals in axes.values():
+                num_cells *= len(vals)
+            summary = {
+                "num_cells": num_cells,
+                "axes": axes,
+                "fixed": fixed,
+                "working_dir": working_dir,
+            }
+            print(_format_dry_run(summary))
+            return summary
 
         if task_fn_wrapper is None:
             task_fn_wrapper = _identity
@@ -1284,6 +1341,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         on_error: str = "raise",
         resume: bool = False,
         capture_env: bool = False,
+        dry_run: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -1320,6 +1378,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ``working_dir/mushin_env.txt`` — or ``mushin_env.<n>.txt`` if a
             snapshot already exists there (a resume never overwrites the
             original run's snapshot).
+        dry_run : bool (default: False)
+            Preview the sweep instead of running it: print the cell count and
+            each swept axis with its values (a range typo shows up as an
+            unexpectedly wide axis), then return a summary dict
+            (``num_cells``/``axes``/``fixed``/``working_dir``) without launching
+            any job.
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -1358,6 +1422,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             on_error=on_error,
             resume=resume,
             capture_env=capture_env,
+            dry_run=dry_run,
             **workflow_overrides,
         )
 

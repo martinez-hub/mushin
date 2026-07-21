@@ -47,10 +47,15 @@ class Sweep:
     def run(self, **kwargs):
         """Run the sweep and return its labeled `xarray.Dataset`. Forwards every
         keyword to `MultiRunMetricsWorkflow.run` (sweep dims via `multirun(...)`
-        plus `working_dir` / `on_error` / `resume` / `launcher` / … )."""
+        plus `working_dir` / `on_error` / `resume` / `launcher` / … ).
+
+        With `dry_run=True` no jobs launch: the grid-preview summary is returned
+        (there is no dataset to build)."""
         wf = self.workflow_cls()  # fresh per run — no state carryover
-        wf.run(**kwargs)
+        result = wf.run(**kwargs)
         self.workflow = wf
+        if kwargs.get("dry_run"):
+            return result  # the dry-run summary; nothing ran, no dataset
         return wf.to_xarray()
 
 
