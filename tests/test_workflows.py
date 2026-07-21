@@ -1463,3 +1463,82 @@ def test_parse_overrides_expands_range_and_rejects_interval():
 
     with pytest.raises(ValueError, match="interval"):
         MultiRunMetricsWorkflow._parse_overrides(["x=interval(0,1)"])
+
+
+def test_resume_reruns_completed_cells_when_config_changed(tmp_path):
+    """A cached cell is only reused if the resolved config that produced it
+    matches the current one -- changing a NON-swept value and resuming must
+    re-run every cell, not silently mix results from two configurations."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, scale=1.0):
+            CALLS["n"] += 1
+            return dict(val=float(a) * scale)
+
+    wd = str(tmp_path / "s")
+    W().run(a=multirun([1, 2]), scale=1.0, working_dir=wd)
+    assert CALLS["n"] == 2
+
+    CALLS["n"] = 0
+    wf2 = W()
+    with pytest.warns(UserWarning, match="config"):
+        wf2.run(a=multirun([1, 2]), scale=2.0, working_dir=wd, resume=True)
+    assert CALLS["n"] == 2  # both cells re-ran under the new config
+    ds = wf2.to_xarray()
+    assert float(ds["val"].sel(a=2)) == 4.0  # new config's result, not stale
+
+
+def test_resume_reuses_legacy_sidecars_without_config_hash(tmp_path):
+    """Sweeps recorded before the config-hash existed must still resume
+    (reuse) their completed cells."""
+    import json as _json
+
+    from mushin import multirun
+    from mushin._resume import STATUS_FILE
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            CALLS["n"] += 1
+            return dict(val=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2]), working_dir=str(wd))
+    # Simulate a pre-hash sweep: strip config_hash from every status sidecar.
+    for status_file in wd.glob(f"*/{STATUS_FILE}"):
+        d = _json.loads(status_file.read_text())
+        d.pop("config_hash", None)
+        status_file.write_text(_json.dumps(d))
+
+    CALLS["n"] = 0
+    W().run(a=multirun([1, 2]), working_dir=str(wd), resume=True)
+    assert CALLS["n"] == 0  # legacy cells reused, nothing re-ran
+
+
+def test_task_runner_ships_only_completed_cells(tmp_path):
+    """Out-of-process launchers pickle the runner to every worker; it must
+    carry only the completed {combo_key: dir} map, not the full manifest
+    (O(N^2) serialized bytes across N cells)."""
+    from mushin import multirun
+    from mushin._sweep_io import Manifest
+    from mushin.workflows import _PriorCells
+
+    class W(_grid_with_one_failure()):
+        pass
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="fail"):
+        W().run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+
+    m = Manifest.from_cell_status(Path(wd), ["a", "b"])
+    prior = _PriorCells.from_manifest(m)
+    assert len(prior.completed) == 3  # the failed cell is not shipped
+    assert all("a=" in k for k in prior.completed)

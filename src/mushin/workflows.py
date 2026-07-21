@@ -91,6 +91,29 @@ class _FailedRun:
         self.exception = exception
 
 
+class _PriorCells:
+    """What a resuming `_TaskRunner` needs from the prior sweep, and nothing
+    more: the sweep root, the swept param names, and the completed
+    {combo_key: dir} map. Picklable and small — failed/pending cells and their
+    error strings never ship to workers."""
+
+    __slots__ = ("root", "params", "completed")
+
+    def __init__(self, root: str, params: tuple, completed: dict):
+        self.root = root
+        self.params = params
+        self.completed = completed
+
+    @classmethod
+    def from_manifest(cls, m) -> "_PriorCells":
+        completed = {
+            k: v["dir"]
+            for k, v in m.cells.items()
+            if v.get("status") == "completed" and v.get("dir")
+        }
+        return cls(str(m.root), tuple(m.params), completed)
+
+
 _MISSING_SWEPT = object()
 
 
@@ -188,23 +211,47 @@ class _TaskRunner:
     def __call__(self, cfg):
         from pathlib import Path
 
+        import warnings
+
         from ._provenance import write_provenance
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
+            config_fingerprint,
+            read_cell_status,
             write_cell_status,
         )
-        from ._sweep_io import read_metrics_sidecar, write_metrics_sidecar
+        from ._sweep_io import combo_key, read_metrics_sidecar, write_metrics_sidecar
+
+        chash = config_fingerprint(cfg)
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
         if self.prior_manifest is not None:
             sc = self._combo(cfg, self.prior_manifest.params)
-            if self.prior_manifest.status(sc) == "completed":
-                cached = read_metrics_sidecar(
-                    Path(self.prior_manifest.root) / (self.prior_manifest.dir(sc) or "")
-                )
-                if cached is not None:
-                    return cached
+            key = combo_key(sc)
+            dir_ = self.prior_manifest.completed.get(key)
+            if dir_ is not None:
+                cell_dir = Path(self.prior_manifest.root) / dir_
+                prior_hash = (read_cell_status(cell_dir) or {}).get("config_hash")
+                if (
+                    prior_hash is not None
+                    and chash is not None
+                    and prior_hash != chash
+                ):
+                    # Same combo, different resolved config (a non-swept value
+                    # changed): reusing the cached result would silently mix
+                    # two configurations into one dataset.
+                    warnings.warn(
+                        f"resume: cell {key!r} was completed under a different "
+                        "config (fingerprint mismatch); re-running it instead "
+                        "of reusing the cached result.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    cached = read_metrics_sidecar(cell_dir)
+                    if cached is not None:
+                        return cached
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
         try:
@@ -217,18 +264,36 @@ class _TaskRunner:
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
-            write_cell_status(cwd, status="running", combo=combo, attempt=rc.attempt)
+            write_cell_status(
+                cwd,
+                status="running",
+                combo=combo,
+                attempt=rc.attempt,
+                config_hash=chash,
+            )
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
-                write_cell_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
+                write_cell_status(
+                    cwd,
+                    status="failed",
+                    combo=combo,
+                    attempt=rc.attempt,
+                    config_hash=chash,
+                )
                 raise
             finally:
                 if token is not None:
                     _CURRENT_RESUME.reset(token)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)
-            write_cell_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
+            write_cell_status(
+                cwd,
+                status="completed",
+                combo=combo,
+                attempt=rc.attempt,
+                config_hash=chash,
+            )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
             if self.on_error == "nan":
@@ -700,12 +765,17 @@ class BaseWorkflow:
 
         _base_provenance = capture_base()
 
-        # Kill-durable resume manifest (only when resuming) — built here so the
-        # runner can hold it.
+        # Kill-durable resume state (only when resuming) — built here so the
+        # runner can hold it. Slimmed to the completed {combo_key: dir} map:
+        # out-of-process launchers pickle the runner to EVERY worker, so
+        # shipping the full N-cell manifest would cost O(N^2) serialized bytes
+        # across an N-cell sweep.
         _prior_manifest = None
         if resume:
-            _prior_manifest = Manifest.from_cell_status(
-                Path(working_dir).resolve(), list(_swept_names)
+            _prior_manifest = _PriorCells.from_manifest(
+                Manifest.from_cell_status(
+                    Path(working_dir).resolve(), list(_swept_names)
+                )
             )
 
         _task_fn, _wants_resume = _prepare_task(self.task)

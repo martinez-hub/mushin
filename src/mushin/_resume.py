@@ -33,13 +33,45 @@ class ResumeContext:
 
 
 def write_cell_status(
-    cell_dir, *, status: str, combo: dict[str, Any], attempt: int
+    cell_dir,
+    *,
+    status: str,
+    combo: dict[str, Any],
+    attempt: int,
+    config_hash: str | None = None,
 ) -> None:
     """Atomically write this cell's status sidecar into its own dir."""
-    _atomic_write_json(
-        Path(cell_dir) / STATUS_FILE,
-        {"status": status, "combo": combo, "attempt": int(attempt)},
-    )
+    payload: dict[str, Any] = {
+        "status": status,
+        "combo": combo,
+        "attempt": int(attempt),
+    }
+    if config_hash is not None:
+        payload["config_hash"] = config_hash
+    _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
+
+
+def config_fingerprint(cfg) -> str | None:
+    """Stable short hash of the fully-resolved job config, or None if the
+    config cannot be resolved/serialized.
+
+    Guards resume reuse: a completed cell's cached metrics are only returned
+    when the config that would run now matches the one that produced them —
+    otherwise a changed NON-swept value (same combo key) would silently mix
+    results from two configurations into one dataset. Task *source* changes
+    are not captured; only the resolved config is."""
+    try:
+        from omegaconf import OmegaConf
+
+        data = OmegaConf.to_container(cfg, resolve=True) if OmegaConf.is_config(
+            cfg
+        ) else cfg
+        payload = json.dumps(data, sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - unresolvable config -> no guard
+        return None
+    import hashlib
+
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def read_cell_status(cell_dir) -> dict | None:
