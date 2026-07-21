@@ -1694,3 +1694,44 @@ def test_resume_reruns_full_grid_when_axis_added(tmp_path):
     assert float(ds["v"].sel(a=1, b=20)) == 120.0
     assert float(ds["v"].sel(a=2, b=10)) == 210.0
     assert wf2.is_complete
+
+
+def test_resume_dir_reuse_keeps_metrics_consistent_with_config(tmp_path):
+    # gridevo case4: a resume that reuses a numeric job dir a prior sweep filled
+    # with a DIFFERENT cell must refresh that dir's metrics so config and metrics
+    # stay in sync -- otherwise the manifest and an offline load_from_dir mis-key
+    # the reused cell (e.g. a=3 read as the stale a=1 value).
+    import json
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def metric_load_fn(p):  # the sidecar is JSON, not a torch pickle
+            with open(p) as f:
+                return json.load(f)
+
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2, 3]), working_dir=str(wd))
+    # resume with a shifted grid: a=3 is reused, a=5/a=6 run into reused dirs
+    W().run(a=multirun([3, 5, 6]), working_dir=str(wd), resume=True)
+
+    # every job dir's metrics must match the config Hydra wrote into it
+    for d in sorted(p for p in wd.glob("[0-9]*") if p.is_dir()):
+        overrides = (d / ".hydra" / "overrides.yaml").read_text()
+        a_val = float(overrides.split("a=")[1].split()[0])
+        v = json.loads((d / "mushin_metrics.json").read_text())["v"]
+        assert v == a_val, f"{d}: config a={a_val} but metrics v={v}"
+
+    # offline reload reads the correct per-cell value (the reused a=3 -> 3.0)
+    wf = W()
+    wf.load_from_dir(str(wd), "mushin_metrics.json")
+    ds = wf.to_xarray()
+    assert float(ds["v"].sel(a=3)) == 3.0
+    assert float(ds["v"].sel(a=5)) == 5.0
+    assert float(ds["v"].sel(a=6)) == 6.0
