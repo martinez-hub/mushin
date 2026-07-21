@@ -45,6 +45,13 @@ keys in the job dir (the same contract as `HydraDDP`). See
 `examples/sharding_fsdp_multirun.py` for a runnable 2-GPU sweep (needs real GPUs,
 not run in CI).
 
+## Rank-launch stagger
+
+`HydraDDP`/`HydraFSDP` wait 1 second between spawning each child rank (it
+avoids dataloader startup contention). For short jobs in large sweeps that
+per-cell tax adds up — set `MUSHIN_DDP_LAUNCH_DELAY=0` (any float works) to
+tune or disable it.
+
 ## DeepSpeed
 
 DeepSpeed ZeRO is the same idea; you would wrap `DeepSpeedStrategy` the same way.
