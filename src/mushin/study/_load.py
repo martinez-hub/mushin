@@ -55,8 +55,7 @@ def evaluate_checkpoints(
     if not checkpoints:
         raise ValueError("`checkpoints` must not be empty")
     models = {
-        method: _LazyModels(paths, load_fn)
-        for method, paths in checkpoints.items()
+        method: _LazyModels(paths, load_fn) for method, paths in checkpoints.items()
     }
     return compare(
         methods=models,

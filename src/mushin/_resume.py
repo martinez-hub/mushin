@@ -63,9 +63,11 @@ def config_fingerprint(cfg) -> str | None:
     try:
         from omegaconf import OmegaConf
 
-        data = OmegaConf.to_container(cfg, resolve=True) if OmegaConf.is_config(
-            cfg
-        ) else cfg
+        data = (
+            OmegaConf.to_container(cfg, resolve=True)
+            if OmegaConf.is_config(cfg)
+            else cfg
+        )
         payload = json.dumps(data, sort_keys=True, default=str)
     except Exception:  # noqa: BLE001 - unresolvable config -> no guard
         return None

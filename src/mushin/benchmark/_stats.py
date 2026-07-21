@@ -128,8 +128,7 @@ def bonferroni_correction(pvalues) -> list[float]:
     pvalues = np.asarray(pvalues, dtype=float)
     n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
     return [
-        float("nan") if np.isnan(p) else float(min(p * n_valid, 1.0))
-        for p in pvalues
+        float("nan") if np.isnan(p) else float(min(p * n_valid, 1.0)) for p in pvalues
     ]
 
 
@@ -251,8 +250,7 @@ def compare_methods(
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
     if correction not in _CORRECTIONS:
         raise ValueError(
-            f"unknown correction {correction!r}; choose from "
-            f"{available_corrections()}"
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
         )
     correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])

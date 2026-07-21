@@ -233,11 +233,7 @@ class _TaskRunner:
             if dir_ is not None:
                 cell_dir = Path(self.prior_manifest.root) / dir_
                 prior_hash = (read_cell_status(cell_dir) or {}).get("config_hash")
-                if (
-                    prior_hash is not None
-                    and chash is not None
-                    and prior_hash != chash
-                ):
+                if prior_hash is not None and chash is not None and prior_hash != chash:
                     # Same combo, different resolved config (a non-swept value
                     # changed): reusing the cached result would silently mix
                     # two configurations into one dataset.
