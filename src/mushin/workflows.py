@@ -138,6 +138,39 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _required_params(fn) -> set[str]:
+    """Named parameters of ``fn`` that have no default — the ones a run must
+    supply. Ignores ``*args``/``**kwargs`` and the injected ``mushin_resume``."""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return set()
+    empty = inspect.Parameter.empty
+    skip = {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+    return {
+        name
+        for name, p in params.items()
+        if p.kind not in skip and p.default is empty and name != "mushin_resume"
+    }
+
+
+def _config_field_names(cfg) -> set[str]:
+    """Top-level field names of a config (a ``make_config`` dataclass type, an
+    instance, or a ``DictConfig``), or an empty set if it can't be read."""
+    try:
+        from omegaconf import OmegaConf
+
+        return {str(k) for k in OmegaConf.structured(cfg).keys()}
+    except Exception:  # noqa: BLE001 - unreadable cfg -> no fields known
+        import dataclasses
+
+        if dataclasses.is_dataclass(cfg):
+            return {f.name for f in dataclasses.fields(cfg)}
+        return set()
+
+
 def _override_name_targets(task_fn) -> set[str] | None:
     """The top-level override names a task's signature accepts, or ``None`` to
     allow any name (the task declares ``**kwargs``, or its signature can't be
@@ -967,6 +1000,36 @@ class BaseWorkflow:
                 raise TypeError(
                     f"{type(self).__name__}.{_name} must be a static method"
                 )
+
+        # Validate up front that every required task/pre_task parameter is
+        # satisfied — by the base config or an override — BEFORE launching. A
+        # genuinely missing parameter otherwise surfaces as an opaque per-job
+        # Hydra error (ConfigAttributeError) after the sweep has started, once
+        # per cell. Only the head of a dotted override counts (`model.width`
+        # satisfies a `model` parameter). A parameter supplied via override is
+        # valid even when the base config is empty (the common decorator case).
+        task_attr = "evaluation_task" if hasattr(self, "evaluation_task") else "task"
+        required = _required_params(getattr(self, task_attr, None))
+        required |= _required_params(getattr(self, "pre_task", None))
+        provided = _config_field_names(self.eval_task_cfg) | {
+            k.split(".", 1)[0] for k in workflow_overrides
+        }
+        # Raw Hydra override strings (`overrides=["+seed=0,1,2"]`) are another way
+        # to supply a parameter; strip any leading +/~/++ and dotted tail.
+        for o in overrides or []:
+            provided.add(o.split("=", 1)[0].lstrip("+~").split(".", 1)[0])
+        jobdir = getattr(self, "_JOBDIR_NAME", None)
+        if jobdir:
+            provided.add(jobdir)
+        missing = sorted(required - provided)
+        if missing:
+            names = ", ".join(repr(m) for m in missing)
+            raise ValueError(
+                f"the task requires parameter(s) {names} that are not provided "
+                "by the base config or any override. Pass them to run() (e.g. "
+                f"`{missing[0]}=...` or `{missing[0]}=multirun([...])`), or set "
+                "them in the workflow's eval_task_cfg."
+            )
 
         # The grid cell count drives both the dry-run preview and the pre-launch
         # gate below. Sourced from the user's own overrides (not launch_overrides)
