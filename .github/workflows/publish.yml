@@ -57,7 +57,10 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI
-        # Pinned to a full commit SHA (v1.14.1): this step holds the OIDC
-        # id-token, and a mutable tag/branch ref would let a retagged action
-        # exfiltrate it or publish tampered artifacts.
-        uses: pypa/gh-action-pypi-publish@2834a314042ef964da07689278dd1e9d773e8afd # v1.14.1
+        # Pinned to the exact release tag, NOT a commit SHA: this is a
+        # Docker-based action whose container image is resolved from the ref,
+        # and no ghcr image exists for a bare SHA ("manifest unknown" — this
+        # broke the v0.9.0 publish). The version tag is the most precise pin
+        # the action supports; it is still far narrower than the moving
+        # release/v1 branch used before.
+        uses: pypa/gh-action-pypi-publish@v1.14.1
