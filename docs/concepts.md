@@ -111,6 +111,10 @@ and the default prediction logic:
 | `"classification"` | accuracy, f1, precision, recall, auroc, ece | argmax + softmax |
 | `"segmentation"` | miou, dice, pixel_acc, precision, recall | argmax + softmax over spatial dims |
 
+Five more batteries ship — `detection`, `regression`, `retrieval`,
+`image_quality`, `audio` — for all seven see the
+[batteries guide](guides/batteries.md); register your own with `register_task`.
+
 You can override either end:
 - Pass `metrics=` to replace the battery entirely.
 - Pass `predict_fn=` to adapt models that return dicts or non-standard tensors.

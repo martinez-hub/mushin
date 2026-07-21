@@ -435,7 +435,8 @@ class BaseWorkflow:
         Dictionary of metrics for across all jobs.
 
     workflow_overrides : Dict[str, Any]
-        Workflow parameters defined as additional arguments to `run`.
+        Present for backward compatibility; not populated. The swept parameters
+        of the last run are exposed by the ``multirun_task_overrides`` property.
 
     jobs : List[Any]
         List of jobs returned for each experiment within the workflow.
@@ -652,9 +653,9 @@ class BaseWorkflow:
 
         Parameters
         ----------
-        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]] | None, optional (default=mushin.zen)
+        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]] | None, optional (default=hydra_zen.zen)
             A wrapper applied to `self.task` prior to launching the task.
-            The default wrapper is `mushin.zen`. Specify `None` for no
+            The default wrapper is `hydra_zen.zen`. Specify `None` for no
             wrapper to be applied.
 
         working_dir: str (default: None, the Hydra default will be used)
@@ -670,9 +671,8 @@ class BaseWorkflow:
             `hydra/launcher=launcher`)
 
         overrides: List[str] | None (default: None)
-            Parameter overrides not considered part of the workflow parameter set.
-            This is helpful for filtering out parameters stored in
-            `self.workflow_overrides`.
+            Parameter overrides not considered part of the swept workflow
+            parameter set (which are exposed via `multirun_task_overrides`).
 
         version_base : Optional[str], optional (default=1.1)
             Available starting with Hydra 1.2.0.
@@ -1142,14 +1142,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             metrics with NaN, and keeps sweeping.
         resume : bool (default: False)
             Skip cells already recorded as completed in ``working_dir`` (their
-            metrics are read from the sidecar) and re-run the rest. Note that
-            completed cells are matched by their swept-parameter combination
-            only — if you changed the task body, a non-swept default, or your
-            environment since the original run, re-run from a fresh
-            ``working_dir`` instead of resuming into the old one.
+            metrics are read from the sidecar) and re-run the rest. A completed
+            cell is reused only if its swept-parameter combination AND a
+            fingerprint of its resolved config both match; a changed non-swept
+            value re-runs that cell (with a warning). Note the fingerprint does
+            not cover the task *body* or the environment — if you changed those,
+            re-run from a fresh ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
-            Record a ``pip freeze`` snapshot to ``working_dir/mushin_env.txt``
-            after the sweep.
+            After the sweep, snapshot the environment (``uv export``, falling
+            back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
+            ``working_dir/mushin_env.txt`` — or ``mushin_env.<n>.txt`` if a
+            snapshot already exists there (a resume never overwrites the
+            original run's snapshot).
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -1482,8 +1486,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         Parameters
         ----------
         metrics_filename : str | Sequence[str]
-            The filename(s) or glob-pattern(s) uses to load the metrics.
-            If `None`, the metrics stored in `self.metrics` is used.
+            The filename(s) or glob-pattern(s) used to load the metrics.
+            Required (unlike ``to_xarray``/``load_from_dir``, this method does
+            not accept ``None``).
 
         Returns
         -------
@@ -1850,9 +1855,9 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             this parameter can be a list of floats that will be converted into a
             multirun sequence override for Hydra.
 
-        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]] | None, optional (default=mushin.zen)
+        task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]] | None, optional (default=hydra_zen.zen)
             A wrapper applied to `self.task` prior to launching the task.
-            The default wrapper is `mushin.zen`. Specify `None` for no
+            The default wrapper is `hydra_zen.zen`. Specify `None` for no
             wrapper to be applied.
 
         working_dir: str (default: None, the Hydra default will be used)
@@ -1868,9 +1873,8 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             `hydra/launcher=launcher`)
 
         overrides: List[str] | None (default: None)
-            Parameter overrides not considered part of the workflow parameter set.
-            This is helpful for filtering out parameters stored in
-            `self.workflow_overrides`.
+            Parameter overrides not considered part of the swept workflow
+            parameter set (which are exposed via `multirun_task_overrides`).
 
         **workflow_overrides: str | int | float | bool | multirun | hydra_list
             These parameters represent the values for configurations to use for the

@@ -78,8 +78,10 @@ The `test` parameter selects the pairwise significance test:
 | `"ttest_rel"` | Paired t-test; equal variance assumed. |
 | `"ttest_ind"` | Independent t-test; equal variance assumed. |
 
-All pairwise comparisons are corrected for multiple testing with the Holm–Bonferroni
-procedure at significance level `alpha` (default `0.05`). See
+All pairwise comparisons are corrected for multiple testing — by default the
+Holm–Bonferroni procedure, at significance level `alpha` (default `0.05`).
+Pass `correction=` to choose `"holm"` (default), `"bonferroni"`, `"fdr_bh"`
+(Benjamini–Hochberg FDR), or `"none"`. See
 [Understanding the statistics](statistics.md) for full details.
 
 !!! warning "Single-seed behavior"

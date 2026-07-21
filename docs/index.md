@@ -38,7 +38,8 @@ the swept parameters.
 `pip install "mushin-py[eval]"`)*
 `benchmark.compare` evaluates a set of trained models on a standard metric
 battery (torchmetrics), then runs pairwise significance tests (scipy) with
-Holm correction. The result is a `BenchmarkResult` with a paper-ready
+multiple-comparison correction (Holm by default; also Bonferroni/FDR/none).
+The result is a `BenchmarkResult` with a paper-ready
 `.summary()`, tidy `.comparisons` DataFrame, and a labeled `.data` dataset.
 
 **`Study`.**
