@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from ._packing import pin_gpu_round_robin
 from ._resume import ResumeContext
-from ._show import best, show
+from ._show import best, diff, show
 from ._sweep_decorator import sweep
 from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
@@ -127,6 +127,7 @@ __all__ = [
     "load_experiment",
     "load_from_checkpoint",
     "best",
+    "diff",
     "original_cwd",
     "show",
     "sweep",

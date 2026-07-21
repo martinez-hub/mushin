@@ -251,3 +251,141 @@ def _render(columns: list[str], rows: list[dict]) -> str:
         "  ".join(row[i].ljust(widths[i]) for i in range(len(columns))) for row in cells
     )
     return f"{header}\n{sep}\n{body}"
+
+
+def _read_provenance(root) -> dict | None:
+    """A representative provenance record for a sweep (the first cell's
+    ``mushin_provenance.json``), or None if none is readable."""
+    import json
+
+    for d in sorted(
+        (p for p in Path(root).iterdir() if p.is_dir()),
+        key=lambda p: _numeric_dir_key(p.name),
+    ):
+        p = d / "mushin_provenance.json"
+        if p.exists():
+            try:
+                data = json.loads(p.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                return data
+    return None
+
+
+# Fields that vary per cell / per run rather than describing the environment;
+# excluded from the provenance delta so it reports only real env changes.
+_PROV_VOLATILE = frozenset({"timestamp", "config"})
+
+
+def _flatten(d: dict, prefix: str = "") -> dict:
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.update(_flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def _diff_provenance(a: dict | None, b: dict | None) -> dict:
+    """Flattened field-by-field diff of two provenance records, excluding
+    volatile fields. Returns ``{dotted_key: (a_value, b_value)}`` for every field
+    whose value differs (a field present on only one side reads as ``None`` on
+    the other)."""
+    fa = _flatten({k: v for k, v in (a or {}).items() if k not in _PROV_VOLATILE})
+    fb = _flatten({k: v for k, v in (b or {}).items() if k not in _PROV_VOLATILE})
+    changed = {}
+    for k in sorted(set(fa) | set(fb)):
+        va, vb = fa.get(k), fb.get(k)
+        if va != vb:
+            changed[k] = (va, vb)
+    return changed
+
+
+class DiffResult:
+    """The result of :func:`diff`: ``rows`` (one per shared cell, each with a
+    ``deltas`` map of ``metric -> (a, b, b - a)``), ``only_in_a`` / ``only_in_b``
+    (combos unique to each sweep), the ``provenance`` delta, and the rendered
+    ``table``. ``str()`` returns the table."""
+
+    def __init__(self, rows, only_in_a, only_in_b, provenance, table):
+        self.rows = rows
+        self.only_in_a = only_in_a
+        self.only_in_b = only_in_b
+        self.provenance = provenance
+        self.table = table
+
+    def __str__(self) -> str:
+        return self.table
+
+    def __repr__(self) -> str:
+        return self.table
+
+
+def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
+    """Compare two sweep directories ``a`` and ``b``.
+
+    Cells are aligned by their swept-param combination. For each shared cell the
+    delta ``b - a`` is computed for every metric that is a finite scalar in both.
+    Cells present in only one sweep are reported separately, along with a diff of
+    the two runs' environment provenance (git/packages/python/accelerator).
+
+    Returns
+    -------
+    DiffResult
+        ``.rows`` (shared-cell deltas), ``.only_in_a`` / ``.only_in_b`` (combos),
+        ``.provenance`` (``{field: (a, b)}``), and ``.table``; the table prints.
+    """
+    from ._sweep_io import combo_key
+
+    cells_a = {combo_key(c["combo"]): c for c in _read_cells(a)}
+    cells_b = {combo_key(c["combo"]): c for c in _read_cells(b)}
+
+    keys_a, keys_b = set(cells_a), set(cells_b)
+    only_in_a = [dict(cells_a[k]["combo"]) for k in sorted(keys_a - keys_b)]
+    only_in_b = [dict(cells_b[k]["combo"]) for k in sorted(keys_b - keys_a)]
+
+    want = set(metrics) if metrics is not None else None
+    rows = []
+    for k in sorted(keys_a & keys_b):
+        ca, cb = cells_a[k], cells_b[k]
+        deltas: dict[str, tuple] = {}
+        for name, va in ca["metrics"].items():
+            if want is not None and name not in want:
+                continue
+            vb = cb["metrics"].get(name)
+            if _finite_number(va) and _finite_number(vb):
+                deltas[name] = (va, vb, vb - va)
+        row: dict[str, Any] = dict(ca["combo"])
+        row["deltas"] = deltas
+        rows.append(row)
+
+    provenance = _diff_provenance(_read_provenance(a), _read_provenance(b))
+    table = _render_diff(rows, only_in_a, only_in_b, provenance)
+    print(table)
+    return DiffResult(rows, only_in_a, only_in_b, provenance, table)
+
+
+def _render_diff(rows, only_in_a, only_in_b, provenance) -> str:
+    param_cols = _ordered_union(
+        [{k: v for k, v in r.items() if k != "deltas"} for r in rows]
+    )
+    metric_cols = _ordered_union([r["deltas"] for r in rows])
+    columns = [*param_cols, *(f"Δ{m}" for m in metric_cols)]
+    flat_rows = []
+    for r in rows:
+        fr = {p: r.get(p) for p in param_cols}
+        for m in metric_cols:
+            fr[f"Δ{m}"] = r["deltas"][m][2] if m in r["deltas"] else None
+        flat_rows.append(fr)
+    parts = [_render(columns, flat_rows) if rows else "(no shared cells)"]
+    if only_in_a:
+        parts.append(f"only in a ({len(only_in_a)}): {only_in_a}")
+    if only_in_b:
+        parts.append(f"only in b ({len(only_in_b)}): {only_in_b}")
+    if provenance:
+        parts.append("provenance changes:")
+        parts.extend(f"  {k}: {va!r} -> {vb!r}" for k, (va, vb) in provenance.items())
+    return "\n".join(parts)
