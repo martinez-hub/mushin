@@ -18,7 +18,7 @@ import torch
 from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
-from mushin._sweep_io import METRICS_FILE, read_metrics_sidecar
+from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE, read_metrics_sidecar
 from mushin._utils import Experiment
 
 # Globals an MCP-loaded metrics file may legitimately reference. Everything here
@@ -317,10 +317,74 @@ def _get_metrics(
                 if k in wanted or k.rsplit(".", 1)[-1] in wanted
             }
         per_run.append(m)
-    result = {"path": str(p), "num_runs": len(exps), "per_run": per_run}
+    # Reduce over the RAW values, but cap what goes into the response:
+    # thousand-point per-epoch curves would otherwise flood the caller's
+    # context.
+    result = {
+        "path": str(p),
+        "num_runs": len(exps),
+        "per_run": [_cap_sequences(m) for m in per_run],
+    }
     if reduce is not None:
         result["reduced"] = _reduce_metrics(per_run, reduce)
     return result
+
+
+def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
+    """Failed sweep cells from the manifest, with each cell's on-disk
+    traceback (``mushin_error.txt``) when present."""
+    import json as _json
+
+    p = _resolve(path, root)
+    rootp = Path(root).expanduser().resolve() if root is not None else None
+    failures = []
+    mf = p / MANIFEST_FILE
+    cells: dict = {}
+    if mf.exists() and _within_root(mf, rootp):
+        try:
+            cells = _json.loads(mf.read_text()).get("cells", {})
+        except (ValueError, OSError):
+            cells = {}
+    for key, v in cells.items():
+        if v.get("status") != "failed":
+            continue
+        entry = {"combo": key, "dir": v.get("dir"), "error": v.get("error")}
+        tb = p / str(v.get("dir") or "") / "mushin_error.txt"
+        if v.get("dir") and tb.exists() and _within_root(tb, rootp):
+            try:
+                entry["traceback"] = tb.read_text()[:4000]
+            except OSError:
+                pass
+        failures.append(entry)
+    return {"path": str(p), "count": len(failures), "failures": failures}
+
+
+def _get_provenance(
+    path: str | Path,
+    root: str | Path | None = None,
+    include_config: bool = False,
+) -> dict:
+    """Per-run ``mushin_provenance.json`` records (git/packages/accelerator).
+
+    The per-run resolved config is omitted unless ``include_config`` — it is
+    the bulky part and ``get_config`` already serves it."""
+    import json as _json
+
+    p = _resolve(path, root)
+    rootp = Path(root).expanduser().resolve() if root is not None else None
+    runs: dict = {}
+    for f in sorted(p.glob("**/mushin_provenance.json")):
+        if not _within_root(f, rootp):
+            continue
+        try:
+            rec = _json.loads(f.read_text())
+        except (ValueError, OSError):
+            continue
+        if not include_config:
+            rec.pop("config", None)
+        rel = f.parent if f.parent == p else f.parent.relative_to(p)
+        runs[str(rel) if rel != p else "."] = rec
+    return {"path": str(p), "num_runs": len(runs), "runs": runs}
 
 
 def _get_config(
@@ -367,7 +431,12 @@ def _read_dataset(path: str | Path, root: str | Path | None = None) -> dict:
         return {
             "path": str(p),
             "dims": {str(k): int(v) for k, v in ds.sizes.items()},
-            "coords": {str(k): _to_jsonable(v.values) for k, v in ds.coords.items()},
+            # Long coord axes (per-step/per-epoch dims) are summarized, not
+            # dumped — a 10^4-point axis would flood the caller's context.
+            "coords": {
+                str(k): _cap_sequences(_to_jsonable(v.values), limit=100)
+                for k, v in ds.coords.items()
+            },
             "data_vars": data_vars,
         }
 
@@ -419,7 +488,35 @@ def create_server(root: str | Path | None = None):
         """Summarize a saved netCDF dataset: dims, coords, data_vars, stats."""
         return _read_dataset(path, rootp)
 
+    @mcp.tool()
+    def get_failures(path: str) -> dict:
+        """Failed sweep cells (combo, dir, error, traceback) from the manifest."""
+        return _get_failures(path, rootp)
+
+    @mcp.tool()
+    def get_provenance(path: str, include_config: bool = False) -> dict:
+        """Per-run provenance (git SHA, package versions, accelerator)."""
+        return _get_provenance(path, rootp, include_config)
+
     return mcp
+
+
+def _cap_sequences(obj: Any, limit: int = 200, head: int = 10) -> Any:
+    """Recursively replace lists longer than ``limit`` with a size-safe
+    ``{length, first, last, truncated}`` summary; short structures pass
+    through unchanged."""
+    if isinstance(obj, dict):
+        return {k: _cap_sequences(v, limit, head) for k, v in obj.items()}
+    if isinstance(obj, list):
+        if len(obj) > limit:
+            return {
+                "length": len(obj),
+                "first": obj[:head],
+                "last": obj[-head:],
+                "truncated": True,
+            }
+        return [_cap_sequences(v, limit, head) for v in obj]
+    return obj
 
 
 def _to_jsonable(obj: Any) -> Any:

@@ -592,3 +592,92 @@ def test_one_corrupt_config_does_not_kill_experiment(tmp_path):
     out = _get_metrics(base, reduce=None)
     assert out["num_runs"] == 2
     assert out["per_run"][0]["metrics"]["accuracy"] == pytest.approx(0.8, abs=1e-5)
+
+
+def test_get_failures_surfaces_manifest_and_traceback(tmp_path):
+    """Failed cells are a primary reason to query a sweep; the manifest's
+    failed entries (and the on-disk traceback) must be reachable."""
+    import json
+
+    from mushin.mcp.server import _get_failures
+
+    base = _make_experiment(tmp_path / "exp")
+    (base / "1" / "mushin_error.txt").write_text("Traceback ...\nRuntimeError: boom")
+    (base / "mushin_sweep_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "params": ["lr"],
+                "cells": {
+                    "lr=0.1": {"dir": "0", "status": "completed"},
+                    "lr=0.2": {"dir": "1", "status": "failed", "error": "boom"},
+                },
+            }
+        )
+    )
+    out = _get_failures(base)
+    assert out["count"] == 1
+    (f,) = out["failures"]
+    assert f["combo"] == "lr=0.2" and f["dir"] == "1" and f["error"] == "boom"
+    assert "RuntimeError: boom" in f["traceback"]
+
+
+def test_get_provenance_reads_per_run_records(tmp_path):
+    import json
+
+    from mushin.mcp.server import _get_provenance
+
+    base = _make_experiment(tmp_path / "exp")
+    for i in range(2):
+        (base / str(i) / "mushin_provenance.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": "t",
+                    "git": {"sha": f"sha{i}"},
+                    "packages": {"torch": "2.6.0"},
+                    "config": {"huge": "blob"},
+                }
+            )
+        )
+    out = _get_provenance(base)
+    assert out["num_runs"] == 2
+    assert out["runs"]["0"]["git"]["sha"] == "sha0"
+    assert "config" not in out["runs"]["0"]  # omitted unless requested
+    full = _get_provenance(base, include_config=True)
+    assert full["runs"]["1"]["config"] == {"huge": "blob"}
+
+
+def test_read_dataset_truncates_long_coords(tmp_path):
+    """A 10^4-point coord axis must not be dumped verbatim into the response
+    (context blowup); past a threshold it is summarized."""
+    import numpy as np
+    import xarray as xr
+
+    from mushin.mcp.server import _read_dataset
+
+    ds = xr.Dataset(
+        {"y": (("step",), np.arange(5000.0))},
+        coords={"step": np.arange(5000)},
+    )
+    p = tmp_path / "big.nc"
+    ds.to_netcdf(p)
+    out = _read_dataset(p)
+    step = out["coords"]["step"]
+    assert step["length"] == 5000
+    assert len(step["first"]) <= 10 and len(step["last"]) <= 10
+    assert step["first"][0] == 0 and step["last"][-1] == 4999
+
+
+def test_get_metrics_summarizes_long_sequences(tmp_path):
+    """Per-epoch metric curves of thousands of points return a size-safe
+    summary, not the raw array."""
+    import torch as _torch
+
+    from mushin.mcp.server import _get_metrics
+
+    base = _make_experiment(tmp_path / "exp")
+    _torch.save({"curve": list(range(5000))}, base / "0" / "fit_metrics.pt")
+    out = _get_metrics(base)
+    curve = out["per_run"][0]["fit_metrics"]["curve"]
+    assert curve["length"] == 5000 and curve["truncated"] is True
+    assert curve["first"][0] == 0 and curve["last"][-1] == 4999
