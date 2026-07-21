@@ -11,7 +11,7 @@ import torch
 from ._aggregate import to_dataset
 from ._inference import PredictFn, evaluate
 from ._result import BenchmarkResult
-from ._stats import compare_methods
+from ._stats import available_corrections, available_tests, compare_methods
 from ._tasks import Task, get_task
 
 
@@ -73,6 +73,15 @@ def compare(
     device : torch.device or None
         Evaluation device; defaults to the device of each model's parameters.
     """
+    # Validate up front so a typo'd test/correction fails before any (possibly
+    # slow) model evaluation runs.
+    if test not in available_tests():
+        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    if correction not in available_corrections():
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
+
     spec = task if isinstance(task, Task) else get_task(task)
 
     if isinstance(data, Iterator):

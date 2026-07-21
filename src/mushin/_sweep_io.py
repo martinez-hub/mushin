@@ -157,7 +157,9 @@ class Manifest:
             if not d.is_dir():
                 continue
             s = read_cell_status(d)
-            if s is None or "combo" not in s:
+            # Skip missing/wrong-shape sidecars (read_cell_status already drops
+            # non-dict payloads); combo must be a mapping for combo_key.
+            if s is None or not isinstance(s.get("combo"), dict):
                 continue
             m.cells[combo_key(s["combo"])] = {
                 "dir": d.name,
