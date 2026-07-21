@@ -308,6 +308,22 @@ class _TaskRunner:
                 else:
                     cached = read_metrics_sidecar(cell_dir)
                     if cached is not None:
+                        # Refresh THIS job dir so its metrics/status match the
+                        # config Hydra just wrote here. Otherwise, when a resume
+                        # reuses a numeric dir that a prior sweep filled with a
+                        # DIFFERENT cell, the dir keeps stale metrics -> the
+                        # manifest and an offline load_from_dir mis-key the cell.
+                        # A no-op when the cached cell is already this dir.
+                        cwd = Path.cwd()
+                        write_metrics_sidecar(cwd, cached)
+                        write_cell_status(
+                            cwd,
+                            status="completed",
+                            combo=sc,
+                            attempt=1,
+                            config_hash=chash,
+                            code_hash=self.code_hash,
+                        )
                         return cached
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
