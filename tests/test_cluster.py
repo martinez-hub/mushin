@@ -71,3 +71,23 @@ def test_multinode_ddp_end_to_end(tmp_path):
         "Provide a SLURM allocation + partition/account, then implement the launch "
         "per docs/guides/multinode.md (this is the merge gate)."
     )
+
+
+def test_seed_everything_per_rank_persists_seed(monkeypatch, tmp_path):
+    """The effective seed must be recoverable from the run's artifacts: if it
+    only lives in-process, the exact cell can never be re-run identically."""
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RANK", "3")
+    from mushin.lightning import seed_everything_per_rank
+
+    seed = seed_everything_per_rank(1000)
+    # rank-suffixed so DDP ranks sharing a dir don't clobber rank 0's record
+    rec = json.loads((tmp_path / "mushin_seed_rank3.json").read_text())
+    assert rec["seed"] == seed == 1003
+    assert rec["rank"] == 3
+
+    monkeypatch.setenv("RANK", "0")
+    assert seed_everything_per_rank(1000) == 1000
+    assert json.loads((tmp_path / "mushin_seed.json").read_text())["seed"] == 1000

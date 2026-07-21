@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from pytorch_lightning import seed_everything
@@ -61,4 +62,16 @@ def seed_everything_per_rank(base: int, workers: bool = True) -> int:
     rank_str = os.environ.get("RANK") or os.environ.get("SLURM_PROCID") or "0"
     seed = int(base) + int(rank_str)
     seed_everything(seed, workers=workers)
+    # Persist the effective seed: if it lives only in-process, the exact run
+    # can never be re-seeded identically from its artifacts. Best-effort (a
+    # read-only cwd must not break training); rank in the filename so DDP
+    # ranks sharing a dir don't clobber rank 0's record.
+    try:
+        import json
+
+        rank = int(rank_str)
+        name = "mushin_seed.json" if rank == 0 else f"mushin_seed_rank{rank}.json"
+        Path(name).write_text(json.dumps({"seed": seed, "rank": rank}))
+    except OSError:
+        pass
     return seed

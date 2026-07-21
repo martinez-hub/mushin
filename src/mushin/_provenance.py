@@ -47,17 +47,42 @@ def _versions() -> dict:
     return out
 
 
+def _accelerator() -> dict:
+    """CUDA/cuDNN/device identity — the part of GPU numerics the torch wheel
+    version alone cannot reconstruct. All-None on CPU-only builds (and if
+    torch itself fails to import)."""
+    out: dict = {"cuda": None, "cudnn": None, "device": None}
+    try:
+        import torch
+
+        out["cuda"] = torch.version.cuda
+        try:
+            if torch.backends.cudnn.is_available():
+                out["cudnn"] = torch.backends.cudnn.version()
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+        try:
+            if torch.cuda.is_available():
+                out["device"] = torch.cuda.get_device_name(0)
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
+    return out
+
+
 def capture_base() -> dict:
     """The sweep-constant part of a provenance record: python/platform plus the
-    git state and package versions. This is identical for every cell in a sweep
-    but expensive to compute (``_git()`` spawns three git subprocesses), so a
-    sweep captures it ONCE and reuses it for all cells rather than paying it per
-    cell (3N git subprocesses for an N-cell sweep)."""
+    git state, package versions, and accelerator identity. This is identical
+    for every cell in a sweep but expensive to compute (``_git()`` spawns three
+    git subprocesses), so a sweep captures it ONCE and reuses it for all cells
+    rather than paying it per cell (3N git subprocesses for an N-cell sweep)."""
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "git": _git(),
         "packages": _versions(),
+        "accelerator": _accelerator(),
     }
 
 

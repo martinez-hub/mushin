@@ -159,6 +159,7 @@ def compare_llms(
     *,
     test: str = "welch",
     alpha: float = 0.05,
+    correction: str = "holm",
     cache: str | os.PathLike[str] | None = None,
 ) -> BenchmarkResult:
     if not systems:
@@ -212,5 +213,5 @@ def compare_llms(
     # constant across seeds has no sampling distribution), re-Holms the survivors,
     # and warns for systems constant in every metric — so the LLM and torch paths
     # handle deterministic systems identically.
-    comparisons = compare_methods(ds, test=test, alpha=alpha)
+    comparisons = compare_methods(ds, test=test, alpha=alpha, correction=correction)
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)

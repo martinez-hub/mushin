@@ -55,6 +55,10 @@ ds = experiment.run(
 #   Data variables: accuracy (lr, seed)
 
 ds["accuracy"].mean("seed")        # average over seeds, per learning rate
+
+# Prefer pandas? One call gives a tidy table — no xarray required:
+experiment.workflow.to_dataframe() #    lr  seed  accuracy
+                                   # 0  0.01    0      ...
 ```
 
 The decorator version above runs as

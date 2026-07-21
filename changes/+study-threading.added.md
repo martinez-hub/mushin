@@ -1,0 +1,1 @@
+Study and evaluate_checkpoints now accept predict_fn/metrics/prob_metrics/correction and forward them to compare (custom-output models and custom batteries work through Study), and checkpoints load lazily one at a time instead of holding every method x seed model in RAM.
