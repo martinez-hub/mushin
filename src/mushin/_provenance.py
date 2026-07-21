@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import subprocess
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -13,6 +14,16 @@ from pathlib import Path
 from typing import Any
 
 _PKGS = ("mushin-py", "torch", "numpy", "pytorch-lightning", "hydra-core", "hydra-zen")
+
+_REDACTED = "***REDACTED***"
+# Config keys whose values are secrets (redacted regardless of their content).
+_REDACT_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|secret|token|password|passwd|credential|auth)"
+)
+# Secret-shaped values that may hide under an innocent key (provider tokens).
+_REDACT_VALUE_RE = re.compile(
+    r"(?:sk-|hf_|ghp_|gho_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{8,}"
+)
 
 
 def _git() -> dict:
@@ -105,10 +116,34 @@ def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> N
     )
 
 
+def _redact_config(obj: Any) -> Any:
+    """Redact secret-shaped config values before they are written to disk.
+
+    A value under a secret-named key (``api_key``, ``token``, ...) is redacted
+    wholesale; a provider-token-shaped string (``sk-...``, ``hf_...``) is
+    redacted even under an innocent key. Structure and non-secret values are
+    preserved so the record stays useful.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: (_REDACTED if _REDACT_KEY_RE.search(str(k)) else _redact_config(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redact_config(v) for v in obj]
+    if isinstance(obj, str) and _REDACT_VALUE_RE.search(obj):
+        return _REDACTED
+    return obj
+
+
 def _to_plain(cfg):
     try:
         from omegaconf import OmegaConf
 
-        return OmegaConf.to_container(cfg, resolve=True)
+        # resolve=False: never evaluate interpolations (e.g. `${oc.env:SECRET}`),
+        # which would bake a resolved secret into the on-disk record; the config
+        # is recorded as authored. Literal secret values are then redacted.
+        plain = OmegaConf.to_container(cfg, resolve=False)
     except Exception:
         return None
+    return _redact_config(plain)
