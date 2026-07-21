@@ -764,7 +764,11 @@ class BaseWorkflow:
                 keys = [_scalar_repr(item) for item in v]
                 if len(set(keys)) != len(keys):
                     dupes = sorted(
-                        {repr(item) for item, kk in zip(v, keys) if keys.count(kk) > 1}
+                        {
+                            repr(item)
+                            for item, kk in zip(v, keys, strict=True)
+                            if keys.count(kk) > 1
+                        }
                     )
                     raise ValueError(
                         f"`{k}` has duplicate sweep values {', '.join(dupes)}; a "
