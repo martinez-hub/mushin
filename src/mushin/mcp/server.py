@@ -342,11 +342,13 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     cells: dict = {}
     if mf.exists() and _within_root(mf, rootp):
         try:
-            cells = _json.loads(mf.read_text()).get("cells", {})
+            loaded = _json.loads(mf.read_text())
+            raw = loaded.get("cells", {}) if isinstance(loaded, dict) else {}
+            cells = raw if isinstance(raw, dict) else {}
         except (ValueError, OSError):
             cells = {}
     for key, v in cells.items():
-        if v.get("status") != "failed":
+        if not isinstance(v, dict) or v.get("status") != "failed":
             continue
         entry = {"combo": key, "dir": v.get("dir"), "error": v.get("error")}
         tb = p / str(v.get("dir") or "") / "mushin_error.txt"
@@ -380,6 +382,8 @@ def _get_provenance(
             rec = _json.loads(f.read_text())
         except (ValueError, OSError):
             continue
+        if not isinstance(rec, dict):
+            continue  # a wrong-shape record is skipped, not crashed on
         if not include_config:
             rec.pop("config", None)
         rel = f.parent if f.parent == p else f.parent.relative_to(p)

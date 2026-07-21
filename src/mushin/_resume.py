@@ -77,14 +77,16 @@ def config_fingerprint(cfg) -> str | None:
 
 
 def read_cell_status(cell_dir) -> dict | None:
-    """Read a cell status sidecar; a missing/corrupt one reads as None."""
+    """Read a cell status sidecar; a missing/corrupt/wrong-shape one reads as
+    None (so callers degrade rather than crash on `.get`)."""
     p = Path(cell_dir) / STATUS_FILE
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text())
+        data = json.loads(p.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def discover_last_ckpt(cell_dir) -> Path | None:
@@ -123,9 +125,13 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     prior = read_cell_status(cell_dir)
     matches = prior is not None and prior.get("combo") == combo
     last = discover_last_ckpt(cell_dir) if matches else None
-    # `.get(..., 0)` so a malformed/older-schema sidecar (combo but no attempt)
-    # degrades to attempt=1 instead of raising inside the task wrapper.
-    attempt = (prior.get("attempt", 0) + 1) if matches else 1
+    # Coerce a malformed/older-schema `attempt` (missing, null, "3") to an int
+    # so it degrades to a fresh attempt instead of raising inside the wrapper.
+    try:
+        prior_attempt = int(prior["attempt"]) if matches else 0
+    except (KeyError, TypeError, ValueError):
+        prior_attempt = 0
+    attempt = prior_attempt + 1 if matches else 1
     return ResumeContext(
         dir=cell_dir, is_resume=matches, last_ckpt=last, attempt=attempt
     )

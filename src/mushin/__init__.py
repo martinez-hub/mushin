@@ -87,9 +87,11 @@ if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
 
 
 def __getattr__(name: str):
-    if name == "llm":
-        module = importlib.import_module("mushin.llm")
-        globals()["llm"] = module
+    if name in ("llm", "lightning", "benchmark", "mcp", "testing"):
+        # Lazy submodule access: `import mushin; mushin.benchmark.compare(...)`
+        # works without an explicit `import mushin.benchmark`.
+        module = importlib.import_module(f"mushin.{name}")
+        globals()[name] = module
         return module
     if name in _LAZY_BENCHMARK:
         value = getattr(importlib.import_module("mushin.benchmark"), name)

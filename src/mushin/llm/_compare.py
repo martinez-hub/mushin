@@ -14,7 +14,11 @@ from torchmetrics import Metric as TorchMetric
 
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
-from mushin.benchmark._stats import available_tests, compare_methods
+from mushin.benchmark._stats import (
+    available_corrections,
+    available_tests,
+    compare_methods,
+)
 
 from ._cache import OutputCache
 from ._system import as_system
@@ -168,6 +172,10 @@ def compare_llms(
         # Validate up front so a typo'd test name fails before any (possibly
         # token-spending) system calls or cache writes.
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    if correction not in available_corrections():
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
     if isinstance(metric, dict) and not metric:
         raise ValueError("`metric` battery is empty; provide at least one metric")
     inputs, refs = _normalize_examples(data)

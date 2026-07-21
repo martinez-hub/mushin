@@ -66,7 +66,7 @@ def value_check(
 
     if not isinstance(value, type_):
         raise TypeError(
-            f"`{name}` must be {'None or' if optional else ''}of type(s) "
+            f"`{name}` must be {'None or ' if optional else ''}of type(s) "
             f"`{_safe_name(type_)}`, got {value} (type: {_safe_name(type(value))})"
         )
 

@@ -64,7 +64,10 @@ def _read_pin(path) -> dict | None:
     p = Path(path)
     if not p.exists():
         return None
-    return dict(OmegaConf.to_container(OmegaConf.load(p), resolve=True))
+    # Return the container as-is (may be a list/scalar for a malformed pin);
+    # callers' `isinstance(pin, dict)` guard then surfaces the friendly
+    # "delete it or pass retune=True" error instead of an opaque TypeError.
+    return OmegaConf.to_container(OmegaConf.load(p), resolve=True)
 
 
 def _write_pin(path, mapping: dict) -> None:

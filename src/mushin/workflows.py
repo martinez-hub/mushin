@@ -294,7 +294,6 @@ class _TaskRunner:
                 write_provenance(cwd, cfg, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
-            token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
             write_cell_status(
                 cwd,
                 status="running",
@@ -302,6 +301,10 @@ class _TaskRunner:
                 attempt=rc.attempt,
                 config_hash=chash,
             )
+            # Set the contextvar AFTER the (fallible) status write, so a failed
+            # write can't leave the token set with no matching reset -> a stale
+            # ResumeContext leaking into later in-process cells.
+            token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
@@ -1455,7 +1458,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         for dir_ in self.multirun_working_dirs:
             # Ensure we load saved YAML configurations for each job (in hydra.job.output_subdir)
             cfg_file = dir_ / f"{self.output_subdir}/config.yaml"
-            assert cfg_file.exists(), cfg_file
+            if not cfg_file.exists():
+                raise FileNotFoundError(
+                    f"{cfg_file} not found; the sweep directory is incomplete or "
+                    "was cleaned. Re-run the sweep, or point load_from_dir at a "
+                    "directory whose cells still have their .hydra/config.yaml."
+                )
             self.cfgs.append(load_from_yaml(cfg_file))
 
         if metrics_filename is not None:
@@ -2000,19 +2008,24 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         if ax is None:
             _, ax = plt.subplots()
 
-        xdata = self.to_xarray(
-            non_multirun_params_as_singleton_dims=non_multirun_params_as_singleton_dims
-        )
-        if group is None:
-            plots = xdata[metric].plot.line(x="epsilon", ax=ax, **kwargs)
-
-        else:
-            # TODO: xarray.groupby doesn't support multidimensional grouping
-            dg = xdata.groupby(group)
-            plots = [
-                grp[metric].plot(x="epsilon", label=name, ax=ax, **kwargs)
-                for name, grp in dg
-            ]
+        try:
+            xdata = self.to_xarray(
+                non_multirun_params_as_singleton_dims=non_multirun_params_as_singleton_dims
+            )
+            if group is None:
+                plots = xdata[metric].plot.line(x="epsilon", ax=ax, **kwargs)
+            else:
+                # TODO: xarray.groupby doesn't support multidimensional grouping
+                dg = xdata.groupby(group)
+                plots = [
+                    grp[metric].plot(x="epsilon", label=name, ax=ax, **kwargs)
+                    for name, grp in dg
+                ]
+        except Exception:
+            # Don't leak the figure we created if assembling/plotting fails.
+            if created_fig:
+                plt.close(ax.figure)
+            raise
 
         if save_filename is not None:
             plt.savefig(save_filename)
