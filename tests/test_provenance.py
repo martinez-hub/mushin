@@ -87,3 +87,67 @@ def test_env_snapshot_never_overwrites_prior_run(tmp_path):
     assert first.read_text() == "SENTINEL-ORIGINAL-ENV"
     siblings = sorted(p.name for p in tmp_path.glob("mushin_env*.txt"))
     assert len(siblings) == 2  # the new snapshot landed beside, not over, it
+
+
+def test_env_interpolated_secret_not_resolved_into_provenance(monkeypatch):
+    # A `${oc.env:...}` interpolation must NOT be resolved into the record —
+    # otherwise a secret env var is baked into mushin_provenance.json.
+    import json
+
+    from omegaconf import OmegaConf
+
+    from mushin._provenance import capture
+
+    monkeypatch.setenv("MUSHIN_TEST_SECRET", "sk-live-should-not-appear")
+    cfg = OmegaConf.create({"token": "${oc.env:MUSHIN_TEST_SECRET}", "lr": 0.1})
+    rec = capture(config=cfg)
+    blob = json.dumps(rec)
+    assert "sk-live-should-not-appear" not in blob
+    assert rec["config"]["lr"] == 0.1  # non-secret values preserved
+
+
+def test_literal_secret_valued_keys_are_redacted():
+    from omegaconf import OmegaConf
+
+    from mushin._provenance import capture
+
+    cfg = OmegaConf.create(
+        {
+            "api_key": "sk-literal-secret",
+            "nested": {"auth_token": "hf_abcdef", "width": 8},
+            "lr": 0.1,
+        }
+    )
+    rec = capture(config=cfg)
+    assert rec["config"]["api_key"] == "***REDACTED***"
+    assert rec["config"]["nested"]["auth_token"] == "***REDACTED***"
+    assert rec["config"]["nested"]["width"] == 8  # non-secret preserved
+    assert rec["config"]["lr"] == 0.1
+
+
+def test_secret_shaped_value_under_innocent_key_is_redacted():
+    from omegaconf import OmegaConf
+
+    from mushin._provenance import capture
+
+    cfg = OmegaConf.create({"note": "sk-ABCDEFGHIJKLMNOPQRSTUV", "ok": "hello"})
+    rec = capture(config=cfg)
+    assert rec["config"]["note"] == "***REDACTED***"
+    assert rec["config"]["ok"] == "hello"
+
+
+def test_mcp_get_provenance_serves_redacted_config(tmp_path):
+    import json
+
+    from mushin.mcp.server import _get_provenance
+
+    d = tmp_path / "exp" / "0"
+    d.mkdir(parents=True)
+    (d / ".hydra").mkdir()
+    (d / "mushin_provenance.json").write_text(
+        json.dumps({"config": {"api_key": "***REDACTED***", "lr": 0.1}})
+    )
+    out = _get_provenance(tmp_path / "exp", include_config=True)
+    served = json.dumps(out)
+    assert "sk-" not in served
+    assert "***REDACTED***" in served
