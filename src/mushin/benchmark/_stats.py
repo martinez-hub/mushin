@@ -122,6 +122,54 @@ def holm_correction(pvalues) -> list[float]:
     return [float(c) for c in corrected]
 
 
+def bonferroni_correction(pvalues) -> list[float]:
+    """Bonferroni correction (``p * n_valid``, capped at 1), original order.
+    NaNs stay NaN and are excluded from the family size."""
+    pvalues = np.asarray(pvalues, dtype=float)
+    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
+    return [
+        float("nan") if np.isnan(p) else float(min(p * n_valid, 1.0))
+        for p in pvalues
+    ]
+
+
+def bh_correction(pvalues) -> list[float]:
+    """Benjamini-Hochberg (FDR) adjusted p-values, returned in original order.
+
+    ``adj_(i) = min_{j >= i}( p_(j) * n / rank_j )`` over the ascending order,
+    capped at 1. NaN p-values stay NaN and are excluded from the family."""
+    pvalues = np.asarray(pvalues, dtype=float)
+    m = len(pvalues)
+    valid = ~np.isnan(pvalues)
+    n_valid = int(np.count_nonzero(valid))
+    corrected = np.full(m, np.nan)
+    if n_valid:
+        idx = np.flatnonzero(valid)
+        order = idx[np.argsort(pvalues[idx])]  # ascending among valid
+        running = 1.0
+        for rank in range(n_valid, 0, -1):  # largest p first
+            i = order[rank - 1]
+            running = min(running, pvalues[i] * n_valid / rank)
+            corrected[i] = min(running, 1.0)
+    return [float(c) for c in corrected]
+
+
+def _no_correction(pvalues) -> list[float]:
+    return [float(p) for p in pvalues]
+
+
+_CORRECTIONS = {
+    "holm": holm_correction,
+    "bonferroni": bonferroni_correction,
+    "fdr_bh": bh_correction,
+    "none": _no_correction,
+}
+
+
+def available_corrections() -> list[str]:
+    return list(_CORRECTIONS)
+
+
 def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
     """Warn if ``test`` cannot reach ``alpha`` at ``n_seeds`` seeds.
 
@@ -161,11 +209,19 @@ def _is_constant(values) -> bool:
 
 
 def compare_methods(
-    ds: xr.Dataset, test: str = "wilcoxon", alpha: float = 0.05
+    ds: xr.Dataset,
+    test: str = "wilcoxon",
+    alpha: float = 0.05,
+    correction: str = "holm",
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
-    Holm correction is applied per metric across the method pairs. A method whose
+    ``correction`` — one of :func:`available_corrections` (``"holm"`` default,
+    ``"bonferroni"``, ``"fdr_bh"`` for Benjamini-Hochberg FDR, ``"none"`` for
+    raw p-values) — is applied **per metric** across the method pairs; the
+    family is one metric's pairs, not the whole battery, so scanning for
+    "significant on any metric" across a large battery still inflates
+    family-wise error. A method whose
     scores are constant across all seeds (for a metric) has no sampling
     distribution, so comparisons involving it are masked — ``p_value``,
     ``p_corrected`` and ``effect_size`` become ``NaN`` and ``significant`` is
@@ -193,6 +249,12 @@ def compare_methods(
         )
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    if correction not in _CORRECTIONS:
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from "
+            f"{available_corrections()}"
+        )
+    correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])
     warn_if_underpowered(test, n_seeds, alpha)
     func, is_paired = _TESTS[test]
@@ -241,7 +303,7 @@ def compare_methods(
                 }
             )
             pvals.append(p)
-        corrected = holm_correction(pvals) if len(pvals) > 1 else pvals
+        corrected = correct(pvals) if len(pvals) > 1 else pvals
         for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)

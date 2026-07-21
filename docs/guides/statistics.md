@@ -33,6 +33,17 @@ stored in `result.comparisons["p_corrected"]`.
 
 The family-wise error rate is controlled at your chosen `alpha` (default 0.05).
 
+Pass `correction=` to `compare`/`compare_methods`/`compare_llms` to choose the
+scheme: `"holm"` (default, family-wise error control), `"bonferroni"` (more
+conservative), `"fdr_bh"` (Benjamini–Hochberg false-discovery-rate control —
+less strict, common for large method×metric grids), or `"none"` for raw
+p-values (e.g. to apply your own correction downstream).
+
+Note the correction family is **one metric's method pairs**, not the whole
+battery: scanning for "significant on *any* metric" across many metrics still
+inflates family-wise error — pre-register the metric you care about, or apply
+your own battery-wide correction to the raw p-values.
+
 ## Effect size
 
 In addition to the p-value, mushin reports **Cohen's d** as

@@ -26,6 +26,7 @@ def compare(
     prob_metrics: frozenset[str] | None = None,
     test: str = "wilcoxon",
     alpha: float = 0.05,
+    correction: str = "holm",
     ignore_index: int | None = None,
     device: torch.device | None = None,
 ) -> BenchmarkResult:
@@ -62,7 +63,11 @@ def compare(
         Statistical test for pairwise method comparison; one of
         ``mushin.benchmark.available_tests()`` (default paired Wilcoxon).
     alpha : float
-        Significance level for the (Holm-corrected) comparisons.
+        Significance level for the (multiple-comparison-corrected) comparisons.
+    correction : str
+        Multiple-comparison correction applied per metric across method pairs:
+        ``"holm"`` (default), ``"bonferroni"``, ``"fdr_bh"``
+        (Benjamini-Hochberg FDR), or ``"none"`` for raw p-values.
     ignore_index : int or None
         Label to exclude from segmentation metrics (e.g. a void/boundary class).
     device : torch.device or None
@@ -111,5 +116,5 @@ def compare(
         ]
 
     ds = to_dataset(results)
-    comparisons = compare_methods(ds, test=test, alpha=alpha)
+    comparisons = compare_methods(ds, test=test, alpha=alpha, correction=correction)
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
