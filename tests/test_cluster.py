@@ -37,9 +37,10 @@ def test_submitit_slurm_config_rejects_bad_inputs():
         submitit_slurm_config(nodes=1, gpus_per_node=4, tasks_per_node=1)
 
 
-def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch):
+def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch, tmp_path):
     from mushin.lightning import seed_everything_per_rank
 
+    monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
     monkeypatch.delenv("RANK", raising=False)
     monkeypatch.setenv("SLURM_PROCID", "3")
     assert seed_everything_per_rank(1000) == 1003  # base + global rank
@@ -48,9 +49,10 @@ def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch):
     assert seed_everything_per_rank(1000) == 1005
 
 
-def test_seed_everything_per_rank_defaults_rank_zero(monkeypatch):
+def test_seed_everything_per_rank_defaults_rank_zero(monkeypatch, tmp_path):
     from mushin.lightning import seed_everything_per_rank
 
+    monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
     monkeypatch.delenv("RANK", raising=False)
     monkeypatch.delenv("SLURM_PROCID", raising=False)
     assert seed_everything_per_rank(42) == 42
