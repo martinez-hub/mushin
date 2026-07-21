@@ -69,11 +69,47 @@ def _to_override_element(item: Any) -> str:
     if isinstance(item, (int, float)):
         return str(item)
     if isinstance(item, str):
-        return "'" + item.replace("'", "\\'") + "'"
+        # Escape backslashes first (Hydra's quoted-string grammar treats '\' as
+        # an escape char), then single-quotes, so the value round-trips.
+        return "'" + item.replace("\\", "\\\\").replace("'", "\\'") + "'"
     if isinstance(item, (list, tuple)):
         return "[" + ",".join(_to_override_element(x) for x in item) + "]"
     # Fall back to a quoted string representation for any other type.
-    return "'" + str(item).replace("'", "\\'") + "'"
+    return "'" + str(item).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _scalar_repr(item: Any) -> Any:
+    """A stable, type-aware key for detecting duplicate sweep-axis values.
+
+    Unwraps 0-d numpy/torch scalars (as :func:`_to_override_element` does) and
+    tags the value with its type so ``1`` and ``"1"`` (distinct coordinates)
+    do not compare equal while ``1`` and ``1`` do.
+    """
+    if hasattr(item, "item") and getattr(item, "ndim", None) == 0:
+        item = item.item()
+    # repr keeps the key hashable (list-valued elements) and type-aware.
+    return (type(item).__name__, repr(item))
+
+
+def _cfg_missing_or_none(cfg, key: str) -> bool:
+    """True if ``key`` (possibly a dotted path) is absent from ``cfg`` or None.
+
+    Drives the Hydra ``+`` append prefix. A dotted path like ``model.width``
+    must be resolved as a config *path*, not a literal attribute — a plain
+    ``hasattr(cfg, "model.width")`` is always False, which would wrongly
+    ``+``-append onto an existing nested field and make Hydra raise.
+    """
+    if "." not in key:
+        return not hasattr(cfg, key) or getattr(cfg, key) is None
+    from omegaconf import OmegaConf
+
+    _missing = object()
+    try:
+        node = OmegaConf.structured(cfg) if not OmegaConf.is_config(cfg) else cfg
+        val = OmegaConf.select(node, key, default=_missing)
+    except Exception:  # noqa: BLE001 - unresolvable path -> treat as append
+        return True
+    return val is _missing or val is None
 
 
 class _FailedRun:
@@ -718,14 +754,24 @@ class BaseWorkflow:
                 )
             value_check(k, v, type_=(int, float, bool, str, multirun, hydra_list))
 
-            prefix = ""
-            if (
-                not hasattr(self.eval_task_cfg, k)
-                or getattr(self.eval_task_cfg, k) is None
-            ):
-                prefix = "+"
+            prefix = "+" if _cfg_missing_or_none(self.eval_task_cfg, k) else ""
 
             if isinstance(v, multirun):
+                # A repeated axis value cannot form a well-defined coordinate:
+                # two cells would share a combo key (silently collapsing to the
+                # last, and making `.sel` ambiguous). Repeat trials belong on a
+                # distinct axis (e.g. seed), not as duplicate values.
+                keys = [_scalar_repr(item) for item in v]
+                if len(set(keys)) != len(keys):
+                    dupes = sorted(
+                        {repr(item) for item, kk in zip(v, keys) if keys.count(kk) > 1}
+                    )
+                    raise ValueError(
+                        f"`{k}` has duplicate sweep values {', '.join(dupes)}; a "
+                        "repeated axis value collapses to a single cell. Use "
+                        "distinct values, or add a separate axis (e.g. seed) for "
+                        "repeat trials."
+                    )
                 # Build a Hydra `choice(...)` sweep rather than a comma-joined
                 # string. `choice(...)` always yields a sweep – even for a
                 # single element (so length-1 multiruns remain swept dimensions)
@@ -734,8 +780,16 @@ class BaseWorkflow:
                 # Hydra's override parser.
                 choices = ",".join(_to_override_element(item) for item in v)
                 launch_overrides.append(f"{prefix}{k}=choice({choices})")
-            else:
+            elif isinstance(v, hydra_list):
+                # hydra_list serializes itself to Hydra list syntax; a single
+                # non-swept list value passed to one job.
                 launch_overrides.append(f"{prefix}{k}={v}")
+            else:
+                # Scalar value: serialize like a multirun element so a fixed
+                # string containing ',' / '=' stays a single string (not an
+                # accidental sweep) and a string like "true"/"1" is not coerced
+                # to a bool/int.
+                launch_overrides.append(f"{prefix}{k}={_to_override_element(v)}")
 
         for _name in self._REQUIRED_STATIC_METHODS:
             if _name == "task" and hasattr(self, "evaluation_task"):
@@ -807,9 +861,16 @@ class BaseWorkflow:
             with_log_configuration=with_log_configuration,
         )
 
-        if isinstance(jobs, list) and len(jobs) == 1:
-            # hydra returns [jobs]
-            jobs = jobs[0]
+        if isinstance(jobs, list):
+            # Hydra returns a list of per-batch job lists (one batch for the
+            # basic sweeper, several when a sweeper/launcher batches — e.g.
+            # `hydra.sweeper.max_batch_size`). Flatten to a single JobReturn
+            # list; the old `len == 1` special case silently mishandled the
+            # multi-batch shape (AssertionError after all jobs had run).
+            flat = []
+            for batch in jobs:
+                flat.extend(batch) if isinstance(batch, list) else flat.append(batch)
+            jobs = flat
             _job_nums = [j.hydra_cfg.hydra.job.num for j in jobs]
             # ensure jobs are always sorted by job-num
             jobs = _sort_x_by_k(jobs, _job_nums)
@@ -1806,7 +1867,22 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             These values will be appended to the `overrides` for the Hydra job.
         """
 
-        if not isinstance(epsilon, str):
+        if isinstance(epsilon, str):
+            # Convenience string form, e.g. "0,1,2,3": parse the comma-separated
+            # values into a multirun explicitly. (Fixed scalar strings no longer
+            # auto-split into sweeps in the general override path, so this axis
+            # must be built here rather than relying on that behavior.)
+            def _parse(tok: str):
+                tok = tok.strip()
+                for cast in (int, float):
+                    try:
+                        return cast(tok)
+                    except ValueError:
+                        continue
+                return tok
+
+            epsilon = multirun([_parse(t) for t in epsilon.split(",")])
+        else:
             epsilon = multirun(epsilon)
 
         return super().run(

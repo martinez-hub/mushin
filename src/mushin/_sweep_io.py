@@ -15,9 +15,20 @@ METRICS_FILE = "mushin_metrics.json"
 MANIFEST_FILE = "mushin_sweep_manifest.json"
 
 
+def _esc(s: Any) -> str:
+    """Escape the ``combo_key`` delimiters in a key or value so the join is
+    injective: a value literally containing ``,`` or ``=`` cannot be confused
+    with a separator. Clean values are unchanged (backward compatible)."""
+    return str(s).replace("%", "%25").replace("=", "%3D").replace(",", "%2C")
+
+
 def combo_key(combo: dict[str, Any]) -> str:
-    """Canonical, order-stable key for a swept-parameter combination."""
-    return ",".join(f"{k}={_scalar(combo[k])}" for k in sorted(combo))
+    """Canonical, order-stable, injective key for a swept-parameter combination.
+
+    Delimiters inside keys/values are percent-escaped so that, e.g.,
+    ``{'a': '1,b=2'}`` and ``{'a': 1, 'b': 2}`` do not collide.
+    """
+    return ",".join(f"{_esc(k)}={_esc(_scalar(combo[k]))}" for k in sorted(combo))
 
 
 def _scalar(v: Any) -> Any:
