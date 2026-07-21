@@ -811,5 +811,3 @@ def test_batch_poor_utilization_warns(monkeypatch, tmp_path):
             trainer, module, effective_batch_size=130, pin_path=tmp_path / "pin.yaml"
         )
     assert pin.effective_batch_size == 130  # still exact
-
-
