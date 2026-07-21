@@ -25,7 +25,20 @@ class Study:
     ``Study.from_checkpoints`` to compare already-trained checkpoints.
     """
 
-    def _init_common(self, load_fn, data, num_classes, task, test, alpha, ignore_index):
+    def _init_common(
+        self,
+        load_fn,
+        data,
+        num_classes,
+        task,
+        test,
+        alpha,
+        ignore_index,
+        predict_fn=None,
+        metrics=None,
+        prob_metrics=None,
+        correction="holm",
+    ):
         self._load_fn = load_fn
         self._data = data
         self._num_classes = num_classes
@@ -33,6 +46,10 @@ class Study:
         self._test = test
         self._alpha = alpha
         self._ignore_index = ignore_index
+        self._predict_fn = predict_fn
+        self._metrics = metrics
+        self._prob_metrics = prob_metrics
+        self._correction = correction
 
     def __init__(
         self,
@@ -45,13 +62,29 @@ class Study:
         task: str | Task = "classification",
         test: str = "wilcoxon",
         alpha: float = 0.05,
+        correction: str = "holm",
         ignore_index: int | None = None,
+        predict_fn=None,
+        metrics: dict | None = None,
+        prob_metrics: frozenset[str] | None = None,
         working_dir: str | None = None,
         on_error: str = "raise",
         resume: bool = False,
         capture_env: bool = False,
     ):
-        self._init_common(load_fn, data, num_classes, task, test, alpha, ignore_index)
+        self._init_common(
+            load_fn,
+            data,
+            num_classes,
+            task,
+            test,
+            alpha,
+            ignore_index,
+            predict_fn=predict_fn,
+            metrics=metrics,
+            prob_metrics=prob_metrics,
+            correction=correction,
+        )
         self._methods = methods
         self._seeds = list(seeds)
         self.working_dir = working_dir
@@ -71,13 +104,29 @@ class Study:
         task: str | Task = "classification",
         test: str = "wilcoxon",
         alpha: float = 0.05,
+        correction: str = "holm",
         ignore_index: int | None = None,
+        predict_fn=None,
+        metrics: dict | None = None,
+        prob_metrics: frozenset[str] | None = None,
     ) -> Study:
         """Build a Study that compares already-trained checkpoints (no training)."""
         if not checkpoints:
             raise ValueError("checkpoints must not be empty")
         study = cls.__new__(cls)
-        study._init_common(load_fn, data, num_classes, task, test, alpha, ignore_index)
+        study._init_common(
+            load_fn,
+            data,
+            num_classes,
+            task,
+            test,
+            alpha,
+            ignore_index,
+            predict_fn=predict_fn,
+            metrics=metrics,
+            prob_metrics=prob_metrics,
+            correction=correction,
+        )
         study._methods = None
         study._seeds = None
         study.working_dir = None
@@ -118,6 +167,10 @@ class Study:
             self._test,
             self._alpha,
             ignore_index=self._ignore_index,
+            predict_fn=self._predict_fn,
+            metrics=self._metrics,
+            prob_metrics=self._prob_metrics,
+            correction=self._correction,
         )
         if self._seeds is not None:
             result.data = result.data.assign_coords(seed=list(self._seeds))
