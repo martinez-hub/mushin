@@ -189,6 +189,7 @@ addopts = "-m 'not real_data and not cluster'"
 markers = [
     "real_data: end-to-end checks that download a real dataset/model (deselected by default; run with -m real_data)",
     "cluster: end-to-end multi-node DDP checks that need a real SLURM/Elastic cluster (deselected by default; run with -m cluster)",
+    "config_group: names user-stored ConfigStore group(s) to remove after the test (see restore_config_group fixture)",
 ]
 filterwarnings = [
     # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read

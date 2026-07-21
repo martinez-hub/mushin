@@ -988,7 +988,10 @@ def _grid_with_one_failure():
 def test_on_error_raise_is_default(tmp_path):
     from mushin import multirun
 
-    with pytest.raises(Exception):
+    # The failing cell raises RuntimeError("boom"); the default on_error="raise"
+    # must propagate exactly that (not merely "some exception", which would pass
+    # even on an unrelated API/signature regression).
+    with pytest.raises(RuntimeError, match="boom"):
         _grid_with_one_failure()().run(
             a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s")
         )
@@ -1316,7 +1319,7 @@ def test_task_runner_is_picklable(tmp_path):
     pickle.loads(pickle.dumps(tc))  # the whole dispatch object is picklable
 
 
-def test_bare_list_sweep_arg_gives_actionable_multirun_error():
+def test_bare_list_sweep_arg_gives_actionable_multirun_error(tmp_path):
     # A new user's most likely slip: forgetting multirun() and passing a bare list.
     # The error must point at the fix (multirun) and the escape hatch (hydra_list),
     # not just list the internal accepted types.
@@ -1329,8 +1332,9 @@ def test_bare_list_sweep_arg_gives_actionable_multirun_error():
         W().run(lr=[0.01, 0.1, 1.0])
     with pytest.raises(TypeError, match=r"mushin\.hydra_list\("):
         W().run(lr=[0.01, 0.1, 1.0])
-    # a legitimate multirun still works (must NOT be caught by the bare-list guard)
-    W().run(lr=multirun([0.01, 0.1]), working_dir=None)
+    # a legitimate multirun still works (must NOT be caught by the bare-list
+    # guard); use tmp_path so the sweep doesn't scatter multirun/ into the cwd.
+    W().run(lr=multirun([0.01, 0.1]), working_dir=str(tmp_path / "s"))
 
 
 def test_failures_attr_survives_netcdf_roundtrip(tmp_path):
@@ -1401,7 +1405,8 @@ def test_dotted_override_sweep_axis(tmp_path):
     assert float(ds["w"].sel({"model.width": 8})) == 8.0
 
 
-def test_config_group_sweep_coords_are_choice_names(tmp_path):
+@pytest.mark.config_group("model")
+def test_config_group_sweep_coords_are_choice_names(tmp_path, restore_config_group):
     """Sweeping a Hydra config GROUP (model=small,big) must key the xarray
     dimension by the chosen option name, not a stringified sub-config."""
     from hydra.core.config_store import ConfigStore

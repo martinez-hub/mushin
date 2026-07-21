@@ -1,5 +1,6 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -210,7 +211,9 @@ def test_real_lr_find_pins_a_finite_learning_rate(tmp_path):
         )
     except RuntimeError as e:
         assert "no learning-rate suggestion" in str(e)
-        return
+        # Visibly skip rather than silently green-pass, so a regression that
+        # stops lr_find from ever producing a suggestion is noticed.
+        pytest.skip(f"lr_find produced no suggestion in this environment: {e}")
     assert pin.learning_rate > 0 and math.isfinite(pin.learning_rate)
     assert m.lr == pin.learning_rate
     assert _read_pin(tmp_path / "lr.yaml")["learning_rate"] == pin.learning_rate
