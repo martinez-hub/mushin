@@ -99,7 +99,11 @@ def _global_rank(node_rank: int, num_processes: int, local_rank: int) -> int:
 
 
 def _subprocess_call(
-    local_rank: int, global_rank: int, testing: bool, predicting: bool
+    local_rank: int,
+    global_rank: int,
+    testing: bool,
+    predicting: bool,
+    validating: bool = False,
 ) -> None:
     env_copy = os.environ.copy()
     env_copy["LOCAL_RANK"] = f"{local_rank}"
@@ -136,11 +140,11 @@ def _subprocess_call(
     # create the command for CLI
     command += ["-cp", hydra_output, "-cn", "config.yaml"]
 
-    # Set flag to run Trainer.fit or Trainer.test in `_pl_main.py`
-    command += ["++pl_testing=" + ("false" if not testing else "true")]
-
-    # Set flag to run Trainer.fit or Trainer.test in `_pl_main.py`
-    command += ["++pl_predicting=" + ("false" if not predicting else "true")]
+    # Flags selecting which Trainer entry point `_pl_main.py` runs on the child
+    # rank (fit is the default when all are false).
+    command += ["++pl_testing=" + ("true" if testing else "false")]
+    command += ["++pl_predicting=" + ("true" if predicting else "false")]
+    command += ["++pl_validating=" + ("true" if validating else "false")]
 
     # Set flag for local rank
     command += [f"++pl_local_rank={local_rank}"]
@@ -338,9 +342,15 @@ if PL_VERSION >= Version(1, 6, 0):
             """
             del trainer  # unused
             if not self.cluster_environment.creates_processes_externally:
+                # Map PL's per-entry-point impl name to the child-rank mode. A
+                # missing branch (validate) must NOT fall through to fit, or the
+                # child ranks train while rank 0 validates -> collective hang.
                 testing = function.__name__ == "_test_impl"
                 predicting = function.__name__ == "_predict_impl"
-                self._call_children_scripts(testing=testing, predicting=predicting)
+                validating = function.__name__ == "_validate_impl"
+                self._call_children_scripts(
+                    testing=testing, predicting=predicting, validating=validating
+                )
                 # Reap child ranks if this (rank 0) process dies, instead of
                 # leaving them orphaned holding GPU memory.
                 if _launch_process_observer is not None:
@@ -352,7 +362,9 @@ if PL_VERSION >= Version(1, 6, 0):
 
             return function(*args, **kwargs)
 
-        def _call_children_scripts(self, testing: bool, predicting: bool):
+        def _call_children_scripts(
+            self, testing: bool, predicting: bool, validating: bool = False
+        ):
             # bookkeeping of spawned processes
             self._check_can_spawn_children()
             # Track the children like the base class: kill()/signal forwarding
@@ -373,6 +385,7 @@ if PL_VERSION >= Version(1, 6, 0):
                     _global_rank(node_rank, self.num_processes, local_rank),
                     testing,
                     predicting,
+                    validating,
                 )
                 self.procs.append(proc)
 
@@ -489,15 +502,16 @@ else:  # pragma: no cover
             self.interactive_ddp_procs = []
             node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
-                testing = self.lightning_module.trainer.state.fn == TrainerFn.TESTING
-                predicting = (
-                    self.lightning_module.trainer.state.fn == TrainerFn.PREDICTING
-                )
+                state_fn = self.lightning_module.trainer.state.fn
+                testing = state_fn == TrainerFn.TESTING
+                predicting = state_fn == TrainerFn.PREDICTING
+                validating = state_fn == TrainerFn.VALIDATING
                 _subprocess_call(
                     local_rank,
                     _global_rank(node_rank, self.num_processes, local_rank),
                     testing=testing,
                     predicting=predicting,
+                    validating=validating,
                 )
 
                 # Stagger rank startup (dataloader contention); tunable

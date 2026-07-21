@@ -21,6 +21,7 @@ def task(
     datamodule: LightningDataModule | None = None,
     pl_testing: bool = False,
     pl_predicting: bool = False,
+    pl_validating: bool = False,
     pl_local_rank: int = 0,
 ) -> None:
     if pl_testing:
@@ -29,6 +30,9 @@ def task(
     elif pl_predicting:
         log.info(f"Rank {pl_local_rank}: Launched subprocess using Trainer.predict")
         trainer.predict(module, datamodule=datamodule)
+    elif pl_validating:
+        log.info(f"Rank {pl_local_rank}: Launched subprocess using Trainer.validate")
+        trainer.validate(module, datamodule=datamodule)
     else:
         log.info(f"Rank {pl_local_rank}: Launched subprocess using Training.fit")
         trainer.fit(module, datamodule=datamodule)

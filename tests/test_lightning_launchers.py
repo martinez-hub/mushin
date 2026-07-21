@@ -108,7 +108,9 @@ def test_call_children_scripts_tracks_procs_and_launch_wires_observer(monkeypatc
 
     fake_procs = []
 
-    def fake_subprocess_call(local_rank, global_rank, testing, predicting):
+    def fake_subprocess_call(
+        local_rank, global_rank, testing, predicting, validating=False
+    ):
         proc = object()
         fake_procs.append(proc)
         return proc
@@ -167,3 +169,56 @@ def test_interrank_delay_env_override(monkeypatch):
     assert _interrank_delay() == 0.0  # clamped
     monkeypatch.setenv("MUSHIN_DDP_LAUNCH_DELAY", "garbage")
     assert _interrank_delay() == 1.0  # falls back to default
+
+
+def test_launch_dispatches_validate_as_validating_not_fit(monkeypatch):
+    """trainer.validate() dispatches as `_validate_impl`; the child ranks must
+    be told to VALIDATE, not fall through to fit (which would train while rank 0
+    validates -> collective mismatch/hang)."""
+    from lightning_fabric.plugins.environments import LightningEnvironment
+
+    import mushin.lightning.launchers as L
+
+    # LightningEnvironment.creates_processes_externally is True when LOCAL_RANK
+    # is set; ensure a clean env so the child-spawn branch actually runs (other
+    # launcher tests leak these vars into os.environ).
+    for _v in ("LOCAL_RANK", "NODE_RANK", "WORLD_SIZE", "RANK", "MASTER_PORT"):
+        monkeypatch.delenv(_v, raising=False)
+
+    captured = []
+
+    def fake_subprocess_call(local_rank, global_rank, testing, predicting, validating):
+        captured.append(
+            dict(testing=testing, predicting=predicting, validating=validating)
+        )
+        return object()
+
+    monkeypatch.setattr(L, "_subprocess_call", fake_subprocess_call)
+    monkeypatch.setattr(L, "sleep", lambda *_: None)
+    monkeypatch.setattr(L, "_launch_process_observer", lambda procs: None)
+    monkeypatch.setattr(L, "_set_num_threads_if_needed", lambda num_processes: None)
+
+    launcher = L._HydraReattachLauncher(
+        cluster_environment=LightningEnvironment(), num_processes=2, num_nodes=1
+    )
+
+    def _validate_impl():
+        return "validated"
+
+    assert launcher.launch(_validate_impl, trainer=None) == "validated"
+    assert captured and all(
+        c == dict(testing=False, predicting=False, validating=True) for c in captured
+    )
+
+
+def test_pl_main_pl_validating_calls_trainer_validate():
+    from unittest.mock import MagicMock
+
+    from mushin.lightning._pl_main import task
+
+    trainer = MagicMock()
+    module = object()
+    task(trainer, module, datamodule=None, pl_validating=True)
+    trainer.validate.assert_called_once()
+    trainer.fit.assert_not_called()
+    trainer.test.assert_not_called()
