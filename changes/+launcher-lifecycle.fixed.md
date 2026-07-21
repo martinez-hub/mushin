@@ -1,1 +1,0 @@
-HydraDDP/HydraFSDP now track their child rank processes like Lightning's base launcher -- children are reaped if rank 0 dies (no more orphaned GPU processes), signal forwarding works, and per-rank thread pools are capped; checkpoint/experiment loading errors are real exceptions with actionable messages instead of bare asserts.

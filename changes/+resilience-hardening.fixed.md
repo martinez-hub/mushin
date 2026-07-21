@@ -1,1 +1,0 @@
-Resilient sweeps got tougher: a corrupt (mid-write-killed) sweep manifest no longer aborts resume, atomic sidecar writes use unique temp names so concurrent writers cannot clobber each other, and `on_error="nan"` now writes the full traceback to `mushin_error.txt` in the failed cell's directory.

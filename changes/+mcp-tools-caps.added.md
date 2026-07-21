@@ -1,1 +1,0 @@
-The MCP server gained `get_failures` (failed cells + tracebacks from the manifest) and `get_provenance` (git/package/accelerator records) tools, and now summarizes long coordinate axes and metric curves instead of flooding the agent's context with raw arrays.

@@ -1,1 +1,0 @@
-The MCP server now surfaces workflow-sweep metrics from `mushin_metrics.json` (previously only MetricsCallback `.pt` files were read), and a single corrupt per-run `config.yaml` no longer makes the whole experiment unqueryable.
