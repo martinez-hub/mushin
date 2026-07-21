@@ -112,6 +112,32 @@ def _cfg_missing_or_none(cfg, key: str) -> bool:
     return val is _missing or val is None
 
 
+def _override_name_targets(task_fn) -> set[str] | None:
+    """The top-level override names a task's signature accepts, or ``None`` to
+    allow any name (the task declares ``**kwargs``, or its signature can't be
+    read). ``*args`` is ignored; every explicitly-named parameter is a target.
+
+    Drives up-front override validation: a name that is neither a task parameter
+    nor already in the base config is almost always a typo (``lrate=`` for an
+    ``lr`` parameter), which Hydra would otherwise ``+``-append as a bogus config
+    key and mushin would surface as a phantom constant sweep dimension.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(task_fn).parameters
+    except (TypeError, ValueError):
+        return None
+    names: set[str] = set()
+    for name, p in params.items():
+        if p.kind is inspect.Parameter.VAR_KEYWORD:
+            return None  # **kwargs -> any override name is valid
+        if p.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        names.add(name)
+    return names
+
+
 class _FailedRun:
     """Sentinel returned by a fail-soft task wrapper in place of a raised
     exception. Hydra's basic sweeper re-raises the first FAILED job's exception
@@ -786,6 +812,60 @@ class BaseWorkflow:
         # implicit. A caller who passes their own `hydra.job.chdir` override wins.
         if not any(o.split("=", 1)[0] == "hydra.job.chdir" for o in launch_overrides):
             launch_overrides.append("hydra.job.chdir=True")
+
+        # Catch a typo'd override name BEFORE launching. mushin deliberately
+        # allows overrides beyond the task's own parameters (values consumed by
+        # `pre_task`, config-group choices, interpolations), so an unknown name is
+        # not by itself an error. But a name that is a near-miss of a real target
+        # (`lrate` for `lr`) is almost always a typo — left unchecked it is
+        # `+`-appended as a config key nothing reads and surfaces as a phantom
+        # constant sweep dimension. Only the head of a dotted path is checked
+        # (`model.width` -> `model`). A task with `**kwargs` opts out entirely.
+        task_attr = "evaluation_task" if hasattr(self, "evaluation_task") else "task"
+        task_targets = _override_name_targets(getattr(self, task_attr, None))
+        if task_targets is not None:
+            # Explicit pre_task params are valid targets too; the default
+            # `pre_task(**kwargs)` contributes nothing (targets is None -> set()).
+            pre_targets = _override_name_targets(getattr(self, "pre_task", None))
+            cfg_names: set[str] = set()
+            try:
+                from omegaconf import OmegaConf
+
+                container = (
+                    OmegaConf.to_container(self.eval_task_cfg, resolve=False)
+                    if OmegaConf.is_config(self.eval_task_cfg)
+                    else self.eval_task_cfg
+                )
+                if isinstance(container, Mapping):
+                    cfg_names = {str(key) for key in container}
+            except Exception:  # noqa: BLE001 - unreadable cfg -> signature only
+                cfg_names = set()
+            jobdir = getattr(self, "_JOBDIR_NAME", None)
+            real_targets = (
+                task_targets
+                | (pre_targets or set())
+                | cfg_names
+                | ({jobdir} if jobdir else set())
+            )
+            import difflib
+
+            for k in workflow_overrides:
+                head = k.split(".", 1)[0]
+                if head in real_targets:
+                    continue
+                # cutoff 0.5 fires on typos (`lrate`~`lr` .57, `epsilonn`~`epsilon`
+                # .93) but clears deliberate extra names (`list_vals`~`epsilon` .13).
+                near = difflib.get_close_matches(
+                    head, sorted(real_targets), n=1, cutoff=0.5
+                )
+                if near:
+                    raise ValueError(
+                        f"override `{head}` does not match any task parameter; "
+                        f"did you mean {near[0]!r}? A mismatched name is appended "
+                        "as a config key nothing reads and would appear as a "
+                        "phantom constant sweep dimension. Rename it, or use "
+                        f"`{near[0]}=` if that was intended."
+                    )
 
         for k, v in workflow_overrides.items():
             # A bare list/tuple is the most common new-user slip (forgetting to
