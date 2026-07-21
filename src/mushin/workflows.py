@@ -209,9 +209,8 @@ class _TaskRunner:
         return combo
 
     def __call__(self, cfg):
-        from pathlib import Path
-
         import warnings
+        from pathlib import Path
 
         from ._provenance import write_provenance
         from ._resume import (
@@ -1483,6 +1482,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 return [str(_v) if _non_str_sequence(_v) else _v for _v in _seq]
             return str(value)
         return value  # type: ignore
+
+    def to_dataframe(self, **to_xarray_kwargs):
+        """The sweep results as a tidy long-form :class:`pandas.DataFrame`.
+
+        One row per sweep cell (times any extra metric dimensions), with the
+        sweep parameters and metrics as plain columns — the pandas view of
+        :meth:`to_xarray` (``to_xarray(...).to_dataframe().reset_index()``),
+        for when you'd rather not touch xarray at all. Keyword arguments
+        forward to :meth:`to_xarray`. Dataset-level ``attrs`` (provenance,
+        failure records) live only on the xarray form.
+        """
+        return self.to_xarray(**to_xarray_kwargs).to_dataframe().reset_index()
 
     def to_xarray(
         self,

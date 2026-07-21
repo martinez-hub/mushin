@@ -1568,3 +1568,25 @@ def test_dataset_netcdf_roundtrip_with_string_coords(tmp_path):
     back = xr.load_dataset(p)
     xr.testing.assert_identical(ds, back)
     assert float(back["score"].sel(opt="adam", lr=0.2)) == pytest.approx(0.8)
+
+
+def test_to_dataframe_tidy_view(tmp_path):
+    """The pandas exit ramp: one call, one row per sweep cell, sweep params
+    and metrics as plain columns -- no xarray knowledge required."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=float(a * 10 + b))
+
+    wf = W()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    df = wf.to_dataframe()
+    assert {"a", "b", "val"} <= set(df.columns)
+    assert len(df) == 4
+    assert float(df[(df.a == 2) & (df.b == 1)]["val"].iloc[0]) == 21.0
+    # kwargs forward to to_xarray
+    df2 = wf.to_dataframe(include_working_subdirs_as_data_var=True)
+    assert "working_subdir" in df2.columns
