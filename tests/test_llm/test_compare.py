@@ -14,20 +14,30 @@ def exact(output, reference):
 
 
 def test_clear_winner_flagged_significant():
-    data = _data()
+    import random
 
-    def good(inputs, seed):  # always correct
-        return ["yes" if i % 2 == 0 else "no" for i in inputs]
+    n = 12
+    data = _data(n)
+    truth = ["yes" if i % 2 == 0 else "no" for i in range(n)]
 
-    def bad(inputs, seed):  # seed-perturbed, mostly wrong
-        return ["yes"] * len(inputs)
+    def good(inputs, seed):  # ~85% correct, varies by seed (deterministic per seed)
+        rng = random.Random(seed)
+        return [truth[i] if rng.random() > 0.15 else "no" for i in inputs]
+
+    def bad(inputs, seed):  # ~50% correct, varies by seed
+        rng = random.Random(seed + 991)
+        return [truth[i] if rng.random() > 0.5 else "no" for i in inputs]
 
     result = compare_llms(
-        {"good": good, "bad": bad}, data, metric=exact, seeds=range(4), test="welch"
+        {"good": good, "bad": bad}, data, metric=exact, seeds=range(5), test="welch"
     )
     assert isinstance(result, BenchmarkResult)
-    assert set(result.data.dims) == {"method", "seed"}
-    assert float(result.data["score"].sel({"method": "good"}).mean()) == 1.0
+    # The clear winner must actually be FLAGGED significant (the point of the
+    # test): both systems have real across-seed variance, so the comparison is
+    # not masked, and the ~0.35 gap is significant at 5 seeds under Welch.
+    row = result.comparisons[result.comparisons["metric"] == "score"].iloc[0]
+    assert bool(row["significant"])
+    assert abs(float(row["mean_diff"])) > 0.15
 
 
 def test_seed_controlled_variance_and_reproducible():

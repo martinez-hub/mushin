@@ -40,3 +40,19 @@ def _restore_task_registry():
     yield
     _TASKS.clear()
     _TASKS.update(snapshot)
+
+
+@pytest.fixture
+def restore_config_group(request):
+    """Remove a user-stored top-level ConfigStore group after the test so it
+    does not leak into the session. A blanket snapshot/restore is unsafe —
+    Hydra lazily registers its built-in ``sweeper``/``launcher`` groups during
+    a sweep, and restoring an earlier snapshot would drop them. Pass the group
+    name(s) via ``@pytest.mark.config_group("model")``."""
+    from hydra.core.config_store import ConfigStore
+
+    groups = [g for m in request.node.iter_markers("config_group") for g in m.args]
+    yield
+    repo = ConfigStore.instance().repo
+    for g in groups:
+        repo.pop(g, None)

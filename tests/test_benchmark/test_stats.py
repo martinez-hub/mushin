@@ -41,7 +41,13 @@ def test_cohens_d_zero_variance_means_equal_within_roundoff_is_zero():
 def test_holm_is_monotone_and_capped():
     corrected = holm_correction([0.01, 0.04, 0.03])
     assert all(0.0 <= c <= 1.0 for c in corrected)
-    assert corrected[0] >= 0.01 * 3 - 1e-9
+    # Exact step-down values: sorted p = [0.01, 0.03, 0.04] scaled by [3, 2, 1]
+    # = [0.03, 0.06, 0.04], then a running max -> [0.03, 0.06, 0.06], mapped
+    # back to input order [0.01, 0.04, 0.03].
+    assert np.allclose(corrected, [0.03, 0.06, 0.06])
+    # ...and the step-down enforces monotonicity in ascending-p order.
+    ascending = [corrected[i] for i in np.argsort([0.01, 0.04, 0.03])]
+    assert all(a <= b + 1e-12 for a, b in zip(ascending, ascending[1:]))
 
 
 def test_compare_flags_clear_difference_as_significant():
