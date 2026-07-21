@@ -681,3 +681,11 @@ def test_get_metrics_summarizes_long_sequences(tmp_path):
     curve = out["per_run"][0]["fit_metrics"]["curve"]
     assert curve["length"] == 5000 and curve["truncated"] is True
     assert curve["first"][0] == 0 and curve["last"][-1] == 4999
+
+
+def test_main_without_mcp_extra_gives_actionable_hint(monkeypatch):
+    import mushin.mcp.__main__ as cli
+
+    monkeypatch.setattr(cli, "create_server", None)  # simulate core install
+    with pytest.raises(SystemExit, match=r"mushin-py\[mcp\]"):
+        cli.main([])

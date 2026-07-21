@@ -34,3 +34,7 @@ site/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# stray runtime artifacts (seed-persistence, env snapshots) if a run lands in-tree
+mushin_seed*.json
+mushin_env*.txt
