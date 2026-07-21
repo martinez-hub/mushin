@@ -36,6 +36,9 @@ epsilons = arrays(
     shape=st.integers(1, 5),
     dtype="float",
     elements=st.floats(-1000, 1000),
+    # A sweep axis cannot repeat a value (duplicates now raise); keep epsilon
+    # values distinct so the generated curve has one cell per epsilon.
+    unique=True,
 )
 
 
@@ -209,7 +212,9 @@ def test_robustnesscurve_extra_param_multirun(fake_param_string: bool):
     task = LocalRobustness(make_config(epsilon=0))
 
     if fake_param_string:
-        task.run(epsilon=[0, 1, 2, 3], fake_param="1,2")
+        # An extra sweep axis is declared explicitly with multirun (a bare
+        # string like "1,2" is now a fixed literal value, not an auto-sweep).
+        task.run(epsilon=[0, 1, 2, 3], fake_param=multirun([1, 2]))
         task.plot("result")
     else:
         with pytest.raises(TypeError):
@@ -608,6 +613,8 @@ def test_raises_on_non_static_method():
         st.booleans() | st.lists(st.integers()),
         min_size=2,
         max_size=5,
+        # Sweep axes reject duplicate values; keep the multirun elements distinct.
+        unique_by=repr,
     ).map(multirun),
 )
 def test_overrides_roundtrip(
