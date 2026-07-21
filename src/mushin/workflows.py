@@ -214,6 +214,7 @@ class _TaskRunner:
         on_error,
         inject_resume,
         prior_manifest,
+        code_hash=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -222,6 +223,7 @@ class _TaskRunner:
         self.on_error = on_error
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
+        self.code_hash = code_hash  # hash of the task source (resume guard)
 
     @staticmethod
     def _combo(cfg, names):
@@ -267,14 +269,34 @@ class _TaskRunner:
             dir_ = self.prior_manifest.completed.get(key)
             if dir_ is not None:
                 cell_dir = Path(self.prior_manifest.root) / dir_
-                prior_hash = (read_cell_status(cell_dir) or {}).get("config_hash")
-                if prior_hash is not None and chash is not None and prior_hash != chash:
-                    # Same combo, different resolved config (a non-swept value
-                    # changed): reusing the cached result would silently mix
-                    # two configurations into one dataset.
+                prior = read_cell_status(cell_dir) or {}
+                prior_config = prior.get("config_hash")
+                prior_code = prior.get("code_hash")
+                # A completed cell is reused only if BOTH the resolved config
+                # and the task source still match. A missing prior hash (a
+                # pre-fingerprint sweep) can't be checked, so it isn't a reason
+                # to re-run — legacy sweeps still resume.
+                config_changed = (
+                    prior_config is not None
+                    and chash is not None
+                    and prior_config != chash
+                )
+                code_changed = (
+                    prior_code is not None
+                    and self.code_hash is not None
+                    and prior_code != self.code_hash
+                )
+                if config_changed or code_changed:
+                    what = (
+                        "config and task code"
+                        if config_changed and code_changed
+                        else "config"
+                        if config_changed
+                        else "task code"
+                    )
                     warnings.warn(
                         f"resume: cell {key!r} was completed under a different "
-                        "config (fingerprint mismatch); re-running it instead "
+                        f"{what} (fingerprint mismatch); re-running it instead "
                         "of reusing the cached result.",
                         UserWarning,
                         stacklevel=2,
@@ -300,6 +322,7 @@ class _TaskRunner:
                 combo=combo,
                 attempt=rc.attempt,
                 config_hash=chash,
+                code_hash=self.code_hash,
             )
             # Set the contextvar AFTER the (fallible) status write, so a failed
             # write can't leave the token set with no matching reset -> a stale
@@ -314,6 +337,7 @@ class _TaskRunner:
                     combo=combo,
                     attempt=rc.attempt,
                     config_hash=chash,
+                    code_hash=self.code_hash,
                 )
                 raise
             finally:
@@ -327,6 +351,7 @@ class _TaskRunner:
                 combo=combo,
                 attempt=rc.attempt,
                 config_hash=chash,
+                code_hash=self.code_hash,
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
@@ -842,6 +867,8 @@ class BaseWorkflow:
                 )
             )
 
+        from ._resume import code_fingerprint
+
         _task_fn, _wants_resume = _prepare_task(self.task)
         task_call = _TaskRunner(
             task=task_fn_wrapper(_task_fn),
@@ -851,6 +878,7 @@ class BaseWorkflow:
             on_error=on_error,
             inject_resume=_wants_resume,
             prior_manifest=_prior_manifest,
+            code_hash=code_fingerprint(self.task),
         )
 
         self._capture_env = capture_env
@@ -1143,11 +1171,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         resume : bool (default: False)
             Skip cells already recorded as completed in ``working_dir`` (their
             metrics are read from the sidecar) and re-run the rest. A completed
-            cell is reused only if its swept-parameter combination AND a
-            fingerprint of its resolved config both match; a changed non-swept
-            value re-runs that cell (with a warning). Note the fingerprint does
-            not cover the task *body* or the environment — if you changed those,
-            re-run from a fresh ``working_dir`` rather than resuming.
+            cell is reused only if its swept-parameter combination AND
+            fingerprints of both its resolved config and its task source still
+            match; a changed non-swept value or an edited task body re-runs that
+            cell (with a warning). The fingerprint does not cover helper
+            functions the task calls, module-level constants, or the
+            environment — for a larger refactor, re-run from a fresh
+            ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to

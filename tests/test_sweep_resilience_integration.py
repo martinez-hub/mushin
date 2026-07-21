@@ -106,6 +106,7 @@ def test_fail_soft_resume_compare_end_to_end(tmp_path):
 def test_resume_after_hard_kill_skips_completed_cells(tmp_path):
     # A sweep is SIGKILLed after some cells finish (no manifest write happens).
     # Resume must skip the finished cells using the durable per-cell sidecars.
+    import os
     import subprocess
     import sys
     import textwrap
@@ -115,23 +116,32 @@ def test_resume_after_hard_kill_skips_completed_cells(tmp_path):
 
     wd = tmp_path / "s"
     marker = tmp_path / "ran.log"
+    # One script, used for BOTH the killed run and the resume, so the task
+    # SOURCE is byte-identical across them (the resume code-hash guard must not
+    # flag a hard kill as a code change). The seed-2 hang and the resume flag
+    # are controlled by env vars, not by editing the task body.
     script = tmp_path / "sweep.py"
     script.write_text(
         textwrap.dedent(f"""
-        import time
+        import os, time
         from mushin import multirun
         from mushin.workflows import MultiRunMetricsWorkflow
         class W(MultiRunMetricsWorkflow):
             @staticmethod
             def task(seed):
                 open(r"{marker}", "a").write(f"{{seed}}\\n")
-                if seed == 2:
+                if seed == 2 and os.environ.get("MUSHIN_TEST_HANG"):
                     time.sleep(30)   # hang so the parent can SIGKILL mid-cell
                 return dict(val=float(seed))
-        W().run(seed=multirun([0,1,2,3]), working_dir=r"{wd}")
+        W().run(
+            seed=multirun([0,1,2,3]),
+            working_dir=r"{wd}",
+            resume=bool(os.environ.get("MUSHIN_TEST_RESUME")),
+        )
         """)
     )
-    p = subprocess.Popen([sys.executable, str(script)])
+    env = {**os.environ, "MUSHIN_TEST_HANG": "1"}
+    p = subprocess.Popen([sys.executable, str(script)], env=env)
     done = set()
     for _ in range(600):
         for d in list(wd.glob("*")) if wd.exists() else []:
@@ -146,20 +156,14 @@ def test_resume_after_hard_kill_skips_completed_cells(tmp_path):
     assert {0, 1} <= done  # at least these two finished before the kill
 
     marker.write_text("")  # reset the ran log
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
-
-    class W2(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(seed):
-            open(str(marker), "a").write(f"{seed}\n")
-            return dict(val=float(seed))
-
-    wf = W2()
-    wf.run(seed=multirun([0, 1, 2, 3]), working_dir=str(wd), resume=True)
+    resume_env = {k: v for k, v in os.environ.items() if k != "MUSHIN_TEST_HANG"}
+    resume_env["MUSHIN_TEST_RESUME"] = "1"
+    # The resume (same script -> identical task source, so no code-hash re-run)
+    # completes the sweep; check=True means the run exited cleanly (complete).
+    subprocess.run([sys.executable, str(script)], env=resume_env, check=True)
     reran = {int(x) for x in marker.read_text().split()}
     assert 0 not in reran and 1 not in reran  # durable completion survived the kill
-    assert wf.is_complete
+    assert {2, 3} <= reran  # the unfinished cells were completed on resume
 
 
 def test_resume_of_legacy_sweep_without_status_sidecars(tmp_path):
