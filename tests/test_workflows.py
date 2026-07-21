@@ -1542,3 +1542,29 @@ def test_task_runner_ships_only_completed_cells(tmp_path):
     prior = _PriorCells.from_manifest(m)
     assert len(prior.completed) == 3  # the failed cell is not shipped
     assert all("a=" in k for k in prior.completed)
+
+
+def test_dataset_netcdf_roundtrip_with_string_coords(tmp_path):
+    """The headline share-your-results flow: a sweep dataset with a string
+    sweep axis must survive to_netcdf -> load_dataset identically (values,
+    coords, and attrs)."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(opt: str, lr: float):
+            return dict(score=float(len(opt)) * lr)
+
+    wf = W()
+    wf.run(
+        opt=multirun(["adam", "sgd"]),
+        lr=multirun([0.1, 0.2]),
+        working_dir=str(tmp_path / "s"),
+    )
+    ds = wf.to_xarray()
+    p = tmp_path / "r.nc"
+    ds.to_netcdf(p)
+    back = xr.load_dataset(p)
+    xr.testing.assert_identical(ds, back)
+    assert float(back["score"].sel(opt="adam", lr=0.2)) == pytest.approx(0.8)
