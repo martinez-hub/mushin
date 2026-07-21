@@ -61,3 +61,29 @@ def test_git_captured_once_per_sweep_not_per_cell(monkeypatch, tmp_path):
         prov = json.loads((d / "mushin_provenance.json").read_text())
         assert "sha" in prov["git"]
         assert prov["packages"]["mushin-py"]
+
+
+def test_capture_base_records_accelerator():
+    """GPU numerics depend on the CUDA/cuDNN build and the physical device,
+    not just the torch wheel version -- the provenance record must carry them
+    (None values on CPU-only builds, but the keys must exist)."""
+    from mushin._provenance import capture_base
+
+    base = capture_base()
+    acc = base["accelerator"]
+    assert set(acc) == {"cuda", "cudnn", "device"}
+
+
+def test_env_snapshot_never_overwrites_prior_run(tmp_path):
+    """A resume runs in a possibly-different environment; it must not
+    overwrite the snapshot recorded for the cells that ran earlier."""
+    from mushin.workflows import _write_env_snapshot
+
+    _write_env_snapshot(tmp_path)
+    first = tmp_path / "mushin_env.txt"
+    assert first.exists()
+    first.write_text("SENTINEL-ORIGINAL-ENV")
+    _write_env_snapshot(tmp_path)
+    assert first.read_text() == "SENTINEL-ORIGINAL-ENV"
+    siblings = sorted(p.name for p in tmp_path.glob("mushin_env*.txt"))
+    assert len(siblings) == 2  # the new snapshot landed beside, not over, it

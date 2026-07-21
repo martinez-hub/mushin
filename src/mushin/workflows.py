@@ -356,6 +356,14 @@ def _write_env_snapshot(working_dir: Path) -> None:
     working_dir = Path(working_dir)
     working_dir.mkdir(parents=True, exist_ok=True)
     out = working_dir / "mushin_env.txt"
+    # Never overwrite a prior run's snapshot: a resume may execute in a
+    # different environment, and clobbering would misattribute the env the
+    # already-completed cells actually ran in. Later runs land beside it.
+    if out.exists():
+        n = 2
+        while (working_dir / f"mushin_env.{n}.txt").exists():
+            n += 1
+        out = working_dir / f"mushin_env.{n}.txt"
 
     for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
         try:

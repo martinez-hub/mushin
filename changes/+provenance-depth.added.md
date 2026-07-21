@@ -1,0 +1,1 @@
+Provenance records the accelerator identity (CUDA/cuDNN/device name), `seed_everything_per_rank` persists the effective seed to a per-rank JSON in the run dir, and a resume no longer overwrites the environment snapshot recorded for earlier cells.
