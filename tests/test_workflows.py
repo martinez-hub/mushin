@@ -1572,3 +1572,82 @@ def test_to_dataframe_tidy_view(tmp_path):
     # kwargs forward to to_xarray
     df2 = wf.to_dataframe(include_working_subdirs_as_data_var=True)
     assert "working_subdir" in df2.columns
+
+
+def test_resume_reruns_when_task_code_changes(tmp_path):
+    # The stale-code-reuse bug: resume=True with an edited task body but an
+    # UNCHANGED config must re-run the cell (new code, new result), not return
+    # the previous run's cached metrics.
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class V1(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a) * 10)
+
+    class V2(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a) * 100)  # edited body, same signature/config
+
+    wd = str(tmp_path / "s")
+    V1().run(a=multirun([1, 2]), working_dir=wd)
+    wf2 = V2()
+    with pytest.warns(UserWarning, match="task code"):
+        wf2.run(a=multirun([1, 2]), working_dir=wd, resume=True)
+    ds = wf2.to_xarray()
+    assert float(ds["v"].sel(a=2)) == 200.0  # V2 ran; not the stale 20.0
+
+
+def test_resume_reuses_when_task_code_unchanged(tmp_path):
+    # Same code + same config -> reuse (no re-run, no warning).
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            CALLS["n"] += 1
+            return dict(v=float(a))
+
+    wd = str(tmp_path / "s")
+    W().run(a=multirun([1, 2]), working_dir=wd)
+    CALLS["n"] = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any resume warning would fail here
+        W().run(a=multirun([1, 2]), working_dir=wd, resume=True)
+    assert CALLS["n"] == 0  # both cells reused
+
+
+def test_resume_reuses_legacy_sidecars_without_code_hash(tmp_path):
+    # Sweeps recorded before the code-hash existed must still resume (reuse)
+    # their completed cells rather than spuriously re-running.
+    import json
+
+    from mushin import multirun
+    from mushin._resume import STATUS_FILE
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            CALLS["n"] += 1
+            return dict(v=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2]), working_dir=str(wd))
+    for sf in wd.glob(f"*/{STATUS_FILE}"):
+        d = json.loads(sf.read_text())
+        d.pop("code_hash", None)  # simulate a pre-code-hash sweep
+        sf.write_text(json.dumps(d))
+
+    CALLS["n"] = 0
+    W().run(a=multirun([1, 2]), working_dir=str(wd), resume=True)
+    assert CALLS["n"] == 0  # legacy cells reused

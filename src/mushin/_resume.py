@@ -39,6 +39,7 @@ def write_cell_status(
     combo: dict[str, Any],
     attempt: int,
     config_hash: str | None = None,
+    code_hash: str | None = None,
 ) -> None:
     """Atomically write this cell's status sidecar into its own dir."""
     payload: dict[str, Any] = {
@@ -48,6 +49,8 @@ def write_cell_status(
     }
     if config_hash is not None:
         payload["config_hash"] = config_hash
+    if code_hash is not None:
+        payload["code_hash"] = code_hash
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
 
 
@@ -58,8 +61,8 @@ def config_fingerprint(cfg) -> str | None:
     Guards resume reuse: a completed cell's cached metrics are only returned
     when the config that would run now matches the one that produced them —
     otherwise a changed NON-swept value (same combo key) would silently mix
-    results from two configurations into one dataset. Task *source* changes
-    are not captured; only the resolved config is."""
+    results from two configurations into one dataset. Task *source* changes are
+    guarded separately by :func:`code_fingerprint`."""
     try:
         from omegaconf import OmegaConf
 
@@ -74,6 +77,29 @@ def config_fingerprint(cfg) -> str | None:
     import hashlib
 
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def code_fingerprint(fn) -> str | None:
+    """Stable short hash of a task function's source, or None if the source
+    can't be read.
+
+    Complements :func:`config_fingerprint` in the resume guard: a task whose
+    *body* was edited between runs (same config, same combo key) would
+    otherwise have its stale cached metrics silently returned. Only the task
+    function's own source is hashed — helpers it calls and module-level
+    constants it reads are not covered, so a fresh ``working_dir`` is still the
+    safe choice for a larger refactor."""
+    import inspect
+
+    try:
+        # unwrap functools.wraps / decorators to the underlying function
+        target = inspect.unwrap(fn) if callable(fn) else fn
+        src = inspect.getsource(target)
+    except (OSError, TypeError):
+        return None
+    import hashlib
+
+    return hashlib.sha256(src.encode()).hexdigest()[:16]
 
 
 def read_cell_status(cell_dir) -> dict | None:
