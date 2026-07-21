@@ -1,5 +1,10 @@
 # LLM evaluation
 
+!!! note "Requires the `eval` extra"
+    LLM evaluation (`compare_llms`, `llm_judge`) is part of mushin's optional
+    evaluation layer — install it with `pip install "mushin-py[eval]"`. See
+    [Installation](../install.md#optional-extras).
+
 The "vibes eval" problem: it's common to eyeball a handful of outputs and
 declare a new prompt or model "better" — but that impression may be pure
 sampling noise. `mushin.llm.compare_llms` runs each system across
@@ -47,6 +52,14 @@ has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
 `ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
 below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
 at the given seed count.
+
+!!! warning "Paired tests need a *shared* per-seed random effect"
+    `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
+    other. That pairing is only meaningful when seed *k* induces a shared
+    random effect across systems (e.g. both score the same seed-*k* data
+    subsample). For independent systems whose seed only drives their own
+    sampling — the typical API-backed setup — the trials are uncorrelated and
+    the pairing assumption does not hold; stick with the default `welch`.
 
 ## Metric options
 
@@ -188,6 +201,13 @@ result = compare_llms(
 
 The cache stores **outputs only** (not metric scores) so you can freely change
 the metric and re-run without re-calling the systems.
+
+!!! warning "The cache cannot see inside your system"
+    The key is the *dict name* plus seed and input — nothing about what the
+    callable actually does. If you change the model, prompt template, or
+    decoding parameters behind a name and reuse the same `cache=` dir, the old
+    outputs are replayed and your comparison is silently stale. Any change to
+    a system means a fresh cache directory (or a new system name).
 
 ## Pitfalls
 

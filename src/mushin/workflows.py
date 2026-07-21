@@ -14,7 +14,6 @@ from typing import (
 )
 
 import numpy as np
-import torch as tr
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
@@ -92,6 +91,75 @@ class _FailedRun:
         self.exception = exception
 
 
+class _PriorCells:
+    """What a resuming `_TaskRunner` needs from the prior sweep, and nothing
+    more: the sweep root, the swept param names, and the completed
+    {combo_key: dir} map. Picklable and small — failed/pending cells and their
+    error strings never ship to workers."""
+
+    __slots__ = ("root", "params", "completed")
+
+    def __init__(self, root: str, params: tuple, completed: dict):
+        self.root = root
+        self.params = params
+        self.completed = completed
+
+    @classmethod
+    def from_manifest(cls, m) -> "_PriorCells":
+        completed = {
+            k: v["dir"]
+            for k, v in m.cells.items()
+            if v.get("status") == "completed" and v.get("dir")
+        }
+        return cls(str(m.root), tuple(m.params), completed)
+
+
+_MISSING_SWEPT = object()
+
+
+def _read_swept_value(cfg, name: str):
+    """Read swept param ``name`` from a job config. A literal flat key wins;
+    otherwise ``name`` is treated as a nested config *path* (``model.width``),
+    which a plain ``cfg[name]`` subscription would reject."""
+    try:
+        return cfg[name]
+    except Exception:  # noqa: BLE001 - fall through to path lookup
+        from omegaconf import OmegaConf
+
+        val = OmegaConf.select(cfg, name, default=_MISSING_SWEPT)
+        if val is _MISSING_SWEPT:
+            raise KeyError(
+                f"swept override {name!r} not found in the job config, neither "
+                "as a literal key nor as a nested path"
+            ) from None
+        return val
+
+
+def _current_group_choice(name: str) -> str | None:
+    """The Hydra config-group option chosen for ``name`` in the current job
+    (from ``runtime.choices``), or None when ``name`` is not a group axis or
+    no Hydra context is active."""
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        if HydraConfig.initialized():
+            choices = HydraConfig.get().runtime.choices
+            if name in choices and choices[name] is not None:
+                return str(choices[name])
+    except Exception:  # noqa: BLE001 - best-effort; fall back to the raw value
+        pass
+    return None
+
+
+def _group_choices_of_job(job) -> dict | None:
+    """``runtime.choices`` recorded in a job's hydra config, or None."""
+    try:
+        choices = job.hydra_cfg.hydra.runtime.choices
+        return None if choices is None else dict(choices)
+    except Exception:  # noqa: BLE001 - jobs loaded without hydra_cfg
+        return None
+
+
 class _TaskRunner:
     """Picklable per-cell dispatch. Collapses the old closure chain
     (_task_calls / _instrument_task / _fail_soft / _resume_short_circuit) into one
@@ -125,34 +193,60 @@ class _TaskRunner:
 
         combo = {}
         for n in names:
-            val = cfg[n]
+            val = _read_swept_value(cfg, n)
             if OmegaConf.is_config(val):
-                val = OmegaConf.to_container(val, resolve=True)
+                # A config-GROUP axis (model=small,big): the coordinate is the
+                # chosen option name, not the composed sub-config. Inside a job
+                # Hydra records the choice in runtime.choices.
+                choice = _current_group_choice(n)
+                if choice is not None:
+                    val = choice
+                else:
+                    val = OmegaConf.to_container(val, resolve=True)
             combo[n] = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray(
                 _unwrap_scalar(val)
             )
         return combo
 
     def __call__(self, cfg):
+        import warnings
         from pathlib import Path
 
         from ._provenance import write_provenance
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
+            config_fingerprint,
+            read_cell_status,
             write_cell_status,
         )
-        from ._sweep_io import read_metrics_sidecar, write_metrics_sidecar
+        from ._sweep_io import combo_key, read_metrics_sidecar, write_metrics_sidecar
+
+        chash = config_fingerprint(cfg)
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
         if self.prior_manifest is not None:
             sc = self._combo(cfg, self.prior_manifest.params)
-            if self.prior_manifest.status(sc) == "completed":
-                cached = read_metrics_sidecar(
-                    Path(self.prior_manifest.root) / (self.prior_manifest.dir(sc) or "")
-                )
-                if cached is not None:
-                    return cached
+            key = combo_key(sc)
+            dir_ = self.prior_manifest.completed.get(key)
+            if dir_ is not None:
+                cell_dir = Path(self.prior_manifest.root) / dir_
+                prior_hash = (read_cell_status(cell_dir) or {}).get("config_hash")
+                if prior_hash is not None and chash is not None and prior_hash != chash:
+                    # Same combo, different resolved config (a non-swept value
+                    # changed): reusing the cached result would silently mix
+                    # two configurations into one dataset.
+                    warnings.warn(
+                        f"resume: cell {key!r} was completed under a different "
+                        "config (fingerprint mismatch); re-running it instead "
+                        "of reusing the cached result.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    cached = read_metrics_sidecar(cell_dir)
+                    if cached is not None:
+                        return cached
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
         try:
@@ -165,21 +259,48 @@ class _TaskRunner:
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
-            write_cell_status(cwd, status="running", combo=combo, attempt=rc.attempt)
+            write_cell_status(
+                cwd,
+                status="running",
+                combo=combo,
+                attempt=rc.attempt,
+                config_hash=chash,
+            )
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
-                write_cell_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
+                write_cell_status(
+                    cwd,
+                    status="failed",
+                    combo=combo,
+                    attempt=rc.attempt,
+                    config_hash=chash,
+                )
                 raise
             finally:
                 if token is not None:
                     _CURRENT_RESUME.reset(token)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)
-            write_cell_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
+            write_cell_status(
+                cwd,
+                status="completed",
+                combo=combo,
+                attempt=rc.attempt,
+                config_hash=chash,
+            )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
             if self.on_error == "nan":
+                # The sentinel keeps only repr(exc); persist the full stack in
+                # the cell dir so a fail-soft sweep stays debuggable. (Hydra's
+                # job cwd IS the cell dir here.)
+                import traceback
+
+                try:
+                    Path("mushin_error.txt").write_text(traceback.format_exc())
+                except OSError:
+                    pass  # a full disk must not break fail-soft itself
                 return _FailedRun(exc)
             raise
 
@@ -230,6 +351,14 @@ def _write_env_snapshot(working_dir: Path) -> None:
     working_dir = Path(working_dir)
     working_dir.mkdir(parents=True, exist_ok=True)
     out = working_dir / "mushin_env.txt"
+    # Never overwrite a prior run's snapshot: a resume may execute in a
+    # different environment, and clobbering would misattribute the env the
+    # already-completed cells actually ran in. Later runs land beside it.
+    if out.exists():
+        n = 2
+        while (working_dir / f"mushin_env.{n}.txt").exists():
+            n += 1
+        out = working_dir / f"mushin_env.{n}.txt"
 
     for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
         try:
@@ -325,7 +454,7 @@ class BaseWorkflow:
 
         if not path.is_dir():
             raise FileNotFoundError(
-                f"`path` point to an existing directory, got {path}"
+                f"`path` must point to an existing directory, got {path}"
             )
 
         self._working_dir = path
@@ -343,7 +472,21 @@ class BaseWorkflow:
             param_name = override.get_key_element()
             val = override.value()
             if override.is_sweep_override():
-                val = multirun(val.list)  # type: ignore
+                if hasattr(val, "list"):  # ChoiceSweep (also glob results)
+                    val = multirun(val.list)  # type: ignore
+                elif hasattr(val, "range"):  # RangeSweep: discrete -> a grid axis
+                    val = multirun(list(val.range()))  # type: ignore
+                else:
+                    # e.g. IntervalSweep: continuous Bayesian-sweeper syntax
+                    # cannot form the Cartesian grid to_xarray assembles.
+                    raise ValueError(
+                        f"unsupported sweep override for {param_name!r}: "
+                        f"{type(val).__name__}. mushin assembles a Cartesian "
+                        "grid, so sweep axes must be discrete — use "
+                        "`param=a,b,c`, `choice(...)`, or `range(...)`; "
+                        "`interval(...)`/adaptive-sweeper syntax is not "
+                        "supported."
+                    )
 
             param_name = param_name.split("+")[-1]
             output[param_name] = val
@@ -625,12 +768,17 @@ class BaseWorkflow:
 
         _base_provenance = capture_base()
 
-        # Kill-durable resume manifest (only when resuming) — built here so the
-        # runner can hold it.
+        # Kill-durable resume state (only when resuming) — built here so the
+        # runner can hold it. Slimmed to the completed {combo_key: dir} map:
+        # out-of-process launchers pickle the runner to EVERY worker, so
+        # shipping the full N-cell manifest would cost O(N^2) serialized bytes
+        # across an N-cell sweep.
         _prior_manifest = None
         if resume:
-            _prior_manifest = Manifest.from_cell_status(
-                Path(working_dir).resolve(), list(_swept_names)
+            _prior_manifest = _PriorCells.from_manifest(
+                Manifest.from_cell_status(
+                    Path(working_dir).resolve(), list(_swept_names)
+                )
             )
 
         _task_fn, _wants_resume = _prepare_task(self.task)
@@ -880,6 +1028,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         dict(a=[1, 2, 3], b=[False, False, False])"""
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
+        import torch as tr
+
         return tr.load(file_path, weights_only=False)
 
     def run(
@@ -904,8 +1054,41 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         capture_env: bool = False,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
-        # TODO: add docs
+        """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
 
+        Extends :meth:`BaseWorkflow.run` (see it for the launcher/sweeper/
+        Hydra parameters) with metrics-workflow behavior:
+
+        Parameters
+        ----------
+        target_job_dirs : Sequence[str | Path] | None (default: None)
+            Existing job directories to evaluate over: each directory becomes
+            one cell of a ``job_dir`` sweep dimension, and the task receives
+            that cell's directory as its ``job_dir`` argument. Use this to
+            post-process completed runs (e.g. evaluate saved checkpoints)
+            instead of sweeping parameter values.
+        on_error : str (default: "raise")
+            ``"raise"`` propagates the first failing cell. ``"nan"`` records
+            the failure (``self.failures``, the sweep manifest, and a
+            ``mushin_error.txt`` traceback in the cell dir), fills that cell's
+            metrics with NaN, and keeps sweeping.
+        resume : bool (default: False)
+            Skip cells already recorded as completed in ``working_dir`` (their
+            metrics are read from the sidecar) and re-run the rest. Note that
+            completed cells are matched by their swept-parameter combination
+            only — if you changed the task body, a non-swept default, or your
+            environment since the original run, re-run from a fresh
+            ``working_dir`` instead of resuming into the old one.
+        capture_env : bool (default: False)
+            Record a ``pip freeze`` snapshot to ``working_dir/mushin_env.txt``
+            after the sweep.
+        **workflow_overrides
+            The sweep itself: ``param=value`` fixes a value,
+            ``param=multirun([...])`` makes a grid dimension. Nested config
+            paths (``**{"model.width": multirun([4, 8])}``) and config groups
+            are supported — see the workflows guide's "Sweep-axis support"
+            section.
+        """
         if target_job_dirs is not None:
             if isinstance(target_job_dirs, str):
                 raise TypeError(
@@ -1055,7 +1238,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         ):
             # Project onto the swept params only, matching `to_xarray`'s
             # `_lookup_key` so `_metrics_by_combo` and manifest keys align.
-            combo = self._combo_of_cfg(cfg)
+            combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             swept_combo = {n: combo[n] for n in swept_names}
             key = combo_key(swept_combo)
 
@@ -1113,22 +1296,36 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if isinstance(v, multirun)
         ]
 
-    def _combo_of_cfg(self, cfg: Any) -> dict[str, Any]:
+    def _combo_of_cfg(self, cfg: Any, choices: dict | None = None) -> dict[str, Any]:
         """The sanitized swept-parameter combination for a single job config.
 
         Values are unwrapped (0-d scalars), converted out of OmegaConf
         containers, and passed through `_sanitize_coordinate_for_xarray` so
         they key identically to the (already-sanitized) coordinate values used
-        to build the grid in `to_xarray`."""
+        to build the grid in `to_xarray`. Swept names may be nested config
+        paths (``model.width``). ``choices`` is the job's
+        ``hydra.runtime.choices``; a config-GROUP axis keys by its chosen
+        option name (matching the grid coordinate), not the composed
+        sub-config."""
         from omegaconf import OmegaConf
 
         combo = {}
         for n in self._swept_param_names():
-            val = cfg[n]
+            val = _read_swept_value(cfg, n)
             if OmegaConf.is_config(val):
-                val = OmegaConf.to_container(val, resolve=True)
+                if choices and choices.get(n) is not None:
+                    val = str(choices[n])
+                else:
+                    val = OmegaConf.to_container(val, resolve=True)
             combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
         return combo
+
+    def _job_choices(self, i: int) -> dict | None:
+        """``runtime.choices`` for job ``i``, when jobs align with cfgs."""
+        jobs = getattr(self, "jobs", None)
+        if jobs and len(jobs) == len(self.cfgs):
+            return _group_choices_of_job(jobs[i])
+        return None
 
     @staticmethod
     def _process_metrics(job_metrics: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1286,6 +1483,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             return str(value)
         return value  # type: ignore
 
+    def to_dataframe(self, **to_xarray_kwargs):
+        """The sweep results as a tidy long-form :class:`pandas.DataFrame`.
+
+        One row per sweep cell (times any extra metric dimensions), with the
+        sweep parameters and metrics as plain columns — the pandas view of
+        :meth:`to_xarray` (``to_xarray(...).to_dataframe().reset_index()``),
+        for when you'd rather not touch xarray at all. Keyword arguments
+        forward to :meth:`to_xarray`. Dataset-level ``attrs`` (provenance,
+        failure records) live only on the xarray form.
+        """
+        return self.to_xarray(**to_xarray_kwargs).to_dataframe().reset_index()
+
     def to_xarray(
         self,
         include_working_subdirs_as_data_var: bool = False,
@@ -1397,9 +1606,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 for i, cfg in enumerate(self.cfgs):
                     per_job = {k: col[i] for k, col in self.metrics.items()}
                     if per_job:
-                        self._metrics_by_combo[combo_key(self._combo_of_cfg(cfg))] = (
-                            per_job
-                        )
+                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        self._metrics_by_combo[combo_key(combo)] = per_job
 
         grid_names = list(orig_coords)
         grid_combos = [
@@ -1454,8 +1662,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # its working dir (cfgs and working dirs are job-aligned), then look
             # up per grid cell; a missing cell gets an empty string.
             workdir_by_combo = {
-                combo_key(self._combo_of_cfg(cfg)): str(wd)
-                for cfg, wd in zip(self.cfgs, self.multirun_working_dirs, strict=True)
+                combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i))): str(
+                    wd
+                )
+                for i, (cfg, wd) in enumerate(
+                    zip(self.cfgs, self.multirun_working_dirs, strict=True)
+                )
             }
             metrics_to_add["working_subdir"] = [
                 workdir_by_combo.get(_lookup_key(combo), "") for combo in grid_combos
@@ -1486,18 +1698,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             data[k] = (k_coords, datum)
 
         coords.update(metric_coords)
+        import json as _json
+
         # Record fail-soft failures (combo keys of NaN-filled cells) on the
         # dataset. Only set when a fail-soft run actually recorded failures so a
         # fully-completed sweep's `attrs` is unchanged from prior behavior.
+        # Stored as a JSON string: a raw list of strings is not a portable
+        # netCDF attr (the scipy engine rejects it, and netCDF4 collapses a
+        # 1-element list to a bare str on reload).
         if self.failures:
-            attrs["mushin_failures"] = [f["combo"] for f in self.failures]
+            attrs["mushin_failures"] = _json.dumps([f["combo"] for f in self.failures])
         # Attach best-effort per-run provenance (git/versions/config) from one
         # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
         # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
         prov = self.provenance
         if prov is not None:
-            import json as _json
-
             attrs["provenance"] = _json.dumps(prov)
         out = xr.Dataset(coords=coords, data_vars=data, attrs=attrs)
 
@@ -1538,7 +1753,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         | None = zen,
         pre_task_fn_wrapper: Callable[[Callable[..., None]], Callable[[Any], None]]
         | None = zen,
-        target_job_dirs: Sequence[str | Path] | None = None,  # TODO: add docs
+        target_job_dirs: Sequence[str | Path] | None = None,
         version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
         working_dir: str | None = None,
         sweeper: str | None = None,
@@ -1701,6 +1916,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         """
         import matplotlib.pyplot as plt
 
+        created_fig = ax is None
         if ax is None:
             _, ax = plt.subplots()
 
@@ -1720,5 +1936,11 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
 
         if save_filename is not None:
             plt.savefig(save_filename)
+
+        if created_fig and save_filename is not None:
+            # We created the figure and the caller asked for a file, not a live
+            # figure: close it so repeated plotting in one process doesn't
+            # accumulate open figures (matplotlib warns past 20).
+            plt.close(ax.figure)
 
         return plots

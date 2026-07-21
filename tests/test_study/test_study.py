@@ -250,3 +250,71 @@ def test_from_checkpoints_classless_task_no_num_classes(tmp_path):
     )
     result = study.run()
     assert "mse" in result.data
+
+
+def test_evaluate_checkpoints_loads_models_lazily(monkeypatch):
+    """A 10-method x 20-seed study must not hold 200 models in RAM at once:
+    checkpoints load on access inside compare's per-model loop."""
+    import mushin.benchmark as bench
+    from mushin.study._load import evaluate_checkpoints
+
+    loaded = []
+
+    def load_fn(p):
+        loaded.append(p)
+        return f"model-{p}"
+
+    def fake_compare(methods, **kwargs):
+        assert loaded == []  # nothing loaded before compare iterates
+        assert methods["a"][1] == "model-p1"
+        assert loaded == ["p1"]  # loading happens on access, one at a time
+        return "RESULT"
+
+    monkeypatch.setattr(bench, "compare", fake_compare)
+    out = evaluate_checkpoints(
+        {"a": ["p0", "p1"]}, load_fn, data=None, task="classification"
+    )
+    assert out == "RESULT"
+
+
+def test_study_threads_custom_metrics_and_correction(tmp_path):
+    """Custom-output/custom-battery researchers must be able to use Study:
+    predict_fn/metrics/prob_metrics/correction all reach compare()."""
+    import torchmetrics
+
+    class _Spy(torchmetrics.Metric):
+        def __init__(self):
+            super().__init__()
+            self.add_state("n", default=torch.tensor(0), dist_reduce_fx="sum")
+            self.dtypes = []
+
+        def update(self, preds, target):
+            self.dtypes.append(preds.dtype)
+            self.n += 1
+
+        def compute(self):
+            return torch.tensor(0.5)
+
+    spies = []
+
+    def fresh_battery_metric():
+        s = _Spy()
+        spies.append(s)
+        return s
+
+    spy = fresh_battery_metric()
+    ckpts = _save(tmp_path, ["m1", "m2"])
+    study = Study.from_checkpoints(
+        ckpts,
+        load_fn=lambda p: torch.load(p, weights_only=False),
+        data=_loader(),
+        num_classes=3,
+        metrics={"probspy": spy},
+        prob_metrics=frozenset({"probspy"}),
+        correction="none",
+    )
+    result = study.run()
+    assert isinstance(result, BenchmarkResult)
+    assert all(dt.is_floating_point for dt in spy.dtypes)  # probs routed
+    df = result.comparisons
+    assert (df["p_corrected"].fillna(-1) == df["p_value"].fillna(-1)).all()

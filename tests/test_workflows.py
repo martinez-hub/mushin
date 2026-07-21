@@ -1324,3 +1324,239 @@ def test_bare_list_sweep_arg_gives_actionable_multirun_error():
         W().run(lr=[0.01, 0.1, 1.0])
     # a legitimate multirun still works (must NOT be caught by the bare-list guard)
     W().run(lr=multirun([0.01, 0.1]), working_dir=None)
+
+
+def test_failures_attr_survives_netcdf_roundtrip(tmp_path):
+    # attrs["mushin_failures"] must be netCDF-portable: a raw list of strings
+    # collapses to a scalar str for 1-element lists (netCDF4) or fails to write
+    # (scipy engine), so it is stored as a JSON string like `provenance`.
+    import json
+
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    ds = wf.to_xarray()
+    combos = json.loads(ds.attrs["mushin_failures"])
+    assert any("a=2" in c for c in combos)
+
+    p = tmp_path / "roundtrip.nc"
+    ds.to_netcdf(p)
+    back = xr.load_dataset(p)
+    assert json.loads(back.attrs["mushin_failures"]) == combos
+
+
+def test_on_error_nan_preserves_traceback_on_disk(tmp_path):
+    """on_error='nan' must not discard the failure's stack trace: the repr in
+    wf.failures is one line; the full traceback is written into the cell dir."""
+    from mushin import multirun
+
+    wf = _grid_with_one_failure()()
+    with pytest.warns(UserWarning, match="fail"):
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    (failure,) = wf.failures
+    err_file = Path(failure["working_dir"]) / "mushin_error.txt"
+    assert err_file.exists()
+    text = err_file.read_text()
+    assert "RuntimeError" in text and "boom" in text and "Traceback" in text
+
+
+def test_dotted_override_sweep_axis(tmp_path):
+    """A nested (dotted) override like model.width=4,8 must be usable as a
+    sweep axis: combo extraction reads it as a config *path*, not a literal
+    key, and it becomes a normal xarray dimension."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model={"width": 4}):  # noqa: B006 - config template, not mutated
+            return dict(w=float(model["width"]))
+
+    wf = W()
+    wf.run(
+        working_dir=str(tmp_path / "s"),
+        **{"model.width": multirun([4, 8])},
+    )
+    ds = wf.to_xarray()
+    assert sorted(ds["model.width"].values.tolist()) == [4, 8]
+    assert float(ds["w"].sel({"model.width": 8})) == 8.0
+
+
+def test_config_group_sweep_coords_are_choice_names(tmp_path):
+    """Sweeping a Hydra config GROUP (model=small,big) must key the xarray
+    dimension by the chosen option name, not a stringified sub-config."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import make_config
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model=None):
+            return dict(w=float(model["width"]))
+
+    # The group's target field must exist on the config for Hydra to compose
+    # into it; declaring it None is the supported pattern.
+    wf = W(make_config(model=None))
+    wf.run(working_dir=str(tmp_path / "s"), model=multirun(["small", "big"]))
+    ds = wf.to_xarray()
+    assert sorted(str(v) for v in ds["model"].values) == ["big", "small"]
+    assert float(ds["w"].sel(model="big")) == 8.0
+
+
+def test_parse_overrides_expands_range_and_rejects_interval():
+    """Hydra range(...) sweeps form a grid and are expanded; continuous
+    interval(...) (Bayesian-sweeper syntax) cannot and must raise a clear
+    error instead of AttributeError."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    out = MultiRunMetricsWorkflow._parse_overrides(["x=range(1,5)"])
+    assert isinstance(out["x"], multirun) and list(out["x"]) == [1, 2, 3, 4]
+
+    with pytest.raises(ValueError, match="interval"):
+        MultiRunMetricsWorkflow._parse_overrides(["x=interval(0,1)"])
+
+
+def test_resume_reruns_completed_cells_when_config_changed(tmp_path):
+    """A cached cell is only reused if the resolved config that produced it
+    matches the current one -- changing a NON-swept value and resuming must
+    re-run every cell, not silently mix results from two configurations."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, scale=1.0):
+            CALLS["n"] += 1
+            return dict(val=float(a) * scale)
+
+    wd = str(tmp_path / "s")
+    W().run(a=multirun([1, 2]), scale=1.0, working_dir=wd)
+    assert CALLS["n"] == 2
+
+    CALLS["n"] = 0
+    wf2 = W()
+    with pytest.warns(UserWarning, match="config"):
+        wf2.run(a=multirun([1, 2]), scale=2.0, working_dir=wd, resume=True)
+    assert CALLS["n"] == 2  # both cells re-ran under the new config
+    ds = wf2.to_xarray()
+    assert float(ds["val"].sel(a=2)) == 4.0  # new config's result, not stale
+
+
+def test_resume_reuses_legacy_sidecars_without_config_hash(tmp_path):
+    """Sweeps recorded before the config-hash existed must still resume
+    (reuse) their completed cells."""
+    import json as _json
+
+    from mushin import multirun
+    from mushin._resume import STATUS_FILE
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            CALLS["n"] += 1
+            return dict(val=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2]), working_dir=str(wd))
+    # Simulate a pre-hash sweep: strip config_hash from every status sidecar.
+    for status_file in wd.glob(f"*/{STATUS_FILE}"):
+        d = _json.loads(status_file.read_text())
+        d.pop("config_hash", None)
+        status_file.write_text(_json.dumps(d))
+
+    CALLS["n"] = 0
+    W().run(a=multirun([1, 2]), working_dir=str(wd), resume=True)
+    assert CALLS["n"] == 0  # legacy cells reused, nothing re-ran
+
+
+def test_task_runner_ships_only_completed_cells(tmp_path):
+    """Out-of-process launchers pickle the runner to every worker; it must
+    carry only the completed {combo_key: dir} map, not the full manifest
+    (O(N^2) serialized bytes across N cells)."""
+    from mushin import multirun
+    from mushin._sweep_io import Manifest
+    from mushin.workflows import _PriorCells
+
+    class W(_grid_with_one_failure()):
+        pass
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="fail"):
+        W().run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
+
+    m = Manifest.from_cell_status(Path(wd), ["a", "b"])
+    prior = _PriorCells.from_manifest(m)
+    assert len(prior.completed) == 3  # the failed cell is not shipped
+    assert all("a=" in k for k in prior.completed)
+
+
+def test_dataset_netcdf_roundtrip_with_string_coords(tmp_path):
+    """The headline share-your-results flow: a sweep dataset with a string
+    sweep axis must survive to_netcdf -> load_dataset identically (values,
+    coords, and attrs)."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(opt: str, lr: float):
+            return dict(score=float(len(opt)) * lr)
+
+    wf = W()
+    wf.run(
+        opt=multirun(["adam", "sgd"]),
+        lr=multirun([0.1, 0.2]),
+        working_dir=str(tmp_path / "s"),
+    )
+    ds = wf.to_xarray()
+    p = tmp_path / "r.nc"
+    ds.to_netcdf(p)
+    back = xr.load_dataset(p)
+    xr.testing.assert_identical(ds, back)
+    assert float(back["score"].sel(opt="adam", lr=0.2)) == pytest.approx(0.8)
+
+
+def test_to_dataframe_tidy_view(tmp_path):
+    """The pandas exit ramp: one call, one row per sweep cell, sweep params
+    and metrics as plain columns -- no xarray knowledge required."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            return dict(val=float(a * 10 + b))
+
+    wf = W()
+    wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
+    df = wf.to_dataframe()
+    assert {"a", "b", "val"} <= set(df.columns)
+    assert len(df) == 4
+    assert float(df[(df.a == 2) & (df.b == 1)]["val"].iloc[0]) == 21.0
+    # kwargs forward to to_xarray
+    df2 = wf.to_dataframe(include_working_subdirs_as_data_var=True)
+    assert "working_subdir" in df2.columns

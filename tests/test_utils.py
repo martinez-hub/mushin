@@ -209,3 +209,34 @@ def test_original_cwd_uses_hydra_when_available(monkeypatch):
 
     monkeypatch.setattr(utils, "_hydra_original_cwd", lambda: "/tmp/launch-dir")
     assert original_cwd() == Path("/tmp/launch-dir")
+
+
+def test_load_from_checkpoint_missing_weights_key_names_available(tmp_path):
+    """A wrong weights_key must raise a real error listing the available keys,
+    not a bare AssertionError (stripped entirely under python -O)."""
+    import torch
+
+    from mushin._utils import load_from_checkpoint
+
+    ckpt = tmp_path / "m.ckpt"
+    torch.save({"state_dict": {"w": torch.zeros(1)}}, ckpt)
+    model = torch.nn.Linear(1, 1, bias=False)
+    with pytest.raises(KeyError, match="wrong_key.*state_dict"):
+        load_from_checkpoint(model, ckpt=ckpt, weights_key="wrong_key")
+
+
+def test_load_from_checkpoint_missing_model_attr_raises(tmp_path):
+    import torch
+
+    from mushin._utils import load_from_checkpoint
+
+    ckpt = tmp_path / "m.ckpt"
+    torch.save({"w": torch.zeros(1, 1)}, ckpt)
+    model = torch.nn.Linear(1, 1, bias=False)
+    with pytest.raises(AttributeError, match="no_such_submodule"):
+        load_from_checkpoint(model, ckpt=ckpt, model_attr="no_such_submodule")
+
+
+def test_load_experiment_missing_path_raises_filenotfound(tmp_path):
+    with pytest.raises(FileNotFoundError, match="nope"):
+        load_experiment(tmp_path / "nope")

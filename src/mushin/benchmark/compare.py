@@ -26,6 +26,7 @@ def compare(
     prob_metrics: frozenset[str] | None = None,
     test: str = "wilcoxon",
     alpha: float = 0.05,
+    correction: str = "holm",
     ignore_index: int | None = None,
     device: torch.device | None = None,
 ) -> BenchmarkResult:
@@ -33,6 +34,12 @@ def compare(
 
     Parameters
     ----------
+    methods : dict[str, Sequence[torch.nn.Module]]
+        ``{method_name: [model_per_seed, ...]}``; every model is evaluated on
+        ``data``, giving one score per (method, seed).
+    data : Iterable
+        A re-iterable batch source (e.g. a ``DataLoader``); it is streamed once
+        per model.
     task : str or Task
         A registered task name (``"classification"``, ``"segmentation"``,
         ``"detection"``, ``"regression"``, ``"retrieval"``, ``"image_quality"``,
@@ -41,10 +48,30 @@ def compare(
         Required (when ``metrics`` is not provided) only for tasks whose battery
         needs it — ``"classification"`` and ``"segmentation"``; ignored for the
         others.
+    predict_fn : callable or None
+        ``(model, x) -> (preds, probs)``; defaults to the task's.
+    metrics : dict[str, torchmetrics.Metric] or None
+        Replaces the task's battery entirely. A custom battery gets no implicit
+        probability routing — name the probability-consuming entries in
+        ``prob_metrics``.
+    prob_metrics : frozenset[str] or None
+        Battery entries fed probabilities instead of hard predictions. ``None``
+        means the task's own set when the task's battery is used, and the empty
+        set when a custom ``metrics=`` battery is given. Every name must be a
+        key of the battery in use.
+    test : str
+        Statistical test for pairwise method comparison; one of
+        ``mushin.benchmark.available_tests()`` (default paired Wilcoxon).
+    alpha : float
+        Significance level for the (multiple-comparison-corrected) comparisons.
+    correction : str
+        Multiple-comparison correction applied per metric across method pairs:
+        ``"holm"`` (default), ``"bonferroni"``, ``"fdr_bh"``
+        (Benjamini-Hochberg FDR), or ``"none"`` for raw p-values.
     ignore_index : int or None
         Label to exclude from segmentation metrics (e.g. a void/boundary class).
-    prob_metrics : frozenset[str] or None
-        Metrics whose names need probabilities; defaults to the task's set.
+    device : torch.device or None
+        Evaluation device; defaults to the device of each model's parameters.
     """
     spec = task if isinstance(task, Task) else get_task(task)
 
@@ -62,7 +89,22 @@ def compare(
         battery = spec.battery(num_classes, ignore_index=ignore_index)
 
     fn = predict_fn or spec.predict_fn
-    pm = spec.prob_metrics if prob_metrics is None else prob_metrics
+    if prob_metrics is None:
+        # The task's prob routing applies only to the task's own battery. A
+        # custom `metrics=` battery gets NO implicit routing: silently feeding
+        # argmax hard predictions to a custom probability metric (or probs to a
+        # custom hard metric that shares a task metric's name) computes a wrong
+        # value with no error. Pass prob_metrics= explicitly for custom batteries.
+        pm = spec.prob_metrics if metrics is None else frozenset()
+    else:
+        pm = frozenset(prob_metrics)
+    missing = pm - battery.keys()
+    if missing:
+        raise ValueError(
+            f"prob_metrics {sorted(missing)} are not in the metric battery "
+            f"{sorted(battery)}; prob_metrics must name entries of the battery "
+            "being used."
+        )
 
     results: dict[str, list[dict[str, float]]] = {}
     for name, models in methods.items():
@@ -74,5 +116,5 @@ def compare(
         ]
 
     ds = to_dataset(results)
-    comparisons = compare_methods(ds, test=test, alpha=alpha)
+    comparisons = compare_methods(ds, test=test, alpha=alpha, correction=correction)
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)

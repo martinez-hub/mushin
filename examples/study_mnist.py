@@ -1,6 +1,7 @@
 """Train two small classifiers with Study on MNIST and compare them.
 
 Run it (downloads MNIST):  python examples/study_mnist.py
+Requires the eval extra:  pip install "mushin-py[eval]"
 
 The reusable `run()` core is exercised by the test suite on tiny synthetic data,
 so CI never downloads MNIST.

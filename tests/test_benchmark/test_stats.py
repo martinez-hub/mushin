@@ -159,3 +159,71 @@ def test_compare_methods_warns_on_method_constant_in_every_metric():
     )
     with pytest.warns(UserWarning, match="identical scores across all"):
         compare_methods(ds, test="welch")
+
+
+def test_paired_test_reports_paired_effect_size():
+    # For paired tests the effect size must be Cohen's d_z = mean(diff)/std(diff),
+    # not the pooled independent-samples d (which ignores the pairing).
+    a = np.array([1.0, 2.0, 3.0, 4.0])
+    diffs = np.array([0.5, 0.6, 0.4, 0.5])
+    b = a - diffs
+    results = {
+        "A": [{"m": float(v)} for v in a],
+        "B": [{"m": float(v)} for v in b],
+    }
+    df = compare_methods(to_dataset(results), test="ttest_rel", alpha=0.05)
+    expected = diffs.mean() / diffs.std(ddof=1)
+    assert np.isclose(df["effect_size"].iloc[0], expected)
+
+
+def test_unpaired_test_keeps_pooled_effect_size():
+    a = [1.0, 2.0, 3.0, 4.0]
+    b = [0.5, 1.4, 2.6, 3.5]
+    results = {
+        "A": [{"m": v} for v in a],
+        "B": [{"m": v} for v in b],
+    }
+    df = compare_methods(to_dataset(results), test="welch", alpha=0.05)
+    assert np.isclose(df["effect_size"].iloc[0], cohens_d(a, b))
+
+
+def test_bh_correction_known_values():
+    from mushin.benchmark._stats import bh_correction
+
+    # classic BH: adjusted_i = min over j>=i of p_(j) * n / rank_j
+    assert np.allclose(bh_correction([0.01, 0.02, 0.03, 0.04]), [0.04] * 4)
+    # monotone from the top: rank-2's 0.03*3/2=0.045 is capped by rank-3's 0.04
+    assert np.allclose(bh_correction([0.005, 0.04, 0.03]), [0.015, 0.04, 0.04])
+    # NaNs stay NaN and are excluded from the family
+    out = bh_correction([0.01, np.nan, 0.02])
+    assert np.isnan(out[1]) and np.allclose([out[0], out[2]], [0.02, 0.02])
+
+
+def test_bonferroni_correction_caps_at_one():
+    from mushin.benchmark._stats import bonferroni_correction
+
+    assert bonferroni_correction([0.01, 0.4, 0.6]) == [0.03, 1.0, 1.0]
+
+
+def _three_method_ds():
+    rng = np.random.default_rng(1)
+    results = {
+        m: [{"acc": float(v)} for v in base + 0.01 * rng.standard_normal(6)]
+        for m, base in [("a", 0.9), ("b", 0.7), ("c", 0.5)]
+    }
+    return to_dataset(results)
+
+
+def test_compare_methods_correction_options():
+    ds = _three_method_ds()
+    holm = compare_methods(ds, test="welch", correction="holm")
+    none = compare_methods(ds, test="welch", correction="none")
+    bh = compare_methods(ds, test="welch", correction="fdr_bh")
+    assert np.allclose(none["p_corrected"], none["p_value"])
+    assert (holm["p_corrected"] >= holm["p_value"] - 1e-15).all()
+    assert (bh["p_corrected"] <= holm["p_corrected"] + 1e-15).all()  # BH less strict
+
+
+def test_compare_methods_unknown_correction_raises():
+    with pytest.raises(ValueError, match="correction"):
+        compare_methods(_three_method_ds(), correction="fdr_by")

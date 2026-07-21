@@ -8,6 +8,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.9.0] - 2026-07-20
+
+### Added
+
+- Provenance records the accelerator identity (CUDA/cuDNN/device name), `seed_everything_per_rank` persists the effective seed to a per-rank JSON in the run dir, and a resume no longer overwrites the environment snapshot recorded for earlier cells.
+- Study and evaluate_checkpoints now accept predict_fn/metrics/prob_metrics/correction and forward them to compare (custom-output models and custom batteries work through Study), and checkpoints load lazily one at a time instead of holding every method x seed model in RAM.
+- Sweep axes got first-class support for nested (dotted) params and Hydra config groups (the dataset coordinate is the chosen option name), `range(...)` overrides expand to their values, and unsupported continuous/adaptive sweeps (`interval(...)`) raise a clear error instead of crashing or yielding an all-NaN grid.
+- The MCP server gained `get_failures` (failed cells + tracebacks from the manifest) and `get_provenance` (git/package/accelerator records) tools, and now summarizes long coordinate axes and metric curves instead of flooding the agent's context with raw arrays.
+- The wheel now ships a PEP 561 `py.typed` marker, so mypy/pyright/IDEs see mushin's type annotations.
+- `MultiRunMetricsWorkflow.to_dataframe()` (and `experiment.workflow.to_dataframe()`) returns the sweep as a tidy pandas DataFrame in one call; README and quickstart show the pandas path alongside the dataset.
+- `compare`/`compare_methods`/`compare_llms` accept `correction=` -- `holm` (default), `bonferroni`, `fdr_bh` (Benjamini-Hochberg), or `none`; the statistics guide documents the per-metric family scope.
+
+### Changed
+
+- `import mushin` is ~5x faster (~0.13s from ~0.61s): torch now loads on first use, not at import time.
+
+### Fixed
+
+- HydraDDP/HydraFSDP now track their child rank processes like Lightning's base launcher -- children are reaped if rank 0 dies (no more orphaned GPU processes), signal forwarding works, and per-rank thread pools are capped; checkpoint/experiment loading errors are real exceptions with actionable messages instead of bare asserts.
+- HydraDDP/HydraFSDP rank startup is staggered by a deterministic, tunable delay (`MUSHIN_DDP_LAUNCH_DELAY`, default 1s) instead of a hard-coded random 1-5s per rank, and the re-launch command builds a Windows-safe `hydra.run.dir` override.
+- Paired tests now report the paired effect size (Cohen's d_z) instead of the pooled-variance d; `mushin_failures` is stored as a JSON attr so failed-sweep datasets survive a netCDF round-trip; a custom `metrics=` battery no longer inherits the task's probability routing silently (pass `prob_metrics=` explicitly, unknown names now raise).
+- Resilient sweeps got tougher: a corrupt (mid-write-killed) sweep manifest no longer aborts resume, atomic sidecar writes use unique temp names so concurrent writers cannot clobber each other, and `on_error="nan"` now writes the full traceback to `mushin_error.txt` in the failed cell's directory.
+- Resume now verifies a config fingerprint before reusing a completed cell -- changing a non-swept value and resuming re-runs the affected cells (with a warning) instead of silently mixing two configurations into one dataset; resuming also no longer ships the full manifest to every worker.
+- The MCP server now surfaces workflow-sweep metrics from `mushin_metrics.json` (previously only MetricsCallback `.pt` files were read), and a single corrupt per-run `config.yaml` no longer makes the whole experiment unqueryable.
+- `parse_score` no longer misreads an incidental leading integer ("0 issues found...") as a 0.0 score -- a bare integer with trailing text now raises; the LLM guide documents cache-invalidation rules and when paired tests are valid.
+
+### Misc
+
+- CI now tests macOS (Apple Silicon + the Intel dependency branch), executes notebooks with the netCDF engine they recommend, and the publish workflow smoke-tests the built wheel and SHA-pins the OIDC publish action; the Python 3.14 classifier is withheld until its CI leg is required to pass.
+- Docs: eval-extra callouts everywhere they were missing (examples index, notebooks 02/03/05, custom/segmentation guides, example docstrings), a "Versioning & scope" statement in the README, a tracker (W&B/TensorBoard) how-to in the workflows guide, `multirun`/`hydra_list` reference entries, and the decorator quickstart now points at the decorator example. `MultiRunMetricsWorkflow.run` is fully documented and `plot` no longer leaks figures.
+- Notebook 07 demonstrates xarray group-by (split-apply-combine), notebook 05 finally shows its plot on the docs site, and a netCDF round-trip test pins string-coordinate datasets.
+
+
+## [0.8.0] - 2026-07-20
+
+### Changed
+
+- The evaluation layer (`compare`, the metric batteries, LLM evaluation, and `Study`) now requires the optional `eval` extra: `pip install mushin-py[eval]`. This keeps the core sweep→dataset install lean — `torchmetrics` and `scipy` are no longer base dependencies. Accessing these features without the extra raises a clear install hint. The `detection`/`image`/`audio` battery extras now imply `eval`.
+
 ## [0.7.0] - 2026-07-18
 
 ### Added
@@ -247,7 +286,9 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/martinez-hub/mushin/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/martinez-hub/mushin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/martinez-hub/mushin/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/martinez-hub/mushin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/martinez-hub/mushin/compare/v0.4.1...v0.5.0

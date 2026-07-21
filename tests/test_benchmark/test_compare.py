@@ -299,3 +299,59 @@ def test_compare_accepts_registered_task_name():
     models = [_Perfect(data) for _ in range(3)]
     result = compare(methods={"m": models}, data=data, task="acc_only", num_classes=3)
     assert "accuracy" in result.data
+
+
+class _DTypeSpy(__import__("torchmetrics").Metric):
+    """Records what it was fed (dtype/shape) and computes a constant."""
+
+    def __init__(self):
+        super().__init__()
+        self.add_state("n", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.seen = []
+
+    def update(self, preds, target):
+        self.seen.append((preds.dtype, tuple(preds.shape)))
+        self.n += 1
+
+    def compute(self):
+        return torch.tensor(0.5)
+
+
+def test_custom_metrics_do_not_inherit_task_prob_routing():
+    # With metrics= given and prob_metrics=None, NO metric may silently receive
+    # the task's default prob routing -- even one named like a task prob metric.
+    data = _loader(seed=0)
+    spy = _DTypeSpy()
+    compare(
+        methods={"m": [_Perfect(data)]},
+        data=data,
+        task="classification",
+        metrics={"auroc": spy},
+    )
+    assert all(dtype == torch.int64 for dtype, _ in spy.seen)  # hard preds
+
+
+def test_explicit_prob_metrics_routes_probabilities():
+    data = _loader(seed=0)
+    spy = _DTypeSpy()
+    compare(
+        methods={"m": [_Perfect(data)]},
+        data=data,
+        task="classification",
+        metrics={"brier": spy},
+        prob_metrics={"brier"},
+    )
+    # probabilities: float, (batch, num_classes)
+    assert all(dtype.is_floating_point and shape[-1] == 3 for dtype, shape in spy.seen)
+
+
+def test_prob_metrics_outside_battery_raises():
+    data = _loader(seed=0)
+    with pytest.raises(ValueError, match="prob_metrics"):
+        compare(
+            methods={"m": [_Perfect(data)]},
+            data=data,
+            task="classification",
+            metrics={"acc": _DTypeSpy()},
+            prob_metrics={"brier"},
+        )

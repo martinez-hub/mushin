@@ -1,5 +1,10 @@
 # Custom metrics & predict_fn
 
+!!! note "Requires the `eval` extra"
+    Tasks, batteries, and `compare` are mushin's optional evaluation layer —
+    install them with `pip install "mushin-py[eval]"`. Importing them without it
+    raises a clear install hint. See [Installation](../install.md#optional-extras).
+
 mushin's metric batteries and prediction logic are fully replaceable. This guide
 shows how to extend mushin with custom metrics and how to adapt models that
 don't return plain tensors.

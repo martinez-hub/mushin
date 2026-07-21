@@ -3,7 +3,9 @@
 This page walks through the flagship example: run a parameter sweep and get the
 results back as a labeled `xarray.Dataset`.
 
-The full runnable script is at `examples/sweep_to_dataset.py` in the repository.
+The decorator flow below runs as `examples/parallel_sweep.py` in the
+repository; `examples/sweep_to_dataset.py` is the same flow written with the
+class API (`MultiRunMetricsWorkflow`), which this page introduces further down.
 
 Decorate a function with `@mushin.sweep`, sweep it over a grid, and get results
 back as a labeled `xarray.Dataset` — no subclassing, no callbacks. Whatever the
@@ -22,6 +24,22 @@ ds = experiment.run(
     seed=mushin.multirun([0, 1, 2]),
 )
 ```
+
+**Prefer pandas?** You never have to touch xarray: one call turns the sweep
+into a tidy long-form table (one row per cell, params and metrics as columns):
+
+```python
+df = experiment.workflow.to_dataframe()   # or ds.to_dataframe().reset_index()
+#      lr  seed  accuracy
+# 0  0.01     0     0.914
+# 1  0.01     1     0.907
+# ...
+df.groupby("lr")["accuracy"].mean()       # plain pandas from here on
+```
+
+The labeled dataset is still the richer object (`.sel`, `.mean("seed")`,
+provenance in `attrs`, netCDF round-trip) — but it's an option, not a
+prerequisite.
 
 Need the full tool — `.failures`, `.plot()`, provenance, custom `to_xarray`? Drop
 to `experiment.workflow` (the last-run instance), or use the `MultiRunMetricsWorkflow`

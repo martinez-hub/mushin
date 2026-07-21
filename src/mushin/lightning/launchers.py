@@ -10,7 +10,6 @@ from pathlib import Path
 from time import sleep
 from typing import Any, TypeVar
 
-import numpy as np
 from hydra.core.hydra_config import HydraConfig
 from hydra_zen import load_from_yaml
 from omegaconf.errors import ConfigAttributeError
@@ -36,6 +35,29 @@ def _set_env(name: str, value: str) -> None:
 def _setup_environment() -> None:
     if distributed.is_initialized():
         distributed.destroy_process_group()
+
+
+def _hydra_run_dir_override(cwd) -> str:
+    """The ``hydra.run.dir=`` override value for a re-launched rank: quoted for
+    Hydra's override grammar (dir names may contain ``=`` etc.), with forward
+    slashes because backslash is an *escape character* inside that grammar's
+    quoted strings — a raw Windows cwd would be corrupted."""
+    from pathlib import PurePath
+
+    p = cwd if isinstance(cwd, PurePath) else Path(cwd)
+    return f'"{p.as_posix()}"'
+
+
+def _interrank_delay() -> float:
+    """Seconds to stagger between spawning child ranks (avoids dataloader
+    startup contention). Override with ``MUSHIN_DDP_LAUNCH_DELAY`` — e.g. ``0``
+    for short jobs in large sweeps, where the default 1s/rank compounds.
+    Negative values clamp to 0; unparsable values fall back to the default."""
+    raw = os.environ.get("MUSHIN_DDP_LAUNCH_DELAY", "1")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1.0
 
 
 def _validate_external_world_size(
@@ -83,9 +105,7 @@ def _subprocess_call(
     env_copy["LOCAL_RANK"] = f"{local_rank}"
     # CWD is the Hydra working directory
     cwd = os.getcwd()
-    os_cwd = (
-        f'"{cwd}"'  # this is needed to handle characters like `=` in the directory name
-    )
+    os_cwd = _hydra_run_dir_override(cwd)
 
     command = [
         sys.executable,
@@ -102,7 +122,11 @@ def _subprocess_call(
 
     # Validate that minimal configuration requirements
     config = Path(hydra_output) / "config.yaml"
-    assert config.exists()
+    if not config.exists():
+        raise FileNotFoundError(
+            f"{config} not found; HydraDDP re-launches each rank from the "
+            "job's saved Hydra config and cannot proceed without it."
+        )
     cfg = load_from_yaml(config)
     if "trainer" not in cfg or "module" not in cfg:
         raise ConfigAttributeError(
@@ -126,7 +150,7 @@ def _subprocess_call(
         f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
         f"hydra.job.name={hydra_cfg.job.name}",
     ]
-    subprocess.Popen(command, env=env_copy, cwd=cwd)
+    return subprocess.Popen(command, env=env_copy, cwd=cwd)
 
 
 if PL_VERSION >= Version(1, 6, 0):
@@ -135,6 +159,24 @@ if PL_VERSION >= Version(1, 6, 0):
     from pytorch_lightning.strategies.launchers.subprocess_script import (
         _SubprocessScriptLauncher,
     )
+
+    # Private Lightning helpers mirrored from the base launcher's lifecycle:
+    # the observer reaps child ranks if rank 0 dies (no orphaned GPU
+    # processes), and the thread cap stops N ranks from each spawning
+    # cpu_count() OMP/torch threads. Guarded so a future PL relocation
+    # degrades to the old behavior instead of breaking imports.
+    try:
+        from pytorch_lightning.strategies.launchers.subprocess_script import (
+            _launch_process_observer,
+        )
+    except ImportError:  # pragma: no cover
+        _launch_process_observer = None
+    try:
+        from lightning_fabric.utilities.distributed import (
+            _set_num_threads_if_needed,
+        )
+    except ImportError:  # pragma: no cover
+        _set_num_threads_if_needed = None
 
     class _HydraReattachMixin:
         """Hydra-aware launcher behavior shared by ``HydraDDP`` and ``HydraFSDP``:
@@ -295,18 +337,27 @@ if PL_VERSION >= Version(1, 6, 0):
             ReturnType
             """
             del trainer  # unused
-            if (
-                not self.cluster_environment.creates_processes_externally
-            ):  # pragma: no cover
+            if not self.cluster_environment.creates_processes_externally:
                 testing = function.__name__ == "_test_impl"
                 predicting = function.__name__ == "_predict_impl"
                 self._call_children_scripts(testing=testing, predicting=predicting)
+                # Reap child ranks if this (rank 0) process dies, instead of
+                # leaving them orphaned holding GPU memory.
+                if _launch_process_observer is not None:
+                    _launch_process_observer(self.procs)
+            # Cap intra-op threads so N ranks don't each spawn cpu_count()
+            # thread pools (mirrors the base launcher).
+            if _set_num_threads_if_needed is not None:
+                _set_num_threads_if_needed(num_processes=self.num_processes)
 
             return function(*args, **kwargs)
 
         def _call_children_scripts(self, testing: bool, predicting: bool):
             # bookkeeping of spawned processes
             self._check_can_spawn_children()
+            # Track the children like the base class: kill()/signal forwarding
+            # iterate self.procs, and the process observer watches it.
+            self.procs = []
 
             # DDP Environment variables (tracked so _teardown clears only these)
             _set_env("MASTER_ADDR", self.cluster_environment.main_address)
@@ -317,17 +368,18 @@ if PL_VERSION >= Version(1, 6, 0):
 
             node_rank = self.cluster_environment.node_rank()
             for local_rank in range(1, self.num_processes):
-                _subprocess_call(
+                proc = _subprocess_call(
                     local_rank,
                     _global_rank(node_rank, self.num_processes, local_rank),
                     testing,
                     predicting,
                 )
+                self.procs.append(proc)
 
-                # starting all processes at once can cause issues
-                # with dataloaders delay between 1-10 seconds
-                delay = np.random.uniform(1, 5, 1)[0]
-                sleep(delay)
+                # Stagger rank startup (dataloader contention); tunable
+                # via MUSHIN_DDP_LAUNCH_DELAY -- the old random 1-5s per rank
+                # compounded into hours across a large multi-GPU sweep.
+                sleep(_interrank_delay())
 
 else:  # pragma: no cover
     from pytorch_lightning.plugins.training_type.ddp import DDPPlugin  # type: ignore
@@ -448,10 +500,10 @@ else:  # pragma: no cover
                     predicting=predicting,
                 )
 
-                # starting all processes at once can cause issues
-                # with dataloaders delay between 1-10 seconds
-                delay = np.random.uniform(1, 5, 1)[0]
-                sleep(delay)
+                # Stagger rank startup (dataloader contention); tunable
+                # via MUSHIN_DDP_LAUNCH_DELAY -- the old random 1-5s per rank
+                # compounded into hours across a large multi-GPU sweep.
+                sleep(_interrank_delay())
 
             self._rank_0_has_called_call_children_scripts = True
 

@@ -37,9 +37,10 @@ def test_submitit_slurm_config_rejects_bad_inputs():
         submitit_slurm_config(nodes=1, gpus_per_node=4, tasks_per_node=1)
 
 
-def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch):
+def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch, tmp_path):
     from mushin.lightning import seed_everything_per_rank
 
+    monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
     monkeypatch.delenv("RANK", raising=False)
     monkeypatch.setenv("SLURM_PROCID", "3")
     assert seed_everything_per_rank(1000) == 1003  # base + global rank
@@ -48,9 +49,10 @@ def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch):
     assert seed_everything_per_rank(1000) == 1005
 
 
-def test_seed_everything_per_rank_defaults_rank_zero(monkeypatch):
+def test_seed_everything_per_rank_defaults_rank_zero(monkeypatch, tmp_path):
     from mushin.lightning import seed_everything_per_rank
 
+    monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
     monkeypatch.delenv("RANK", raising=False)
     monkeypatch.delenv("SLURM_PROCID", raising=False)
     assert seed_everything_per_rank(42) == 42
@@ -71,3 +73,23 @@ def test_multinode_ddp_end_to_end(tmp_path):
         "Provide a SLURM allocation + partition/account, then implement the launch "
         "per docs/guides/multinode.md (this is the merge gate)."
     )
+
+
+def test_seed_everything_per_rank_persists_seed(monkeypatch, tmp_path):
+    """The effective seed must be recoverable from the run's artifacts: if it
+    only lives in-process, the exact cell can never be re-run identically."""
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RANK", "3")
+    from mushin.lightning import seed_everything_per_rank
+
+    seed = seed_everything_per_rank(1000)
+    # rank-suffixed so DDP ranks sharing a dir don't clobber rank 0's record
+    rec = json.loads((tmp_path / "mushin_seed_rank3.json").read_text())
+    assert rec["seed"] == seed == 1003
+    assert rec["rank"] == 3
+
+    monkeypatch.setenv("RANK", "0")
+    assert seed_everything_per_rank(1000) == 1000
+    assert json.loads((tmp_path / "mushin_seed.json").read_text())["seed"] == 1000

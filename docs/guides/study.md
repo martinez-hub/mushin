@@ -1,5 +1,9 @@
 # Studies
 
+!!! note "Requires the `eval` extra"
+    `Study` builds on `compare`, mushin's optional evaluation layer —
+    `pip install "mushin-py[eval]"`. See [Installation](../install.md#optional-extras).
+
 `Study` combines a multi-seed training sweep with `compare` into a single call:
 define your training functions once, specify seeds and evaluation data, and get
 back a `BenchmarkResult` — no intermediate bookkeeping, no manual checkpoint

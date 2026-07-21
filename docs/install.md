@@ -20,11 +20,19 @@ uv add mushin-py
 
 ## Optional extras
 
+The core install is the sweep → dataset workflow. The **evaluation layer**
+(`compare`, the metric batteries, LLM evaluation, and `Study`) is the `eval`
+extra — accessing those features without it raises a clear install hint.
+
 | Extra | What it adds | Install |
 |---|---|---|
-| `viz` | matplotlib (for `RobustnessCurve` plots) | `pip install "mushin-py[viz]"` |
+| `eval` | `compare`, metric batteries, LLM eval, `Study` (adds torchmetrics, scipy) | `pip install "mushin-py[eval]"` |
+| `viz` | matplotlib (for plotting results) | `pip install "mushin-py[viz]"` |
 | `netcdf` | netCDF4 (save/load datasets as `.nc` files) | `pip install "mushin-py[netcdf]"` |
 | `mcp` | MCP server (`mushin-mcp`) for Claude Code integration | `pip install "mushin-py[mcp]"` |
+| `detection` / `image` / `audio` | extra metric batteries (imply `eval`) | `pip install "mushin-py[detection]"` |
+
+Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 
 ## Support matrix
 

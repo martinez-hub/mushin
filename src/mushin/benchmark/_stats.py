@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import warnings
 
 import numpy as np
@@ -56,6 +57,50 @@ def cohens_d(a, b) -> float:
     return diff / pooled_sd
 
 
+def cohens_dz(a, b) -> float:
+    """Paired-samples Cohen's :math:`d_z`: ``mean(a - b) / std(a - b)``.
+
+    The effect size matching the paired tests (``wilcoxon``, ``ttest_rel``);
+    the pooled-variance :func:`cohens_d` ignores the pairing and understates
+    the effect when the per-seed differences are consistent.
+    """
+    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    sd = float(d.std(ddof=1))
+    mean = float(d.mean())
+    if sd == 0.0:
+        # identical differences every seed: zero effect only if that constant
+        # difference is itself ~0; otherwise the shift is perfectly consistent
+        # (d_z is undefined/infinite) and 0.0 would hide a real difference.
+        if np.isclose(mean, 0.0):
+            return 0.0
+        return float("inf") if mean > 0 else float("-inf")
+    return mean / sd
+
+
+def _normalize_failures(val) -> list[str]:
+    """``attrs['mushin_failures']`` as a list of combo strings, any vintage.
+
+    Current writers store a JSON string. Legacy in-memory datasets used a raw
+    list, a legacy 1-element list round-trips netCDF4 as a bare string, and a
+    multi-element one comes back as an ndarray.
+    """
+    if val is None:
+        return []
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+        except ValueError:
+            return [val]  # legacy scalar: a single combo string
+        if isinstance(parsed, list):
+            return [str(c) for c in parsed]
+        return [str(parsed)]
+    if isinstance(val, np.ndarray):
+        return [str(c) for c in val.tolist()]
+    if isinstance(val, (list, tuple)):
+        return [str(c) for c in val]
+    return [str(val)]
+
+
 def holm_correction(pvalues) -> list[float]:
     """Holm-Bonferroni step-down correction, returned in original order.
 
@@ -75,6 +120,53 @@ def holm_correction(pvalues) -> list[float]:
         running = max(running, (n_valid - rank) * p)
         corrected[idx] = min(running, 1.0)
     return [float(c) for c in corrected]
+
+
+def bonferroni_correction(pvalues) -> list[float]:
+    """Bonferroni correction (``p * n_valid``, capped at 1), original order.
+    NaNs stay NaN and are excluded from the family size."""
+    pvalues = np.asarray(pvalues, dtype=float)
+    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
+    return [
+        float("nan") if np.isnan(p) else float(min(p * n_valid, 1.0)) for p in pvalues
+    ]
+
+
+def bh_correction(pvalues) -> list[float]:
+    """Benjamini-Hochberg (FDR) adjusted p-values, returned in original order.
+
+    ``adj_(i) = min_{j >= i}( p_(j) * n / rank_j )`` over the ascending order,
+    capped at 1. NaN p-values stay NaN and are excluded from the family."""
+    pvalues = np.asarray(pvalues, dtype=float)
+    m = len(pvalues)
+    valid = ~np.isnan(pvalues)
+    n_valid = int(np.count_nonzero(valid))
+    corrected = np.full(m, np.nan)
+    if n_valid:
+        idx = np.flatnonzero(valid)
+        order = idx[np.argsort(pvalues[idx])]  # ascending among valid
+        running = 1.0
+        for rank in range(n_valid, 0, -1):  # largest p first
+            i = order[rank - 1]
+            running = min(running, pvalues[i] * n_valid / rank)
+            corrected[i] = min(running, 1.0)
+    return [float(c) for c in corrected]
+
+
+def _no_correction(pvalues) -> list[float]:
+    return [float(p) for p in pvalues]
+
+
+_CORRECTIONS = {
+    "holm": holm_correction,
+    "bonferroni": bonferroni_correction,
+    "fdr_bh": bh_correction,
+    "none": _no_correction,
+}
+
+
+def available_corrections() -> list[str]:
+    return list(_CORRECTIONS)
 
 
 def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
@@ -116,11 +208,19 @@ def _is_constant(values) -> bool:
 
 
 def compare_methods(
-    ds: xr.Dataset, test: str = "wilcoxon", alpha: float = 0.05
+    ds: xr.Dataset,
+    test: str = "wilcoxon",
+    alpha: float = 0.05,
+    correction: str = "holm",
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
-    Holm correction is applied per metric across the method pairs. A method whose
+    ``correction`` — one of :func:`available_corrections` (``"holm"`` default,
+    ``"bonferroni"``, ``"fdr_bh"`` for Benjamini-Hochberg FDR, ``"none"`` for
+    raw p-values) — is applied **per metric** across the method pairs; the
+    family is one metric's pairs, not the whole battery, so scanning for
+    "significant on any metric" across a large battery still inflates
+    family-wise error. A method whose
     scores are constant across all seeds (for a metric) has no sampling
     distribution, so comparisons involving it are masked — ``p_value``,
     ``p_corrected`` and ``effect_size`` become ``NaN`` and ``significant`` is
@@ -139,7 +239,7 @@ def compare_methods(
         completeness signal, never on raw NaN values in the data, so a metric that
         is legitimately NaN for other reasons does not trigger it.
     """
-    failures = ds.attrs.get("mushin_failures")
+    failures = _normalize_failures(ds.attrs.get("mushin_failures"))
     if failures:
         raise IncompleteSweepError(
             f"{len(failures)} run(s) failed ({', '.join(map(str, failures))}); "
@@ -148,9 +248,14 @@ def compare_methods(
         )
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    if correction not in _CORRECTIONS:
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
+    correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])
     warn_if_underpowered(test, n_seeds, alpha)
-    func, _ = _TESTS[test]
+    func, is_paired = _TESTS[test]
     methods = [str(m) for m in ds["method"].values]
 
     rows = []
@@ -166,7 +271,9 @@ def compare_methods(
         recs, pvals = [], []
         for a, b in itertools.combinations(methods, 2):
             va, vb = vals[a], vals[b]
-            eff = cohens_d(va, vb)
+            # Match the effect size to the test: paired tests get d_z over the
+            # per-seed differences; unpaired tests get the pooled-variance d.
+            eff = cohens_dz(va, vb) if is_paired else cohens_d(va, vb)
             if a in constant or b in constant:
                 # A method with zero within-group variance has no valid sampling
                 # distribution, so any comparison involving it is masked (regardless
@@ -194,7 +301,7 @@ def compare_methods(
                 }
             )
             pvals.append(p)
-        corrected = holm_correction(pvals) if len(pvals) > 1 else pvals
+        corrected = correct(pvals) if len(pvals) > 1 else pvals
         for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)

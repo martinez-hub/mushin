@@ -1,5 +1,10 @@
 # Segmentation
 
+!!! note "Requires the `eval` extra"
+    `compare` and `Study` are mushin's optional evaluation layer — install them
+    with `pip install "mushin-py[eval]"`. Importing them without it raises a
+    clear install hint. See [Installation](../install.md#optional-extras).
+
 `compare` and `Study` support semantic segmentation via `task="segmentation"`.
 Models receive `(N, C, H, W)` input tensors and must produce `(N, num_classes, H, W)`
 logit tensors; the default `predict_fn` takes the argmax over classes and softmax

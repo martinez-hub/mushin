@@ -1,6 +1,7 @@
 """Compare two fake LLM systems with statistical significance.
 
 Run it (no network, no real LLM):  python examples/compare_llms_demo.py
+Requires the eval extra:  pip install "mushin-py[eval]"
 
 The reusable `run(data)` core is exercised by the test suite on a small
 synthetic eval set, so CI never needs a real model or API key.

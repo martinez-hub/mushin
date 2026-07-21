@@ -98,3 +98,72 @@ def test_global_rank_computation():
     assert _global_rank(node_rank=0, num_processes=2, local_rank=1) == 1
     assert _global_rank(node_rank=1, num_processes=2, local_rank=0) == 2
     assert _global_rank(node_rank=1, num_processes=2, local_rank=1) == 3
+
+
+def test_call_children_scripts_tracks_procs_and_launch_wires_observer(monkeypatch):
+    """The launcher must own its children like PL's base class: track Popen
+    handles in self.procs (so kill()/signal forwarding work) and start the
+    process observer (so children are reaped if rank 0 dies)."""
+    import mushin.lightning.launchers as L
+
+    fake_procs = []
+
+    def fake_subprocess_call(local_rank, global_rank, testing, predicting):
+        proc = object()
+        fake_procs.append(proc)
+        return proc
+
+    observed = {}
+    monkeypatch.setattr(L, "_subprocess_call", fake_subprocess_call)
+    monkeypatch.setattr(L, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        L, "_launch_process_observer", lambda procs: observed.setdefault("obs", procs)
+    )
+    monkeypatch.setattr(
+        L,
+        "_set_num_threads_if_needed",
+        lambda num_processes: observed.setdefault("threads", num_processes),
+    )
+
+    from lightning_fabric.plugins.environments import LightningEnvironment
+
+    launcher = L._HydraReattachLauncher(
+        cluster_environment=LightningEnvironment(), num_processes=3, num_nodes=1
+    )
+    result = launcher.launch(lambda: "ran", trainer=None)
+
+    assert result == "ran"
+    assert launcher.procs == fake_procs and len(launcher.procs) == 2
+    assert observed["obs"] is launcher.procs
+    assert observed["threads"] == 3
+
+
+def test_hydra_run_dir_override_is_windows_safe():
+    """Backslash is an escape character inside Hydra's quoted override
+    grammar; a raw Windows cwd would be corrupted. Forward slashes are valid
+    on every platform."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    from mushin.lightning.launchers import _hydra_run_dir_override
+
+    assert (
+        _hydra_run_dir_override(PureWindowsPath(r"C:\Users\me\out"))
+        == '"C:/Users/me/out"'
+    )
+    # '=' in the dir name still relies on the quoting
+    assert _hydra_run_dir_override(PurePosixPath("/tmp/lr=0.1")) == '"/tmp/lr=0.1"'
+
+
+def test_interrank_delay_env_override(monkeypatch):
+    from mushin.lightning.launchers import _interrank_delay
+
+    monkeypatch.delenv("MUSHIN_DDP_LAUNCH_DELAY", raising=False)
+    assert _interrank_delay() == 1.0  # deterministic default
+    monkeypatch.setenv("MUSHIN_DDP_LAUNCH_DELAY", "0")
+    assert _interrank_delay() == 0.0
+    monkeypatch.setenv("MUSHIN_DDP_LAUNCH_DELAY", "2.5")
+    assert _interrank_delay() == 2.5
+    monkeypatch.setenv("MUSHIN_DDP_LAUNCH_DELAY", "-3")
+    assert _interrank_delay() == 0.0  # clamped
+    monkeypatch.setenv("MUSHIN_DDP_LAUNCH_DELAY", "garbage")
+    assert _interrank_delay() == 1.0  # falls back to default

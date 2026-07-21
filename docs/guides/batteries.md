@@ -1,5 +1,10 @@
 # Built-in batteries
 
+!!! note "Requires the `eval` extra"
+    The batteries are part of mushin's optional evaluation layer —
+    `pip install "mushin-py[eval]"`. The `detection`, `image`, and `audio` battery
+    extras imply `eval`. See [Installation](../install.md#optional-extras).
+
 mushin ships **seven** benchmark batteries as first-class, reusable
 [tasks](custom.md#define-a-reusable-task): `classification`, `segmentation`,
 `detection`, `regression`, `retrieval`, `image_quality`, and `audio`. Each is a

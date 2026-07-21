@@ -1,6 +1,7 @@
 """Compare two small classifiers on MNIST with statistical significance.
 
 Run it (downloads MNIST):  python examples/compare_classifiers.py
+Requires the eval extra:  pip install "mushin-py[eval]"
 
 The reusable `run()` core is exercised by the test suite on tiny synthetic data,
 so CI never downloads MNIST.

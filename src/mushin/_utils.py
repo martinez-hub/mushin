@@ -2,15 +2,18 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import torch
 from hydra_zen import load_from_yaml
 from omegaconf import DictConfig, ListConfig
-from torch import nn
+
+if TYPE_CHECKING:
+    from torch import nn
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +87,8 @@ def load_from_checkpoint(
     if ckpt is None:
         return model
 
+    import torch
+
     ckpt = Path(str(ckpt))
     if not ckpt.exists():
         ckpt = Path.home() / ".torch" / "models" / ckpt
@@ -94,7 +99,11 @@ def load_from_checkpoint(
     ckpt_data: dict[str, Any] = torch.load(ckpt, map_location="cpu", weights_only=False)
 
     if weights_key is not None:
-        assert weights_key in ckpt_data
+        if weights_key not in ckpt_data:
+            raise KeyError(
+                f"weights_key {weights_key!r} not in checkpoint {ckpt}; "
+                f"available keys: {sorted(map(str, ckpt_data))}"
+            )
         ckpt_data = ckpt_data[weights_key]
 
     if weights_key_strip:
@@ -112,7 +121,11 @@ def load_from_checkpoint(
         model.load_state_dict(ckpt_data)
 
     else:
-        assert hasattr(model, model_attr)
+        if not hasattr(model, model_attr):
+            raise AttributeError(
+                f"model {type(model).__name__} has no attribute "
+                f"{model_attr!r} to load the checkpoint weights into"
+            )
         getattr(model, model_attr).load_state_dict(ckpt_data)
 
     return model
@@ -142,7 +155,8 @@ def load_experiment(
     exps: Union[Experiment, List[Experiment]]
 
     """
-    assert Path(exp_path).exists(), f"{exp_path} not found"
+    if not Path(exp_path).exists():
+        raise FileNotFoundError(f"{exp_path} not found")
 
     # first find all .hydra directories
     if search_path is None:
@@ -159,6 +173,8 @@ def load_experiment(
         cfg = load_from_yaml(config_path) if config_path.exists() else None
 
         # Load metrics files
+        import torch
+
         files = path.parent.glob("*.pt")
         metrics = dict()
         for f in files:

@@ -119,6 +119,54 @@ from mushin import multirun, hydra_list
     - **Output directories:** Hydra writes each job's output to a timestamped
       subdirectory. Pass `working_dir=...` to control the root.
 
+## Sweep-axis support and limits
+
+`to_xarray` assembles a **Cartesian grid**: every sweep axis must be a discrete
+list of values, and every combination is one cell.
+
+- **Nested (dotted) params** work as axes: `wf.run(**{"model.width":
+  multirun([4, 8])})` sweeps a nested config path and becomes a normal
+  dimension (select it with `ds.sel({"model.width": 8})`).
+- **Config groups** work as axes when the config declares the target field:
+  register your options (e.g. `cs.store(group="model", name="small", ...)`),
+  give the workflow `eval_task_cfg=make_config(model=None)`, and sweep
+  `model=multirun(["small", "big"])`. The dataset coordinate is the chosen
+  option *name*.
+- **`range(1,5)`-style overrides** (e.g. in a sweep dir you re-load) expand to
+  their discrete values.
+- **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
+  plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
+  grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
+  than producing an all-NaN dataset.
+
+## Using mushin alongside your experiment tracker
+
+mushin is *not* a tracker and does not replace one: it owns the sidecar
+metrics and the final dataset; W&B/TensorBoard/MLflow own live curves,
+system metrics, and collaboration. They compose cleanly — mushin never
+touches your `Trainer`'s logger, so attach one inside `task()` as usual:
+
+```python
+class Experiment(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr: float, seed: int):
+        import wandb
+        from pytorch_lightning.loggers import WandbLogger
+
+        logger = WandbLogger(project="my-sweep", name=f"lr={lr}-seed={seed}")
+        trainer = pl.Trainer(logger=logger, ...)
+        trainer.fit(model, datamodule=dm)
+        wandb.finish()  # one run per sweep cell
+        # Return the tracker's run id alongside your metrics: it becomes a
+        # data variable, so every dataset cell links back to its W&B run.
+        return dict(accuracy=float(acc), wandb_run_id=logger.experiment.id)
+```
+
+Each sweep cell runs in its own Hydra job directory (Hydra `chdir`s into it),
+so file-based loggers like TensorBoard write per-cell logs there — point
+`TensorBoardLogger(save_dir=...)` at a fixed path if you want one aggregate
+log dir instead.
+
 ## Parallel & out-of-process launchers
 
 By default a sweep runs its cells in-process, sequentially (Hydra's `basic`

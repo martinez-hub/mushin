@@ -38,6 +38,17 @@ def parse_score(reply: str) -> float:
         m = re.match(_NUM, text)
         if not m:
             raise ValueError(f"could not parse a score from judge reply: {reply!r}")
+        # A leading bare integer followed by prose is far more likely a count
+        # ("0 issues found...", "3 reasons...") than a score; scoring it would
+        # be silently, maximally wrong. Only a decimal, a fraction, or a reply
+        # that IS the number is unambiguous.
+        is_bare_int = "." not in m.group(1) and m.group(2) is None
+        if is_bare_int and text[m.end() :].strip(" .!"):
+            raise ValueError(
+                f"could not parse a score from judge reply: {reply!r} (a "
+                "leading bare integer with trailing text is ambiguous — have "
+                "the judge reply `score: <0-1>`)"
+            )
         score = _to_float(m.group(1), m.group(2))
     if not 0.0 <= score <= 1.0:
         raise ValueError(

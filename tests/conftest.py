@@ -13,7 +13,10 @@ from hypothesis import Verbosity, settings
 # usage:
 #   pytest tests --hypothesis-profile <profile-name>
 settings.register_profile("ci", deadline=None)
-settings.register_profile("fast", max_examples=10)
+# deadline=None: CI runners are noisy-neighbor machines; Hypothesis's default
+# 200ms per-example deadline turns load spikes into flaky DeadlineExceeded
+# failures for any @given test that forgets a per-test override.
+settings.register_profile("fast", max_examples=10, deadline=None)
 settings.register_profile("debug", max_examples=10, verbosity=Verbosity.verbose)
 
 

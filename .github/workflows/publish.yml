@@ -32,6 +32,14 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
 
+      - name: Smoke-test the built wheel
+        # A broken/unimportable wheel must never reach PyPI: install it into a
+        # clean venv and import the package before the publish job runs.
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/python -c "import mushin; print('wheel imports ok:', mushin.__name__)"
+
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -49,4 +57,10 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to the exact release tag, NOT a commit SHA: this is a
+        # Docker-based action whose container image is resolved from the ref,
+        # and no ghcr image exists for a bare SHA ("manifest unknown" — this
+        # broke the v0.9.0 publish). The version tag is the most precise pin
+        # the action supports; it is still far narrower than the moving
+        # release/v1 branch used before.
+        uses: pypa/gh-action-pypi-publish@v1.14.1
