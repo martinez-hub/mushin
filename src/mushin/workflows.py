@@ -741,6 +741,7 @@ class BaseWorkflow:
         resume: bool = False,
         capture_env: bool = False,
         dry_run: bool = False,
+        confirm_above: int | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -804,6 +805,10 @@ class BaseWorkflow:
         dry_run : bool (default: False)
             Preview the grid (cell count + per-axis values) and return a summary
             dict without launching any job.
+
+        confirm_above : int | None (default: None)
+            Refuse to launch a sweep with more than this many cells (raising a
+            ``ValueError``). ``MUSHIN_MAX_CELLS`` supplies a default ceiling.
 
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
@@ -963,10 +968,18 @@ class BaseWorkflow:
                     f"{type(self).__name__}.{_name} must be a static method"
                 )
 
+        # The grid cell count drives both the dry-run preview and the pre-launch
+        # gate below. Sourced from the user's own overrides (not launch_overrides)
+        # so the `hydra.*` plumbing is excluded.
+        num_cells = 1
+        for v in workflow_overrides.values():
+            if isinstance(v, multirun):
+                num_cells *= len(v)
+
         if dry_run:
-            # Preview the grid and return WITHOUT launching. Sourced from the
-            # user's own overrides (not launch_overrides) so the `hydra.*`
-            # plumbing is excluded and axes/fixed are cleanly separated.
+            # Preview the grid and return WITHOUT launching (also the intended
+            # escape hatch for previewing an over-limit sweep — the gate below is
+            # skipped on a dry run). Axes vs fixed are separated cleanly.
             axes = {
                 k: list(v)
                 for k, v in workflow_overrides.items()
@@ -977,9 +990,6 @@ class BaseWorkflow:
                 for k, v in workflow_overrides.items()
                 if not isinstance(v, multirun)
             }
-            num_cells = 1
-            for vals in axes.values():
-                num_cells *= len(vals)
             summary = {
                 "num_cells": num_cells,
                 "axes": axes,
@@ -988,6 +998,30 @@ class BaseWorkflow:
             }
             print(_format_dry_run(summary))
             return summary
+
+        # Pre-launch cell-count gate: refuse an over-large sweep before it
+        # launches. `confirm_above=` is the per-call ceiling; the MUSHIN_MAX_CELLS
+        # environment variable is the default used when the call doesn't set one
+        # (so a shared cluster/CI profile can cap everything). Preview an
+        # over-limit sweep with dry_run=True, or raise the ceiling to proceed.
+        limit = confirm_above
+        limit_src = "confirm_above"
+        if limit is None:
+            import os
+
+            env = os.environ.get("MUSHIN_MAX_CELLS")
+            if env:
+                try:
+                    limit = int(env)
+                    limit_src = "MUSHIN_MAX_CELLS"
+                except ValueError:
+                    limit = None  # malformed env -> no gate
+        if limit is not None and num_cells > limit:
+            raise ValueError(
+                f"this sweep has {num_cells} cells, above the {limit_src} limit "
+                f"of {limit}. Preview it with `dry_run=True`, or raise the ceiling "
+                f"(e.g. `confirm_above={num_cells}`) to run it."
+            )
 
         if task_fn_wrapper is None:
             task_fn_wrapper = _identity
@@ -1342,6 +1376,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         resume: bool = False,
         capture_env: bool = False,
         dry_run: bool = False,
+        confirm_above: int | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -1384,6 +1419,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             unexpectedly wide axis), then return a summary dict
             (``num_cells``/``axes``/``fixed``/``working_dir``) without launching
             any job.
+        confirm_above : int | None (default: None)
+            Refuse to launch a sweep with more than this many grid cells,
+            raising a ``ValueError`` instead — a guard against an accidentally
+            huge grid. The ``MUSHIN_MAX_CELLS`` environment variable supplies a
+            default ceiling when this is not set (an explicit value wins). Use
+            ``dry_run=True`` to preview an over-limit sweep.
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -1423,6 +1464,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             resume=resume,
             capture_env=capture_env,
             dry_run=dry_run,
+            confirm_above=confirm_above,
             **workflow_overrides,
         )
 
