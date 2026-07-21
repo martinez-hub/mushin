@@ -264,7 +264,11 @@ class _TaskRunner:
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
         if self.prior_manifest is not None:
-            sc = self._combo(cfg, self.prior_manifest.params)
+            # Key the lookup on the CURRENT swept names, not the prior sweep's:
+            # if the grid shape changed (an axis added/removed), the current
+            # cell's key won't match any completed cell, so it re-runs instead
+            # of projecting onto the old params and reusing the wrong cell.
+            sc = self._combo(cfg, self.swept_names)
             key = combo_key(sc)
             dir_ = self.prior_manifest.completed.get(key)
             if dir_ is not None:
@@ -866,6 +870,24 @@ class BaseWorkflow:
                     Path(working_dir).resolve(), list(_swept_names)
                 )
             )
+            # A resume whose grid shape differs from the prior sweep (an axis
+            # added or removed) cannot reuse the old cells — their combo keys
+            # no longer correspond. Warn once so the full re-run isn't a
+            # surprise (the per-cell lookup already refuses the mismatched
+            # cells; this is the user-facing signal).
+            if _prior_manifest.completed and set(_prior_manifest.params) != set(
+                _swept_names
+            ):
+                import warnings
+
+                warnings.warn(
+                    f"resume: the sweep grid changed (was over "
+                    f"{sorted(_prior_manifest.params)}, now over "
+                    f"{sorted(_swept_names)}); prior cells cannot be reused and "
+                    "the full grid will be re-run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         from ._resume import code_fingerprint
 

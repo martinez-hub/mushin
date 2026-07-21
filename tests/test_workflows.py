@@ -1651,3 +1651,46 @@ def test_resume_reuses_legacy_sidecars_without_code_hash(tmp_path):
     CALLS["n"] = 0
     W().run(a=multirun([1, 2]), working_dir=str(wd), resume=True)
     assert CALLS["n"] == 0  # legacy cells reused
+
+
+def test_resume_reruns_full_grid_when_axis_added(tmp_path):
+    # Adding a sweep axis changes the grid shape. A resume must NOT project the
+    # new cells onto the old params and reuse the wrong cell (which silently
+    # dropped the new axis and marked the sweep complete); it re-runs the full
+    # new grid and warns.
+    import json
+
+    from mushin import multirun
+    from mushin._resume import STATUS_FILE
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    CALLS = {"n": 0}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b=0):
+            CALLS["n"] += 1
+            return dict(v=float(a) * 100 + float(b))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2]), working_dir=str(wd))
+    # simulate a legacy (pre-fingerprint) sweep: strip the hashes so the config
+    # guard can't catch the shape change -- the grid-shape guard must.
+    for sf in wd.glob(f"*/{STATUS_FILE}"):
+        d = json.loads(sf.read_text())
+        d.pop("config_hash", None)
+        d.pop("code_hash", None)
+        sf.write_text(json.dumps(d))
+
+    CALLS["n"] = 0
+    wf2 = W()
+    with pytest.warns(UserWarning, match="grid changed"):
+        wf2.run(
+            a=multirun([1, 2]), b=multirun([10, 20]), working_dir=str(wd), resume=True
+        )
+    assert CALLS["n"] == 4  # the full 2x2 grid re-ran (nothing wrongly reused)
+    ds = wf2.to_xarray()
+    assert set(ds.dims) == {"a", "b"}
+    assert float(ds["v"].sel(a=1, b=20)) == 120.0
+    assert float(ds["v"].sel(a=2, b=10)) == 210.0
+    assert wf2.is_complete
