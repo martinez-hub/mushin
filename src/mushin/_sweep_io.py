@@ -40,9 +40,47 @@ def _scalar(v: Any) -> Any:
     return v
 
 
+def _json_normalize(v: Any) -> Any:
+    """Recursively normalize a metric value to strict-JSON-native types.
+
+    Handles the full metric shape (nested dicts and lists), converts
+    numpy/torch scalars and arrays, maps non-finite floats (NaN/±Inf) to
+    ``None`` so the file is valid JSON (``read_metrics_sidecar`` restores them
+    to NaN), and stringifies any other type rather than letting an otherwise-
+    successful task's sidecar write crash the sweep.
+    """
+    import math
+
+    if hasattr(v, "item") and getattr(v, "ndim", None) == 0:  # 0-d np/torch scalar
+        v = v.item()
+    elif hasattr(v, "tolist"):  # numpy/torch array
+        return _json_normalize(v.tolist())
+    if isinstance(v, dict):
+        return {str(k): _json_normalize(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_normalize(x) for x in v]
+    if isinstance(v, bool) or v is None:
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, (int, str)):
+        return v
+    return str(v)  # datetime, Path, arbitrary objects -> stringify, never crash
+
+
+def _restore_nonfinite(v: Any) -> Any:
+    """Inverse of the NaN->None mapping in :func:`_json_normalize`: a ``None``
+    in a metrics payload marks a value that was non-finite on write, restored
+    to NaN so metric columns stay float rather than object dtype on resume."""
+    if isinstance(v, dict):
+        return {k: _restore_nonfinite(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_restore_nonfinite(x) for x in v]
+    return float("nan") if v is None else v
+
+
 def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> None:
-    payload = {k: _scalar(v) for k, v in metrics.items()}
-    _atomic_write_json(Path(job_dir) / METRICS_FILE, payload)
+    _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics)
 
 
 def read_metrics_sidecar(job_dir) -> dict | None:
@@ -52,7 +90,7 @@ def read_metrics_sidecar(job_dir) -> dict | None:
     # A corrupt/unreadable sidecar is treated like a missing one (return None ->
     # the cell re-runs) rather than aborting an otherwise-resumable sweep.
     try:
-        return json.loads(p.read_text())
+        return _restore_nonfinite(json.loads(p.read_text()))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -64,7 +102,10 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
     # mid-write and rename half-written content over the target.
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        tmp.write_text(json.dumps(payload, indent=2))
+        # Normalize every sidecar to strict-JSON-native values (nested numpy,
+        # non-finite floats -> None, non-native -> str) so a write never emits
+        # the invalid `NaN`/`Infinity` literals nor crashes on an exotic value.
+        tmp.write_text(json.dumps(_json_normalize(payload), indent=2, allow_nan=False))
         tmp.replace(path)  # atomic on POSIX/Windows
     finally:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed

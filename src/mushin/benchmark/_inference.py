@@ -39,9 +39,19 @@ def _as_float(v) -> float:
     applicable' sentinel is normalized to ``NaN`` upstream, inside the detection
     mAP battery — not here — so it is not applied to metrics like the IoU variants
     whose range legitimately includes ``-1``.)"""
-    if isinstance(v, torch.Tensor) and v.numel() != 1:
+    # torch tensors expose numel(); numpy arrays expose an int .size — guard both
+    # (and any list) so a non-scalar gives the crafted message, not a raw cast error.
+    n = None
+    if isinstance(v, torch.Tensor):
+        n = v.numel()
+    elif isinstance(getattr(v, "size", None), int):  # numpy array/scalar
+        n = v.size
+    elif isinstance(v, (list, tuple)):
+        n = len(v)
+    if n is not None and n != 1:
         raise TypeError(
-            f"metric produced a non-scalar value of shape {tuple(v.shape)}; "
+            f"metric produced a non-scalar value of shape "
+            f"{tuple(getattr(v, 'shape', (n,)))}; "
             "battery metrics must return scalar values per key"
         )
     return float(v)
