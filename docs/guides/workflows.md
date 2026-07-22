@@ -139,7 +139,7 @@ list of values, and every combination is one cell.
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
   than producing an all-NaN dataset. To use a searcher, run it as a separate
   step and feed the winners to a mushin grid — see
-  [Using mushin alongside a hyperparameter search](#using-mushin-alongside-a-hyperparameter-search).
+  [Hyperparameter search](#hyperparameter-search).
 
 ## Using mushin alongside your experiment tracker
 
@@ -169,13 +169,27 @@ so file-based loggers like TensorBoard write per-cell logs there — point
 `TensorBoardLogger(save_dir=...)` at a fixed path if you want one aggregate
 log dir instead.
 
-## Using mushin alongside a hyperparameter search
+## Hyperparameter search
 
-mushin is *not* a hyperparameter optimizer: it runs a fixed, discrete grid and
-labels the result, so adaptive samplers (Optuna, Ax, Nevergrad) are deliberately
-out of scope (see [Sweep-axis support](#sweep-axis-support-and-limits) above).
-The two compose as a **two-phase workflow**, not a plugin — let the optimizer
-*search*, then let mushin run the *final grid* you report.
+mushin *does* hyperparameter search — as **grid search** (a `multirun` per axis)
+or **random search** (`sample=K` over the grid). For a small, discrete space that
+is often the whole job, and you get more than the winning config: the full
+labeled `xarray` dataset over every cell, `compare_methods` statistics, and
+per-cell provenance, all reproducibly.
+
+What mushin does *not* do is **adaptive / Bayesian** search — TPE, CMA-ES,
+pruning of unpromising trials, or continuous/conditional spaces. Those steer the
+next trial from past ones over a continuous domain, which a fixed grid cannot
+express (mushin rejects continuous `interval(...)` syntax; see
+[Sweep-axis support](#sweep-axis-support-and-limits) above). That is exactly
+where a dedicated optimizer like **Optuna** (or Ax, Nevergrad) wins: a large or
+continuous space where you want a good config in far fewer trials than an
+exhaustive grid.
+
+So the two are complementary, not exclusive. Reach for mushin's grid/random
+search when the space is small and discrete; reach for Optuna when it is large or
+continuous. And the strongest combination is a **two-phase workflow** — let the
+optimizer *search*, then let mushin run the reproducible *final grid* you report:
 
 **1. Search.** The optimizer owns the adaptive part. Give it a cheap objective
 (often a single seed) and let it sample the space:
