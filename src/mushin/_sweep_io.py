@@ -116,10 +116,20 @@ class Manifest:
 
     SCHEMA = 1
 
-    def __init__(self, root: Path, params: list[str], cells: dict | None = None):
+    def __init__(
+        self,
+        root: Path,
+        params: list[str],
+        cells: dict | None = None,
+        notes: str | None = None,
+        tags: list[str] | None = None,
+    ):
         self.root = Path(root)
         self.params = list(params)
         self.cells: dict[str, dict] = cells or {}
+        # Free-form sweep-level lineage annotations (see run(notes=, tags=)).
+        self.notes = notes
+        self.tags = list(tags) if tags else []
 
     @classmethod
     def load_or_new(cls, root, params: list[str]) -> Manifest:
@@ -133,7 +143,13 @@ class Manifest:
                 d = json.loads(p.read_text())
             except (json.JSONDecodeError, OSError):
                 return cls(root, params)
-            return cls(root, d.get("params", params), d.get("cells", {}))
+            return cls(
+                root,
+                d.get("params", params),
+                d.get("cells", {}),
+                notes=d.get("notes"),
+                tags=d.get("tags"),
+            )
         return cls(root, params)
 
     @classmethod
@@ -192,7 +208,11 @@ class Manifest:
         return all(v.get("status") == "completed" for v in self.cells.values())
 
     def save(self) -> None:
-        _atomic_write_json(
-            self.root / MANIFEST_FILE,
-            {"schema": self.SCHEMA, "params": self.params, "cells": self.cells},
-        )
+        payload = {"schema": self.SCHEMA, "params": self.params, "cells": self.cells}
+        # Only emit lineage keys when set, so a manifest without notes/tags is
+        # unchanged from prior behavior.
+        if self.notes is not None:
+            payload["notes"] = self.notes
+        if self.tags:
+            payload["tags"] = self.tags
+        _atomic_write_json(self.root / MANIFEST_FILE, payload)
