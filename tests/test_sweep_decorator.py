@@ -162,3 +162,24 @@ def test_sweep_does_not_mutate_the_original_function():
     # the synthesized task is a distinct copy carrying the mangled qualname
     assert handle.workflow_cls().task is not _pristine_task
     assert handle.workflow_cls().task.__qualname__ == before + ".__mushin_task__"
+
+
+def test_workflow_attr_points_at_failed_run(tmp_path):
+    """After a failing run, `.workflow` must expose THAT run's instance for
+    debugging — not silently keep the previous (successful) run's workflow."""
+    import pytest
+
+    import mushin
+
+    @mushin.sweep
+    def exp(a):
+        if a > 1:
+            raise RuntimeError("boom")
+        return dict(m=float(a))
+
+    exp.run(a=mushin.multirun([0, 1]), working_dir=str(tmp_path / "ok"))
+    good_wf = exp.workflow
+
+    with pytest.raises(RuntimeError, match="boom"):
+        exp.run(a=mushin.multirun([1, 2]), working_dir=str(tmp_path / "bad"))
+    assert exp.workflow is not good_wf

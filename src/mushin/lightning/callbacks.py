@@ -20,7 +20,8 @@ class MetricsCallback(Callback):
 
     filename : str, optional (default="metrics.pt")
         The base filename used to store metrics.  For `FITTING` the file is prepended
-        with "fit_" and for `TESTING` the file is prepended with `test_`.
+        with "fit_", for `TESTING` with "test_", and for a standalone
+        ``trainer.validate(...)`` run with "validate_".
 
     Notes
     -----
@@ -48,6 +49,10 @@ class MetricsCallback(Callback):
         self.train_metrics = defaultdict(list)
         self.val_metrics = defaultdict(list)
         self.test_metrics = defaultdict(list)
+        # Standalone `trainer.validate(...)` rounds — kept apart from the
+        # fit-stage validation series so a post-hoc validate neither appends
+        # onto nor overwrites `fit_<filename>`.
+        self.validate_metrics = defaultdict(list)
 
     def _get_filename(self, stage: str):
         return self.save_dir / f"{stage}_{self.filename}"
@@ -84,13 +89,18 @@ class MetricsCallback(Callback):
         # Make sure PL is not doing its sanity check run
         if trainer.sanity_checking:
             return
-        self._record(
-            self.val_metrics, trainer.callback_metrics, pl_module.current_epoch
-        )
+        # A standalone `trainer.validate(...)` fires this same hook; route it
+        # to its own series/file so it can't masquerade as fit-stage history.
+        fn = getattr(getattr(trainer, "state", None), "fn", None)
+        if str(getattr(fn, "value", fn)) == "validate":
+            stored, stage = self.validate_metrics, "validate"
+        else:
+            stored, stage = self.val_metrics, "fit"
+        self._record(stored, trainer.callback_metrics, pl_module.current_epoch)
         # Under (multi-node) DDP every rank fires this callback; only rank 0 writes
         # so N ranks don't clobber the same file on a shared filesystem.
         if trainer.is_global_zero:
-            torch.save(self.val_metrics, self._get_filename("fit"))
+            torch.save(stored, self._get_filename(stage))
 
     def on_test_end(self, trainer: Trainer, pl_module: LightningModule):
         self._record(self.test_metrics, trainer.callback_metrics)

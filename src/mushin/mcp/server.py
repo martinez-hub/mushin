@@ -336,6 +336,10 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     import json as _json
 
     p = _resolve(path, root)
+    if not p.exists():
+        # Raise like every sibling tool: an empty-but-valid {"count": 0} for a
+        # mistyped path would read as "the sweep had zero failures".
+        raise FileNotFoundError(f"{p} not found")
     rootp = Path(root).expanduser().resolve() if root is not None else None
     failures = []
     mf = p / MANIFEST_FILE
@@ -373,6 +377,8 @@ def _get_provenance(
     import json as _json
 
     p = _resolve(path, root)
+    if not p.exists():
+        raise FileNotFoundError(f"{p} not found")
     rootp = Path(root).expanduser().resolve() if root is not None else None
     runs: dict = {}
     for f in sorted(p.glob("**/mushin_provenance.json")):

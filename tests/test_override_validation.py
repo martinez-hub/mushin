@@ -88,3 +88,20 @@ def test_kwargs_task_accepts_any_override_name(tmp_path):
     wf.run(anything=multirun([1.0, 2.0]), working_dir=str(tmp_path / "s"))
     ds = wf.to_xarray()
     assert set(ds["v"].sizes) == {"anything"}
+
+
+def test_duplicate_sweep_values_via_raw_overrides_rejected(tmp_path):
+    """Duplicate values in a raw `overrides=` sweep collapse to one combo key
+    (silently dropping cells) — they must be rejected exactly like duplicate
+    `multirun` kwarg values already are."""
+    import pytest
+
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    with pytest.raises(ValueError, match="duplicate sweep values"):
+        W().run(overrides=["+a=1.0,1.0"], working_dir=str(tmp_path / "s"))

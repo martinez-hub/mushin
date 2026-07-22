@@ -90,7 +90,12 @@ def _score_one(
         try:
             scores.append(float(m(o, r, seed=seed) if pass_seed else m(o, r)))
         except Exception as e:
-            raise type(e)(f"metric {base!r} failed on example {i}: {e}") from e
+            msg = f"metric {base!r} failed on example {i}: {e}"
+            try:
+                wrapped = type(e)(msg)
+            except Exception:  # noqa: BLE001 - multi-arg ctor (UnicodeDecodeError…)
+                wrapped = RuntimeError(msg)
+            raise wrapped from e
     return {base: sum(scores) / len(scores)}
 
 

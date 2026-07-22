@@ -1769,3 +1769,23 @@ def test_default_metric_load_fn_still_reads_torch_files(tmp_path):
     p = tmp_path / "fit_metrics.pt"
     torch.save({"loss": [0.5, 0.4]}, p)
     assert MultiRunMetricsWorkflow.metric_load_fn(p) == {"loss": [0.5, 0.4]}
+
+
+def test_working_dir_with_equals_or_comma_in_name(tmp_path):
+    """Experiment dirs are commonly named after params (`lr=0.1`); the
+    working_dir override must be quoted so such paths don't break Hydra's
+    override parser (or get split as an accidental sweep)."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    for name in ("lr=0.1", "run,2"):
+        wd = tmp_path / name
+        wf = W()
+        wf.run(a=multirun([1.0]), working_dir=str(wd))
+        assert wf.is_complete
+        assert (wd / "0" / "mushin_metrics.json").exists()

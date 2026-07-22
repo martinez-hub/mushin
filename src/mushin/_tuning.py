@@ -234,7 +234,14 @@ def tune_batch_size(
                 f"pin file {pin_path} is missing 'found_max_device_batch'; "
                 "delete it or pass retune=True to re-tune."
             )
-        found_max = int(pin["found_max_device_batch"])
+        try:
+            found_max = int(pin["found_max_device_batch"])
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"pin file {pin_path} has a non-numeric found_max_device_batch="
+                f"{pin['found_max_device_batch']!r}; delete it or pass "
+                "retune=True to re-tune."
+            ) from None
         if found_max < 1:
             raise ValueError(
                 f"pin file {pin_path} has an invalid found_max_device_batch="

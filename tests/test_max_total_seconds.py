@@ -104,3 +104,33 @@ def test_skipped_cells_are_resumable(tmp_path):
 
     assert set(calls) == {1, 2, 3}  # only the skipped cells re-ran; seed 0 reused
     assert wf2.is_complete
+
+
+def test_budget_immune_to_wall_clock_jumps(tmp_path, monkeypatch):
+    """The budget must run on a monotonic clock: a wall-clock step (NTP/DST)
+    mid-sweep must not extend it. Freezing time.time simulates the clock never
+    advancing — the budget must still expire and skip the remaining cells."""
+    import time as _time
+
+    frozen = _time.time()
+    monkeypatch.setattr(_time, "time", lambda: frozen)
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            import time
+
+            time.sleep(0.05)
+            return dict(m=float(a))
+
+    wf = W()
+    with pytest.warns(UserWarning, match="skipped"):
+        wf.run(
+            a=multirun([1, 2, 3]),
+            working_dir=str(tmp_path / "s"),
+            max_total_seconds=0.01,
+        )
+    assert len(wf.skipped) >= 1

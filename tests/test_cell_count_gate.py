@@ -119,3 +119,25 @@ def test_gate_applies_to_decorator_sweep(tmp_path):
             working_dir=str(tmp_path / "s"),
         )
     assert counter["n"] == 0
+
+
+def test_gate_uses_sampled_cell_count(tmp_path):
+    """`sample=` bounds what actually computes, so the cell-count gate must
+    compare the SAMPLED count against the limit, not the full grid."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    wf = W()
+    with pytest.warns(UserWarning, match="skipped"):
+        wf.run(
+            a=multirun([1, 2, 3, 4, 5, 6]),
+            sample=2,
+            confirm_above=3,
+            working_dir=str(tmp_path / "s"),
+        )
+    assert len(wf.skipped) == 4

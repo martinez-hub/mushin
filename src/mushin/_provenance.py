@@ -41,9 +41,20 @@ def _git() -> dict:
     sha = run("git", "rev-parse", "HEAD")
     if sha is None:
         return {"sha": None, "dirty": None, "branch": None}
+    # `dirty` must distinguish "verified clean" (False) from "could not verify"
+    # (None): the shared `run` helper maps a failure AND clean-empty output to
+    # None, which would record a confident dirty=False for a status call that
+    # timed out (plausible on a large repo / slow cluster filesystem).
+    try:
+        st = subprocess.run(
+            ("git", "status", "--porcelain"), capture_output=True, text=True, timeout=5
+        )
+        dirty = bool(st.stdout.strip()) if st.returncode == 0 else None
+    except Exception:  # noqa: BLE001 - unknown, never "clean"
+        dirty = None
     return {
         "sha": sha,
-        "dirty": bool(run("git", "status", "--porcelain")),
+        "dirty": dirty,
         "branch": run("git", "rev-parse", "--abbrev-ref", "HEAD"),
     }
 

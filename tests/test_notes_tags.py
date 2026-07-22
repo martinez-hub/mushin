@@ -105,3 +105,25 @@ def test_notes_and_tags_survive_resume_without_repassing(tmp_path):
     manifest = json.loads((wd / MANIFEST_FILE).read_text())
     assert manifest["notes"] == "original run"
     assert manifest["tags"] == ["baseline"]
+
+
+def test_fresh_run_does_not_inherit_prior_lineage(tmp_path):
+    """The manifest fallback exists for RESUME; a fresh (non-resume) run reusing
+    a working_dir is a new sweep and must not silently adopt the previous
+    sweep's notes/tags."""
+    wd = tmp_path / "s"
+    _W().run(x=multirun([1, 2]), notes="old sweep", tags=["old"], working_dir=str(wd))
+    wf2 = _W()
+    wf2.run(x=multirun([1, 2]), working_dir=str(wd))  # fresh run, no lineage
+    assert wf2.notes is None
+    assert wf2.tags == []
+
+
+def test_resume_with_empty_tags_clears_prior(tmp_path):
+    """Explicitly passing `tags=[]` on a resume is a request to clear the tags,
+    not an omission — it must not fall back to the prior manifest's tags."""
+    wd = tmp_path / "s"
+    _W().run(x=multirun([1, 2]), tags=["baseline"], working_dir=str(wd))
+    wf2 = _W()
+    wf2.run(x=multirun([1, 2]), resume=True, tags=[], working_dir=str(wd))
+    assert wf2.tags == []

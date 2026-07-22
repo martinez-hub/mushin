@@ -689,3 +689,21 @@ def test_main_without_mcp_extra_gives_actionable_hint(monkeypatch):
     monkeypatch.setattr(cli, "create_server", None)  # simulate core install
     with pytest.raises(SystemExit, match=r"mushin-py\[mcp\]"):
         cli.main([])
+
+
+def test_get_failures_missing_path_raises(tmp_path):
+    """A mistyped path must raise like every sibling tool — returning
+    {'count': 0} would tell an agent the sweep had zero failures."""
+    from mushin.mcp.server import _get_failures
+
+    with pytest.raises(FileNotFoundError):
+        _get_failures(tmp_path / "no_such_sweep")
+
+
+def test_get_provenance_missing_path_raises(tmp_path):
+    """A mistyped path must raise, not report an empty-but-valid
+    {'num_runs': 0} provenance record."""
+    from mushin.mcp.server import _get_provenance
+
+    with pytest.raises(FileNotFoundError):
+        _get_provenance(tmp_path / "no_such_sweep")

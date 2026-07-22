@@ -54,13 +54,28 @@ def submitit_slurm_config(
     return cfg
 
 
+def _rank_from_env() -> int:
+    """Best-effort global rank: ``RANK`` (torchrun/external launchers), then
+    ``SLURM_PROCID``, then ``LOCAL_RANK`` (the only variable a plain
+    single-node HydraDDP child exports — equal to the global rank there).
+    A malformed value degrades to the next source rather than crashing."""
+    for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
+        v = os.environ.get(var)
+        if v:
+            try:
+                return int(v)
+            except ValueError:
+                continue
+    return 0
+
+
 def seed_everything_per_rank(base: int, workers: bool = True) -> int:
     """Seed each process with ``base + global_rank`` so a multi-GPU/-node run is as
     reproducible as a single-GPU run (each rank gets a distinct but deterministic
-    seed). Reads the global rank from ``RANK`` (preferred) or ``SLURM_PROCID``,
-    defaulting to 0. Returns the seed used."""
-    rank_str = os.environ.get("RANK") or os.environ.get("SLURM_PROCID") or "0"
-    seed = int(base) + int(rank_str)
+    seed). Reads the global rank from ``RANK`` (preferred), ``SLURM_PROCID``,
+    or ``LOCAL_RANK`` (single-node), defaulting to 0. Returns the seed used."""
+    rank = _rank_from_env()
+    seed = int(base) + rank
     seed_everything(seed, workers=workers)
     # Persist the effective seed: if it lives only in-process, the exact run
     # can never be re-seeded identically from its artifacts. Best-effort (a
@@ -69,7 +84,6 @@ def seed_everything_per_rank(base: int, workers: bool = True) -> int:
     try:
         import json
 
-        rank = int(rank_str)
         name = "mushin_seed.json" if rank == 0 else f"mushin_seed_rank{rank}.json"
         Path(name).write_text(json.dumps({"seed": seed, "rank": rank}))
     except OSError:

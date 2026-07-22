@@ -122,6 +122,8 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
     lines = [f"Dry run — {n} cell{'s' if n != 1 else ''}, no jobs launched."]
     wd = summary.get("working_dir")
     lines.append(f"  working_dir: {wd if wd else '(Hydra default)'}")
+    if "sample" in summary:
+        lines.append(f"  sample: only {summary['sample']} cell(s) would compute")
     if axes:
         shape = " x ".join(str(len(v)) for v in axes.values())
         width = max(len(k) for k in axes)
@@ -513,7 +515,9 @@ class _TaskRunner:
         if self.max_total_seconds is not None:
             import time
 
-            now = time.time()
+            # Monotonic: a wall-clock step (NTP/DST) mid-sweep must neither
+            # extend the budget nor expire it early.
+            now = time.monotonic()
             if self._deadline is None:
                 self._deadline = now + self.max_total_seconds
             elif now >= self._deadline:
@@ -1040,7 +1044,11 @@ class BaseWorkflow:
             launch_overrides.extend(overrides)
 
         if working_dir is not None:
-            launch_overrides.append(f"hydra.sweep.dir={working_dir}")
+            # Quote the path: dirs named after params (`lr=0.1`) or containing
+            # commas would otherwise be re-split by Hydra's override parser.
+            launch_overrides.append(
+                f"hydra.sweep.dir={_to_override_element(str(working_dir))}"
+            )
 
         if sweeper is not None:
             launch_overrides.append(f"hydra/sweeper={sweeper}")
@@ -1213,13 +1221,39 @@ class BaseWorkflow:
         _grid = {
             k: v
             for k, v in self._parse_overrides(launch_overrides).items()
-            if not k.startswith("hydra")
+            # Exclude only real Hydra plumbing (`hydra.sweep.dir`, `hydra/launcher`)
+            # — a USER axis merely named with that prefix (`hydraulic`) counts.
+            if not (k == "hydra" or k.startswith(("hydra.", "hydra/")))
         }
         axes = {k: list(v) for k, v in _grid.items() if isinstance(v, multirun)}
         fixed = {k: v for k, v in _grid.items() if not isinstance(v, multirun)}
         num_cells = 1
         for v in axes.values():
             num_cells *= len(v)
+
+        # Duplicate-value guard over the PARSED grid, so a sweep supplied via raw
+        # `overrides=["+a=1,1"]` is rejected like a duplicate multirun kwarg is
+        # (two cells sharing a combo key silently collapse to the last).
+        for k, vals in axes.items():
+            keys = [_scalar_repr(item) for item in vals]
+            if len(set(keys)) != len(keys):
+                dupes = sorted(
+                    {
+                        repr(item)
+                        for item, kk in zip(vals, keys, strict=True)
+                        if keys.count(kk) > 1
+                    }
+                )
+                raise ValueError(
+                    f"`{k}` has duplicate sweep values {', '.join(dupes)}; a "
+                    "repeated axis value collapses to a single cell. Use "
+                    "distinct values, or add a separate axis (e.g. seed) for "
+                    "repeat trials."
+                )
+
+        # `sample=` bounds what actually computes; the preview and the gate
+        # reflect that (the full grid still defines the dataset's shape).
+        effective_cells = num_cells if sample is None else min(sample, num_cells)
 
         if dry_run:
             # Preview the grid and return WITHOUT launching (also the intended
@@ -1231,6 +1265,8 @@ class BaseWorkflow:
                 "fixed": fixed,
                 "working_dir": working_dir,
             }
+            if sample is not None:
+                summary["sample"] = effective_cells
             print(_format_dry_run(summary))
             return summary
 
@@ -1251,11 +1287,16 @@ class BaseWorkflow:
                     limit_src = "MUSHIN_MAX_CELLS"
                 except ValueError:
                     limit = None  # malformed env -> no gate
-        if limit is not None and num_cells > limit:
+        if limit is not None and effective_cells > limit:
+            what = (
+                f"{num_cells} cells"
+                if sample is None
+                else f"{effective_cells} sampled cells (of a {num_cells}-cell grid)"
+            )
             raise ValueError(
-                f"this sweep has {num_cells} cells, above the {limit_src} limit "
+                f"this sweep runs {what}, above the {limit_src} limit "
                 f"of {limit}. Preview it with `dry_run=True`, or raise the ceiling "
-                f"(e.g. `confirm_above={num_cells}`) to run it."
+                f"(e.g. `confirm_above={effective_cells}`) to run it."
             )
 
         if task_fn_wrapper is None:
@@ -1525,7 +1566,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         manifest of a loaded sweep); an empty list if none were set."""
         if self._manifest is not None:
             return list(self._manifest.tags)
-        return list(getattr(self, "_tags", []))
+        return list(getattr(self, "_tags", None) or [])
 
     @property
     def provenance(self) -> dict | None:
@@ -1757,8 +1798,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             raise ValueError(f"`tags` must be a list of strings, got {tags!r}")
         # Stashed for jobs_post_process to record on the sweep manifest (run() and
         # jobs_post_process are separate methods; the manifest is built there).
+        # `None` means "not passed" — distinct from an explicit `tags=[]`, which
+        # is a request to clear — and the prior-manifest fallback only applies
+        # on a resume (a fresh run reusing a dir is a NEW sweep, not lineage).
         self._notes = notes
-        self._tags = list(tags) if tags else []
+        self._tags = list(tags) if tags is not None else None
+        self._lineage_from_prior = resume
 
         if target_job_dirs is not None:
             if isinstance(target_job_dirs, str):
@@ -1906,18 +1951,23 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # combo is re-marked in the loop below, and resume reads prior state from
         # its own `prior_manifest` (loaded in `run()` before this file is rewritten).
         # Lineage (notes/tags) from THIS run, falling back to the prior manifest
-        # so a resume that does not re-pass them preserves the original run's
-        # lineage instead of silently wiping it. (The fresh Manifest above is
+        # ONLY on a resume that did not re-pass them — so a resume preserves the
+        # original run's lineage, while a fresh run reusing the dir starts clean
+        # and an explicit `tags=[]` clears. (The fresh Manifest below is
         # deliberately not load_or_new — that is only to drop stale *cells*.)
         _notes = getattr(self, "_notes", None)
-        _tags = getattr(self, "_tags", None) or []
-        if _notes is None or not _tags:
+        _tags = getattr(self, "_tags", None)
+        if getattr(self, "_lineage_from_prior", False) and (
+            _notes is None or _tags is None
+        ):
             _prev = Manifest.load_or_new(self.working_dir, [])
             if _notes is None:
                 _notes = _prev.notes
-            if not _tags:
+            if _tags is None:
                 _tags = _prev.tags
-        manifest = Manifest(self.working_dir, swept_names, notes=_notes, tags=_tags)
+        manifest = Manifest(
+            self.working_dir, swept_names, notes=_notes, tags=_tags or []
+        )
 
         self._metrics_by_combo = {}
         self.failures = []
@@ -2698,7 +2748,10 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             raise
 
         if save_filename is not None:
-            plt.savefig(save_filename)
+            # Save the figure `ax` belongs to — `plt.savefig` targets whatever
+            # figure is current, which need not be this one when the caller
+            # passed their own `ax`.
+            ax.figure.savefig(save_filename)
 
         if created_fig and save_filename is not None:
             # We created the figure and the caller asked for a file, not a live
