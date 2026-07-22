@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b><br>
+  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b> —<br>
   a framework-agnostic sweep engine built on
   <a href="https://github.com/mit-ll-responsible-ai/hydra-zen">hydra-zen</a>,
   with first-class <a href="https://lightning.ai/">PyTorch Lightning</a> integration.
