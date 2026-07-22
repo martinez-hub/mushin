@@ -10,6 +10,7 @@
 <p align="center">
   <a href="https://github.com/martinez-hub/mushin/actions/workflows/ci.yml"><img src="https://github.com/martinez-hub/mushin/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/mushin-py/"><img src="https://img.shields.io/pypi/v/mushin-py.svg" alt="PyPI"></a>
+  <a href="https://github.com/martinez-hub/mushin/releases/latest"><img src="https://img.shields.io/github/v/release/martinez-hub/mushin?label=release" alt="Latest release"></a>
   <a href="https://pypi.org/project/mushin-py/"><img src="https://img.shields.io/pypi/pyversions/mushin-py.svg" alt="Python versions"></a>
   <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://doi.org/10.5281/zenodo.21436444"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.21436444.svg" alt="DOI"></a>
