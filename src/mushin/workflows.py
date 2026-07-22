@@ -992,6 +992,15 @@ class BaseWorkflow:
             ``working_dir``\\ s: a cell whose config AND task source match a
             cached entry reuses it instead of recomputing.
 
+        notes : str | None (default: None)
+            A free-form note recorded for the sweep — in the manifest, on
+            ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for
+            "why did I run this?".
+
+        tags : list[str] | None (default: None)
+            Tags recorded for the sweep — in the manifest, on ``wf.tags``, and as
+            the dataset attr ``mushin_tags``.
+
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
             existing behavior: a failing job aborts the sweep and the exception
@@ -1512,6 +1521,22 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         return True
 
     @property
+    def notes(self) -> str | None:
+        """Free-form note recorded for this sweep via ``run(notes=...)`` (or read
+        from the manifest of a loaded sweep); ``None`` if none was set."""
+        if self._manifest is not None:
+            return self._manifest.notes
+        return getattr(self, "_notes", None)
+
+    @property
+    def tags(self) -> list[str]:
+        """Tags recorded for this sweep via ``run(tags=[...])`` (or read from the
+        manifest of a loaded sweep); an empty list if none were set."""
+        if self._manifest is not None:
+            return list(self._manifest.tags)
+        return list(getattr(self, "_tags", []))
+
+    @property
     def provenance(self) -> dict | None:
         """Best-effort per-run provenance (git/versions/config) read from one
         job's ``mushin_provenance.json``. ``None`` if no record is found."""
@@ -1634,6 +1659,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         sample: int | None = None,
         sample_seed: int = 0,
         cache_dir: str | None = None,
+        notes: str | None = None,
+        tags: list[str] | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -1720,6 +1747,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             are supported — see the workflows guide's "Sweep-axis support"
             section.
         """
+        if notes is not None and not isinstance(notes, str):
+            raise ValueError(
+                f"`notes` must be a string or None, got {type(notes).__name__}"
+            )
+        if tags is not None and (
+            not isinstance(tags, (list, tuple))
+            or not all(isinstance(t, str) for t in tags)
+        ):
+            raise ValueError(f"`tags` must be a list of strings, got {tags!r}")
+        # Stashed for jobs_post_process to record on the sweep manifest (run() and
+        # jobs_post_process are separate methods; the manifest is built there).
+        self._notes = notes
+        self._tags = list(tags) if tags else []
+
         if target_job_dirs is not None:
             if isinstance(target_job_dirs, str):
                 raise TypeError(
@@ -1865,7 +1906,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # not AND over cells absent from the current grid. Every current-grid
         # combo is re-marked in the loop below, and resume reads prior state from
         # its own `prior_manifest` (loaded in `run()` before this file is rewritten).
-        manifest = Manifest(self.working_dir, swept_names)
+        manifest = Manifest(
+            self.working_dir,
+            swept_names,
+            notes=getattr(self, "_notes", None),
+            tags=getattr(self, "_tags", None),
+        )
 
         self._metrics_by_combo = {}
         self.failures = []
@@ -2062,6 +2108,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         if metrics_filename is not None:
             self.load_metrics(metrics_filename)
+
+        # Surface any sweep-level lineage (notes/tags) recorded in the manifest,
+        # so a loaded sweep reports the same wf.notes/wf.tags it ran with. Read
+        # only these fields (not the full manifest) to keep is_complete's
+        # documented "loaded workflow -> True" behavior unchanged.
+        try:
+            from ._sweep_io import Manifest
+
+            _m = Manifest.load_or_new(self.working_dir, [])
+            self._notes = _m.notes
+            self._tags = list(_m.tags)
+        except Exception:  # noqa: BLE001 - lineage is best-effort
+            pass
 
         return self
 
@@ -2381,6 +2440,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # from failures.
         if getattr(self, "skipped", None):
             attrs["mushin_skipped"] = _json.dumps([s["combo"] for s in self.skipped])
+        # Lineage annotations travel with the dataset (tags as a JSON string:
+        # netCDF attrs cannot portably hold a list of strings).
+        if self.notes is not None:
+            attrs["mushin_notes"] = self.notes
+        if self.tags:
+            attrs["mushin_tags"] = _json.dumps(self.tags)
         # Attach best-effort per-run provenance (git/versions/config) from one
         # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
         # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
