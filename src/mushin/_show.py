@@ -139,23 +139,32 @@ def show(
             row[m] = c["metrics"].get(m)
         rows.append(row)
 
+    columns = [*param_cols, "status", *metric_cols]
     if sort is not None:
+        if sort not in columns:
+            raise ValueError(
+                f"sort column {sort!r} not found; available columns: "
+                f"{', '.join(columns)}"
+            )
         rows.sort(key=lambda r: (r.get(sort) is None, _sortable(r.get(sort))))
     elif param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))
-
-    columns = [*param_cols, "status", *metric_cols]
     table = _render(columns, rows)
     print(table)
     return ShowResult(rows, table)
 
 
 def _sortable(v: Any):
-    """A total-order key: numbers sort together, everything else by string."""
+    """A total-order key: finite numbers first (numeric order), then everything
+    else by string, then NaN last. NaN gets its own bucket so it cannot break the
+    sort's total order (``nan < x`` and ``x < nan`` are both False)."""
     if isinstance(v, bool):
         return (1, str(v))
     if isinstance(v, int | float):
-        return (0, float(v))
+        f = float(v)
+        if f != f:  # NaN
+            return (2, 0.0)
+        return (0, f)
     return (1, str(v))
 
 
