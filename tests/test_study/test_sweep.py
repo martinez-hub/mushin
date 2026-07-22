@@ -189,3 +189,33 @@ def test_resume_not_fooled_by_method_reordering(tmp_path):
         )
     assert Path(ckpts["a"][0]).read_text() == "a-0"
     assert Path(ckpts["b"][0]).read_text() == "b-0"
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_resume_reruns_when_partial_method_changes(tmp_path):
+    """functools.partial has no readable source; the methods fingerprint must
+    still change when the partial's bound arguments change, not silently
+    degrade to a constant and reuse stale checkpoints."""
+    import functools
+
+    def train(seed, tag=""):
+        p = Path(f"_tmp_p_{seed}.bin")
+        p.write_text(f"{tag}-{seed}")
+        return str(p.resolve())
+
+    wd = str(tmp_path / "wd")
+    run_training_sweep(
+        {"m": functools.partial(train, tag="v1")},
+        seeds=[0],
+        ckpt_dir=tmp_path / "ck",
+        working_dir=wd,
+    )
+    with pytest.warns(UserWarning, match="fingerprint mismatch"):
+        ckpts = run_training_sweep(
+            {"m": functools.partial(train, tag="v2")},
+            seeds=[0],
+            ckpt_dir=tmp_path / "ck",
+            working_dir=wd,
+            resume=True,
+        )
+    assert Path(ckpts["m"][0]).read_text() == "v2-0"

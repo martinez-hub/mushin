@@ -132,3 +132,13 @@ def test_metrics_sidecar_roundtrips_infinities(tmp_path):
         raise AssertionError(f"non-strict JSON literal in sidecar: {name}")
 
     json.loads((tmp_path / METRICS_FILE).read_text(), parse_constant=_reject_constant)
+
+
+def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
+    """Only the exact internal marker values decode to ±Inf — a user metric
+    dict that merely shares the tag key must round-trip unchanged."""
+    from mushin._sweep_io import read_metrics_sidecar, write_metrics_sidecar
+
+    write_metrics_sidecar(tmp_path, {"weird": {"__mushin_nonfinite__": "hello"}})
+    back = read_metrics_sidecar(tmp_path)
+    assert back == {"weird": {"__mushin_nonfinite__": "hello"}}

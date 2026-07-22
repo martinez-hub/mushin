@@ -420,6 +420,13 @@ class _TaskRunner:
                     config_hash=chash,
                     code_hash=self.code_hash,
                 )
+                # A skipped cell has no valid metrics; drop any sidecar a prior
+                # sweep left in this reused dir so show/export don't list old
+                # metrics on a 'skipped' row while to_xarray NaN-fills it.
+                try:
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return _SkippedRun("not sampled")
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
@@ -532,9 +539,15 @@ class _TaskRunner:
                     config_hash=chash,
                     code_hash=self.code_hash,
                 )
+                # Same reused-dir hygiene as the sampling skip above.
+                try:
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return _SkippedRun()
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
+        failed_recorded = False
         try:
             self.pre_task(cfg)
             cwd = Path.cwd()
@@ -574,6 +587,7 @@ class _TaskRunner:
                     (cwd / METRICS_FILE).unlink(missing_ok=True)
                 except OSError:
                     pass  # best-effort: never mask the task's own failure
+                failed_recorded = True
                 raise
             finally:
                 if token is not None:
@@ -602,6 +616,27 @@ class _TaskRunner:
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
+            if not failed_recorded:
+                # A SETUP-phase failure (pre_task, combo extraction, the
+                # 'running' status write) never reached the task-body handler
+                # above, so the cell dir may still carry a prior sweep's
+                # 'completed' status + metrics sidecar. Record the failure and
+                # remove the stale sidecar so offline tools cannot present the
+                # old metrics as this sweep's results. Best-effort: the combo
+                # itself may be what failed to compute.
+                try:
+                    cwd = Path.cwd()
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                    write_cell_status(
+                        cwd,
+                        status="failed",
+                        combo=self._combo(cfg, self.swept_names),
+                        attempt=1,
+                        config_hash=chash,
+                        code_hash=self.code_hash,
+                    )
+                except Exception:  # noqa: BLE001 - never mask the real failure
+                    pass
             if self.on_error == "nan":
                 # The sentinel keeps only repr(exc); persist the full stack in
                 # the cell dir so a fail-soft sweep stays debuggable. (Hydra's
@@ -1017,14 +1052,6 @@ class BaseWorkflow:
             )
         self._on_error = on_error
 
-        # Reset memoized override caches so a SECOND run() on the same instance
-        # keys its grid on this sweep, not the previous one (mirrors the reset
-        # in `load_from_dir` for reused loader objects).
-        self._multirun_task_overrides = {}
-        self._target_dir_multirun_overrides = None
-        self._loaded_job_choices = None
-        self._job_metrics_by_index = None
-
         if resume and working_dir is None:
             raise ValueError("`resume=True` requires `working_dir` to be provided.")
 
@@ -1362,6 +1389,17 @@ class BaseWorkflow:
 
         self._capture_env = capture_env
 
+        # Reset memoized override caches and loaded-from-disk state so a SECOND
+        # run() on the same instance keys its grid on this sweep, not the
+        # previous one (mirrors the reset in `load_from_dir` for reused loader
+        # objects). Deliberately placed HERE — after every validation raise and
+        # the dry_run early-return — so a preview or a rejected call on a
+        # loaded workflow does not wipe state its next to_xarray() needs.
+        self._multirun_task_overrides = {}
+        self._target_dir_multirun_overrides = None
+        self._loaded_job_choices = None
+        self._job_metrics_by_index = None
+
         # Run a Multirun over epsilons
         jobs = launch(
             self.eval_task_cfg,
@@ -1642,8 +1680,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if head[:1] in (b"{", b"["):
             import json
 
+            from ._sweep_io import _restore_nonfinite
+
             with open(file_path) as f:
-                return json.load(f)
+                # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
+                # as a tagged marker) so an offline reload yields the same
+                # float values the in-process run produced.
+                return _restore_nonfinite(json.load(f))
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
         import torch as tr

@@ -71,9 +71,11 @@ def _read_cells(root) -> list[dict]:
     manifest_mtime = 0.0
     try:
         manifest_cells = Manifest.load_or_new(root, []).cells
+        if not isinstance(manifest_cells, dict):
+            manifest_cells = {}
         if manifest_cells:
             manifest_mtime = (root / MANIFEST_FILE).stat().st_mtime
-    except OSError:  # unreadable manifest -> fall back to an unscoped scan
+    except Exception:  # noqa: BLE001 - unreadable manifest -> unscoped scan
         manifest_cells = {}
 
     cells: list[dict] = []
@@ -364,9 +366,12 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     """Compare two sweep directories ``a`` and ``b``.
 
     Cells are aligned by their swept-param combination. For each shared cell the
-    delta ``b - a`` is computed for every metric that is a finite scalar in both.
-    Cells present in only one sweep are reported separately, along with a diff of
-    the two runs' environment provenance (git/packages/python/accelerator).
+    delta ``b - a`` is computed for every metric that is a finite scalar in both
+    — and only when the cell is ``completed`` on BOTH sides (a failed/skipped
+    cell may carry a stale sidecar from a prior attempt; its row appears with
+    empty ``deltas``). Cells present in only one sweep are reported separately,
+    along with a diff of the two runs' environment provenance
+    (git/packages/python/accelerator).
 
     Returns
     -------

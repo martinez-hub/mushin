@@ -127,9 +127,13 @@ def test_offline_tools_ignore_duplicate_dirs_not_in_manifest(tmp_path):
     wd = tmp_path / "s"
     W().run(lr=multirun([0.001, 0.01]), working_dir=str(wd))
     shutil.copytree(wd / "0", wd / "9")  # duplicate claimant for dir 0's combo
+    # give the impostor DIFFERENT metrics, so the assertion below proves the
+    # manifest's dir won (not merely that a duplicate was dropped)
+    (wd / "9" / "mushin_metrics.json").write_text('{"acc": 999.0}')
 
     res = mushin.show(wd)
     assert len(res.rows) == 2  # the copy is not double-counted
+    assert all(r["acc"] != 999.0 for r in res.rows)  # manifest's dir wins
 
 
 def test_show_keeps_cells_of_a_newer_inflight_sweep(tmp_path):
@@ -149,6 +153,24 @@ def test_show_keeps_cells_of_a_newer_inflight_sweep(tmp_path):
     d = wd / "7"
     d.mkdir()
     write_cell_status(d, status="running", combo={"lr": 0.5}, attempt=1)
+    # Force the sidecar mtime past the manifest's, so the test doesn't depend
+    # on sub-second filesystem mtime resolution.
+    import os
+
+    manifest_mtime = (wd / "mushin_sweep_manifest.json").stat().st_mtime
+    os.utime(d / "mushin_cell_status.json", (manifest_mtime + 5, manifest_mtime + 5))
 
     rows = mushin.show(wd).rows
     assert any(r["lr"] == 0.5 and r["status"] == "running" for r in rows)
+
+
+def test_offline_tools_survive_wrong_shape_manifest(tmp_path):
+    """A valid-JSON manifest of the wrong shape (list payload, or non-dict
+    cells) must degrade to the unscoped scan, not crash show/best/export."""
+    wd = tmp_path / "s"
+    _run_sweep(wd)
+
+    for payload in ("[]", '{"cells": []}', '{"cells": {"k": 5}}'):
+        (wd / "mushin_sweep_manifest.json").write_text(payload)
+        assert len(mushin.show(wd).rows) == 4
+        assert mushin.best(wd, "acc").combo == {"lr": 0.2, "seed": 1}
