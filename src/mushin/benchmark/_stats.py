@@ -306,6 +306,28 @@ def compare_methods(
         recs, pvals = [], []
         for a, b in itertools.combinations(methods, 2):
             va, vb = vals[a], vals[b]
+            if allow_incomplete:
+                # Compute over the seeds completed for BOTH methods: drop pairs
+                # where either cell is missing (NaN). No-op for a complete grid
+                # (nothing is NaN), so the normal path is byte-for-byte unchanged.
+                _fa = np.asarray(va, dtype=float)
+                _fb = np.asarray(vb, dtype=float)
+                _finite = np.isfinite(_fa) & np.isfinite(_fb)
+                va, vb = _fa[_finite], _fb[_finite]
+                if va.size < 2:
+                    # too few completed pairs to form a test
+                    recs.append(
+                        {
+                            "metric": str(metric),
+                            "method_a": a,
+                            "method_b": b,
+                            "mean_diff": float("nan"),
+                            "effect_size": float("nan"),
+                            "p_value": float("nan"),
+                        }
+                    )
+                    pvals.append(float("nan"))
+                    continue
             # Match the effect size to the test: paired tests get d_z over the
             # per-seed differences; unpaired tests get the pooled-variance d.
             eff = cohens_dz(va, vb) if is_paired else cohens_d(va, vb)

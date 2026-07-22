@@ -1019,6 +1019,21 @@ class BaseWorkflow:
                 f"`sample` must be a positive number of cells, got {sample!r}."
             )
 
+        if resume and sample is not None:
+            raise ValueError(
+                "`resume` and `sample` cannot be combined: sampling skips cells "
+                "by job index, which would overwrite already-completed cells on a "
+                "resume. Run WITHOUT `sample` and `resume=True` to fill in the "
+                "remaining cells."
+            )
+
+        # Normalize cache_dir to an absolute path NOW (before Hydra chdirs each
+        # job into its own numeric dir). A relative/`~` cache_dir would otherwise
+        # be dereferenced inside every cell's job dir, so cross-cell reuse would
+        # silently never hit.
+        if cache_dir is not None:
+            cache_dir = str(Path(cache_dir).expanduser().resolve())
+
         launch_overrides = []
 
         if overrides is not None:
@@ -1191,28 +1206,25 @@ class BaseWorkflow:
                 "them in the workflow's eval_task_cfg."
             )
 
-        # The grid cell count drives both the dry-run preview and the pre-launch
-        # gate below. Sourced from the user's own overrides (not launch_overrides)
-        # so the `hydra.*` plumbing is excluded.
+        # The grid axes and cell count drive the dry-run preview, the pre-launch
+        # gate, and `sample=`. Derived from the FULLY parsed launch overrides so a
+        # sweep axis counts whether it came through a `param=` kwarg OR the raw
+        # `overrides=[...]` list; the `hydra.*` plumbing is excluded.
+        _grid = {
+            k: v
+            for k, v in self._parse_overrides(launch_overrides).items()
+            if not k.startswith("hydra")
+        }
+        axes = {k: list(v) for k, v in _grid.items() if isinstance(v, multirun)}
+        fixed = {k: v for k, v in _grid.items() if not isinstance(v, multirun)}
         num_cells = 1
-        for v in workflow_overrides.values():
-            if isinstance(v, multirun):
-                num_cells *= len(v)
+        for v in axes.values():
+            num_cells *= len(v)
 
         if dry_run:
             # Preview the grid and return WITHOUT launching (also the intended
             # escape hatch for previewing an over-limit sweep — the gate below is
-            # skipped on a dry run). Axes vs fixed are separated cleanly.
-            axes = {
-                k: list(v)
-                for k, v in workflow_overrides.items()
-                if isinstance(v, multirun)
-            }
-            fixed = {
-                k: (list(v) if isinstance(v, hydra_list) else v)
-                for k, v in workflow_overrides.items()
-                if not isinstance(v, multirun)
-            }
+            # skipped on a dry run).
             summary = {
                 "num_cells": num_cells,
                 "axes": axes,
