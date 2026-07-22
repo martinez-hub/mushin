@@ -992,15 +992,6 @@ class BaseWorkflow:
             ``working_dir``\\ s: a cell whose config AND task source match a
             cached entry reuses it instead of recomputing.
 
-        notes : str | None (default: None)
-            A free-form note recorded for the sweep — in the manifest, on
-            ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for
-            "why did I run this?".
-
-        tags : list[str] | None (default: None)
-            Tags recorded for the sweep — in the manifest, on ``wf.tags``, and as
-            the dataset attr ``mushin_tags``.
-
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
             existing behavior: a failing job aborts the sweep and the exception
@@ -1740,6 +1731,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             sweep is free in another. Newly-computed cells are stored there.
             Complements ``resume`` (which reuses within a single ``working_dir``);
             a changed config value or edited task body is a cache miss.
+        notes : str | None (default: None)
+            A free-form note recorded for the sweep — in the manifest, on
+            ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for
+            "why did I run this?". A resume that does not re-pass it keeps the
+            original run's note.
+        tags : list[str] | None (default: None)
+            Tags recorded for the sweep — in the manifest, on ``wf.tags``, and as
+            the dataset attr ``mushin_tags`` (preserved across a resume).
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
