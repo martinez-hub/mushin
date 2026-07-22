@@ -17,9 +17,9 @@ See [Workflows & sweeps](guides/workflows.md) and the
 
 ## Frameworks: Lightning-first, sweep layer agnostic
 
-mushin is built on [PyTorch Lightning](https://lightning.ai/) and hydra-zen, and
-that's its first-class path. But the two layers differ in how tied to Lightning
-they are:
+mushin is built on hydra-zen, with
+[PyTorch Lightning](https://lightning.ai/) as its first-class deep-learning
+path. The two layers differ in how tied to Lightning they are:
 
 **The sweep layer is framework-agnostic.** `MultiRunMetricsWorkflow` never
 inspects your model — it only sweeps configurations and collects the `dict` your
