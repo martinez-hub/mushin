@@ -121,9 +121,12 @@ def test_gate_applies_to_decorator_sweep(tmp_path):
     assert counter["n"] == 0
 
 
-def test_gate_uses_sampled_cell_count(tmp_path):
-    """`sample=` bounds what actually computes, so the cell-count gate must
-    compare the SAMPLED count against the limit, not the full grid."""
+def test_gate_fires_on_full_grid_even_with_sample(tmp_path):
+    """`sample=` limits COMPUTE, not launch: Hydra still enumerates and
+    launches every grid cell (a job dir, composed config, and — under
+    submitit — a scheduler submission per cell). The gate exists to catch a
+    typo'd grid before that launch cost, so it must fire on the FULL grid
+    size, and its message must say why sample= doesn't exempt the sweep."""
     from mushin import multirun
     from mushin.workflows import MultiRunMetricsWorkflow
 
@@ -133,11 +136,11 @@ def test_gate_uses_sampled_cell_count(tmp_path):
             return dict(m=float(a))
 
     wf = W()
-    with pytest.warns(UserWarning, match="skipped"):
+    with pytest.raises(ValueError, match="sample.*does not reduce"):
         wf.run(
             a=multirun([1, 2, 3, 4, 5, 6]),
             sample=2,
             confirm_above=3,
             working_dir=str(tmp_path / "s"),
         )
-    assert len(wf.skipped) == 4
+    assert not (tmp_path / "s" / "0").exists()  # nothing launched

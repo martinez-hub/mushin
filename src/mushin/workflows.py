@@ -1251,8 +1251,11 @@ class BaseWorkflow:
                     "repeat trials."
                 )
 
-        # `sample=` bounds what actually computes; the preview and the gate
-        # reflect that (the full grid still defines the dataset's shape).
+        # `sample=` bounds what actually COMPUTES; the dry-run preview reports
+        # that. The gate below still fires on the full grid: Hydra enumerates
+        # and launches every cell regardless of sampling (a job dir, composed
+        # config, and — under submitit — a scheduler submission per cell), so
+        # the typo'd-grid rail must cap launch cost, not just compute.
         effective_cells = num_cells if sample is None else min(sample, num_cells)
 
         if dry_run:
@@ -1287,16 +1290,18 @@ class BaseWorkflow:
                     limit_src = "MUSHIN_MAX_CELLS"
                 except ValueError:
                     limit = None  # malformed env -> no gate
-        if limit is not None and effective_cells > limit:
-            what = (
-                f"{num_cells} cells"
+        if limit is not None and num_cells > limit:
+            sample_note = (
+                ""
                 if sample is None
-                else f"{effective_cells} sampled cells (of a {num_cells}-cell grid)"
+                else f" `sample={sample}` limits compute but does not reduce the "
+                f"number of launched Hydra jobs — all {num_cells} cells would "
+                "still be launched."
             )
             raise ValueError(
-                f"this sweep runs {what}, above the {limit_src} limit "
-                f"of {limit}. Preview it with `dry_run=True`, or raise the ceiling "
-                f"(e.g. `confirm_above={effective_cells}`) to run it."
+                f"this sweep has {num_cells} cells, above the {limit_src} limit "
+                f"of {limit}.{sample_note} Preview it with `dry_run=True`, or raise "
+                f"the ceiling (e.g. `confirm_above={num_cells}`) to run it."
             )
 
         if task_fn_wrapper is None:
@@ -1740,7 +1745,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             raising a ``ValueError`` instead — a guard against an accidentally
             huge grid. The ``MUSHIN_MAX_CELLS`` environment variable supplies a
             default ceiling when this is not set (an explicit value wins). Use
-            ``dry_run=True`` to preview an over-limit sweep.
+            ``dry_run=True`` to preview an over-limit sweep. ``sample=`` does
+            not lower this gate: Hydra still launches every grid cell (sampling
+            saves compute, not launch overhead).
         max_total_seconds : float | None (default: None)
             A graceful wall-clock budget. Once it is exhausted the remaining
             cells are skipped (recorded ``'skipped'``, NaN in the dataset,

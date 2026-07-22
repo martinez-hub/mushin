@@ -95,7 +95,8 @@ def _apply_metric_filter(
 ) -> list[str]:
     """Restrict/reorder metric columns to ``metrics``. Unknown names raise
     (like ``sort=`` does) — a typo silently dropping a column is worse — and
-    the caller's requested order is honored."""
+    the caller's requested order is honored, with repeats deduplicated (a
+    duplicate CSV header would be mangled by downstream consumers)."""
     if metrics is None:
         return metric_cols
     unknown = [m for m in metrics if m not in set(metric_cols)]
@@ -104,7 +105,7 @@ def _apply_metric_filter(
             f"metric column(s) {', '.join(map(repr, unknown))} not found; "
             f"available metrics: {', '.join(metric_cols) or '(none)'}"
         )
-    return list(metrics)
+    return list(dict.fromkeys(metrics))
 
 
 class ShowResult:
@@ -139,10 +140,13 @@ def show(
     root :
         A sweep ``working_dir`` (the parent of the numeric per-cell job dirs).
     metrics : list[str] | None
-        Restrict the metric columns to these names (default: every metric found).
+        Restrict the metric columns to these names, in this order (default:
+        every metric found, discovery order). An unknown name raises
+        ``ValueError`` (like ``sort=``); repeats are deduplicated.
     sort : str | None
         Column to sort rows by (a swept param, ``"status"``, or a metric).
-        Defaults to the swept params in grid order.
+        Defaults to the swept params in grid order. A metric that shares a
+        swept param's name is shown (and sorted) as ``"<name> (metric)"``.
 
     Returns
     -------

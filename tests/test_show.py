@@ -126,3 +126,18 @@ def test_unknown_metric_filter_raises(tmp_path):
     res = mushin.show(wd, metrics=["loss", "acc"])
     cols = res.table.splitlines()[0].split()
     assert cols.index("loss") < cols.index("acc")  # requested order wins
+
+
+def test_metrics_filter_deduplicates_repeated_names(tmp_path):
+    """A repeated metrics= entry must not emit a duplicated table/CSV column
+    (a duplicate CSV header makes pandas mangle it to acc/acc.1)."""
+    from mushin import export
+
+    wd = tmp_path / "s"
+    _run_sweep(wd)
+
+    cols = mushin.show(wd, metrics=["acc", "acc"]).table.splitlines()[0].split()
+    assert cols.count("acc") == 1
+
+    header = export.table(wd, metrics=["acc", "acc"]).strip().splitlines()[0]
+    assert header.split(",").count("acc") == 1

@@ -46,12 +46,16 @@ def table(root, *, path=None, metrics: list[str] | None = None):
         If given, write the CSV there and return the ``Path``. Otherwise return
         the CSV as a string.
     metrics : list[str] | None
-        Restrict the metric columns to these names (default: every metric found).
+        Restrict the metric columns to these names, in this order (default:
+        every metric found, discovery order); repeats are deduplicated. A
+        metric sharing a swept param's name is emitted as ``"<name> (metric)"``.
 
     Raises
     ------
     FileNotFoundError
         If ``root`` is not a directory.
+    ValueError
+        If ``metrics`` contains a name that is not a metric of this sweep.
     """
     cells = _read_cells(root)
 
