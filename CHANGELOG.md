@@ -8,6 +8,171 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.10.0] - 2026-07-22
+
+### Added
+
+- A pre-launch cell-count gate guards against an accidentally huge grid.
+  `run(..., confirm_above=N)` refuses to launch a sweep with more than `N` cells,
+  raising a `ValueError` that reports the count and how to proceed (preview with
+  `dry_run=True`, or raise the ceiling). The `MUSHIN_MAX_CELLS` environment
+  variable supplies a default ceiling when a call doesn't set one — so a shared
+  cluster or CI profile can cap every sweep — and an explicit `confirm_above=`
+  wins over it. A malformed `MUSHIN_MAX_CELLS` is ignored, and `dry_run=True`
+  bypasses the gate so an over-limit sweep can still be previewed.
+- `mushin.best(root, metric)` returns the completed cell that optimizes a metric
+  across a sweep — `mode="max"` (default) or `mode="min"`. Like `mushin.show` it
+  reads the per-cell sidecars directly (offline, no Hydra/xarray). The returned
+  `BestResult` carries the winning `combo` (swept params), the optimized `value`,
+  the full `metrics` dict, the cell `status`, and its job `dir` (for locating
+  checkpoints/artifacts). Failed/running/skipped cells and non-finite metric
+  values are ignored; an unknown metric raises a `ValueError` that lists the
+  available scalar metrics.
+- `mushin.diff(a, b)` compares two sweep directories. It aligns cells by their
+  swept-parameter combination and, for each shared cell, reports the delta
+  `b - a` of every metric that is a finite scalar in both — printed as a `Δmetric`
+  table. Cells present in only one sweep are listed (`only_in_a` / `only_in_b`),
+  and the two runs' environment provenance is diffed field-by-field
+  (git/packages/python/accelerator), excluding volatile fields like the per-cell
+  timestamp. Like `show`/`best` it reads the per-cell sidecars directly (offline,
+  no Hydra/xarray); the returned `DiffResult` exposes `.rows`, `.only_in_a`,
+  `.only_in_b`, `.provenance`, and `.table`.
+- `mushin.export.table(root)` exports a sweep as CSV — one row per cell with its
+  swept parameters, `status`, and metrics. It reads the per-cell sidecars directly
+  (offline, no Hydra/xarray) and writes full-precision values so pandas parses
+  numbers numerically. Returns the CSV string, or writes to `path=` and returns the
+  `Path`; `metrics=` restricts the metric columns. A durable, spreadsheet-friendly
+  substrate for researchers who prefer pandas to xarray.
+- `mushin.show(root)` prints (and returns) a status/metrics table for a sweep
+  directory. It reads each cell's status and metrics sidecars directly — pure
+  JSON, so it needs neither Hydra nor xarray and works mid-sweep — making it handy
+  for watching a live sweep or eyeballing a finished one before the full
+  `to_xarray` load. Each row carries the cell's swept parameters, its status
+  (`completed`/`running`/`failed`/`skipped`/…), and its metric values; `metrics=`
+  restricts the metric columns and `sort=` orders the rows. The returned
+  `ShowResult` exposes `.rows` (one dict per cell) and `.table`.
+- `run()` now validates up front that every required task (and `pre_task`)
+  parameter is satisfied — by the base config, an override, or the raw
+  `overrides=[...]` list — and raises a clear `ValueError` naming the missing
+  parameter(s) before launching. Previously a genuinely missing parameter surfaced
+  as an opaque per-job Hydra `ConfigAttributeError` after the sweep had already
+  started, once per cell. A parameter supplied only via an override is still valid
+  (the common decorator case, where the base config is empty), so this adds no
+  false positives.
+- `run(..., cache_dir=...)` adds a content-addressed cache of completed cells that
+  is shared across `working_dir`s. A cell whose resolved config AND task source
+  match a previously-computed cell — keyed on the same fingerprints as `resume` —
+  reuses that result instead of recomputing, so a cell computed in one sweep is
+  free in another (a coarse grid refined into a finer one, a re-run in a fresh
+  directory). Newly-computed cells are stored in the cache automatically. It
+  complements `resume` (which reuses only within a single `working_dir`); a changed
+  non-swept config value or an edited task body is a cache miss. Cache writes are
+  best-effort and never fail the cell.
+- `run(..., dry_run=True)` (and `@mushin.sweep` `.run(dry_run=True)`) previews a
+  sweep instead of launching it: it prints the cell count and each swept axis with
+  its values — so a range typo shows up as an unexpectedly wide axis before any
+  compute is spent — and returns a summary dict (`num_cells`, `axes`, `fixed`,
+  `working_dir`) with no jobs run.
+- `run(..., max_total_seconds=T)` adds a graceful wall-clock budget. Once the
+  budget is exhausted the remaining grid cells are skipped — recorded `'skipped'`
+  in the manifest and per-cell status, NaN in the dataset, and surfaced in
+  `self.skipped` (and a `mushin_skipped` dataset attr) — instead of the sweep
+  running to the end. The clock starts at the first computed cell, so at least one
+  cell always runs and resume cache hits don't consume the budget; a cell already
+  running is never interrupted. Because a skipped cell is not `completed`, a later
+  `resume=True` with more time finishes exactly the skipped cells. The budget is
+  measured per launcher process, so it's best paired with the default sequential
+  launcher.
+- `run(..., notes="...", tags=[...])` annotates a sweep with free-form lineage. The
+  note and tags are recorded in the sweep manifest, exposed on the workflow as
+  `wf.notes` / `wf.tags` (and preserved when a sweep is reloaded with
+  `load_from_dir`), and carried on the dataset as the `mushin_notes` /
+  `mushin_tags` attrs — so "why did I run this?" travels with the results. `tags`
+  must be a list of strings and `notes` a string. A resume that does not re-pass
+  `notes`/`tags` preserves the original run's lineage rather than wiping it.
+- `run(..., sample=K)` runs only a random `K`-cell subset of the grid — the rest
+  are skipped (NaN, and listed in `self.skipped`) — for fast exploration of a large
+  grid without paying for every cell. The subset is chosen deterministically from
+  the Hydra job indices (seeded by `sample_seed`, default 0), so it is reproducible
+  and identical across a resume; resuming *without* `sample` fills in the remaining
+  cells. `sample >= n_cells` runs everything. Because selection is by job index it
+  is launcher- and axis-type-agnostic. Note: the full grid is still composed by
+  Hydra (only the sampled cells run), and a sampled sweep is intentionally
+  incomplete (`is_complete` is False).
+
+### Fixed
+
+- A batch of defensive-handling fixes: corrupt-but-valid-JSON cell-status sidecars now degrade (resume treats a null/`"3"` attempt or a wrong-shape record as absent) instead of crashing; `load_from_dir` raises a real `FileNotFoundError` for a missing config (not a `-O`-stripped assert); the resume contextvar no longer leaks when a status write fails; `RobustnessCurve.plot` no longer leaks a figure when plotting raises; a malformed tuning pin reaches its friendly "delete it or retune" guard; `mushin.lightning`/`benchmark`/`mcp`/`testing` are reachable as lazy submodules after `import mushin`; `compare`/`compare_llms` reject an unknown `correction=` before any evaluation runs; the MCP `get_failures`/`get_provenance` tools tolerate wrong-type sidecar JSON; and a `value_check` message typo ("None orof") is fixed.
+- A typo'd sweep-axis name is now caught before launch instead of silently
+  producing a wrong dataset. Passing `run(lrate=multirun(...))` when the task
+  parameter is `lr` previously ran to completion and added a phantom `lrate`
+  dimension of constant values; it now raises a `ValueError` that names the likely
+  intended parameter. Only near-misses of a real target are rejected — deliberate
+  overrides beyond the task's own parameters (values consumed by `pre_task`,
+  config groups, interpolations) and tasks declaring `**kwargs` are unaffected.
+- Fixed `trainer.validate()` under `HydraDDP`/`HydraFSDP`: the child ranks were told to run `fit` (train) while rank 0 validated — a collective mismatch that hangs or crashes. The launcher now maps Lightning's `_validate_impl` to a `pl_validating` flag and `_pl_main` dispatches `trainer.validate` accordingly, alongside the existing test/predict paths.
+- Fixed a cluster of silent-wrong-results bugs in the override → grid pipeline: a fixed (non-`multirun`) string containing `,` or `=` is no longer re-split into an accidental sweep and `"true"`/`"1"` stay strings; a duplicated sweep-axis value is rejected instead of silently collapsing two cells into one; `combo_key` is now injective (delimiter-containing values can't collide with a different combination); a dotted sweep (`model.width`) on a config field that already exists no longer crashes; and a batching sweeper's multi-batch job list is flattened instead of failing after every job ran.
+- Fixed five defects found by an adversarial review of the exploration features:
+
+  - **`cache_dir`** is now resolved to an absolute path (`expanduser().resolve()`)
+    before launching. A relative or `~`-prefixed `cache_dir` was previously
+    dereferenced inside each per-cell job dir (Hydra chdirs into it), so
+    cross-cell/cross-directory reuse silently never hit.
+  - **`resume=True` with `sample=`** is now rejected with a clear error. Combining
+    them overwrote already-completed cells (skipped by job index) to `skipped`/NaN,
+    silently discarding prior results; resume WITHOUT `sample` fills the rest.
+  - **The cell count** (used by `sample=`, `confirm_above=`/`MUSHIN_MAX_CELLS`, and
+    `dry_run`) now counts sweep axes supplied via the raw `overrides=[...]` list,
+    not only `param=multirun(...)` kwargs — so those no longer undercount the grid.
+  - **`compare_methods(allow_incomplete=True)`** now computes each comparison over
+    only the seeds completed for both methods (dropping NaN cells), fulfilling its
+    documented promise instead of feeding NaN into the tests and returning all-NaN
+    statistics.
+  - **`mushin.show(sort=...)`** places NaN metric values last deterministically
+    (they no longer break the sort's total order) and raises a clear error when
+    `sort` names a column that isn't present.
+- Fixed metric-value coercion into the JSON sidecar: a task returning a nested-dict metric containing numpy/torch values (or a `datetime`/`Path`) no longer crashes the sidecar write *after* the task succeeded (which left the cell stuck and aborted the sweep); non-finite metrics (NaN/±Inf) now serialize as valid JSON (`null`) instead of the non-strict `NaN`/`Infinity` literals that broke strict parsers, and read back as NaN so metric columns stay float dtype on resume; a non-scalar battery metric (numpy array/list, not just a torch tensor) now gives the crafted "must return scalar" error.
+- Provenance no longer leaks secrets: `mushin_provenance.json` records the config with `resolve=False` (so a `${oc.env:SECRET}` interpolation is kept as an unresolved reference instead of baking the resolved secret into the file), and values under secret-named keys (`api_key`, `token`, `password`, ...) or shaped like provider tokens (`sk-...`, `hf_...`) are redacted. This also fixes the MCP `get_provenance(include_config=True)` tool, which re-served the on-disk record.
+- Reloading a sweep offline with `load_from_dir(dir, "mushin_metrics.json")` no
+  longer crashes. The default `metric_load_fn` now sniffs the file — it reads the
+  JSON metrics sidecar (written by any task that returns a dict, including
+  `@mushin.sweep`/decorator sweeps) with `json` and falls back to `torch.load`
+  only for torch pickle/`.pt` files. Previously it was hard-wired to `torch.load`,
+  which raised `UnpicklingError` on the JSON sidecar unless you overrode the loader.
+- Resume now guards against stale-code reuse: editing a task body and re-running with `resume=True` (same config, same swept params) re-runs the affected cells — with a clear warning — instead of silently returning the previous run’s cached metrics. A per-cell hash of the task source is stored alongside the config fingerprint; a completed cell is reused only when both still match. Legacy sweeps (no recorded code hash) resume as before.
+- Resuming a sweep after changing the grid shape (adding or removing an axis) no longer silently reuses the wrong cells: previously, with legacy (pre-fingerprint) sidecars, adding an axis projected every new cell onto the old parameters, reused a stale cell across every new axis value, dropped the new dimension entirely, and reported the sweep complete. The resume now keys reuse on the current swept parameters, so a shape change re-runs the full grid, with a one-time warning.
+- Resuming into a working_dir whose numeric job dirs get reused for different cells no longer leaves stale metrics behind: on a cache hit the reused cell now writes its metrics and status into the current job dir, so the dir stays consistent with the config Hydra wrote there. Previously a reused cell (e.g. a=3) kept the leftover metrics of whatever cell last used that dir (e.g. a=1), so the manifest and an offline `load_from_dir` mis-keyed the value.
+- `compare_methods` now refuses a sweep that has **skipped/never-run** cells, not
+  just failed ones. Previously it keyed only on `mushin_failures`, so a `sample=`
+  subset or a `max_total_seconds`-limited sweep — both of which leave NaN cells —
+  would compute statistics silently over a partial grid. It now also keys on the
+  `mushin_skipped` completeness signal and raises `IncompleteSweepError`. A new
+  `allow_incomplete=True` argument bypasses the guard (with a warning) to compute
+  stats over only the completed cells, for exploratory analysis of a partial
+  sweep. As before, the guard keys on the completeness signals (attrs), never on
+  raw NaN values, so a metric that is legitimately NaN for other reasons does not
+  trigger it.
+
+### Misc
+
+- Documentation fixes: `load_from_checkpoint` docstring corrected (its three params default to None, not "state_dict"/"model"; no `load_module` param; returns the passed `nn.Module`, not a `LightningModule`); `run()`/wrapper docstrings reference `hydra_zen.zen` (not the nonexistent `mushin.zen`); `capture_env`/`resume`/`load_metrics`/`workflow_overrides` docstrings match actual behavior; the Python support matrix reads 3.10–3.13 (3.14 is not yet a required CI leg); `study.md`/`concepts.md` list all seven task batteries; and the `correction=` option is documented in the compare/LLM/index guides.
+- Documented the sweep-analysis API. `mushin.show`, `mushin.best`, `mushin.diff`,
+  and `mushin.export.table` now have an API reference page (`reference/analysis`),
+  and the exploration-to-paper guide covers `max_total_seconds`, `notes=`, and
+  `tags=`. The workflows guide also gains a "Using mushin alongside a
+  hyperparameter search" section documenting the Optuna/Ax/Nevergrad → mushin
+  two-phase pattern (searcher finds configs; mushin runs the reproducible final
+  grid), with no new dependency.
+- Fixed several tests that did not test what they claimed: the LLM "clear winner flagged significant" test now uses seed-varying systems and asserts the comparison is actually flagged significant (its old deterministic systems made the comparison masked, so it asserted nothing about significance); the Holm "is monotone" test now pins the exact step-down values and the monotonicity property; `test_on_error_raise` asserts the specific `RuntimeError("boom")` rather than any exception; a conditional-pass tuning test now visibly `pytest.skip`s instead of silently returning; a workflow test no longer scatters `multirun/` into the repo root; and a config-group test cleans up its `ConfigStore` entry.
+- New guide, "From exploration to a paper-ready sweep", documenting the convention
+  for moving from fast throwaway exploration (`sample=`, `cache_dir=`, `dry_run`,
+  `show`/`best`/`diff`) to a clean, complete, reproducible paper run — including why
+  the paper grid must be run fresh (code-era mixing, winner's curse) rather than
+  grown from the exploration directory.
+- Repo hygiene & example fixes: the crashing MNIST examples (`compare_classifiers`, `study_mnist`) now name torchvision in their install hint; `batteries.py` skips (not fails, exit 0) batteries whose optional extra is missing and drops the false "Run one"; two tracked stray `mushin_seed*.json` files are removed and gitignored; the `omegaconf`/`typing-extensions` dependency floors are raised to versions that actually resolve; `mushin-mcp` on a core install gives an actionable "install [mcp]" message instead of a bare `ModuleNotFoundError`; and `make spell` now covers `examples` like CI.
+- The publish workflow pins pypa/gh-action-pypi-publish to its release tag (a bare commit SHA cannot resolve the Docker-based action's container image, which broke the v0.9.0 publish).
+
+
 ## [0.9.0] - 2026-07-20
 
 ### Added
@@ -286,7 +451,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/martinez-hub/mushin/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/martinez-hub/mushin/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/martinez-hub/mushin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/martinez-hub/mushin/compare/v0.6.0...v0.7.0
