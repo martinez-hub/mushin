@@ -49,3 +49,43 @@ def test_compare_methods_runs_on_complete_sweep():
 def test_plain_user_dataset_unaffected():
     ds = _ds()  # no mushin attrs at all
     compare_methods(ds)  # must not raise
+
+
+def test_compare_methods_refuses_skipped_sweep():
+    # A sampled or budget-skipped sweep records skipped cells (NaN); stats must
+    # refuse it just like a failed one, rather than computing silently.
+    import json
+
+    ds = _ds()
+    ds.attrs["mushin_skipped"] = json.dumps(["method=a,seed=2"])
+    with pytest.raises(IncompleteSweepError, match="skip"):
+        compare_methods(ds)
+
+
+def test_allow_incomplete_bypasses_the_guard_with_a_warning():
+    import json
+
+    ds = _ds()
+    ds.attrs["mushin_skipped"] = json.dumps(["method=a,seed=2"])
+    with pytest.warns(UserWarning, match="incomplete"):
+        out = compare_methods(ds, allow_incomplete=True)
+    assert out is not None
+
+
+def test_allow_incomplete_also_bypasses_failures():
+    ds = _ds()
+    ds.attrs["mushin_failures"] = ["method=a,seed=1"]
+    with pytest.warns(UserWarning, match="incomplete"):
+        compare_methods(ds, allow_incomplete=True)
+
+
+def test_failures_and_skipped_both_reported():
+    import json
+
+    ds = _ds()
+    ds.attrs["mushin_failures"] = json.dumps(["method=a,seed=1"])
+    ds.attrs["mushin_skipped"] = json.dumps(["method=b,seed=2"])
+    with pytest.raises(IncompleteSweepError) as exc:
+        compare_methods(ds)
+    msg = str(exc.value)
+    assert "failed" in msg and "skip" in msg
