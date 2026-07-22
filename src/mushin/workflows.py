@@ -213,12 +213,16 @@ class _FailedRun:
 
 
 class _SkippedRun:
-    """Sentinel returned in place of a cell skipped because the wall-clock budget
-    (``max_total_seconds``) was exhausted. Like ``_FailedRun`` it lets the Hydra
-    job complete normally, so ``jobs_post_process`` can NaN-fill and record the
-    skipped cell; unlike it, no exception occurred — the cell simply never ran."""
+    """Sentinel returned in place of a cell that was intentionally not run — the
+    wall-clock budget (``max_total_seconds``) was exhausted, or the cell was not
+    in a ``sample=`` subset. Like ``_FailedRun`` it lets the Hydra job complete
+    normally, so ``jobs_post_process`` can NaN-fill and record the skipped cell;
+    unlike it, no exception occurred — the cell simply never ran."""
 
-    __slots__ = ()
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str = "budget") -> None:
+        self.reason = reason
 
 
 class _PriorCells:
@@ -310,6 +314,7 @@ class _TaskRunner:
         prior_manifest,
         code_hash=None,
         max_total_seconds=None,
+        sampled_indices=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -319,6 +324,11 @@ class _TaskRunner:
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
         self.code_hash = code_hash  # hash of the task source (resume guard)
+        # Grid subsampling: the set of Hydra job numbers to actually run (None =
+        # run every cell). A cell whose job.num is not selected is skipped
+        # (NaN), keyed on the deterministic job index so it's launcher- and
+        # axis-type-agnostic and identical across a resume.
+        self.sampled_indices = sampled_indices
         # Wall-clock budget: the deadline is set lazily at the first COMPUTED
         # cell (below), so launch/import overhead and resume cache hits don't
         # consume it. None resets on pickle -> each worker process observes its
@@ -362,6 +372,33 @@ class _TaskRunner:
         from ._sweep_io import combo_key, read_metrics_sidecar, write_metrics_sidecar
 
         chash = config_fingerprint(cfg)
+
+        # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
+        # job number is not in the selected sample never runs (NaN); keying on
+        # the job index (not the combo) makes the selection launcher- and
+        # axis-type-agnostic and identical across a resume. An un-sampled cell is
+        # recorded 'skipped', so a later resume WITHOUT `sample` fills it in.
+        if self.sampled_indices is not None:
+            from hydra.core.hydra_config import HydraConfig
+
+            job_num = None
+            try:
+                if HydraConfig.initialized():
+                    job_num = HydraConfig.get().job.num
+            except Exception:  # noqa: BLE001 - no job num -> don't skip
+                job_num = None
+            if job_num is not None and job_num not in self.sampled_indices:
+                cwd = Path.cwd()
+                combo = self._combo(cfg, self.swept_names)
+                write_cell_status(
+                    cwd,
+                    status="skipped",
+                    combo=combo,
+                    attempt=1,
+                    config_hash=chash,
+                    code_hash=self.code_hash,
+                )
+                return _SkippedRun("not sampled")
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
         if self.prior_manifest is not None:
@@ -817,6 +854,8 @@ class BaseWorkflow:
         dry_run: bool = False,
         confirm_above: int | None = None,
         max_total_seconds: float | None = None,
+        sample: int | None = None,
+        sample_seed: int = 0,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -890,6 +929,11 @@ class BaseWorkflow:
             skipped (NaN, ``self.skipped``) and a later ``resume=True`` finishes
             them.
 
+        sample : int | None (default: None)
+            Run a random ``sample``-cell subset of the grid (rest NaN) for fast
+            exploration; deterministic and resume-safe. ``sample_seed`` varies
+            the subset.
+
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
             existing behavior: a failing job aborts the sweep and the exception
@@ -910,6 +954,11 @@ class BaseWorkflow:
             raise ValueError(
                 f"`max_total_seconds` must be a positive number of seconds, got "
                 f"{max_total_seconds!r}."
+            )
+
+        if sample is not None and sample <= 0:
+            raise ValueError(
+                f"`sample` must be a positive number of cells, got {sample!r}."
             )
 
         launch_overrides = []
@@ -1194,6 +1243,18 @@ class BaseWorkflow:
 
         from ._resume import code_fingerprint
 
+        # Grid subsampling: pick a deterministic random subset of the job indices
+        # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
+        # selection reproducible AND identical across a resume, and the runner
+        # skips any cell whose job.num is not selected. `sample >= num_cells`
+        # runs the whole grid (nothing to subsample).
+        sampled_indices = None
+        if sample is not None and sample < num_cells:
+            import random as _random
+
+            _rng = _random.Random(f"{num_cells}:{sample}:{sample_seed}")
+            sampled_indices = frozenset(_rng.sample(range(num_cells), sample))
+
         _task_fn, _wants_resume = _prepare_task(self.task)
         task_call = _TaskRunner(
             task=task_fn_wrapper(_task_fn),
@@ -1205,6 +1266,7 @@ class BaseWorkflow:
             prior_manifest=_prior_manifest,
             code_hash=code_fingerprint(self.task),
             max_total_seconds=max_total_seconds,
+            sampled_indices=sampled_indices,
         )
 
         self._capture_env = capture_env
@@ -1498,6 +1560,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         dry_run: bool = False,
         confirm_above: int | None = None,
         max_total_seconds: float | None = None,
+        sample: int | None = None,
+        sample_seed: int = 0,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -1556,6 +1620,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             completed, so a later ``resume=True`` with more time finishes them.
             Measured per launcher process — best with the default sequential
             launcher.
+        sample : int | None (default: None)
+            Run only a random subset of ``sample`` cells from the full grid for
+            fast exploration; the remaining cells are skipped (NaN, and
+            ``self.skipped``). The subset is chosen deterministically (see
+            ``sample_seed``) so it is reproducible and identical across a resume;
+            resuming WITHOUT ``sample`` fills in the remaining cells. The full
+            grid is still composed by Hydra (only the sampled cells run), so this
+            saves compute, not launch overhead. ``sample >= n_cells`` runs
+            everything. A sampled sweep is intentionally incomplete
+            (``is_complete`` is False).
+        sample_seed : int (default: 0)
+            Seeds the ``sample`` selection; change it to draw a different
+            reproducible subset of the same grid.
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -1597,6 +1674,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             dry_run=dry_run,
             confirm_above=confirm_above,
             max_total_seconds=max_total_seconds,
+            sample=sample,
+            sample_seed=sample_seed,
             **workflow_overrides,
         )
 
@@ -1782,9 +1861,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             import warnings
 
             warnings.warn(
-                f"{len(self.skipped)} cell(s) skipped after the max_total_seconds "
-                f"budget was exhausted: {[s['combo'] for s in self.skipped]}; grid "
-                "cells set to NaN. Resume with more time to finish them.",
+                f"{len(self.skipped)} cell(s) were not run (skipped); their grid "
+                "cells are set to NaN. Resume to run them (a budget-exhausted "
+                "sweep needs more time; a sampled sweep needs a resume without "
+                "`sample`).",
                 UserWarning,
                 stacklevel=2,
             )
