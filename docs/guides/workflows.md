@@ -137,7 +137,9 @@ list of values, and every combination is one cell.
 - **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
-  than producing an all-NaN dataset.
+  than producing an all-NaN dataset. To use a searcher, run it as a separate
+  step and feed the winners to a mushin grid — see
+  [Using mushin alongside a hyperparameter search](#using-mushin-alongside-a-hyperparameter-search).
 
 ## Using mushin alongside your experiment tracker
 
@@ -166,6 +168,70 @@ Each sweep cell runs in its own Hydra job directory (Hydra `chdir`s into it),
 so file-based loggers like TensorBoard write per-cell logs there — point
 `TensorBoardLogger(save_dir=...)` at a fixed path if you want one aggregate
 log dir instead.
+
+## Using mushin alongside a hyperparameter search
+
+mushin is *not* a hyperparameter optimizer: it runs a fixed, discrete grid and
+labels the result, so adaptive samplers (Optuna, Ax, Nevergrad) are deliberately
+out of scope (see [Sweep-axis support](#sweep-axis-support-and-limits) above).
+The two compose as a **two-phase workflow**, not a plugin — let the optimizer
+*search*, then let mushin run the *final grid* you report.
+
+**1. Search.** The optimizer owns the adaptive part. Give it a cheap objective
+(often a single seed) and let it sample the space:
+
+```python
+import optuna
+
+def objective(trial):
+    lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
+    wd = trial.suggest_float("weight_decay", 0.0, 1e-2)
+    return train_once(lr=lr, weight_decay=wd, seed=0)  # your training function
+
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=50)
+best = study.best_params            # e.g. {"lr": 3.1e-4, "weight_decay": 4e-3}
+```
+
+**2. Final grid.** Hand the winning config (and a baseline) to mushin and sweep
+them over *seeds* for the reproducible, labeled dataset and the statistics you
+report. Because each candidate couples several values (`lr` + `weight_decay`),
+express the candidates as a [config group](#sweep-axis-support-and-limits) so one
+axis selects a whole config:
+
+```python
+from hydra.core.config_store import ConfigStore
+from hydra_zen import make_config
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+cs = ConfigStore.instance()
+cs.store(group="hp", name="baseline", node=make_config(lr=1e-3, weight_decay=0.0))
+cs.store(group="hp", name="tuned", node=make_config(**best))
+
+class Final(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(hp, seed):
+        acc = train_once(lr=hp.lr, weight_decay=hp.weight_decay, seed=seed)
+        return dict(accuracy=float(acc))
+
+wf = Final(make_config(hp=None))
+wf.run(
+    hp=multirun(["baseline", "tuned"]),
+    seed=multirun(range(10)),
+    working_dir="runs/paper/tuned-vs-baseline",
+)
+```
+
+`wf.to_xarray()` now has an `hp` dimension and a `seed` dimension, so
+`compare_methods(wf.to_xarray().rename(hp="method"))` gives the baseline-vs-tuned
+test — a defensible claim over fresh seeds, not the optimizer's optimistic
+best-trial number (which suffers the winner's curse; see
+[From exploration to a paper](exploration-to-paper.md)).
+
+The same shape works for any searcher — Ax, Nevergrad, a hand-rolled random
+search — and adds **no dependency to mushin**: the search lives entirely in your
+code, and mushin only ever sees the discrete configs you chose to report.
 
 ## Parallel & out-of-process launchers
 
