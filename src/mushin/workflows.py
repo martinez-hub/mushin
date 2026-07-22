@@ -315,6 +315,7 @@ class _TaskRunner:
         code_hash=None,
         max_total_seconds=None,
         sampled_indices=None,
+        cache_dir=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -329,12 +330,28 @@ class _TaskRunner:
         # (NaN), keyed on the deterministic job index so it's launcher- and
         # axis-type-agnostic and identical across a resume.
         self.sampled_indices = sampled_indices
+        # Content-addressed cross-working_dir cache: a directory keyed on
+        # (config fingerprint, code fingerprint). A cell whose config AND task
+        # source match a cached entry reuses it instead of recomputing.
+        self.cache_dir = cache_dir
         # Wall-clock budget: the deadline is set lazily at the first COMPUTED
         # cell (below), so launch/import overhead and resume cache hits don't
         # consume it. None resets on pickle -> each worker process observes its
         # own budget (the feature targets the default sequential launcher).
         self.max_total_seconds = max_total_seconds
         self._deadline = None
+
+    def _cache_key(self, config_hash) -> str | None:
+        """The content-address for this cell — a hash of its resolved-config and
+        task-source fingerprints — or None if either is unavailable (so an
+        unresolvable cell is simply never cached)."""
+        if not self.cache_dir or config_hash is None or self.code_hash is None:
+            return None
+        import hashlib
+
+        return hashlib.sha256(f"{config_hash}:{self.code_hash}".encode()).hexdigest()[
+            :32
+        ]
 
     @staticmethod
     def _combo(cfg, names):
@@ -464,6 +481,29 @@ class _TaskRunner:
                         )
                         return cached
 
+        # (1.4) content-addressed cache: reuse a cell computed under the same
+        # resolved config AND task source in ANY working_dir. Keyed on the
+        # fingerprints (not the combo/dir), so it survives a fresh working_dir.
+        # The cache hit refreshes this job dir (metrics + completed status) so
+        # the manifest and an offline load see a normal completed cell.
+        cache_key = self._cache_key(chash)
+        if cache_key is not None:
+            cache_cell = Path(self.cache_dir) / cache_key
+            cached = read_metrics_sidecar(cache_cell)
+            if cached is not None:
+                cwd = Path.cwd()
+                combo = self._combo(cfg, self.swept_names)
+                write_metrics_sidecar(cwd, cached)
+                write_cell_status(
+                    cwd,
+                    status="completed",
+                    combo=combo,
+                    attempt=1,
+                    config_hash=chash,
+                    code_hash=self.code_hash,
+                )
+                return cached
+
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
         # cells (no compute) so a long sweep ends gracefully instead of running
         # to completion. The clock starts at THIS, the first computed cell (cache
@@ -528,6 +568,18 @@ class _TaskRunner:
                     _CURRENT_RESUME.reset(token)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)
+                # Store the freshly-computed cell in the content-addressed cache
+                # so a future sweep with the same config+code reuses it. Keyed on
+                # the fingerprints; best-effort (a cache-write failure must never
+                # fail the cell itself).
+                cache_key = self._cache_key(chash)
+                if cache_key is not None:
+                    try:
+                        cache_cell = Path(self.cache_dir) / cache_key
+                        cache_cell.mkdir(parents=True, exist_ok=True)
+                        write_metrics_sidecar(cache_cell, result)
+                    except OSError:
+                        pass
             write_cell_status(
                 cwd,
                 status="completed",
@@ -856,6 +908,7 @@ class BaseWorkflow:
         max_total_seconds: float | None = None,
         sample: int | None = None,
         sample_seed: int = 0,
+        cache_dir: str | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -933,6 +986,11 @@ class BaseWorkflow:
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast
             exploration; deterministic and resume-safe. ``sample_seed`` varies
             the subset.
+
+        cache_dir : str | None (default: None)
+            Content-addressed cache of completed cells shared across
+            ``working_dir``\\ s: a cell whose config AND task source match a
+            cached entry reuses it instead of recomputing.
 
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
@@ -1267,6 +1325,7 @@ class BaseWorkflow:
             code_hash=code_fingerprint(self.task),
             max_total_seconds=max_total_seconds,
             sampled_indices=sampled_indices,
+            cache_dir=cache_dir,
         )
 
         self._capture_env = capture_env
@@ -1562,6 +1621,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         max_total_seconds: float | None = None,
         sample: int | None = None,
         sample_seed: int = 0,
+        cache_dir: str | None = None,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -1633,6 +1693,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         sample_seed : int (default: 0)
             Seeds the ``sample`` selection; change it to draw a different
             reproducible subset of the same grid.
+        cache_dir : str | None (default: None)
+            A content-addressed cache of completed cells, shared across
+            ``working_dir``\\ s. A cell whose resolved config AND task source
+            match a cached entry (keyed on the same fingerprints as resume)
+            reuses that result instead of recomputing — so a cell computed in one
+            sweep is free in another. Newly-computed cells are stored there.
+            Complements ``resume`` (which reuses within a single ``working_dir``);
+            a changed config value or edited task body is a cache miss.
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -1676,6 +1744,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             max_total_seconds=max_total_seconds,
             sample=sample,
             sample_seed=sample_seed,
+            cache_dir=cache_dir,
             **workflow_overrides,
         )
 
