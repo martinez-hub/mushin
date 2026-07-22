@@ -89,6 +89,7 @@ nav:
       - scikit-learn (framework-agnostic): notebooks/06_sklearn_framework_agnostic.ipynb
       - Analyzing your results: notebooks/07_analyzing_results.ipynb
   - API Reference:
+      - analysis: reference/analysis.md
       - benchmark: reference/benchmark.md
       - llm: reference/llm.md
       - study: reference/study.md

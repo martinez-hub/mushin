@@ -33,6 +33,9 @@ of them away. Four options make that cheap:
   anything — catch a `range(100)` you meant to be `range(10)` before it costs you.
 - **`confirm_above=N`** (or the `MUSHIN_MAX_CELLS` environment variable) refuses a
   grid larger than `N` cells, so an accidental combinatorial blow-up fails fast.
+- **`max_total_seconds=T`** time-boxes a run: once the budget is spent the
+  remaining cells are skipped (NaN) rather than the sweep running to the end, and
+  a later `resume=True` finishes them when you have more time.
 
 A typical exploration loop:
 
@@ -169,6 +172,10 @@ needs. To hand it off:
   status, metrics) for an appendix or a `pandas` reader.
 - **The manifest** — `mushin_sweep_manifest.json` records that every requested
   cell completed, which is what lets `compare_methods` confirm the grid is whole.
+- **Notes and tags** — annotate the run with `run(..., notes="...", tags=[...])`
+  to record *why* it exists. They persist in the manifest, travel on the dataset
+  (`ds.attrs["mushin_notes"]` / `mushin_tags`), survive a resume, and read back as
+  `wf.notes` / `wf.tags`.
 
 ## Checklist
 
