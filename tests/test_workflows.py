@@ -746,6 +746,27 @@ def test_g4_load_from_dir_resets_cached_overrides():
 
 
 @pytest.mark.usefixtures("cleandir")
+def test_rerun_same_instance_resets_cached_overrides():
+    # A second run() on the SAME workflow instance must not reuse the first
+    # run's cached overrides: the grid (coords, cell keys) must come from the
+    # new sweep, not silently NaN-fill against the old one.
+    class WF(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a) * 10)
+
+    wf = WF()
+    wf.run(a=multirun([1.0, 2.0]), working_dir="dir_a")
+    ds1 = wf.to_xarray()  # populates the override cache for dir_a
+    assert ds1["m"].values.tolist() == [10.0, 20.0]
+
+    wf.run(a=multirun([3.0, 4.0]), working_dir="dir_b")
+    ds2 = wf.to_xarray()
+    assert ds2.coords["a"].values.tolist() == [3.0, 4.0]
+    assert ds2["m"].values.tolist() == [30.0, 40.0]
+
+
+@pytest.mark.usefixtures("cleandir")
 def test_g5_dict_override_rejected():
     # G5: dict workflow_overrides were advertised but emitted invalid Hydra
     # syntax; dict support has been dropped, so it must be rejected.
@@ -1433,6 +1454,85 @@ def test_config_group_sweep_coords_are_choice_names(tmp_path, restore_config_gro
     assert float(ds["w"].sel(model="big")) == 8.0
 
 
+@pytest.mark.config_group("model")
+def test_config_group_sweep_survives_offline_reload(tmp_path, restore_config_group):
+    """A finished config-GROUP sweep must reload from disk with real values:
+    load_from_dir must recover each cell's runtime choice from its hydra.yaml
+    so combo keys match the choice-name coordinates (not NaN-fill the grid)."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import make_config
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model=None):
+            return dict(w=float(model["width"]))
+
+    wf = W(make_config(model=None))
+    wf.run(working_dir=str(tmp_path / "s"), model=multirun(["small", "big"]))
+
+    loader = W(make_config(model=None)).load_from_dir(
+        tmp_path / "s", "mushin_metrics.json"
+    )
+    ds = loader.to_xarray()
+    assert sorted(str(v) for v in ds["model"].values) == ["big", "small"]
+    assert float(ds["w"].sel(model="big")) == 8.0
+    assert float(ds["w"].sel(model="small")) == 4.0
+
+
+def test_load_from_dir_nan_fills_failed_cells(tmp_path):
+    """A fail-soft sweep must be reloadable offline: a failed cell has no
+    metrics sidecar, so load_metrics must NaN-fill it (consulting the cell's
+    recorded status) instead of raising FileNotFoundError."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return dict(m=float(a) * 10)
+
+    wf = W()
+    with pytest.warns(UserWarning, match="failed"):
+        wf.run(a=multirun([1, 2, 3]), working_dir=str(tmp_path / "s"), on_error="nan")
+
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    ds = loader.to_xarray()
+    vals = ds["m"].values.tolist()
+    assert vals[0] == 10.0 and vals[2] == 30.0
+    assert vals[1] != vals[1]  # NaN
+
+
+def test_load_from_dir_nan_fills_sampled_out_cells(tmp_path):
+    """A sampled sweep records un-sampled cells as 'skipped' with no metrics;
+    reloading it offline must NaN-fill those cells, not raise."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a) * 10)
+
+    wf = W()
+    with pytest.warns(UserWarning, match="skipped"):
+        wf.run(a=multirun([1, 2, 3, 4]), working_dir=str(tmp_path / "s"), sample=2)
+
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    ds = loader.to_xarray()
+    vals = ds["m"].values.tolist()
+    present = [v for v in vals if v == v]
+    assert len(present) == 2 and len(vals) == 4
+
+
 def test_parse_overrides_expands_range_and_rejects_interval():
     """Hydra range(...) sweeps form a grid and are expanded; continuous
     interval(...) (Bayesian-sweeper syntax) cannot and must raise a clear
@@ -1769,3 +1869,29 @@ def test_default_metric_load_fn_still_reads_torch_files(tmp_path):
     p = tmp_path / "fit_metrics.pt"
     torch.save({"loss": [0.5, 0.4]}, p)
     assert MultiRunMetricsWorkflow.metric_load_fn(p) == {"loss": [0.5, 0.4]}
+
+
+def test_failed_rerun_removes_stale_metrics_sidecar(tmp_path):
+    """When a cell fails, a metrics sidecar left by a prior successful attempt
+    in the same dir must be removed — otherwise offline tools present the old
+    metrics as if the failed attempt produced them."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class Good(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    class Bad(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            raise RuntimeError("boom")
+
+    wd = tmp_path / "s"
+    Good().run(a=multirun([1.0]), working_dir=str(wd))
+    assert (wd / "0" / "mushin_metrics.json").exists()
+
+    with pytest.warns(UserWarning, match="failed"):
+        Bad().run(a=multirun([1.0]), working_dir=str(wd), on_error="nan")
+    assert not (wd / "0" / "mushin_metrics.json").exists()

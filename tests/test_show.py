@@ -85,3 +85,70 @@ def test_show_empty_dir_returns_no_rows(tmp_path):
     (tmp_path / "empty").mkdir()
     res = mushin.show(tmp_path / "empty")
     assert res.rows == []
+
+
+def test_offline_tools_scope_to_latest_sweep_grid(tmp_path):
+    """Re-running a narrowed grid in the same working_dir leaves stale cell
+    dirs behind; show/best/export must scope to the LATEST sweep's manifest,
+    not resurrect cells that are no longer part of the grid."""
+
+    from mushin import export
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr):
+            return dict(acc=float(lr))
+
+    wd = tmp_path / "s"
+    W().run(lr=multirun([0.001, 0.01, 0.1]), working_dir=str(wd))
+    W().run(lr=multirun([0.001, 0.01]), working_dir=str(wd))  # narrowed re-run
+
+    res = mushin.show(wd)
+    assert len(res.rows) == 2
+    assert all(r["lr"] != 0.1 for r in res.rows)
+
+    b = mushin.best(wd, "acc")
+    assert b.combo == {"lr": 0.01}  # NOT the stale lr=0.1 cell
+
+    csv_text = export.table(wd)
+    assert len(csv_text.strip().splitlines()) == 1 + 2  # header + 2 cells
+
+
+def test_offline_tools_ignore_duplicate_dirs_not_in_manifest(tmp_path):
+    """When two dirs claim the same combo, the manifest's assignment wins —
+    the winner must not depend on filesystem iteration order."""
+    import shutil
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr):
+            return dict(acc=float(lr))
+
+    wd = tmp_path / "s"
+    W().run(lr=multirun([0.001, 0.01]), working_dir=str(wd))
+    shutil.copytree(wd / "0", wd / "9")  # duplicate claimant for dir 0's combo
+
+    res = mushin.show(wd)
+    assert len(res.rows) == 2  # the copy is not double-counted
+
+
+def test_show_keeps_cells_of_a_newer_inflight_sweep(tmp_path):
+    """Mid-sweep view of a NEW grid in a reused dir: a cell whose sidecar is
+    newer than the (previous sweep's) manifest belongs to the in-flight sweep
+    and must be shown even though the stale manifest doesn't list it."""
+    from mushin._resume import write_cell_status
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr):
+            return dict(acc=float(lr))
+
+    wd = tmp_path / "s"
+    W().run(lr=multirun([0.001, 0.01]), working_dir=str(wd))
+
+    d = wd / "7"
+    d.mkdir()
+    write_cell_status(d, status="running", combo={"lr": 0.5}, attempt=1)
+
+    rows = mushin.show(wd).rows
+    assert any(r["lr"] == 0.5 and r["status"] == "running" for r in rows)

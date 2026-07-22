@@ -40,14 +40,22 @@ def _scalar(v: Any) -> Any:
     return v
 
 
+# Strict-JSON encoding of ±Inf (json's own Infinity literal is non-standard).
+# NaN keeps its legacy ``null`` encoding so pre-existing sidecars read the same.
+_NONFINITE_TAG = "__mushin_nonfinite__"
+_NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
+
+
 def _json_normalize(v: Any) -> Any:
     """Recursively normalize a metric value to strict-JSON-native types.
 
     Handles the full metric shape (nested dicts and lists), converts
-    numpy/torch scalars and arrays, maps non-finite floats (NaN/±Inf) to
-    ``None`` so the file is valid JSON (``read_metrics_sidecar`` restores them
-    to NaN), and stringifies any other type rather than letting an otherwise-
-    successful task's sidecar write crash the sweep.
+    numpy/torch scalars and arrays, maps NaN to ``None`` and ±Inf to a tagged
+    marker so the file is valid JSON (``read_metrics_sidecar`` restores them
+    to NaN / signed Inf), and stringifies any other type rather than letting an
+    otherwise-successful task's sidecar write crash the sweep. A genuine
+    ``None`` metric value also encodes as ``null``, so it reads back as NaN —
+    the one remaining lossy case.
     """
     import math
 
@@ -62,17 +70,24 @@ def _json_normalize(v: Any) -> Any:
     if isinstance(v, bool) or v is None:
         return v
     if isinstance(v, float):
-        return v if math.isfinite(v) else None
+        if math.isfinite(v):
+            return v
+        if math.isnan(v):
+            return None
+        return {_NONFINITE_TAG: "inf" if v > 0 else "-inf"}
     if isinstance(v, (int, str)):
         return v
     return str(v)  # datetime, Path, arbitrary objects -> stringify, never crash
 
 
 def _restore_nonfinite(v: Any) -> Any:
-    """Inverse of the NaN->None mapping in :func:`_json_normalize`: a ``None``
-    in a metrics payload marks a value that was non-finite on write, restored
-    to NaN so metric columns stay float rather than object dtype on resume."""
+    """Inverse of the non-finite mapping in :func:`_json_normalize`: a ``None``
+    in a metrics payload marks a value that was NaN on write (restored to NaN so
+    metric columns stay float rather than object dtype on resume), and a tagged
+    ``{"__mushin_nonfinite__": "inf"|"-inf"}`` marker restores to signed Inf."""
     if isinstance(v, dict):
+        if set(v) == {_NONFINITE_TAG}:
+            return _NONFINITE_VALUES.get(v[_NONFINITE_TAG], float("nan"))
         return {k: _restore_nonfinite(x) for k, x in v.items()}
     if isinstance(v, list):
         return [_restore_nonfinite(x) for x in v]

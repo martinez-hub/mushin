@@ -139,3 +139,53 @@ def test_run_training_sweep_relocates_from_separate_tmp_dir(tmp_path):
     for s, p in enumerate(ckpts["a"]):
         assert Path(p).exists(), f"checkpoint for seed={s} not found at {p}"
         assert Path(p).read_text() == f"a-{s}"
+
+
+def _train_v1(seed):
+    p = Path(f"_tmp_v_{seed}.bin")
+    p.write_text(f"v1-{seed}")
+    return str(p.resolve())
+
+
+def _train_v2(seed):
+    p = Path(f"_tmp_v_{seed}.bin")
+    p.write_text(f"v2-{seed}")
+    return str(p.resolve())
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_resume_reruns_when_a_method_body_changes(tmp_path):
+    """Resuming after editing a method's training code must re-run its cells —
+    silently reusing checkpoints trained by the OLD code would mix
+    implementations in the statistical comparison."""
+    wd = str(tmp_path / "wd")
+    run_training_sweep(
+        {"m": _train_v1}, seeds=[0], ckpt_dir=tmp_path / "ck", working_dir=wd
+    )
+
+    with pytest.warns(UserWarning, match="fingerprint mismatch"):
+        ckpts = run_training_sweep(
+            {"m": _train_v2},
+            seeds=[0],
+            ckpt_dir=tmp_path / "ck",
+            working_dir=wd,
+            resume=True,
+        )
+    assert Path(ckpts["m"][0]).read_text() == "v2-0"
+
+
+@pytest.mark.usefixtures("cleandir")
+def test_resume_not_fooled_by_method_reordering(tmp_path):
+    """Reordering the methods dict shifts every method_index; a resume must not
+    return old checkpoints under the wrong method names."""
+    wd = str(tmp_path / "wd")
+    methods = {"a": _make_train("a"), "b": _make_train("b")}
+    run_training_sweep(methods, seeds=[0], ckpt_dir=tmp_path / "ck", working_dir=wd)
+
+    reordered = {"b": _make_train("b"), "a": _make_train("a")}
+    with pytest.warns(UserWarning, match="fingerprint mismatch"):
+        ckpts = run_training_sweep(
+            reordered, seeds=[0], ckpt_dir=tmp_path / "ck", working_dir=wd, resume=True
+        )
+    assert Path(ckpts["a"][0]).read_text() == "a-0"
+    assert Path(ckpts["b"][0]).read_text() == "b-0"
