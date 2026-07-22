@@ -212,6 +212,7 @@ def compare_methods(
     test: str = "wilcoxon",
     alpha: float = 0.05,
     correction: str = "holm",
+    allow_incomplete: bool = False,
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
@@ -229,22 +230,56 @@ def compare_methods(
     Emits a warning when ``test`` cannot reach ``alpha`` at the dataset's seed
     count, and when a method is constant across seeds in *every* metric.
 
+    ``allow_incomplete`` (default ``False``) — when ``True``, an incomplete sweep
+    is compared anyway (with a warning) instead of raising, computing stats over
+    only the completed cells. Use it for exploratory analysis of a ``sample=`` or
+    budget-limited sweep; the result may be under-powered or biased.
+
     Raises
     ------
     IncompleteSweepError
-        If ``ds.attrs["mushin_failures"]`` is a non-empty list, meaning the sweep
-        that produced ``ds`` had failed/missing runs (recorded under
-        ``on_error="nan"``). A dataset without the attr — a plain user dataset or
-        a clean (failure-free) sweep — is unaffected. This is keyed purely on the
-        completeness signal, never on raw NaN values in the data, so a metric that
-        is legitimately NaN for other reasons does not trigger it.
+        If ``ds.attrs["mushin_failures"]`` or ``ds.attrs["mushin_skipped"]`` is a
+        non-empty list — the sweep that produced ``ds`` had failed runs (recorded
+        under ``on_error="nan"``) or cells that were never run (skipped by a
+        ``sample=`` subset or an exhausted ``max_total_seconds`` budget) — unless
+        ``allow_incomplete=True``. A dataset without those attrs — a plain user
+        dataset or a clean, fully-completed sweep — is unaffected. This is keyed
+        purely on the completeness signals, never on raw NaN values in the data,
+        so a metric that is legitimately NaN for other reasons does not trigger
+        it.
     """
+    # Refuse an incomplete sweep — failed cells (on_error="nan") AND cells that
+    # were never run (skipped by a `sample=` subset or an exhausted
+    # `max_total_seconds` budget). Both leave NaN in the grid, so computing stats
+    # over them silently would under-power or bias the result. Keyed on the
+    # completeness *signals* (attrs), never on raw NaN values, so a metric that is
+    # legitimately NaN for other reasons does not trigger it.
     failures = _normalize_failures(ds.attrs.get("mushin_failures"))
-    if failures:
-        raise IncompleteSweepError(
-            f"{len(failures)} run(s) failed ({', '.join(map(str, failures))}); "
-            "fix the cause and re-run with resume=True to complete the sweep "
-            "before comparing."
+    skipped = _normalize_failures(ds.attrs.get("mushin_skipped"))
+    if failures or skipped:
+        if not allow_incomplete:
+            reasons = []
+            if failures:
+                reasons.append(
+                    f"{len(failures)} run(s) failed ({', '.join(map(str, failures))})"
+                )
+            if skipped:
+                reasons.append(
+                    f"{len(skipped)} cell(s) not run/skipped "
+                    f"({', '.join(map(str, skipped))})"
+                )
+            raise IncompleteSweepError(
+                "; ".join(reasons) + ". Complete the sweep (fix failures and "
+                "resume, or resume without `sample`/with more time) before "
+                "comparing, or pass allow_incomplete=True to compute stats on the "
+                "partial grid."
+            )
+        warnings.warn(
+            f"comparing an incomplete sweep ({len(failures) + len(skipped)} "
+            "cell(s) failed/skipped, NaN in the grid); statistics use only the "
+            "completed cells and may be under-powered or biased.",
+            UserWarning,
+            stacklevel=2,
         )
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
