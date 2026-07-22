@@ -1906,12 +1906,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # not AND over cells absent from the current grid. Every current-grid
         # combo is re-marked in the loop below, and resume reads prior state from
         # its own `prior_manifest` (loaded in `run()` before this file is rewritten).
-        manifest = Manifest(
-            self.working_dir,
-            swept_names,
-            notes=getattr(self, "_notes", None),
-            tags=getattr(self, "_tags", None),
-        )
+        # Lineage (notes/tags) from THIS run, falling back to the prior manifest
+        # so a resume that does not re-pass them preserves the original run's
+        # lineage instead of silently wiping it. (The fresh Manifest above is
+        # deliberately not load_or_new — that is only to drop stale *cells*.)
+        _notes = getattr(self, "_notes", None)
+        _tags = getattr(self, "_tags", None) or []
+        if _notes is None or not _tags:
+            _prev = Manifest.load_or_new(self.working_dir, [])
+            if _notes is None:
+                _notes = _prev.notes
+            if not _tags:
+                _tags = _prev.tags
+        manifest = Manifest(self.working_dir, swept_names, notes=_notes, tags=_tags)
 
         self._metrics_by_combo = {}
         self.failures = []

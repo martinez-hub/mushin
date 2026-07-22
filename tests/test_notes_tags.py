@@ -86,3 +86,22 @@ def test_notes_and_tags_survive_reload(tmp_path):
     loaded = MultiRunMetricsWorkflow(working_dir=wd)
     assert loaded.notes == "original run"
     assert loaded.tags == ["baseline"]
+
+
+def test_notes_and_tags_survive_resume_without_repassing(tmp_path):
+    # A resume that does not re-pass notes/tags must NOT wipe the lineage the
+    # original run recorded.
+    wd = tmp_path / "s"
+    _W().run(
+        x=multirun([1, 2]),
+        notes="original run",
+        tags=["baseline"],
+        working_dir=str(wd),
+    )
+    wf2 = _W()
+    wf2.run(x=multirun([1, 2]), resume=True, working_dir=str(wd))  # no notes/tags
+    assert wf2.notes == "original run"
+    assert wf2.tags == ["baseline"]
+    manifest = json.loads((wd / MANIFEST_FILE).read_text())
+    assert manifest["notes"] == "original run"
+    assert manifest["tags"] == ["baseline"]
