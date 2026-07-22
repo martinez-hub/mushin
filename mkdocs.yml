@@ -71,6 +71,7 @@ nav:
       - LLM evaluation: guides/llm.md
       - Studies: guides/study.md
       - Resilient & resumable sweeps: guides/resilience.md
+      - From exploration to a paper: guides/exploration-to-paper.md
       - Packing small jobs onto GPUs: guides/packing.md
       - Multi-node training: guides/multinode.md
       - Sharded training: guides/sharding.md
