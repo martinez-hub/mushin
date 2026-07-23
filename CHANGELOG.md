@@ -8,6 +8,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.10.1] - 2026-07-22
+
+### Changed
+
+- Repositioned the project description everywhere (README, PyPI, docs site + metadata, citation, paper): mushin is a framework-agnostic sweep engine built on hydra-zen, with first-class PyTorch Lightning integration — the sweep layer never imports Lightning (Lightning ships in the base install for the deep-learning path). (#146)
+
+### Fixed
+
+- A second `run()` on the same workflow instance no longer reuses the previous sweep's cached overrides, which silently NaN-filled the new grid. (#145)
+- ±Inf metric values survive the sidecar round-trip with their sign instead of collapsing to NaN. (#145)
+- `load_from_dir` now recovers each cell's config-group choice, so a finished group sweep reloads with real values instead of an all-NaN grid. (#145)
+- `diff` no longer reports metric deltas from failed/skipped cells, and a failing cell removes the metrics sidecar left by a prior successful attempt. (#145)
+- `show`/`best`/`diff`/`export.table` now scope to the latest sweep's manifest, excluding stale cell dirs left by an earlier sweep in a reused `working_dir` (the mid-sweep live view is preserved). (#145)
+- `Study` training-sweep resume now fingerprints the methods mapping: renaming, reordering, or editing a method (including a `functools.partial`'s bound arguments) re-runs cells instead of silently reusing checkpoints trained by old code. One-time cost: the first resume of a sweep created before this change re-runs all cells (its cells lack the fingerprint). (#145)
+- Fail-soft, sampled, and budget-skipped sweeps can now be reloaded from disk: failed/skipped cells NaN-fill instead of `load_metrics` raising `FileNotFoundError`, and a stale sidecar in a failed cell's dir is never loaded. (#145)
+- `compare_methods(allow_incomplete=True)` masks constant (zero-variance) methods over the completed seeds and keeps ±Inf cells in the pairing instead of silently excluding them; `summary(reference=...)` rejects unknown method names. (#147)
+- `max_total_seconds` runs on a monotonic clock — a wall-clock step (NTP/DST) mid-sweep can no longer stretch or prematurely expire the budget. (#147)
+- `show`/`export.table`: a metric sharing a swept param's name renders as `<name> (metric)` instead of overwriting the param column, and a typo'd `metrics=` entry raises instead of silently dropping the column. (#147)
+- The grid accounting (dry-run preview, `confirm_above` gate, `sample=` selection) no longer silently excludes user params whose names merely start with "hydra" (e.g. `hydraulic=`). (#147)
+- `dry_run` reports the sampled cell count when `sample=` is set (the cell-count gate still applies to the full grid, since every cell is launched regardless of sampling); a fresh run reusing a `working_dir` no longer inherits the prior sweep's `notes`/`tags`, and `tags=[]` on resume clears them. (#147)
+- MCP `get_failures`/`get_provenance` raise for a nonexistent path instead of reporting an empty-but-valid result; `MetricsCallback` writes standalone `trainer.validate()` metrics to `validate_metrics.pt`; `seed_everything_per_rank` falls back to `LOCAL_RANK`; provenance records `dirty: null` when `git status` cannot be verified. (#147)
+- `working_dir` paths containing `=` or `,` (e.g. dirs named `lr=0.1`) now work; duplicate sweep values via raw `overrides=` are rejected instead of silently collapsing to one cell. (#147)
+
+### Removed
+
+- Removed the dead pre-Lightning-1.6 `HydraDDP` code path (~130 lines) — the dependency floor is `pytorch-lightning >= 2.4`. (#147)
+
+### Misc
+
+- Reframed the workflows guide's hyperparameter-search section: mushin *does*
+  grid and random search (often the whole job for a small discrete space, with the
+  labeled dataset + stats as a bonus); it does not do adaptive/Bayesian search over
+  large or continuous spaces, which is where a dedicated optimizer like Optuna is
+  complementary. Replaces the earlier "mushin is not a hyperparameter optimizer"
+  overstatement.
+- The README shows a "latest release" badge linking to the newest GitHub release
+  and its notes, alongside the existing PyPI version badge.
+
+
 ## [0.10.0] - 2026-07-22
 
 ### Added
@@ -451,7 +490,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/martinez-hub/mushin/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/martinez-hub/mushin/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/martinez-hub/mushin/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/martinez-hub/mushin/compare/v0.7.0...v0.8.0
