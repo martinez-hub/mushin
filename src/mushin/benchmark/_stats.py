@@ -300,7 +300,16 @@ def compare_methods(
         n_metrics += 1
         vals = {m: ds[metric].sel({"method": m}).values for m in methods}
         # A method with no within-group variance has no sampling distribution.
-        constant = {m for m in methods if n_seeds > 1 and _is_constant(vals[m])}
+        # Constancy is judged over the COMPLETED (non-NaN) seeds, so the mask
+        # holds on the allow_incomplete path too — NaN would defeat allclose
+        # and let a deterministic method leak into a reported significance.
+        completed = {
+            m: (lambda f: f[~np.isnan(f)])(np.asarray(vals[m], dtype=float))
+            for m in methods
+        }
+        constant = {
+            m for m in methods if completed[m].size > 1 and _is_constant(completed[m])
+        }
         for m in constant:
             constant_metric_count[m] = constant_metric_count.get(m, 0) + 1
         recs, pvals = [], []
@@ -308,12 +317,13 @@ def compare_methods(
             va, vb = vals[a], vals[b]
             if allow_incomplete:
                 # Compute over the seeds completed for BOTH methods: drop pairs
-                # where either cell is missing (NaN). No-op for a complete grid
-                # (nothing is NaN), so the normal path is byte-for-byte unchanged.
+                # where either cell is missing (NaN). ±Inf is a real completed
+                # value (e.g. diverged loss) and stays. No-op for a complete
+                # grid (nothing is NaN), so the normal path is unchanged.
                 _fa = np.asarray(va, dtype=float)
                 _fb = np.asarray(vb, dtype=float)
-                _finite = np.isfinite(_fa) & np.isfinite(_fb)
-                va, vb = _fa[_finite], _fb[_finite]
+                _ok = ~np.isnan(_fa) & ~np.isnan(_fb)
+                va, vb = _fa[_ok], _fb[_ok]
                 if va.size < 2:
                     # too few completed pairs to form a test
                     recs.append(

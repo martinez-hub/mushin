@@ -2,6 +2,7 @@ import warnings
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._stats import (
@@ -233,3 +234,46 @@ def test_compare_methods_correction_options():
 def test_compare_methods_unknown_correction_raises():
     with pytest.raises(ValueError, match="correction"):
         compare_methods(_three_method_ds(), correction="fdr_by")
+
+
+def test_incomplete_path_masks_constant_methods_too():
+    """Under allow_incomplete=True the zero-variance mask must be computed over
+    the COMPLETED seeds — a method constant across every completed seed has no
+    sampling distribution, and NaN-contaminated rows must not sneak it past the
+    mask into a reported significance."""
+    ds = xr.Dataset(
+        {
+            "acc": (
+                ("method", "seed"),
+                [[1.0, 1.0, 1.0, np.nan, 1.0], [2.0, 3.0, 4.0, np.nan, 5.0]],
+            )
+        },
+        coords={"method": ["det", "stoch"], "seed": [0, 1, 2, 3, 4]},
+        attrs={"mushin_failures": ["seed=3"]},
+    )
+    with pytest.warns(UserWarning):
+        row = compare_methods(ds, test="wilcoxon", allow_incomplete=True).iloc[0]
+    assert np.isnan(row["p_value"])
+    assert np.isnan(row["effect_size"])
+    assert not bool(row["significant"])
+
+
+def test_incomplete_path_keeps_infinite_cells():
+    """±Inf is a real completed value (e.g. diverged loss), not a missing cell:
+    allow_incomplete must only drop NaN (failed/skipped) cells, so an Inf cell
+    stays in the pairing instead of being silently excluded."""
+    ds = xr.Dataset(
+        {
+            "loss": (
+                ("method", "seed"),
+                [[1.0, 2.0, np.inf, 4.0], [2.0, 3.0, 4.0, 5.0]],
+            )
+        },
+        coords={"method": ["a", "b"], "seed": [0, 1, 2, 3]},
+        attrs={"mushin_failures": ["elsewhere"]},
+    )
+    with pytest.warns(UserWarning):
+        row = compare_methods(ds, test="wilcoxon", allow_incomplete=True).iloc[0]
+    # the Inf pair participates: the mean difference is -Inf, not a finite
+    # value computed over a silently reduced sample
+    assert np.isinf(row["mean_diff"])

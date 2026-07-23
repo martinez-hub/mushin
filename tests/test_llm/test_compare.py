@@ -584,3 +584,19 @@ def test_bare_two_tuple_is_an_input_not_split_into_reference():
     )
     assert inputs == [("system", "user"), "x"]  # tuple passed through whole
     assert refs == [None, "y"]
+
+
+def test_metric_failure_reraise_survives_multi_arg_exceptions():
+    """The 'metric failed on example i' re-raise must not itself crash when the
+    original exception type has a multi-arg constructor (UnicodeDecodeError et
+    al.) — the context must reach the user, not a TypeError from the re-raise."""
+    import pytest
+
+    from mushin.llm._compare import _score_one
+
+    def bad_metric(o, r):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "boom")
+
+    with pytest.raises(RuntimeError, match="failed on example 0") as ei:
+        _score_one("m", bad_metric, ["out"], ["ref"], seed=0)
+    assert isinstance(ei.value.__cause__, UnicodeDecodeError)

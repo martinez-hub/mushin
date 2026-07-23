@@ -79,3 +79,36 @@ def test_format_dry_run_lists_cells_axes_and_fixed():
     assert "lr" in text and "0.1" in text  # an axis and its values
     assert "seed" in text
     assert "epochs" in text  # fixed value
+
+
+def test_user_param_starting_with_hydra_counts_in_grid(tmp_path):
+    """A user axis whose name merely STARTS with 'hydra' (e.g. `hydraulic`)
+    must count toward the grid — only real `hydra.*`/`hydra/*` plumbing is
+    excluded from the preview/gate/sample cell count."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(hydraulic, a):
+            return dict(m=1.0)
+
+    s = W().run(dry_run=True, hydraulic=multirun([1, 2, 3]), a=multirun([1, 2]))
+    assert s["num_cells"] == 6
+    assert set(s["axes"]) == {"hydraulic", "a"}
+
+
+def test_dry_run_reports_sample(tmp_path):
+    """With `sample=` set, the preview must say how many cells will actually
+    compute, not just the full grid size."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=1.0)
+
+    s = W().run(dry_run=True, sample=2, a=multirun([1, 2, 3]))
+    assert s["num_cells"] == 3
+    assert s["sample"] == 2

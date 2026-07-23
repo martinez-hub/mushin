@@ -52,8 +52,11 @@ class Sweep:
         With `dry_run=True` no jobs launch: the grid-preview summary is returned
         (there is no dataset to build)."""
         wf = self.workflow_cls()  # fresh per run — no state carryover
-        result = wf.run(**kwargs)
+        # Expose the instance BEFORE running, so a failing run's workflow is
+        # inspectable for debugging instead of `.workflow` silently keeping the
+        # previous run's instance.
         self.workflow = wf
+        result = wf.run(**kwargs)
         if kwargs.get("dry_run"):
             return result  # the dry-run summary; nothing ran, no dataset
         return wf.to_xarray()

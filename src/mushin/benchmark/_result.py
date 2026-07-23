@@ -36,6 +36,11 @@ class BenchmarkResult:
         (default: the first method in ``data``)."""
         methods = [str(m) for m in self.data["method"].values]
         ref = reference if reference is not None else methods[0]
+        if ref not in methods:
+            raise ValueError(
+                f"reference {ref!r} is not one of the compared methods: "
+                f"{', '.join(methods)}"
+            )
 
         rows = []
         for method in methods:

@@ -2007,3 +2007,23 @@ def test_offline_reload_restores_inf_metrics(tmp_path):
     ds = loader.to_xarray()
     assert float(ds["m"].sel(a=1)) == math.inf
     assert float(ds["m"].sel(a=2)) == 2.0
+
+
+def test_working_dir_with_equals_or_comma_in_name(tmp_path):
+    """Experiment dirs are commonly named after params (`lr=0.1`); the
+    working_dir override must be quoted so such paths don't break Hydra's
+    override parser (or get split as an accidental sweep)."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    for name in ("lr=0.1", "run,2"):
+        wd = tmp_path / name
+        wf = W()
+        wf.run(a=multirun([1.0]), working_dir=str(wd))
+        assert wf.is_complete
+        assert (wd / "0" / "mushin_metrics.json").exists()

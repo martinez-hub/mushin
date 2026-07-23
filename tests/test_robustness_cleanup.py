@@ -177,3 +177,39 @@ def test_mcp_get_provenance_tolerates_wrong_type_record(tmp_path):
     (d / "mushin_provenance.json").write_text('"just a string"')
     out = _get_provenance(tmp_path, include_config=True)  # must not raise
     assert out["num_runs"] == 0
+
+
+def test_plot_with_ax_saves_that_axes_figure(tmp_path, monkeypatch):
+    """plot(ax=..., save_filename=...) must save the figure `ax` belongs to,
+    not whatever figure happens to be matplotlib's current one."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
+
+    from mushin.workflows import RobustnessCurve
+
+    class RC(RobustnessCurve):
+        @staticmethod
+        def task(epsilon):
+            return dict(result=100 - epsilon**2)
+
+    wf = RC()
+    wf.run(epsilon=[0, 1, 2], working_dir=str(tmp_path / "s"))
+
+    fig1, ax = plt.subplots()
+    plt.figure()  # a different, now-current figure
+
+    saved = []
+    orig = Figure.savefig
+
+    def spy(self, *args, **kwargs):
+        saved.append(self)
+        return orig(self, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", spy)
+    try:
+        wf.plot("result", ax=ax, save_filename=str(tmp_path / "p.png"))
+    finally:
+        plt.close("all")
+    assert saved and saved[0] is fig1

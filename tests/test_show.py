@@ -174,3 +174,59 @@ def test_offline_tools_survive_wrong_shape_manifest(tmp_path):
         (wd / "mushin_sweep_manifest.json").write_text(payload)
         assert len(mushin.show(wd).rows) == 4
         assert mushin.best(wd, "acc").combo == {"lr": 0.2, "seed": 1}
+
+
+def test_param_and_metric_sharing_a_name_do_not_collide(tmp_path):
+    """A task reporting a metric named like a swept param (e.g. the effective
+    `lr`) must not overwrite the param column — both values must survive."""
+    from mushin import export
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr):
+            return dict(lr=float(lr) * 2, loss=1.0)  # effective lr, a common pattern
+
+    wd = tmp_path / "s"
+    W().run(lr=multirun([0.001, 0.01]), working_dir=str(wd))
+
+    rows = mushin.show(wd).rows
+    r = next(row for row in rows if row["lr"] == 0.001)  # swept value intact
+    assert r["lr (metric)"] == pytest.approx(0.002)
+
+    csv_lines = export.table(wd).strip().splitlines()
+    header = csv_lines[0].split(",")
+    assert header.count("lr") == 1
+    assert "lr (metric)" in header
+
+
+def test_unknown_metric_filter_raises(tmp_path):
+    """A typo'd metrics= entry must raise (like sort= does), not silently drop
+    the column; and the requested order must be honored."""
+    from mushin import export
+
+    wd = tmp_path / "s"
+    _run_sweep(wd)
+
+    with pytest.raises(ValueError, match="wrong_metric"):
+        mushin.show(wd, metrics=["wrong_metric"])
+    with pytest.raises(ValueError, match="wrong_metric"):
+        export.table(wd, metrics=["wrong_metric"])
+
+    res = mushin.show(wd, metrics=["loss", "acc"])
+    cols = res.table.splitlines()[0].split()
+    assert cols.index("loss") < cols.index("acc")  # requested order wins
+
+
+def test_metrics_filter_deduplicates_repeated_names(tmp_path):
+    """A repeated metrics= entry must not emit a duplicated table/CSV column
+    (a duplicate CSV header makes pandas mangle it to acc/acc.1)."""
+    from mushin import export
+
+    wd = tmp_path / "s"
+    _run_sweep(wd)
+
+    cols = mushin.show(wd, metrics=["acc", "acc"]).table.splitlines()[0].split()
+    assert cols.count("acc") == 1
+
+    header = export.table(wd, metrics=["acc", "acc"]).strip().splitlines()[0]
+    assert header.split(",").count("acc") == 1

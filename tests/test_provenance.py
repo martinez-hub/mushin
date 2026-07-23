@@ -151,3 +151,23 @@ def test_mcp_get_provenance_serves_redacted_config(tmp_path):
     served = json.dumps(out)
     assert "sk-" not in served
     assert "***REDACTED***" in served
+
+
+def test_git_dirty_is_unknown_when_status_fails(monkeypatch):
+    """A failed/timed-out `git status` must record dirty=None (unknown), never
+    a confident dirty=False the tool could not verify."""
+    import subprocess
+
+    from mushin import _provenance
+
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if "status" in args:
+            raise subprocess.TimeoutExpired(args, 5)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = _provenance._git()
+    assert out["sha"] is not None  # we ARE in a git repo
+    assert out["dirty"] is None  # ...but cleanliness could not be verified

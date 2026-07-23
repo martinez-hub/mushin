@@ -93,3 +93,31 @@ def test_seed_everything_per_rank_persists_seed(monkeypatch, tmp_path):
     monkeypatch.setenv("RANK", "0")
     assert seed_everything_per_rank(1000) == 1000
     assert json.loads((tmp_path / "mushin_seed.json").read_text())["seed"] == 1000
+
+
+def test_seed_per_rank_falls_back_to_local_rank(monkeypatch, tmp_path):
+    """Plain single-node multi-GPU (HydraDDP) exports only LOCAL_RANK — the
+    per-rank seed must still differ per process, not silently collapse to
+    base+0 on every rank."""
+    from mushin.lightning._cluster import seed_everything_per_rank
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.delenv("SLURM_PROCID", raising=False)
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    assert seed_everything_per_rank(100) == 101
+
+
+def test_rank_from_env_survives_malformed_rank(monkeypatch):
+    """A malformed rank env var must degrade to the next source (or rank 0) in
+    mushin's own parsing, not raise an uncaught ValueError. (Lightning's
+    seed_everything performs its own int(RANK) — that part is theirs.)"""
+    from mushin.lightning._cluster import _rank_from_env
+
+    monkeypatch.setenv("RANK", "not-a-number")
+    monkeypatch.setenv("SLURM_PROCID", "2")
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    assert _rank_from_env() == 2
+
+    monkeypatch.delenv("SLURM_PROCID")
+    assert _rank_from_env() == 0

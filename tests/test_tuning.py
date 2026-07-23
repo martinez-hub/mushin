@@ -811,3 +811,21 @@ def test_batch_poor_utilization_warns(monkeypatch, tmp_path):
             trainer, module, effective_batch_size=130, pin_path=tmp_path / "pin.yaml"
         )
     assert pin.effective_batch_size == 130  # still exact
+
+
+def test_batch_pin_non_numeric_found_max_raises_friendly(tmp_path):
+    """A hand-edited pin with a non-numeric value must surface the same
+    'delete it or retune' guidance, not a raw int() ValueError."""
+    from mushin._tuning import _write_pin, tune_batch_size
+
+    pin_path = tmp_path / "bad.yaml"
+    _write_pin(pin_path, {"found_max_device_batch": "banana"})
+    with pytest.raises(ValueError, match="retune=True"):
+        tune_batch_size(
+            _make_trainer(),
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=pin_path,
+        )

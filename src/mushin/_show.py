@@ -110,6 +110,33 @@ def _read_cells(root) -> list[dict]:
     return cells
 
 
+def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
+    """Column name per metric; a metric colliding with a swept-param column (or
+    ``status``) is disambiguated as ``"<name> (metric)"`` so both values
+    survive — e.g. a task reporting the effective ``lr`` alongside a swept
+    ``lr``."""
+    taken = set(param_cols) | {"status"}
+    return {m: (f"{m} (metric)" if m in taken else m) for m in metric_cols}
+
+
+def _apply_metric_filter(
+    metrics: list[str] | None, metric_cols: list[str]
+) -> list[str]:
+    """Restrict/reorder metric columns to ``metrics``. Unknown names raise
+    (like ``sort=`` does) — a typo silently dropping a column is worse — and
+    the caller's requested order is honored, with repeats deduplicated (a
+    duplicate CSV header would be mangled by downstream consumers)."""
+    if metrics is None:
+        return metric_cols
+    unknown = [m for m in metrics if m not in set(metric_cols)]
+    if unknown:
+        raise ValueError(
+            f"metric column(s) {', '.join(map(repr, unknown))} not found; "
+            f"available metrics: {', '.join(metric_cols) or '(none)'}"
+        )
+    return list(dict.fromkeys(metrics))
+
+
 class ShowResult:
     """The result of :func:`show`: ``rows`` (one dict per cell, with raw swept
     params, ``status``, and metric values) plus a rendered ``table``. ``str()``
@@ -142,10 +169,13 @@ def show(
     root :
         A sweep ``working_dir`` (the parent of the numeric per-cell job dirs).
     metrics : list[str] | None
-        Restrict the metric columns to these names (default: every metric found).
+        Restrict the metric columns to these names, in this order (default:
+        every metric found, discovery order). An unknown name raises
+        ``ValueError`` (like ``sort=``); repeats are deduplicated.
     sort : str | None
         Column to sort rows by (a swept param, ``"status"``, or a metric).
-        Defaults to the swept params in grid order.
+        Defaults to the swept params in grid order. A metric that shares a
+        swept param's name is shown (and sorted) as ``"<name> (metric)"``.
 
     Returns
     -------
@@ -157,18 +187,18 @@ def show(
 
     param_cols = _ordered_union([c["combo"] for c in cells])
     metric_cols = _ordered_union([c["metrics"] for c in cells])
-    if metrics is not None:
-        metric_cols = [m for m in metric_cols if m in set(metrics)]
+    metric_cols = _apply_metric_filter(metrics, metric_cols)
+    colname = _metric_column_names(param_cols, metric_cols)
 
     rows: list[dict] = []
     for c in cells:
         row: dict[str, Any] = {p: c["combo"].get(p) for p in param_cols}
         row["status"] = c["status"]
         for m in metric_cols:
-            row[m] = c["metrics"].get(m)
+            row[colname[m]] = c["metrics"].get(m)
         rows.append(row)
 
-    columns = [*param_cols, "status", *metric_cols]
+    columns = [*param_cols, "status", *(colname[m] for m in metric_cols)]
     if sort is not None:
         if sort not in columns:
             raise ValueError(

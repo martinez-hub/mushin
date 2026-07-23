@@ -158,3 +158,23 @@ def test_metrics_callback_test_end_saves_only_on_global_zero(tmp_path):
         _make_fake_module(current_epoch=0),
     )
     assert not (tmp_path / "test_metrics.pt").exists()
+
+
+def test_metrics_callback_standalone_validate_gets_own_file(tmp_path):
+    """A standalone trainer.validate() run must write validate_metrics.pt —
+    not masquerade as (or append onto) the fit-stage series."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from mushin.lightning.callbacks import MetricsCallback
+
+    cb = MetricsCallback(save_dir=tmp_path)
+    trainer = _make_fake_trainer(callback_metrics={"val_acc": torch.tensor(0.7)})
+    trainer.state = SimpleNamespace(fn=SimpleNamespace(value="validate"))
+
+    cb.on_validation_end(trainer, _make_fake_module(current_epoch=0))
+    assert (tmp_path / "validate_metrics.pt").exists()
+    assert not (tmp_path / "fit_metrics.pt").exists()
+    assert cb.validate_metrics["val_acc"] == pytest.approx([0.7])
+    assert cb.val_metrics == {}  # the fit series is untouched

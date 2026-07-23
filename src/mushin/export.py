@@ -11,7 +11,14 @@ import io
 from pathlib import Path
 from typing import Any
 
-from ._show import _fmt, _ordered_union, _read_cells, _sortable
+from ._show import (
+    _apply_metric_filter,
+    _fmt,
+    _metric_column_names,
+    _ordered_union,
+    _read_cells,
+    _sortable,
+)
 
 
 def _csv_cell(v: Any):
@@ -39,27 +46,31 @@ def table(root, *, path=None, metrics: list[str] | None = None):
         If given, write the CSV there and return the ``Path``. Otherwise return
         the CSV as a string.
     metrics : list[str] | None
-        Restrict the metric columns to these names (default: every metric found).
+        Restrict the metric columns to these names, in this order (default:
+        every metric found, discovery order); repeats are deduplicated. A
+        metric sharing a swept param's name is emitted as ``"<name> (metric)"``.
 
     Raises
     ------
     FileNotFoundError
         If ``root`` is not a directory.
+    ValueError
+        If ``metrics`` contains a name that is not a metric of this sweep.
     """
     cells = _read_cells(root)
 
     param_cols = _ordered_union([c["combo"] for c in cells])
     metric_cols = _ordered_union([c["metrics"] for c in cells])
-    if metrics is not None:
-        metric_cols = [m for m in metric_cols if m in set(metrics)]
-    columns = [*param_cols, "status", *metric_cols]
+    metric_cols = _apply_metric_filter(metrics, metric_cols)
+    colname = _metric_column_names(param_cols, metric_cols)
+    columns = [*param_cols, "status", *(colname[m] for m in metric_cols)]
 
     rows = []
     for c in cells:
         row: dict[str, Any] = {p: c["combo"].get(p) for p in param_cols}
         row["status"] = c["status"]
         for m in metric_cols:
-            row[m] = c["metrics"].get(m)
+            row[colname[m]] = c["metrics"].get(m)
         rows.append(row)
     if param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))

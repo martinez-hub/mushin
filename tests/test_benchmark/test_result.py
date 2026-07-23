@@ -30,3 +30,31 @@ def test_summary_marks_significant_against_reference():
     summary = _result().summary()  # reference defaults to first method ("ours")
     base_row = summary[summary["method"] == "base"].iloc[0]
     assert base_row["significant_vs_ref"] == "*"
+
+
+def test_summary_rejects_unknown_reference():
+    """A typo'd reference must raise, not silently blank every significance
+    marker in a publication-ready table."""
+    import pandas as pd
+    import pytest
+    import xarray as xr
+
+    from mushin.benchmark._result import BenchmarkResult
+
+    ds = xr.Dataset(
+        {"acc": (("method", "seed"), [[0.9, 0.8], [0.7, 0.6]])},
+        coords={"method": ["a", "b"], "seed": [0, 1]},
+    )
+    comps = pd.DataFrame(
+        [
+            {
+                "metric": "acc",
+                "method_a": "a",
+                "method_b": "b",
+                "significant": True,
+            }
+        ]
+    )
+    res = BenchmarkResult(data=ds, comparisons=comps, alpha=0.05)
+    with pytest.raises(ValueError, match="TYPO"):
+        res.summary(reference="TYPO")
