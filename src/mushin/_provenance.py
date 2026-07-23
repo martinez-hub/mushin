@@ -70,8 +70,10 @@ def _versions() -> dict:
 
 
 def _apple_chip() -> str | None:
-    """The Apple Silicon chip name (e.g. 'Apple M5'), or None off-macOS /
-    on failure. Best-effort — provenance must never break a run."""
+    """The Apple Silicon chip name (e.g. 'Apple M5'), or None off-macOS / on
+    failure / on a non-Apple CPU (Intel Macs can expose MPS via a Metal GPU —
+    their x86 brand string must not be recorded as the chip). Best-effort —
+    provenance must never break a run."""
     try:
         r = subprocess.run(
             ("sysctl", "-n", "machdep.cpu.brand_string"),
@@ -79,7 +81,8 @@ def _apple_chip() -> str | None:
             text=True,
             timeout=5,
         )
-        return r.stdout.strip() or None
+        s = r.stdout.strip()
+        return s if r.returncode == 0 and s.startswith("Apple") else None
     except Exception:  # noqa: BLE001 - best-effort
         return None
 
@@ -106,9 +109,10 @@ def _accelerator() -> dict:
                 getattr(torch.backends, "mps", None) is not None
                 and torch.backends.mps.is_available()
             ):
-                # Apple Silicon: record the MPS backend + chip so an M-series
-                # run's provenance is not silently hardware-blind.
-                out["device"] = f"mps ({_apple_chip() or 'Apple Silicon'})"
+                # MPS: record the backend + the real Apple chip when known, or
+                # the CPU architecture otherwise — never a hardcoded "Apple
+                # Silicon" claim (Intel Macs can expose MPS via a Metal GPU).
+                out["device"] = f"mps ({_apple_chip() or platform.machine()})"
         except Exception:  # noqa: BLE001 - best-effort
             pass
     except Exception:  # noqa: BLE001 - best-effort
