@@ -171,3 +171,16 @@ def test_git_dirty_is_unknown_when_status_fails(monkeypatch):
     out = _provenance._git()
     assert out["sha"] is not None  # we ARE in a git repo
     assert out["dirty"] is None  # ...but cleanliness could not be verified
+
+
+def test_accelerator_records_mps_when_available(monkeypatch):
+    """On Apple Silicon (no CUDA), the accelerator record must not be all-None:
+    an MPS-trained run's provenance should say what it ran on."""
+    import torch
+
+    from mushin import _provenance
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True, raising=False)
+    out = _provenance._accelerator()
+    assert out["device"] is not None and out["device"].startswith("mps")

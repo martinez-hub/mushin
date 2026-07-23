@@ -69,10 +69,26 @@ def _versions() -> dict:
     return out
 
 
+def _apple_chip() -> str | None:
+    """The Apple Silicon chip name (e.g. 'Apple M5'), or None off-macOS /
+    on failure. Best-effort — provenance must never break a run."""
+    try:
+        r = subprocess.run(
+            ("sysctl", "-n", "machdep.cpu.brand_string"),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return r.stdout.strip() or None
+    except Exception:  # noqa: BLE001 - best-effort
+        return None
+
+
 def _accelerator() -> dict:
-    """CUDA/cuDNN/device identity — the part of GPU numerics the torch wheel
-    version alone cannot reconstruct. All-None on CPU-only builds (and if
-    torch itself fails to import)."""
+    """Accelerator identity — the part of GPU numerics the torch wheel version
+    alone cannot reconstruct: CUDA/cuDNN + device name on NVIDIA, the MPS
+    device on Apple Silicon. All-None on CPU-only builds (and if torch itself
+    fails to import)."""
     out: dict = {"cuda": None, "cudnn": None, "device": None}
     try:
         import torch
@@ -86,6 +102,13 @@ def _accelerator() -> dict:
         try:
             if torch.cuda.is_available():
                 out["device"] = torch.cuda.get_device_name(0)
+            elif (
+                getattr(torch.backends, "mps", None) is not None
+                and torch.backends.mps.is_available()
+            ):
+                # Apple Silicon: record the MPS backend + chip so an M-series
+                # run's provenance is not silently hardware-blind.
+                out["device"] = f"mps ({_apple_chip() or 'Apple Silicon'})"
         except Exception:  # noqa: BLE001 - best-effort
             pass
     except Exception:  # noqa: BLE001 - best-effort
