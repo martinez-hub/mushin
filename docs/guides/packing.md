@@ -87,7 +87,8 @@ time-slicing a device rather than each pinned to a whole one.
 
 ## MPS and MIG
 
-- **NVIDIA MPS** (Multi-Process Service) improves compute overlap when several
+- **NVIDIA MPS** (Multi-Process Service — unrelated to Apple's MPS/Metal
+  backend) improves compute overlap when several
   small processes share a GPU — start `nvidia-cuda-mps-control -d` before the
   sweep. Combine with the round-robin pinning above.
 - **MIG** (A100/H100) partitions one physical GPU into isolated instances that

@@ -171,3 +171,80 @@ def test_git_dirty_is_unknown_when_status_fails(monkeypatch):
     out = _provenance._git()
     assert out["sha"] is not None  # we ARE in a git repo
     assert out["dirty"] is None  # ...but cleanliness could not be verified
+
+
+def test_accelerator_records_mps_when_available(monkeypatch):
+    """On Apple Silicon (no CUDA), the accelerator record must not be all-None:
+    an MPS-trained run's provenance should say what it ran on."""
+    import torch
+
+    from mushin import _provenance
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True, raising=False)
+    out = _provenance._accelerator()
+    assert out["device"] is not None and out["device"].startswith("mps")
+
+
+def test_apple_chip_parses_only_apple_brands(monkeypatch):
+    """_apple_chip must return the chip only for a successful sysctl reporting
+    an Apple chip — an Intel CPU brand (Intel Macs can have MPS via a Metal
+    GPU) or a failed command must yield None, not a wrong hardware label."""
+    import subprocess as _subprocess
+    from types import SimpleNamespace
+
+    from mushin import _provenance
+
+    def fake(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="Apple M3\n")
+
+    monkeypatch.setattr(_subprocess, "run", fake)
+    assert _provenance._apple_chip() == "Apple M3"
+
+    monkeypatch.setattr(
+        _subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout="Intel(R) Core(TM) i9-9880H\n"
+        ),
+    )
+    assert _provenance._apple_chip() is None
+
+    monkeypatch.setattr(
+        _subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout="Apple M3\n"),
+    )
+    assert _provenance._apple_chip() is None
+
+
+def test_accelerator_mps_labels(monkeypatch):
+    """The MPS device label must be the real Apple chip when known, the CPU
+    architecture otherwise — never a hardcoded 'Apple Silicon' claim that
+    could mislabel an Intel Mac with a Metal GPU."""
+    import platform
+
+    import torch
+
+    from mushin import _provenance
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True, raising=False)
+
+    monkeypatch.setattr(_provenance, "_apple_chip", lambda: "Apple M3")
+    assert _provenance._accelerator()["device"] == "mps (Apple M3)"
+
+    monkeypatch.setattr(_provenance, "_apple_chip", lambda: None)
+    assert _provenance._accelerator()["device"] == f"mps ({platform.machine()})"
+
+
+def test_accelerator_device_none_without_cuda_or_mps(monkeypatch):
+    import torch
+
+    from mushin import _provenance
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        torch.backends.mps, "is_available", lambda: False, raising=False
+    )
+    assert _provenance._accelerator()["device"] is None
