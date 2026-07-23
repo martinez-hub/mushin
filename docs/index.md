@@ -1,13 +1,14 @@
 # mushin
 
-Boilerplate-free, reproducible ML experiment workflows built on
-[PyTorch Lightning](https://lightning.ai/) and
-[hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen).
+Boilerplate-free, reproducible ML experiment workflows: a framework-agnostic
+sweep engine built on
+[hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen), with
+first-class [PyTorch Lightning](https://lightning.ai/) integration.
 
-`mushin` is the evaluate-and-report layer sitting on top of Lightning and
-hydra-zen. Define your experiment as a function, sweep over parameters with
-Hydra, and get results back as a labeled `xarray.Dataset` — not rows in a
-dashboard you have to export.
+`mushin` is the evaluate-and-report layer sitting on top of hydra-zen — and,
+for deep learning, Lightning. Define your experiment as a function, sweep over
+parameters with Hydra, and get results back as a labeled `xarray.Dataset` — not
+rows in a dashboard you have to export.
 
 !!! tip "Highlights"
     - **`@mushin.sweep`** — the boilerplate-free core: decorate a function and

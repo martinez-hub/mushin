@@ -17,9 +17,10 @@
 </p>
 
 <p align="center">
-  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b><br>
-  built on <a href="https://lightning.ai/">PyTorch Lightning</a> and
-  <a href="https://github.com/mit-ll-responsible-ai/hydra-zen">hydra-zen</a>.
+  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b> —<br>
+  a framework-agnostic sweep engine built on
+  <a href="https://github.com/mit-ll-responsible-ai/hydra-zen">hydra-zen</a>,
+  with first-class <a href="https://lightning.ai/">PyTorch Lightning</a> integration.
 </p>
 
 <p align="center"><a href="https://martinez-hub.github.io/mushin/"><b>Documentation</b></a></p>

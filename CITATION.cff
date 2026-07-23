@@ -23,8 +23,9 @@ keywords:
 abstract: >-
   mushin runs reproducible machine-learning experiment sweeps with minimal
   boilerplate: decorate a function with @mushin.sweep, declare the swept
-  parameters, and get the results back as a labeled xarray.Dataset. Built on
-  PyTorch Lightning and hydra-zen, it captures per-run provenance, resumes
+  parameters, and get the results back as a labeled xarray.Dataset. A
+  framework-agnostic sweep engine built on hydra-zen, with first-class PyTorch
+  Lightning integration, it captures per-run provenance, resumes
   durably after interruption (including cluster preemption), and scales from a
   laptop to a multi-node SLURM cluster by changing only the launcher.
 references:

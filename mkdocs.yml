@@ -1,6 +1,8 @@
 site_name: mushin
 site_url: https://martinez-hub.github.io/mushin/
-site_description: Boilerplate-free, reproducible ML experiment workflows on PyTorch Lightning and hydra-zen.
+site_description: >-
+  Boilerplate-free, reproducible ML experiment workflows: a framework-agnostic
+  sweep engine built on hydra-zen, with first-class PyTorch Lightning integration.
 repo_url: https://github.com/martinez-hub/mushin
 repo_name: martinez-hub/mushin
 
