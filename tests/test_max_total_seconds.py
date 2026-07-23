@@ -165,3 +165,35 @@ def test_budget_disabled_under_multi_rank_launch(tmp_path, monkeypatch):
         )
     assert wf.skipped == []  # every cell ran; no rank-divergence hazard
     assert wf.is_complete
+
+
+def test_multi_rank_detection_branches(monkeypatch):
+    """The multi-rank signal must be a real per-rank launch, not just an
+    allocation-wide variable: SLURM_NTASKS>1 needs SLURM_PROCID (srun sets it
+    per task; a sequential driver inside an salloc shell has no PROCID), and
+    WORLD_SIZE>1 needs RANK/SLURM_PROCID (mushin's own single-node launcher
+    exports WORLD_SIZE but never a per-rank var)."""
+    from mushin.workflows import _TaskRunner
+
+    for var in ("WORLD_SIZE", "RANK", "SLURM_NTASKS", "SLURM_PROCID"):
+        monkeypatch.delenv(var, raising=False)
+    assert not _TaskRunner._multi_rank_world()
+
+    # SLURM positive: a submitit/srun-launched rank
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.setenv("SLURM_PROCID", "1")
+    assert _TaskRunner._multi_rank_world()
+
+    # SLURM negative: sequential driver inside a multi-task allocation
+    monkeypatch.delenv("SLURM_PROCID")
+    assert not _TaskRunner._multi_rank_world()
+    monkeypatch.delenv("SLURM_NTASKS")
+
+    # torchrun positive: WORLD_SIZE + RANK
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "0")
+    assert _TaskRunner._multi_rank_world()
+
+    # negative: WORLD_SIZE leaked without a per-rank marker
+    monkeypatch.delenv("RANK")
+    assert not _TaskRunner._multi_rank_world()

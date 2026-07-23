@@ -64,6 +64,9 @@ def _to_override_element(item: Any) -> str:
     if hasattr(item, "item") and getattr(item, "ndim", None) == 0:
         item = item.item()
 
+    if item is None:
+        # Hydra null — the string 'None' would e.g. submit partition="None".
+        return "null"
     if isinstance(item, bool):
         return "true" if item else "false"
     if isinstance(item, (int, float)):
@@ -74,6 +77,15 @@ def _to_override_element(item: Any) -> str:
         return "'" + item.replace("\\", "\\\\").replace("'", "\\'") + "'"
     if isinstance(item, (list, tuple)):
         return "[" + ",".join(_to_override_element(x) for x in item) + "]"
+    if isinstance(item, Mapping):
+        # Hydra dict grammar, so e.g. a launcher's
+        # additional_parameters={"requeue": True} reaches the structured config
+        # as a real dict rather than a quoted Python repr that fails validation.
+        return (
+            "{"
+            + ",".join(f"{k}:{_to_override_element(v)}" for k, v in item.items())
+            + "}"
+        )
     # Fall back to a quoted string representation for any other type.
     return "'" + str(item).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
@@ -384,7 +396,10 @@ class _TaskRunner:
             except ValueError:
                 return False
 
-        if _gt1("SLURM_NTASKS"):
+        if _gt1("SLURM_NTASKS") and "SLURM_PROCID" in os.environ:
+            # SLURM_NTASKS is allocation-wide; SLURM_PROCID is set per task by
+            # srun — a sequential driver inside an salloc shell has no PROCID
+            # and is NOT a rank.
             return True
         return _gt1("WORLD_SIZE") and (
             "RANK" in os.environ or "SLURM_PROCID" in os.environ
@@ -1092,7 +1107,8 @@ class BaseWorkflow:
         max_total_seconds : float | None (default: None)
             Graceful wall-clock budget: once exhausted, remaining cells are
             skipped (NaN, ``self.skipped``) and a later ``resume=True`` finishes
-            them.
+            them. Disabled (with a warning) for cells running under an external
+            multi-rank launch — per-rank deadlines could diverge and hang DDP.
 
         sample : int | None (default: None)
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast
@@ -2861,6 +2877,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             working_dir=working_dir,
             sweeper=sweeper,
             launcher=launcher,
+            launcher_config=launcher_config,
             version_base=version_base,
             overrides=overrides,
             to_dictconfig=to_dictconfig,
