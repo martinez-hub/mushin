@@ -24,9 +24,12 @@ def submitit_slurm_config(
     """Build a ``hydra-submitit-launcher`` SLURM config for multi-node DDP.
 
     ``tasks_per_node`` is derived as ``gpus_per_node`` so the two can never desync
-    (DDP needs one SLURM task per GPU). Returns a plain dict you wire into your
-    Hydra ``hydra/launcher`` config (see the multi-node guide); it submits nothing.
-    Extra keyword args (e.g. ``account``, ``qos``) pass through verbatim.
+    (DDP needs one SLURM task per GPU). Returns a plain dict — pass it to
+    ``run(launcher="submitit_slurm", launcher_config=...)`` (see the multi-node
+    guide); it submits nothing. Extra keyword args (e.g. ``account``, ``qos``,
+    ``constraint``) pass through verbatim — including preemption knobs such as
+    ``signal_delay_s`` (grace signal before the kill, time to checkpoint) and
+    ``additional_parameters={"requeue": True}`` for SLURM auto-requeue.
     """
     if int(nodes) < 1 or int(gpus_per_node) < 1:
         raise ValueError(

@@ -9,6 +9,10 @@ coordinates them into a single NCCL DDP world. The contract is
 ``tasks_per_node`` from ``gpus_per_node`` so they can't desync, and a mismatch
 fails fast with a clear error instead of hanging at NCCL rendezvous.
 
+This is the same workflow API as every other mushin sweep: the SLURM specifics
+are one ``launcher=`` + ``launcher_config=`` pair on ``run()`` — no hand-rolled
+``hydra.launcher.*`` overrides.
+
 Requires a real SLURM cluster with >=2 GPU nodes and ``hydra-submitit-launcher``.
 Not run in CI. Fill in your ``partition``/``account`` below.
 
@@ -17,21 +21,22 @@ Run it (submits the SLURM job for you):
   python examples/multinode_ddp.py
 
 For single-node multi-GPU, set ``nodes=1`` and ``gpus_per_node`` to that node's
-GPU count. See the Multi-node training guide for the full runbook.
+GPU count. See the Multi-node training guide for the full runbook, including
+what happens on preemption and how to resume.
 """
 
 from __future__ import annotations
 
 import os
 import socket
-from pathlib import Path
 
 import pytorch_lightning as pl
-from hydra_zen import builds, instantiate, launch, make_config
+from hydra_zen import builds, make_config
 
 import mushin
 from mushin import HydraDDP, MetricsCallback, submitit_slurm_config
 from mushin.testing.lightning import SimpleLightningModule
+from mushin.workflows import MultiRunMetricsWorkflow
 
 NODES = 2
 GPUS_PER_NODE = 1  # == Trainer devices == launcher tasks_per_node
@@ -53,21 +58,23 @@ TrainerConfig = builds(
     logger=False,
     populate_full_signature=True,
 )
-# HydraDDP re-execs each rank against this saved config, so `trainer` and
+# HydraDDP re-execs each rank against the job's saved config, so `trainer` and
 # `module` must be declarative Hydra config keys (not built imperatively).
 Config = make_config(trainer=TrainerConfig, module=builds(SimpleLightningModule))
 
 
-def task_fn(cfg):
-    print(
-        "RANK",
-        {k: os.environ.get(k) for k in ("SLURM_PROCID", "SLURM_NTASKS")},
-        "host",
-        socket.gethostname(),
-        flush=True,
-    )
-    obj = instantiate(cfg)
-    obj.trainer.fit(obj.module)
+class MultinodeDDP(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(trainer: pl.Trainer, module: pl.LightningModule):
+        print(
+            "RANK",
+            {k: os.environ.get(k) for k in ("SLURM_PROCID", "SLURM_NTASKS")},
+            "host",
+            socket.gethostname(),
+            flush=True,
+        )
+        trainer.fit(module)
+        return dict(fitted=1.0)
 
 
 if __name__ == "__main__":
@@ -78,18 +85,15 @@ if __name__ == "__main__":
         partition=PARTITION,
         account=ACCOUNT,
         timeout_min=15,
-        mem_gb=16,
     )
-    overrides = [
-        "hydra/launcher=submitit_slurm",
-        "hydra.sweep.dir=multinode_ddp_runs",
-        "hydra.sweep.subdir=0",
-        "+trial=0",
-    ] + [f"hydra.launcher.{k}={v}" for k, v in slurm.items()]
 
-    launch(Config, task_fn, overrides=overrides, multirun=True, version_base="1.1")
+    wf = MultinodeDDP(Config)
+    wf.run(
+        working_dir="multinode_ddp_runs",
+        launcher="submitit_slurm",
+        launcher_config=slurm,
+    )
 
-    metrics = sorted(str(p) for p in Path("multinode_ddp_runs").glob("**/*metrics*"))
     loaded = mushin.load_experiment("multinode_ddp_runs")
     count = len(loaded) if isinstance(loaded, list) else 1
-    print(f"DONE — {count} experiment(s), metrics: {metrics}")
+    print(f"DONE — {count} experiment(s); metrics written once (rank 0) per job")

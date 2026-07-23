@@ -35,10 +35,20 @@ slurm = submitit_slurm_config(
 )
 ```
 
-Wire these values into your Hydra submitit launcher (install the plugin:
-`pip install hydra-submitit-launcher`). Set `hydra/launcher=submitit_slurm` and
-override its fields from the dict, e.g. as launch overrides:
-`hydra.launcher.nodes=2 hydra.launcher.tasks_per_node=4 hydra.launcher.gpus_per_node=4 ...`.
+Hand the dict straight to `run()` (install the plugin first:
+`pip install hydra-submitit-launcher`) — no hand-rolled `hydra.launcher.*`
+overrides:
+
+```python
+wf.run(
+    working_dir="runs",
+    launcher="submitit_slurm",
+    launcher_config=slurm,
+)
+```
+
+(Outside the workflow API, the equivalent raw overrides are
+`hydra/launcher=submitit_slurm` plus `hydra.launcher.<key>=<value>` per field.)
 The Trainer must use a matching `devices`/`num_nodes`:
 
 ```python
@@ -71,6 +81,33 @@ seed_everything_per_rank(1234)   # each rank: 1234 + global_rank
 `MetricsCallback` writes its output (`fit_metrics.pt` / `test_metrics.pt`, one per
 stage) only on global rank 0, so the N ranks don't clobber the file on a shared
 filesystem; `load_experiment` reads it back as usual.
+
+## Preemption & resume
+
+When SLURM preempts (or times out) a cell's job, the sweep driver observes a
+failed job: under the default `on_error="raise"` the sweep aborts with that
+error; under `on_error="nan"` it records the failure and finishes the rest.
+Either way, recovery is one command — re-run the same sweep with
+`resume=True` (same `working_dir`): completed cells are reused from their
+sidecars, and only the preempted/missing cells re-run. Inside a long cell, use
+the [`mushin_resume` checkpoint contract](resilience.md) so the re-run
+continues from `last.ckpt` instead of epoch 0.
+
+To have SLURM requeue preempted jobs automatically, pass the scheduler knobs
+through `submitit_slurm_config(**extra)` — e.g.
+`signal_delay_s=120` (submitit's grace signal before the kill, time to write a
+checkpoint) and `additional_parameters={"requeue": True}`.
+
+Two multi-rank cautions:
+
+- `max_total_seconds` is **disabled** for cells that run under a multi-rank
+  launch (each rank would keep its own deadline; a rank that stops while its
+  siblings train would hang DDP at rendezvous — a warning is emitted). Bound
+  multi-rank jobs with the scheduler's own `timeout_min` instead.
+- Every rank of a cell runs the task function, so per-cell files
+  (status/metrics/provenance sidecars) are written once per rank — writes are
+  atomic and carry the same values, so this is benign; `MetricsCallback`'s
+  `.pt` files are rank-0-only by design.
 
 ## Runbook (the merge gate)
 

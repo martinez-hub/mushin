@@ -323,8 +323,7 @@ only this axis — its toy task does no training). `HydraDDP` / `HydraFSDP` trai
     experiment.run(
         seed=mushin.multirun([0]),
         launcher="submitit_slurm",
-        # via Hydra overrides: hydra.launcher.nodes=2,
-        #   hydra.launcher.tasks_per_node=1, hydra.launcher.gpus_per_node=1
+        launcher_config=mushin.submitit_slurm_config(nodes=2, gpus_per_node=1),
     )
     ```
 
