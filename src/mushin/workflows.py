@@ -287,6 +287,17 @@ def _current_group_choice(name: str) -> str | None:
     return None
 
 
+# Pip package per Hydra launcher name, for the missing-plugin install hint.
+_LAUNCHER_PLUGINS: dict[str, str] = {
+    "joblib": "hydra-joblib-launcher",
+    "submitit_slurm": "hydra-submitit-launcher",
+    "submitit_local": "hydra-submitit-launcher",
+    "ray": "hydra-ray-launcher",
+    "ray_aws": "hydra-ray-launcher",
+    "rq": "hydra-rq-launcher",
+}
+
+
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
     try:
@@ -342,6 +353,7 @@ class _TaskRunner:
         # own budget (the feature targets the default sequential launcher).
         self.max_total_seconds = max_total_seconds
         self._deadline = None
+        self._budget_rank_warned = False
 
     def _cache_key(self, config_hash) -> str | None:
         """The content-address for this cell — a hash of its resolved-config and
@@ -354,6 +366,29 @@ class _TaskRunner:
         return hashlib.sha256(f"{config_hash}:{self.code_hash}".encode()).hexdigest()[
             :32
         ]
+
+    @staticmethod
+    def _multi_rank_world() -> bool:
+        """True when this process is one rank of an EXTERNAL multi-rank launch
+        (SLURM/submitit set SLURM_NTASKS; torchrun sets WORLD_SIZE + RANK —
+        both before the process starts). Requires a per-rank marker alongside
+        WORLD_SIZE so mushin's own single-node launcher (which exports
+        WORLD_SIZE in rank 0 but never RANK/SLURM_PROCID) is not mistaken for
+        an external rank."""
+        import os
+
+        def _gt1(name: str) -> bool:
+            v = os.environ.get(name)
+            try:
+                return v is not None and int(v) > 1
+            except ValueError:
+                return False
+
+        if _gt1("SLURM_NTASKS"):
+            return True
+        return _gt1("WORLD_SIZE") and (
+            "RANK" in os.environ or "SLURM_PROCID" in os.environ
+        )
 
     @staticmethod
     def _combo(cfg, names):
@@ -524,7 +559,24 @@ class _TaskRunner:
         # hits above returned before here), so at least one cell always runs. A
         # skipped cell is 'skipped', not 'completed', so a later resume with more
         # time finishes it. A cell already running is never interrupted.
-        if self.max_total_seconds is not None:
+        if self.max_total_seconds is not None and self._multi_rank_world():
+            # Under an external multi-rank launch (submitit DDP/FSDP: every
+            # rank runs this task with its OWN deadline), a budget that expires
+            # on one rank but not its siblings would leave the training ranks
+            # hanging at NCCL rendezvous. Disable the budget rather than risk
+            # the hang; the scheduler's own time limit still bounds the job.
+            if not self._budget_rank_warned:
+                warnings.warn(
+                    "`max_total_seconds` is disabled for this cell: it runs "
+                    "under a multi-rank launch (WORLD_SIZE/SLURM_NTASKS > 1), "
+                    "where per-rank deadlines could diverge and hang DDP at "
+                    "rendezvous. Use the scheduler's time limit (e.g. "
+                    "submitit's `timeout_min`) to bound multi-rank jobs.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                self._budget_rank_warned = True
+        elif self.max_total_seconds is not None:
             import time
 
             # Monotonic: a wall-clock step (NTP/DST) mid-sweep must neither
@@ -941,6 +993,7 @@ class BaseWorkflow:
         working_dir: str | None = None,
         sweeper: str | None = None,
         launcher: str | None = None,
+        launcher_config: Mapping[str, Any] | None = None,
         overrides: list[str] | None = None,
         task_fn_wrapper: Callable[[Callable[..., T1]], Callable[[Any], T1]]
         | None = zen,
@@ -986,6 +1039,14 @@ class BaseWorkflow:
         launcher: str | None (default: None)
             The configuration name of the Hydra Launcher to use (i.e., the override for
             `hydra/launcher=launcher`)
+
+        launcher_config: Mapping[str, Any] | None (default: None)
+            Fields for the selected ``launcher``, applied as
+            ``hydra.launcher.<key>=<value>`` overrides — no hand-rolled
+            strings. Pair with `mushin.submitit_slurm_config`, e.g.
+            ``run(launcher="submitit_slurm",
+            launcher_config=submitit_slurm_config(nodes=2, gpus_per_node=4))``.
+            Requires ``launcher=``.
 
         overrides: List[str] | None (default: None)
             Parameter overrides not considered part of the swept workflow
@@ -1102,6 +1163,21 @@ class BaseWorkflow:
 
         if launcher is not None:
             launch_overrides.append(f"hydra/launcher={launcher}")
+
+        if launcher_config is not None:
+            if launcher is None:
+                raise ValueError(
+                    "`launcher_config` requires `launcher=` — its fields "
+                    "configure that launcher (e.g. launcher='submitit_slurm' "
+                    "with mushin.submitit_slurm_config(...))."
+                )
+            # Emit the `hydra.launcher.*` overrides so callers never hand-roll
+            # them (values serialized like sweep elements: numbers/bools bare,
+            # strings quoted so ',' or '=' inside a value cannot re-split).
+            launch_overrides.extend(
+                f"hydra.launcher.{k}={_to_override_element(v)}"
+                for k, v in launcher_config.items()
+            )
 
         # Under version_base "1.1" Hydra changes the working directory per job at
         # runtime, and the workflow depends on it: each job writes and reads its
@@ -1447,17 +1523,41 @@ class BaseWorkflow:
         self._job_metrics_by_index = None
 
         # Run a Multirun over epsilons
-        jobs = launch(
-            self.eval_task_cfg,
-            task_call,
-            overrides=launch_overrides,
-            multirun=True,
-            version_base=version_base,
-            to_dictconfig=to_dictconfig,
-            config_name=config_name,
-            job_name=job_name,
-            with_log_configuration=with_log_configuration,
-        )
+        try:
+            jobs = launch(
+                self.eval_task_cfg,
+                task_call,
+                overrides=launch_overrides,
+                multirun=True,
+                version_base=version_base,
+                to_dictconfig=to_dictconfig,
+                config_name=config_name,
+                job_name=job_name,
+                with_log_configuration=with_log_configuration,
+            )
+        except Exception as e:
+            # A missing launcher plugin is the FIRST error every cluster user
+            # hits; Hydra's raw message lists options but never names the pip
+            # package. Amend it with the install hint.
+            from hydra.errors import MissingConfigException
+
+            if (
+                isinstance(e, MissingConfigException)
+                and launcher is not None
+                and f"hydra/launcher/{launcher}" in str(e)
+            ):
+                pkg = _LAUNCHER_PLUGINS.get(launcher)
+                hint = (
+                    f"pip install {pkg}"
+                    if pkg
+                    else f"install the Hydra launcher plugin providing {launcher!r}"
+                )
+                raise MissingConfigException(
+                    f"{e}\n\nThe {launcher!r} launcher comes from a Hydra "
+                    f"plugin that is not installed here: `{hint}` and re-run.",
+                    getattr(e, "missing_cfg_file", None),
+                ) from e
+            raise
 
         if isinstance(jobs, list):
             # Hydra returns a list of per-batch job lists (one batch for the
@@ -1749,6 +1849,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         working_dir: str | None = None,
         sweeper: str | None = None,
         launcher: str | None = None,
+        launcher_config: Mapping[str, Any] | None = None,
         overrides: list[str] | None = None,
         version_base: str | type[_NotSet] | None = _VERSION_BASE_DEFAULT,
         target_job_dirs: Sequence[str | Path] | None = None,
@@ -1826,7 +1927,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             already running is never interrupted. Skipped cells are not
             completed, so a later ``resume=True`` with more time finishes them.
             Measured per launcher process — best with the default sequential
-            launcher.
+            launcher. Disabled (with a warning) for cells running under a
+            multi-rank launch (submitit DDP/FSDP): per-rank deadlines could
+            diverge and hang the ranks at rendezvous — use the scheduler's
+            time limit for those jobs instead.
         sample : int | None (default: None)
             Run only a random subset of ``sample`` cells from the full grid for
             fast exploration; the remaining cells are skipped (NaN, and
@@ -1901,6 +2005,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             working_dir=working_dir,
             sweeper=sweeper,
             launcher=launcher,
+            launcher_config=launcher_config,
             overrides=overrides,
             task_fn_wrapper=task_fn_wrapper,
             pre_task_fn_wrapper=pre_task_fn_wrapper,
@@ -2676,6 +2781,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         working_dir: str | None = None,
         sweeper: str | None = None,
         launcher: str | None = None,
+        launcher_config: Mapping[str, Any] | None = None,
         overrides: list[str] | None = None,
         to_dictconfig: bool = False,
         config_name: str = "mushin_workflow",
@@ -2711,6 +2817,14 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         launcher: str | None (default: None)
             The configuration name of the Hydra Launcher to use (i.e., the override for
             `hydra/launcher=launcher`)
+
+        launcher_config: Mapping[str, Any] | None (default: None)
+            Fields for the selected ``launcher``, applied as
+            ``hydra.launcher.<key>=<value>`` overrides — no hand-rolled
+            strings. Pair with `mushin.submitit_slurm_config`, e.g.
+            ``run(launcher="submitit_slurm",
+            launcher_config=submitit_slurm_config(nodes=2, gpus_per_node=4))``.
+            Requires ``launcher=``.
 
         overrides: List[str] | None (default: None)
             Parameter overrides not considered part of the swept workflow

@@ -37,15 +37,14 @@ def run_parallel(working_dir=None, launcher="joblib"):
     ``launcher="joblib"`` parallelizes across local cores (needs
     ``hydra-joblib-launcher``). For a SLURM cluster, install
     ``hydra-submitit-launcher`` and pass ``launcher="submitit_slurm"`` with the
-    scheduler overrides, e.g.::
+    scheduler fields, e.g.::
 
         experiment.run(
             lr=mushin.multirun([...]), seed=mushin.multirun([...]),
             launcher="submitit_slurm",
-            overrides=[
-                "hydra.launcher.timeout_min=60",
-                "hydra.launcher.gpus_per_node=1",
-            ],
+            launcher_config=mushin.submitit_slurm_config(
+                nodes=1, gpus_per_node=1, timeout_min=60
+            ),
         )
     """
     return experiment.run(

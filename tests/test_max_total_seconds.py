@@ -134,3 +134,34 @@ def test_budget_immune_to_wall_clock_jumps(tmp_path, monkeypatch):
             max_total_seconds=0.01,
         )
     assert len(wf.skipped) >= 1
+
+
+def test_budget_disabled_under_multi_rank_launch(tmp_path, monkeypatch):
+    """Under an external multi-rank launch (submitit DDP: every rank runs the
+    task with its own clock), a per-process budget could expire on one rank but
+    not its siblings — the skipped rank would leave the others hanging at NCCL
+    rendezvous. The budget must be disabled with a warning instead."""
+    import time as _time
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    # a real external rank has both the world size and a per-rank marker
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "0")
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            _time.sleep(0.05)
+            return dict(m=float(a))
+
+    wf = W()
+    with pytest.warns(UserWarning, match="multi-rank"):
+        wf.run(
+            a=multirun([1, 2]),
+            working_dir=str(tmp_path / "s"),
+            max_total_seconds=0.01,  # would expire after cell 1 if enforced
+        )
+    assert wf.skipped == []  # every cell ran; no rank-divergence hazard
+    assert wf.is_complete

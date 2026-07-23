@@ -233,14 +233,14 @@ class HydraDDP(_HydraReattachMixin, DDPStrategy):  # type: ignore
     First define a Hydra configuration using hydra-zen:
 
     >>> import pytorch_lightning as pl
-    ... from hydra_zen import builds, make_config,
+    ... from hydra_zen import builds, make_config
     ... from mushin import HydraDDP
     ... from mushin.testing.lightning import SimpleLightningModule
     ...
     ... TrainerConfig = builds(
     ...     pl.Trainer,
-    ...     accelerator="auto",
-    ...     gpus=2,
+    ...     accelerator="gpu",
+    ...     devices=2,
     ...     max_epochs=1,
     ...     fast_dev_run=True,
     ...     strategy=builds(HydraDDP),
