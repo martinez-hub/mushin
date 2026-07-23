@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.11.0] - 2026-07-23
+
+### Added
+
+- A missing Hydra launcher plugin now raises with the exact `pip install` package name (e.g. `hydra-submitit-launcher`) instead of Hydra's bare "Could not find" listing. (#149)
+- `run()` accepts `launcher_config=` — launcher fields (e.g. from `submitit_slurm_config()`) are applied as `hydra.launcher.*` overrides internally, so cluster sweeps no longer need hand-rolled override strings. (#149)
+
+### Fixed
+
+- `max_total_seconds` is disabled (with a warning) for cells running as one rank of an external multi-rank launch (submitit DDP/FSDP) — per-rank deadlines could diverge and hang the ranks at NCCL rendezvous; bound those jobs with the scheduler's time limit instead. (#149)
+- `HydraDDP`'s docstring example now runs on supported Lightning (`devices=2`, not the removed `gpus=2`); the multinode example uses the standard workflow API; the multinode guide gained a "Preemption & resume" section covering SLURM requeue and recovery. (#149)
+- Provenance now records the Apple Silicon MPS accelerator (`device: "mps (<chip>)"`) when CUDA is absent — M-series runs are no longer hardware-blind; the install guide documents Apple Silicon support explicitly. (#150)
+
+
 ## [0.10.1] - 2026-07-22
 
 ### Changed
@@ -490,7 +504,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/martinez-hub/mushin/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/martinez-hub/mushin/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/martinez-hub/mushin/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/martinez-hub/mushin/compare/v0.8.0...v0.9.0
