@@ -77,3 +77,33 @@ def test_diff_missing_dir_raises(tmp_path):
     _run(tmp_path / "a")
     with pytest.raises(FileNotFoundError):
         mushin.diff(tmp_path / "a", tmp_path / "nope")
+
+
+def test_diff_excludes_non_completed_cells(tmp_path):
+    """A failed cell that still has a stale metrics sidecar on disk must not
+    produce metric deltas as if it were an unchanged completed result — on
+    EITHER side of the diff."""
+    import json
+
+    def _mark_failed(root, seed):
+        target = next(
+            p
+            for p in sorted(root.glob("*/mushin_cell_status.json"))
+            if json.loads(p.read_text())["combo"] == {"seed": seed}
+        )
+        payload = json.loads(target.read_text())
+        payload["status"] = "failed"
+        target.write_text(json.dumps(payload))
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    _run(a, bump=0.0, seeds=(0, 1, 2))
+    _run(b, bump=0.0, seeds=(0, 1, 2))
+
+    _mark_failed(b, 1)  # b-side failure, stale metrics sidecar remains
+    _mark_failed(a, 2)  # a-side failure likewise
+
+    d = mushin.diff(a, b)
+    assert next(r for r in d.rows if r["seed"] == 1)["deltas"] == {}
+    assert next(r for r in d.rows if r["seed"] == 2)["deltas"] == {}
+    ok_row = next(r for r in d.rows if r["seed"] == 0)
+    assert "acc" in ok_row["deltas"]

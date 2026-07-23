@@ -97,3 +97,48 @@ def test_atomic_write_uses_unique_temp_names(tmp_path, monkeypatch):
     _atomic_write_json(tmp_path / "m.json", {"a": 2})
     assert len(seen) == 2 and seen[0] != seen[1]
     assert not list(tmp_path.glob("*.tmp"))  # no residue
+
+
+def test_metrics_sidecar_roundtrips_infinities(tmp_path):
+    """±Inf metric values must survive the sidecar round-trip with their sign
+    (not collapse to NaN), including inside nested containers, while the file
+    stays strict JSON (no Infinity/NaN literals)."""
+    import json
+    import math
+
+    from mushin._sweep_io import (
+        METRICS_FILE,
+        read_metrics_sidecar,
+        write_metrics_sidecar,
+    )
+
+    write_metrics_sidecar(
+        tmp_path,
+        {
+            "pos": float("inf"),
+            "neg": float("-inf"),
+            "nan": float("nan"),
+            "nested": {"v": [1.0, float("inf")]},
+        },
+    )
+    back = read_metrics_sidecar(tmp_path)
+    assert back is not None
+    assert back["pos"] == math.inf
+    assert back["neg"] == -math.inf
+    assert back["nan"] != back["nan"]  # NaN still round-trips to NaN
+    assert back["nested"]["v"] == [1.0, math.inf]
+
+    def _reject_constant(name):  # Infinity/NaN literals are not strict JSON
+        raise AssertionError(f"non-strict JSON literal in sidecar: {name}")
+
+    json.loads((tmp_path / METRICS_FILE).read_text(), parse_constant=_reject_constant)
+
+
+def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
+    """Only the exact internal marker values decode to ±Inf — a user metric
+    dict that merely shares the tag key must round-trip unchanged."""
+    from mushin._sweep_io import read_metrics_sidecar, write_metrics_sidecar
+
+    write_metrics_sidecar(tmp_path, {"weird": {"__mushin_nonfinite__": "hello"}})
+    back = read_metrics_sidecar(tmp_path)
+    assert back == {"weird": {"__mushin_nonfinite__": "hello"}}

@@ -52,14 +52,65 @@ def run_training_sweep(
     ``resume`` and ``capture_env`` are forwarded to the workflow's ``run`` as
     well: ``resume=True`` (requires a stable ``working_dir``) re-executes only
     the failed/missing cells of a prior sweep, and ``capture_env=True`` writes a
-    full dependency snapshot alongside the per-job provenance records.
+    full dependency snapshot alongside the per-job provenance records. Because
+    cells are swept by method *index*, resume additionally fingerprints the
+    methods mapping itself (each name paired with its function's source hash):
+    renaming, reordering, adding/removing a method, or editing any method's
+    body invalidates every completed cell (with a warning) rather than silently
+    reusing checkpoints trained by different code — coarse, but never stale.
+    Like the core resume guard, the fingerprint covers each function's own
+    source only, not helpers it calls or values it closes over.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     seeds = list(seeds)
     names = list(methods)
 
-    def task(method_index, seed):
+    # One fingerprint over (name, identity) pairs IN ORDER. Passed to the
+    # task as a config value so the per-cell config fingerprint — the resume
+    # guard — covers the methods mapping, which the swept (method_index, seed)
+    # combo alone cannot see.
+    import functools
+    import hashlib
+    import warnings
+
+    from mushin._resume import code_fingerprint
+
+    def _method_identity(fn) -> str:
+        """A string that changes when the method's code (or bound arguments)
+        change. Falls back through source-less callables: a functools.partial
+        keys on its wrapped function plus bound args; a callable object keys
+        on its class source plus instance state. '?' means undetectable."""
+        fp = code_fingerprint(fn)
+        if fp is not None:
+            return fp
+        if isinstance(fn, functools.partial):
+            kw = sorted((fn.keywords or {}).items())
+            return f"partial:{_method_identity(fn.func)}:{fn.args!r}:{kw!r}"
+        cls_fp = code_fingerprint(type(fn))
+        if cls_fp is not None:
+            try:
+                state = repr(sorted(vars(fn).items()))
+            except Exception:  # noqa: BLE001 - unorderable/unreprable state
+                state = "?"
+            return f"obj:{cls_fp}:{state}"
+        return "?"
+
+    _identities = {n: _method_identity(methods[n]) for n in names}
+    _blind = sorted(n for n, ident in _identities.items() if "?" in ident)
+    if _blind:
+        warnings.warn(
+            f"resume cannot detect code changes for method(s) "
+            f"{', '.join(map(repr, _blind))}: their source is unreadable and no "
+            "fallback identity applies. Re-run from a fresh working_dir after "
+            "editing them.",
+            UserWarning,
+            stacklevel=2,
+        )
+    _fp_src = ",".join(f"{n}:{_identities[n]}" for n in names)
+    methods_fp = hashlib.sha256(_fp_src.encode()).hexdigest()[:16]
+
+    def task(method_index, seed, methods_fingerprint=""):
         name = names[method_index]
         src = methods[name](seed)
         if src is None:
@@ -77,6 +128,7 @@ def run_training_sweep(
     wf.run(
         method_index=multirun(list(range(len(names)))),
         seed=multirun(seeds),
+        methods_fingerprint=methods_fp,
         working_dir=working_dir,
         on_error=on_error,
         resume=resume,

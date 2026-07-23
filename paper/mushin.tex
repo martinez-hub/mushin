@@ -28,8 +28,8 @@ keyed by the swept dimensions --- rather than as rows in a dashboard that must b
 exported and re-assembled. The sweep layer is framework-agnostic: a task returns
 a dictionary of metrics, so scikit-learn~\citep{pedregosa2011scikit}, XGBoost, or
 any Python model can be swept the same way as a PyTorch~\citep{paszke2019pytorch}
-model. Built on PyTorch Lightning~\citep{falcon2019lightning} and
-hydra-zen~\citep{hydrazen2022}, \texttt{mushin} records each run's configuration
+model. Built on hydra-zen~\citep{hydrazen2022}, with first-class PyTorch
+Lightning~\citep{falcon2019lightning} integration, \texttt{mushin} records each run's configuration
 and provenance, resumes durably after interruption, and scales from a laptop to a
 multi-node SLURM cluster by changing only the launcher. It is available on PyPI
 as \texttt{mushin-py}.

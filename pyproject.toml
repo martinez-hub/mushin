@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # the import package is still `import mushin` (see src/mushin/).
 name = "mushin-py"
 version = "0.10.0"
-description = "Boilerplate-free, reproducible ML experiment workflows built on PyTorch Lightning and hydra-zen. Carved out of MIT-LL's responsible-ai-toolbox."
+description = "Boilerplate-free, reproducible ML experiment workflows: a framework-agnostic sweep engine built on hydra-zen, with first-class PyTorch Lightning integration. Carved out of MIT-LL's responsible-ai-toolbox."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
