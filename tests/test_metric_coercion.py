@@ -33,13 +33,14 @@ def test_nested_numpy_metric_serializes_and_roundtrips(tmp_path):
     json.loads((tmp_path / "mushin_metrics.json").read_text())
 
 
-def test_nonfinite_metric_is_valid_json_and_restores_nan(tmp_path):
+def test_nonfinite_metric_is_valid_json_and_restores_nonfinite(tmp_path):
     write_metrics_sidecar(tmp_path, {"loss": float("nan"), "grad": float("inf")})
     raw = (tmp_path / "mushin_metrics.json").read_text()
     assert "NaN" not in raw and "Infinity" not in raw  # not python-only literals
     json.loads(raw)  # strict parse succeeds
     back = read_metrics_sidecar(tmp_path)
-    assert math.isnan(back["loss"]) and math.isnan(back["grad"])
+    assert math.isnan(back["loss"])
+    assert back["grad"] == math.inf  # ±Inf keeps its sign (no NaN collapse)
 
 
 def test_nonnative_metric_value_is_stringified_not_crashing(tmp_path):

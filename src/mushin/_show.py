@@ -51,13 +51,32 @@ def _read_cells(root) -> list[dict]:
     """Scan a sweep ``root`` and return one dict per cell:
     ``{"combo", "status", "metrics", "dir"}`` (``dir`` is the job dir Path).
     Reads only the per-cell JSON sidecars — no Hydra/xarray. Raises
-    ``FileNotFoundError`` if ``root`` is not a directory."""
-    from ._resume import read_cell_status
-    from ._sweep_io import read_metrics_sidecar
+    ``FileNotFoundError`` if ``root`` is not a directory.
+
+    When a sweep manifest exists it scopes the result to the LATEST sweep's
+    grid: a dir whose combo the manifest does not list (or lists under another
+    dir) is stale residue of an earlier/wider sweep in a reused ``working_dir``
+    and is excluded — unless its status sidecar is newer than the manifest,
+    which marks a cell of a newer sweep currently in flight (the mid-sweep
+    view). Without a manifest (fresh dir mid-sweep, pre-manifest sweeps) every
+    cell dir is kept."""
+    from ._resume import STATUS_FILE, read_cell_status
+    from ._sweep_io import MANIFEST_FILE, Manifest, combo_key, read_metrics_sidecar
 
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f"sweep directory not found: {root}")
+
+    manifest_cells: dict = {}
+    manifest_mtime = 0.0
+    try:
+        manifest_cells = Manifest.load_or_new(root, []).cells
+        if not isinstance(manifest_cells, dict):
+            manifest_cells = {}
+        if manifest_cells:
+            manifest_mtime = (root / MANIFEST_FILE).stat().st_mtime
+    except Exception:  # noqa: BLE001 - unreadable manifest -> unscoped scan
+        manifest_cells = {}
 
     cells: list[dict] = []
     for d in sorted(
@@ -67,6 +86,16 @@ def _read_cells(root) -> list[dict]:
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
+        if manifest_cells:
+            entry = manifest_cells.get(combo_key(s["combo"]))
+            in_grid = isinstance(entry, dict) and entry.get("dir") == d.name
+            if not in_grid:
+                try:
+                    newer = (d / STATUS_FILE).stat().st_mtime > manifest_mtime
+                except OSError:
+                    newer = False
+                if not newer:
+                    continue  # stale cell from a previous sweep of this dir
         m = read_metrics_sidecar(d) or {}
         if not isinstance(m, dict):
             m = {}
@@ -337,9 +366,12 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     """Compare two sweep directories ``a`` and ``b``.
 
     Cells are aligned by their swept-param combination. For each shared cell the
-    delta ``b - a`` is computed for every metric that is a finite scalar in both.
-    Cells present in only one sweep are reported separately, along with a diff of
-    the two runs' environment provenance (git/packages/python/accelerator).
+    delta ``b - a`` is computed for every metric that is a finite scalar in both
+    — and only when the cell is ``completed`` on BOTH sides (a failed/skipped
+    cell may carry a stale sidecar from a prior attempt; its row appears with
+    empty ``deltas``). Cells present in only one sweep are reported separately,
+    along with a diff of the two runs' environment provenance
+    (git/packages/python/accelerator).
 
     Returns
     -------
@@ -361,7 +393,11 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     for k in sorted(keys_a & keys_b):
         ca, cb = cells_a[k], cells_b[k]
         deltas: dict[str, tuple] = {}
-        for name, va in ca["metrics"].items():
+        # Deltas only between COMPLETED cells: a failed/skipped cell may still
+        # carry a stale metrics sidecar from a prior attempt, and a Δ computed
+        # from it would present the failure as an unchanged result.
+        both_completed = ca["status"] == "completed" and cb["status"] == "completed"
+        for name, va in ca["metrics"].items() if both_completed else ():
             if want is not None and name not in want:
                 continue
             vb = cb["metrics"].get(name)

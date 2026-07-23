@@ -386,7 +386,12 @@ class _TaskRunner:
             read_cell_status,
             write_cell_status,
         )
-        from ._sweep_io import combo_key, read_metrics_sidecar, write_metrics_sidecar
+        from ._sweep_io import (
+            METRICS_FILE,
+            combo_key,
+            read_metrics_sidecar,
+            write_metrics_sidecar,
+        )
 
         chash = config_fingerprint(cfg)
 
@@ -415,6 +420,13 @@ class _TaskRunner:
                     config_hash=chash,
                     code_hash=self.code_hash,
                 )
+                # A skipped cell has no valid metrics; drop any sidecar a prior
+                # sweep left in this reused dir so show/export don't list old
+                # metrics on a 'skipped' row while to_xarray NaN-fills it.
+                try:
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return _SkippedRun("not sampled")
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
@@ -527,9 +539,15 @@ class _TaskRunner:
                     config_hash=chash,
                     code_hash=self.code_hash,
                 )
+                # Same reused-dir hygiene as the sampling skip above.
+                try:
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return _SkippedRun()
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
+        failed_recorded = False
         try:
             self.pre_task(cfg)
             cwd = Path.cwd()
@@ -562,6 +580,14 @@ class _TaskRunner:
                     config_hash=chash,
                     code_hash=self.code_hash,
                 )
+                # A metrics sidecar left by a prior successful attempt no longer
+                # describes this cell — remove it so offline tools (show/best/
+                # diff/load) cannot present stale metrics as current results.
+                try:
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass  # best-effort: never mask the task's own failure
+                failed_recorded = True
                 raise
             finally:
                 if token is not None:
@@ -590,6 +616,27 @@ class _TaskRunner:
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
+            if not failed_recorded:
+                # A SETUP-phase failure (pre_task, combo extraction, the
+                # 'running' status write) never reached the task-body handler
+                # above, so the cell dir may still carry a prior sweep's
+                # 'completed' status + metrics sidecar. Record the failure and
+                # remove the stale sidecar so offline tools cannot present the
+                # old metrics as this sweep's results. Best-effort: the combo
+                # itself may be what failed to compute.
+                try:
+                    cwd = Path.cwd()
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                    write_cell_status(
+                        cwd,
+                        status="failed",
+                        combo=self._combo(cfg, self.swept_names),
+                        attempt=1,
+                        config_hash=chash,
+                        code_hash=self.code_hash,
+                    )
+                except Exception:  # noqa: BLE001 - never mask the real failure
+                    pass
             if self.on_error == "nan":
                 # The sentinel keeps only repr(exc); persist the full stack in
                 # the cell dir so a fail-soft sweep stays debuggable. (Hydra's
@@ -1342,6 +1389,17 @@ class BaseWorkflow:
 
         self._capture_env = capture_env
 
+        # Reset memoized override caches and loaded-from-disk state so a SECOND
+        # run() on the same instance keys its grid on this sweep, not the
+        # previous one (mirrors the reset in `load_from_dir` for reused loader
+        # objects). Deliberately placed HERE — after every validation raise and
+        # the dry_run early-return — so a preview or a rejected call on a
+        # loaded workflow does not wipe state its next to_xarray() needs.
+        self._multirun_task_overrides = {}
+        self._target_dir_multirun_overrides = None
+        self._loaded_job_choices = None
+        self._job_metrics_by_index = None
+
         # Run a Multirun over epsilons
         jobs = launch(
             self.eval_task_cfg,
@@ -1549,6 +1607,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
     _JOBDIR_NAME: str = "job_dir"
     _target_dir_multirun_overrides: defaultdict[str, list[Any]] | None = None
+    # Per-job `runtime.choices` recovered by `load_from_dir` (job-num order),
+    # so offline loads key config-group axes by choice name like in-process.
+    _loaded_job_choices: list[dict | None] | None = None
+    # Job-aligned metrics from `load_metrics` (None = failed/skipped cell), so
+    # `to_xarray` can rebuild the combo map with holes NaN-filled.
+    _job_metrics_by_index: list[Any] | None = None
     output_subdir: str | None = None
 
     # List of all the dirs that the multirun writes to; sorted by job-num
@@ -1616,8 +1680,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if head[:1] in (b"{", b"["):
             import json
 
+            from ._sweep_io import _restore_nonfinite
+
             with open(file_path) as f:
-                return json.load(f)
+                # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
+                # as a tagged marker) so an offline reload yields the same
+                # float values the in-process run produced.
+                return _restore_nonfinite(json.load(f))
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
         import torch as tr
@@ -2035,10 +2104,16 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         return combo
 
     def _job_choices(self, i: int) -> dict | None:
-        """``runtime.choices`` for job ``i``, when jobs align with cfgs."""
+        """``runtime.choices`` for job ``i``, when jobs align with cfgs.
+
+        Falls back to the choices recovered from each cell's hydra.yaml by
+        `load_from_dir`, so offline loads key config-group axes correctly."""
         jobs = getattr(self, "jobs", None)
         if jobs and len(jobs) == len(self.cfgs):
             return _group_choices_of_job(jobs[i])
+        loaded = getattr(self, "_loaded_job_choices", None)
+        if loaded is not None and len(loaded) == len(self.cfgs):
+            return loaded[i]
         return None
 
     @staticmethod
@@ -2082,6 +2157,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # stale overrides/coordinates from a previously loaded directory.
         self._multirun_task_overrides = {}
         self._target_dir_multirun_overrides = None
+        self._loaded_job_choices = None
+        self._job_metrics_by_index = None
 
         self.working_dir = Path(working_dir)
         self.output_subdir = load_from_yaml(
@@ -2092,13 +2169,28 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             x.parent for x in self.working_dir.glob(f"**/*/{self.output_subdir}")
         )
 
-        # ensure working dirs are sorted by job num
-        _job_nums = (
-            load_from_yaml(dir_ / f"{self.output_subdir}/hydra.yaml").hydra.job.num
+        # ensure working dirs are sorted by job num; while each hydra.yaml is
+        # open, also recover the job's `runtime.choices` so a config-GROUP axis
+        # keys by its chosen option name offline exactly as it does in-process
+        # (without this, `_combo_of_cfg` falls back to the composed sub-config
+        # and no combo ever matches the choice-name grid coordinates).
+        _hydra_cfgs = [
+            load_from_yaml(dir_ / f"{self.output_subdir}/hydra.yaml")
             for dir_ in self.multirun_working_dirs
-        )
+        ]
+        _job_nums = [hc.hydra.job.num for hc in _hydra_cfgs]
+        _choices: list[dict | None] = []
+        for hc in _hydra_cfgs:
+            try:
+                ch = hc.hydra.runtime.choices
+                _choices.append(None if ch is None else dict(ch))
+            except Exception:  # noqa: BLE001 - older dirs without choices
+                _choices.append(None)
 
         self.multirun_working_dirs = _sort_x_by_k(self.multirun_working_dirs, _job_nums)
+        self._loaded_job_choices = (
+            _sort_x_by_k(_choices, _job_nums) if _choices else None
+        )
         self.cfgs = []
 
         for dir_ in self.multirun_working_dirs:
@@ -2183,8 +2275,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if isinstance(metrics_filename, str):
             metrics_filename = [metrics_filename]
 
-        job_metrics = []
+        from ._resume import read_cell_status
+
+        job_metrics: list[Any] = []
         for dir_ in self.multirun_working_dirs:
+            # A cell recorded 'failed' or 'skipped' (fail-soft, `sample=`, or an
+            # exhausted `max_total_seconds` budget) deliberately has no valid
+            # metrics: NaN-fill it exactly like the in-process path — never load
+            # a stale sidecar a prior attempt left behind, and never raise for
+            # its (expected) missing files.
+            status = (read_cell_status(dir_) or {}).get("status")
+            if status in ("failed", "skipped"):
+                job_metrics.append(None)
+                continue
             _metrics = {}
             for name in metrics_filename:
                 files = sorted(dir_.glob(name))
@@ -2197,6 +2300,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     _metrics.update(self.metric_load_fn(f_))
             job_metrics.append(_metrics)
 
+        # Keep the job-aligned view (None = failed/skipped cell) so `to_xarray`
+        # can rebuild `_metrics_by_combo` per cell even when some cells are
+        # absent — the column-aligned `self.metrics` cannot express holes.
+        self._job_metrics_by_index = job_metrics
         self.metrics = self._process_metrics(job_metrics)
 
         return self.metrics
@@ -2328,14 +2435,24 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             return combo_key({n: combo[n] for n in swept_names})
 
         # If `_metrics_by_combo` was not populated by `jobs_post_process` (e.g. a
-        # workflow loaded from disk), reconstruct it from the job-aligned
-        # `self.metrics` columns and `self.cfgs`. This index-based mapping is only
-        # sound when every column aligns 1:1 with `self.cfgs`; `_process_metrics`
-        # drops None jobs / absent keys, so a ragged column would mis-map. Guard
-        # against that and only reconstruct when all columns are full-length.
+        # workflow loaded from disk), reconstruct it per cell. Prefer the
+        # job-aligned `_job_metrics_by_index` from `load_metrics` (it expresses
+        # holes: None marks a failed/skipped cell, which simply NaN-fills).
+        # Otherwise fall back to inverting the column-aligned `self.metrics`,
+        # which is only sound when every column aligns 1:1 with `self.cfgs` —
+        # `_process_metrics` drops None jobs / absent keys, so a ragged column
+        # would mis-map; guard and only reconstruct full-length columns.
         if not self._metrics_by_combo and self.cfgs:
             n_jobs = len(self.cfgs)
-            if all(len(col) == n_jobs for col in self.metrics.values()):
+            aligned = getattr(self, "_job_metrics_by_index", None)
+            if aligned is not None and len(aligned) == n_jobs:
+                for i, (cfg, per_job) in enumerate(
+                    zip(self.cfgs, aligned, strict=True)
+                ):
+                    if per_job:
+                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        self._metrics_by_combo[combo_key(combo)] = per_job
+            elif all(len(col) == n_jobs for col in self.metrics.values()):
                 for i, cfg in enumerate(self.cfgs):
                     per_job = {k: col[i] for k, col in self.metrics.items()}
                     if per_job:
