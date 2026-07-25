@@ -1,6 +1,6 @@
 # mushin
 
-Boilerplate-free, reproducible ML experiment workflows: a framework-agnostic
+Boilerplate-free, reproducible machine-learning experiment sweeps: a framework-agnostic
 sweep engine built on
 [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen), with
 first-class [PyTorch Lightning](https://lightning.ai/) integration.
