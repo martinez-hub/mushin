@@ -132,7 +132,7 @@ Changelog = "https://github.com/martinez-hub/mushin/blob/main/CHANGELOG.md"
 [dependency-groups]
 docs = [
     "mkdocs-material >= 9.5, < 10",
-    "mkdocstrings[python]>=0.26,<2",
+    "mkdocstrings[python]>=1.0.6,<2",
     # Renders committed .ipynb notebooks under docs/notebooks/ into the site.
     # execute:false in mkdocs.yml — the build shows the committed outputs and
     # never runs torch. Notebooks are executed separately by the `notebooks` CI
