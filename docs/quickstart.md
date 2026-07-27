@@ -14,10 +14,12 @@ function returns as a `dict` becomes data variables in the output dataset.
 ```python
 import mushin
 
+
 @mushin.sweep
 def experiment(lr, seed):
     ...  # train, evaluate
-    return dict(accuracy=acc)          # returned dict -> dataset variables
+    return dict(accuracy=acc)  # returned dict -> dataset variables
+
 
 ds = experiment.run(
     lr=mushin.multirun([0.01, 0.1, 1.0]),
@@ -29,12 +31,12 @@ ds = experiment.run(
 into a tidy long-form table (one row per cell, params and metrics as columns):
 
 ```python
-df = experiment.workflow.to_dataframe()   # or ds.to_dataframe().reset_index()
+df = experiment.workflow.to_dataframe()  # or ds.to_dataframe().reset_index()
 #      lr  seed  accuracy
 # 0  0.01     0     0.914
 # 1  0.01     1     0.907
 # ...
-df.groupby("lr")["accuracy"].mean()       # plain pandas from here on
+df.groupby("lr")["accuracy"].mean()  # plain pandas from here on
 ```
 
 The labeled dataset is still the richer object (`.sel`, `.mean("seed")`,
@@ -137,6 +139,7 @@ print(mean_acc)
 
 # plot
 import matplotlib.pyplot as plt
+
 mean_acc.plot.line(x="lr", marker="o")
 plt.xscale("log")
 plt.savefig("sweep_accuracy.png", dpi=120, bbox_inches="tight")

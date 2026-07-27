@@ -40,13 +40,16 @@ step and makes the owned evaluation loop stream.
       predict_fn: PredictFn
       prob_metrics: frozenset[str]
 
+
   _TASKS = {
-      "classification": TaskSpec(classification_battery,
-                                 default_classification_predict_fn,
-                                 frozenset({"auroc", "ece"})),
-      "segmentation":   TaskSpec(segmentation_battery,
-                                 default_segmentation_predict_fn,
-                                 frozenset()),
+      "classification": TaskSpec(
+          classification_battery,
+          default_classification_predict_fn,
+          frozenset({"auroc", "ece"}),
+      ),
+      "segmentation": TaskSpec(
+          segmentation_battery, default_segmentation_predict_fn, frozenset()
+      ),
   }
   ```
   An unknown `task` raises `NotImplementedError` listing the known tasks.

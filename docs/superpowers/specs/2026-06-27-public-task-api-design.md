@@ -81,7 +81,7 @@ Three public functions over the existing `_TASKS` dict (replacing the private
 ```python
 def register_task(name: str, task: Task, *, overwrite: bool = False) -> None: ...
 def get_task(name: str) -> Task: ...
-def list_tasks() -> dict[str, str]: ...   # {name: description}
+def list_tasks() -> dict[str, str]: ...  # {name: description}
 ```
 
 - `register_task` validates: `name` is a non-empty `str`; `task` is a `Task` instance;

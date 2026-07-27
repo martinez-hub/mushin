@@ -45,7 +45,9 @@ class _HydraReattachMixin:
 
     def setup_environment(self) -> None:
         _setup_environment()
-        _validate_external_world_size(self.num_nodes, self.num_processes, self.cluster_environment)
+        _validate_external_world_size(
+            self.num_nodes, self.num_processes, self.cluster_environment
+        )
         super().setup_environment()
 
     def _configure_launcher(self) -> None:
@@ -62,6 +64,8 @@ class _HydraReattachMixin:
 
 
 class HydraDDP(_HydraReattachMixin, DDPStrategy): ...
+
+
 class HydraFSDP(_HydraReattachMixin, FSDPStrategy): ...
 ```
 

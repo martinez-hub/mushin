@@ -43,11 +43,13 @@ labeled `xarray.Dataset` — not rows in a dashboard you have to export.
 ```python
 import mushin
 
+
 @mushin.sweep
 def experiment(lr, seed):
     # ... train a model with this lr/seed, then evaluate it ...
-    acc = ...                      # your validation accuracy
-    return dict(accuracy=acc)      # whatever you return becomes a data variable
+    acc = ...  # your validation accuracy
+    return dict(accuracy=acc)  # whatever you return becomes a data variable
+
 
 ds = experiment.run(
     lr=mushin.multirun([0.01, 0.1, 1.0]),
@@ -56,11 +58,11 @@ ds = experiment.run(
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
 #   Data variables: accuracy (lr, seed)
 
-ds["accuracy"].mean("seed")        # average over seeds, per learning rate
+ds["accuracy"].mean("seed")  # average over seeds, per learning rate
 
 # Prefer pandas? One call gives a tidy table — no xarray required:
-experiment.workflow.to_dataframe() #    lr  seed  accuracy
-                                   # 0  0.01    0      ...
+experiment.workflow.to_dataframe()  #    lr  seed  accuracy
+# 0  0.01    0      ...
 ```
 
 The decorator version above runs as

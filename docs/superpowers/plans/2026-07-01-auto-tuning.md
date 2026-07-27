@@ -50,7 +50,9 @@ def test_pin_roundtrip(tmp_path):
     path = tmp_path / "pin.yaml"
     assert _read_pin(path) is None  # absent -> None
 
-    _write_pin(path, {"device_batch": 64, "effective_batch_size": 256, "num_devices": 1})
+    _write_pin(
+        path, {"device_batch": 64, "effective_batch_size": 256, "num_devices": 1}
+    )
     assert path.exists()
     got = _read_pin(path)
     assert got == {"device_batch": 64, "effective_batch_size": 256, "num_devices": 1}
@@ -70,7 +72,10 @@ def test_default_pin_path_uses_trainer_log_dir():
     from mushin._tuning import _default_pin_path
 
     trainer = SimpleNamespace(log_dir="/tmp/run7", default_root_dir="/tmp/root")
-    assert str(_default_pin_path(trainer, "mushin_batch_pin.yaml")) == "/tmp/run7/mushin_batch_pin.yaml"
+    assert (
+        str(_default_pin_path(trainer, "mushin_batch_pin.yaml"))
+        == "/tmp/run7/mushin_batch_pin.yaml"
+    )
 
 
 def test_default_pin_path_falls_back_to_default_root_dir():
@@ -87,7 +92,13 @@ def test_batchpin_and_lrpin_are_frozen_dataclasses():
 
     from mushin._tuning import BatchPin, LRPin
 
-    bp = BatchPin(device_batch=64, accumulate_grad_batches=4, effective_batch_size=256, num_devices=1, drift=0)
+    bp = BatchPin(
+        device_batch=64,
+        accumulate_grad_batches=4,
+        effective_batch_size=256,
+        num_devices=1,
+        drift=0,
+    )
     lp = LRPin(learning_rate=0.001)
     assert dataclasses.is_dataclass(bp) and dataclasses.is_dataclass(lp)
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -141,7 +152,11 @@ class LRPin:
 
 
 def _default_pin_path(trainer, filename: str) -> Path:
-    base = getattr(trainer, "log_dir", None) or getattr(trainer, "default_root_dir", None) or "."
+    base = (
+        getattr(trainer, "log_dir", None)
+        or getattr(trainer, "default_root_dir", None)
+        or "."
+    )
     return Path(base) / filename
 
 
@@ -197,7 +212,9 @@ Append to `tests/test_tuning.py`:
 def _make_trainer():
     import pytorch_lightning as pl
 
-    return pl.Trainer(logger=False, enable_checkpointing=False, enable_progress_bar=False)
+    return pl.Trainer(
+        logger=False, enable_checkpointing=False, enable_progress_bar=False
+    )
 
 
 class _DM:
@@ -223,8 +240,12 @@ def test_batch_exact_when_max_meets_target(monkeypatch, tmp_path):
     _patch_scale(monkeypatch, 512)  # >= per_device_total(256)
     dm = _DM()
     pin = tune_batch_size(
-        _make_trainer(), object(), dm,
-        effective_batch_size=256, num_devices=1, pin_path=tmp_path / "p.yaml",
+        _make_trainer(),
+        object(),
+        dm,
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=tmp_path / "p.yaml",
         retune=True,
     )
     assert (pin.device_batch, pin.accumulate_grad_batches) == (256, 1)
@@ -238,8 +259,13 @@ def test_batch_accumulation_clean_divisor(monkeypatch, tmp_path):
     _patch_scale(monkeypatch, 64)  # 256/64 == 4 exactly
     trainer = _make_trainer()
     pin = tune_batch_size(
-        trainer, object(), _DM(),
-        effective_batch_size=256, num_devices=1, pin_path=tmp_path / "p.yaml", retune=True,
+        trainer,
+        object(),
+        _DM(),
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
     )
     assert (pin.device_batch, pin.accumulate_grad_batches) == (64, 4)
     assert pin.effective_batch_size == 256 and pin.drift == 0
@@ -252,8 +278,13 @@ def test_batch_drift_warns_when_not_divisible(monkeypatch, tmp_path):
     _patch_scale(monkeypatch, 100)  # 256/100 -> round(2.56)=3 -> 300
     with pytest.warns(UserWarning, match="differs from requested"):
         pin = tune_batch_size(
-            _make_trainer(), object(), _DM(),
-            effective_batch_size=256, num_devices=1, pin_path=tmp_path / "p.yaml", retune=True,
+            _make_trainer(),
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
         )
     assert pin.device_batch == 100 and pin.accumulate_grad_batches == 3
     assert pin.effective_batch_size == 300 and pin.drift == 44
@@ -265,9 +296,14 @@ def test_batch_safety_margin_backs_off_found_max(monkeypatch, tmp_path):
     # found 100, margin 0.2 -> floor(80)=80 -> min(80, 240)=80; round(240/80)=3 -> 240 (no drift)
     _patch_scale(monkeypatch, 100)
     pin = tune_batch_size(
-        _make_trainer(), object(), _DM(),
-        effective_batch_size=240, num_devices=1, safety_margin=0.2,
-        pin_path=tmp_path / "p.yaml", retune=True,
+        _make_trainer(),
+        object(),
+        _DM(),
+        effective_batch_size=240,
+        num_devices=1,
+        safety_margin=0.2,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
     )
     assert pin.device_batch == 80 and pin.accumulate_grad_batches == 3
     assert pin.effective_batch_size == 240 and pin.drift == 0
@@ -278,8 +314,13 @@ def test_batch_num_devices_divides_effective(monkeypatch, tmp_path):
 
     _patch_scale(monkeypatch, 512)  # per_device_total = 256/4 = 64
     pin = tune_batch_size(
-        _make_trainer(), object(), _DM(),
-        effective_batch_size=256, num_devices=4, pin_path=tmp_path / "p.yaml", retune=True,
+        _make_trainer(),
+        object(),
+        _DM(),
+        effective_batch_size=256,
+        num_devices=4,
+        pin_path=tmp_path / "p.yaml",
+        retune=True,
     )
     assert pin.device_batch == 64 and pin.accumulate_grad_batches == 1
     assert pin.num_devices == 4 and pin.effective_batch_size == 256
@@ -292,14 +333,36 @@ def test_batch_invalid_inputs(monkeypatch, tmp_path):
     _patch_scale(monkeypatch, 128)
     t, dm, pin = _make_trainer(), _DM(), tmp_path / "p.yaml"
     with pytest.raises(ValueError, match="divisible"):
-        tune_batch_size(t, object(), dm, effective_batch_size=250, num_devices=4,
-                        pin_path=pin, retune=True)
+        tune_batch_size(
+            t,
+            object(),
+            dm,
+            effective_batch_size=250,
+            num_devices=4,
+            pin_path=pin,
+            retune=True,
+        )
     with pytest.raises(ValueError, match="safety_margin"):
-        tune_batch_size(t, object(), dm, effective_batch_size=256, num_devices=1,
-                        safety_margin=1.0, pin_path=pin, retune=True)
+        tune_batch_size(
+            t,
+            object(),
+            dm,
+            effective_batch_size=256,
+            num_devices=1,
+            safety_margin=1.0,
+            pin_path=pin,
+            retune=True,
+        )
     with pytest.raises(ValueError, match="effective_batch_size"):
-        tune_batch_size(t, object(), dm, effective_batch_size=0, num_devices=1,
-                        pin_path=pin, retune=True)
+        tune_batch_size(
+            t,
+            object(),
+            dm,
+            effective_batch_size=0,
+            num_devices=1,
+            pin_path=pin,
+            retune=True,
+        )
 
 
 def test_batch_none_from_tuner_raises(monkeypatch, tmp_path):
@@ -307,8 +370,15 @@ def test_batch_none_from_tuner_raises(monkeypatch, tmp_path):
 
     _patch_scale(monkeypatch, None)
     with pytest.raises(RuntimeError, match="no batch size"):
-        tune_batch_size(_make_trainer(), object(), _DM(), effective_batch_size=256,
-                        num_devices=1, pin_path=tmp_path / "p.yaml", retune=True)
+        tune_batch_size(
+            _make_trainer(),
+            object(),
+            _DM(),
+            effective_batch_size=256,
+            num_devices=1,
+            pin_path=tmp_path / "p.yaml",
+            retune=True,
+        )
 
 
 def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
@@ -318,17 +388,28 @@ def test_batch_pin_roundtrip_skips_search(monkeypatch, tmp_path):
     _patch_scale(monkeypatch, 128, counter)
     pin_path = tmp_path / "batch.yaml"
     a1 = _make_trainer()
-    r1 = tune_batch_size(a1, object(), _DM(), effective_batch_size=256, num_devices=1, pin_path=pin_path)
+    r1 = tune_batch_size(
+        a1, object(), _DM(), effective_batch_size=256, num_devices=1, pin_path=pin_path
+    )
     assert counter["n"] == 1 and pin_path.exists()
 
     a2 = _make_trainer()
-    r2 = tune_batch_size(a2, object(), _DM(), effective_batch_size=256, num_devices=1, pin_path=pin_path)
+    r2 = tune_batch_size(
+        a2, object(), _DM(), effective_batch_size=256, num_devices=1, pin_path=pin_path
+    )
     assert counter["n"] == 1  # search NOT called again
     assert r2.device_batch == r1.device_batch
     assert a2.accumulate_grad_batches == r1.accumulate_grad_batches  # still applied
 
-    r3 = tune_batch_size(_make_trainer(), object(), _DM(), effective_batch_size=256,
-                         num_devices=1, pin_path=pin_path, retune=True)
+    r3 = tune_batch_size(
+        _make_trainer(),
+        object(),
+        _DM(),
+        effective_batch_size=256,
+        num_devices=1,
+        pin_path=pin_path,
+        retune=True,
+    )
     assert counter["n"] == 2  # retune forces a fresh search
     assert r3.device_batch == 128
 ```
@@ -394,7 +475,9 @@ def tune_batch_size(
     from pytorch_lightning.tuner.tuning import Tuner
 
     if effective_batch_size < 1:
-        raise ValueError(f"effective_batch_size must be >= 1; got {effective_batch_size}")
+        raise ValueError(
+            f"effective_batch_size must be >= 1; got {effective_batch_size}"
+        )
     if not (0.0 <= safety_margin < 1.0):
         raise ValueError(f"safety_margin must be in [0, 1); got {safety_margin}")
     if num_devices is None:
@@ -552,7 +635,9 @@ def test_lr_custom_attr_name(monkeypatch, tmp_path):
         learning_rate = 0.0
 
     m = M()
-    tune_learning_rate(_make_trainer(), m, None, pin_path=tmp_path / "lr.yaml", lr_attr="learning_rate")
+    tune_learning_rate(
+        _make_trainer(), m, None, pin_path=tmp_path / "lr.yaml", lr_attr="learning_rate"
+    )
     assert m.learning_rate == 0.007
 
 
@@ -679,9 +764,9 @@ from ._tuning import tune_batch_size, tune_learning_rate
 In the `__all__` list, add the two names next to `"pin_gpu_round_robin"`:
 
 ```python
-    "pin_gpu_round_robin",
-    "tune_batch_size",
-    "tune_learning_rate",
+("pin_gpu_round_robin",)
+("tune_batch_size",)
+("tune_learning_rate",)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -756,15 +841,24 @@ def test_applied_accumulation_and_device_batch_take_effect(monkeypatch, tmp_path
     module = _CountingModule()
     dm = _DataModule()
     trainer = pl.Trainer(
-        max_epochs=1, accelerator="cpu", logger=False,
-        enable_checkpointing=False, enable_progress_bar=False, enable_model_summary=False,
+        max_epochs=1,
+        accelerator="cpu",
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
     )
 
     # effective 8 on 1 device => per_device_total 8; device_batch min(2, 8) = 2;
     # accumulate = round(8 / 2) = 4.
     pin = tune_batch_size(
-        trainer, module, dm, effective_batch_size=8, num_devices=1,
-        pin_path=tmp_path / "pin.yaml", retune=True,
+        trainer,
+        module,
+        dm,
+        effective_batch_size=8,
+        num_devices=1,
+        pin_path=tmp_path / "pin.yaml",
+        retune=True,
     )
     assert pin.device_batch == 2 and pin.accumulate_grad_batches == 4
     assert dm.batch_size == 2  # applied

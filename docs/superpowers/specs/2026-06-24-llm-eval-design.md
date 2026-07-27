@@ -60,7 +60,10 @@ Files:
 def compare_llms(
     systems: dict[str, System],
     data: Sequence[Example],
-    metric: Metric | dict[str, Metric],  # Metric = torchmetrics.Metric | Callable[[output, reference], float]
+    metric: Metric
+    | dict[
+        str, Metric
+    ],  # Metric = torchmetrics.Metric | Callable[[output, reference], float]
     seeds: Sequence[int] = (0, 1, 2, 3, 4),
     *,
     test: str = "welch",

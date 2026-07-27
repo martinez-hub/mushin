@@ -105,8 +105,12 @@ def experiment(seed):
     x, y = torch.randn(256, 8), torch.randint(0, 2, (256,))
     loader = DataLoader(TensorDataset(x, y), batch_size=32)
     trainer = pl.Trainer(
-        strategy=HydraDDP(), devices=2, accelerator="gpu",   # devices == #GPUs
-        max_epochs=1, enable_progress_bar=False, logger=False,
+        strategy=HydraDDP(),
+        devices=2,
+        accelerator="gpu",  # devices == #GPUs
+        max_epochs=1,
+        enable_progress_bar=False,
+        logger=False,
     )
     trainer.fit(Tiny(), loader)
     return dict(loss=float(trainer.callback_metrics.get("train_loss", 0.0)))
@@ -145,11 +149,15 @@ from mushin.workflows import MultiRunMetricsWorkflow
 class Pack(MultiRunMetricsWorkflow):
     @staticmethod
     def task(seed):
-        gpu = pin_gpu_round_robin(num_gpus=2)   # this job -> GPU (job_num % 2)
+        gpu = pin_gpu_round_robin(num_gpus=2)  # this job -> GPU (job_num % 2)
         import torch
+
         assert torch.cuda.is_available()
         # record which physical GPU this job was pinned to
-        return dict(pinned_gpu=float(gpu), cuda_visible=float(int(os.environ["CUDA_VISIBLE_DEVICES"])))
+        return dict(
+            pinned_gpu=float(gpu),
+            cuda_visible=float(int(os.environ["CUDA_VISIBLE_DEVICES"])),
+        )
 
 
 if __name__ == "__main__":
@@ -157,7 +165,7 @@ if __name__ == "__main__":
         seed=mushin.multirun([0, 1, 2, 3]),
         working_dir="t2_runs",
         launcher="joblib",
-        overrides=["hydra.launcher.n_jobs=4"],   # 4 parallel jobs over 2 GPUs
+        overrides=["hydra.launcher.n_jobs=4"],  # 4 parallel jobs over 2 GPUs
     )
     print("DONE")
 ```
@@ -181,9 +189,16 @@ Same shape as T1 but with `strategy=HydraFSDP()` in the `Trainer`. Copy
 
 ```python
 from mushin import HydraFSDP
+
 # ...
-trainer = pl.Trainer(strategy=HydraFSDP(), devices=2, accelerator="gpu",
-                     max_epochs=1, enable_progress_bar=False, logger=False)
+trainer = pl.Trainer(
+    strategy=HydraFSDP(),
+    devices=2,
+    accelerator="gpu",
+    max_epochs=1,
+    enable_progress_bar=False,
+    logger=False,
+)
 ```
 
 **Run:** `python t3_fsdp.py`
@@ -213,12 +228,13 @@ class W(MultiRunMetricsWorkflow):
     def task(seed):
         open("ran.log", "a").write(f"{seed}\n")
         if seed == 2:
-            time.sleep(120)          # hang so you can SIGKILL mid-cell
+            time.sleep(120)  # hang so you can SIGKILL mid-cell
         return dict(v=float(seed))
 
 
 if __name__ == "__main__":
     import sys
+
     resume = "--resume" in sys.argv
     W().run(seed=mushin.multirun([0, 1, 2, 3]), working_dir="t4_runs", resume=resume)
     print("COMPLETE")

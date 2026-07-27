@@ -47,30 +47,32 @@ from mushin import Study
 
 # 1. Full motion: train sweep + compare
 study = Study(
-    methods={"cnn": train_cnn, "mlp": train_mlp},   # train_fn(seed) -> checkpoint_path
-    load_fn=LitClassifier.load_from_checkpoint,       # path -> model
+    methods={"cnn": train_cnn, "mlp": train_mlp},  # train_fn(seed) -> checkpoint_path
+    load_fn=LitClassifier.load_from_checkpoint,  # path -> model
     seeds=[0, 1, 2],
-    data=test_loader,                                  # eval data for compare
+    data=test_loader,  # eval data for compare
     task="classification",
     num_classes=10,
     test="welch",
-    working_dir=None,                                  # where the sweep runs
+    working_dir=None,  # where the sweep runs
 )
-result = study.run()         # -> BenchmarkResult
-study.checkpoints            # {method: [checkpoint_path_per_seed]}
+result = study.run()  # -> BenchmarkResult
+study.checkpoints  # {method: [checkpoint_path_per_seed]}
 study.working_dir
 
 # 2. Eval-only: load existing checkpoints + compare (no training)
 study = Study.from_checkpoints(
-    checkpoints={"cnn": ["cnn_0.ckpt", "cnn_1.ckpt", "cnn_2.ckpt"],
-                 "mlp": ["mlp_0.ckpt", "mlp_1.ckpt", "mlp_2.ckpt"]},
+    checkpoints={
+        "cnn": ["cnn_0.ckpt", "cnn_1.ckpt", "cnn_2.ckpt"],
+        "mlp": ["mlp_0.ckpt", "mlp_1.ckpt", "mlp_2.ckpt"],
+    },
     load_fn=LitClassifier.load_from_checkpoint,
     data=test_loader,
     task="classification",
     num_classes=10,
     test="welch",
 )
-result = study.run()         # -> BenchmarkResult
+result = study.run()  # -> BenchmarkResult
 ```
 
 `train_fn(seed: int) -> str | Path` trains one model for one seed and returns the

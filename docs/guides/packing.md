@@ -31,8 +31,9 @@ call it at the **top** of your task function, before any CUDA use:
 ```python
 from mushin import pin_gpu_round_robin
 
+
 def task(cfg):
-    pin_gpu_round_robin(num_gpus=4)   # this job -> GPU (job_num % 4)
+    pin_gpu_round_robin(num_gpus=4)  # this job -> GPU (job_num % 4)
     # ... build the Trainer(devices=1, accelerator="gpu") and train ...
 ```
 

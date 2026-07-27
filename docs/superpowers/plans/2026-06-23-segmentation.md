@@ -286,7 +286,10 @@ def test_evaluate_streams_and_matches_one_shot():
 
     battery = classification_battery(3)
     streamed = evaluate(
-        model, loader, battery, default_classification_predict_fn,
+        model,
+        loader,
+        battery,
+        default_classification_predict_fn,
         prob_metrics=frozenset({"auroc", "ece"}),
     )
     # one-shot reference on the whole set
@@ -487,7 +490,9 @@ def test_compare_segmentation_end_to_end():
             out = []
             for xi in xb:
                 m = self._m[tuple(xi.flatten().tolist())]
-                out.append(torch.nn.functional.one_hot(m, 3).permute(2, 0, 1).float() * 10)
+                out.append(
+                    torch.nn.functional.one_hot(m, 3).permute(2, 0, 1).float() * 10
+                )
             return torch.stack(out)
 
     class Bad(torch.nn.Module):
@@ -495,8 +500,14 @@ def test_compare_segmentation_end_to_end():
             return torch.zeros(xb.shape[0], 3, 8, 8)
 
     result = compare(
-        methods={"good": [Perfect(masks) for _ in range(3)], "bad": [Bad() for _ in range(3)]},
-        data=loader, task="segmentation", num_classes=3, test="welch",
+        methods={
+            "good": [Perfect(masks) for _ in range(3)],
+            "bad": [Bad() for _ in range(3)],
+        },
+        data=loader,
+        task="segmentation",
+        num_classes=3,
+        test="welch",
     )
     assert isinstance(result, BenchmarkResult)
     assert set(result.data.dims) == {"method", "seed"}
@@ -648,7 +659,9 @@ def test_study_forwards_ignore_index_for_segmentation(tmp_path):
             out = []
             for xi in xb:
                 m = self._m[tuple(xi.flatten().tolist())].clamp(max=2)
-                out.append(torch.nn.functional.one_hot(m, 3).permute(2, 0, 1).float() * 10)
+                out.append(
+                    torch.nn.functional.one_hot(m, 3).permute(2, 0, 1).float() * 10
+                )
             return torch.stack(out)
 
     ckpts = {}
@@ -663,7 +676,10 @@ def test_study_forwards_ignore_index_for_segmentation(tmp_path):
     study = Study.from_checkpoints(
         checkpoints=ckpts,
         load_fn=lambda p: torch.load(p, weights_only=False),
-        data=loader, task="segmentation", num_classes=3, test="welch",
+        data=loader,
+        task="segmentation",
+        num_classes=3,
+        test="welch",
         ignore_index=255,
     )
     result = study.run()

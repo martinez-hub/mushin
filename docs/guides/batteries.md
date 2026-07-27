@@ -16,7 +16,7 @@ that consume probabilities. List them at runtime:
 ```python
 from mushin.benchmark import list_tasks
 
-list_tasks()   # {name: description} for every registered task
+list_tasks()  # {name: description} for every registered task
 ```
 
 Every battery flows through the same [`compare`](compare.md) / [`Study`](study.md)
@@ -55,13 +55,13 @@ within-method variance, not a deterministic constant). `strong` corrupts ~15% of
 labels, `weak` ~40%:
 
 ```python
---8<-- "examples/batteries.py:walkthrough"
+--8 < --"examples/batteries.py:walkthrough"
 ```
 
 ### 2. Run the comparison and read the summary
 
 ```python
-result = run_walkthrough()          # returns a BenchmarkResult
+result = run_walkthrough()  # returns a BenchmarkResult
 print(result.summary().to_string(index=False))
 ```
 
@@ -174,18 +174,18 @@ from mushin.benchmark import compare
 # in eval mode, that map an (N, 3, H, W) image batch to (N, num_classes) logits.
 result = compare(
     methods={"vit": vit_seeds, "resnet50": resnet_seeds},
-    data=val_loader,          # yields (images, labels); labels are (N,) class ids
+    data=val_loader,  # yields (images, labels); labels are (N,) class ids
     task="classification",
     num_classes=1000,
     test="welch",
 )
-result.summary()   # accuracy / f1 / precision / recall / auroc / ece + significance
+result.summary()  # accuracy / f1 / precision / recall / auroc / ece + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:classification"
+--8 < --"examples/batteries.py:classification"
 ```
 
 **Output** (from running the toy):
@@ -240,7 +240,9 @@ def sam_predict(model, x):
     mapping for your prompts / label scheme.
     """
     n, _, h, w = x.shape
-    outputs = model(x)  # e.g. per-image list of {"masks": (K, H, W) bool, "labels": (K,)}
+    outputs = model(
+        x
+    )  # e.g. per-image list of {"masks": (K, H, W) bool, "labels": (K,)}
 
     preds = x.new_zeros((n, h, w), dtype=torch.long)  # 0 = background
     for i, out in enumerate(outputs):
@@ -250,20 +252,20 @@ def sam_predict(model, x):
 
 
 result = compare(
-    methods={"sam": sam_seeds},   # each a list of models (one per seed), eval mode
-    data=val_loader,              # yields (images, masks); masks are (N, H, W) labels
+    methods={"sam": sam_seeds},  # each a list of models (one per seed), eval mode
+    data=val_loader,  # yields (images, masks); masks are (N, H, W) labels
     task="segmentation",
     num_classes=21,
     predict_fn=sam_predict,
     test="welch",
 )
-result.summary()   # miou / dice / pixel_acc / precision / recall + significance
+result.summary()  # miou / dice / pixel_acc / precision / recall + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:segmentation"
+--8 < --"examples/batteries.py:segmentation"
 ```
 
 **Output** (from running the toy):
@@ -323,9 +325,9 @@ def yolo_world_predict(model, x):
     results = model(x)  # e.g. an Ultralytics Results list, one entry per image
     preds = [
         {
-            "boxes": r.boxes.xyxy,          # (M, 4), xyxy
-            "scores": r.boxes.conf,         # (M,)
-            "labels": r.boxes.cls.long(),   # (M,)
+            "boxes": r.boxes.xyxy,  # (M, 4), xyxy
+            "scores": r.boxes.conf,  # (M,)
+            "labels": r.boxes.cls.long(),  # (M,)
         }
         for r in results
     ]
@@ -333,19 +335,19 @@ def yolo_world_predict(model, x):
 
 
 result = compare(
-    methods={"yolo_world": yolo_seeds},   # each a list of models (one per seed)
-    data=coco_val_loader,                 # yields (images, targets) as above
+    methods={"yolo_world": yolo_seeds},  # each a list of models (one per seed)
+    data=coco_val_loader,  # yields (images, targets) as above
     task="detection",
     predict_fn=yolo_world_predict,
     test="welch",
 )
-result.summary()   # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + significance
+result.summary()  # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:detection"
+--8 < --"examples/batteries.py:detection"
 ```
 
 **Output** (from running the toy — the full 16-metric battery):
@@ -412,17 +414,17 @@ from mushin.benchmark import compare
 # batch to an (N,) scalar-score tensor.
 result = compare(
     methods={"aesthetic_scorer": scorer_seeds},
-    data=val_loader,          # yields (inputs, scores); scores are (N,) floats
+    data=val_loader,  # yields (inputs, scores); scores are (N,) floats
     task="regression",
     test="welch",
 )
-result.summary()   # mse / mae / rmse / r2 / pearson / spearman + significance
+result.summary()  # mse / mae / rmse / r2 / pearson / spearman + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:regression"
+--8 < --"examples/batteries.py:regression"
 ```
 
 **Output** (from running the toy):
@@ -475,18 +477,18 @@ from mushin.benchmark import compare
 #   relevance : (P,) binary 0/1 — is this candidate relevant to its query?
 #   indexes   : (P,) query id per pair, so metrics rank within each query
 result = compare(
-    methods={"clip": clip_seeds},   # each a list of models (one per seed)
+    methods={"clip": clip_seeds},  # each a list of models (one per seed)
     data=retrieval_loader,
     task="retrieval",
     test="welch",
 )
-result.summary()   # retrieval_map / ndcg / mrr / precision / recall + significance
+result.summary()  # retrieval_map / ndcg / mrr / precision / recall + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:retrieval"
+--8 < --"examples/batteries.py:retrieval"
 ```
 
 **Output** (from running the toy):
@@ -538,17 +540,17 @@ from mushin.benchmark import compare
 # degraded (N, 3, H, W) image in [0, 1] to a restored (N, 3, H, W) image in [0, 1].
 result = compare(
     methods={"real_esrgan": esrgan_seeds, "swinir": swinir_seeds},
-    data=val_loader,          # yields (degraded, reference); both (N, 3, H, W) in [0, 1]
+    data=val_loader,  # yields (degraded, reference); both (N, 3, H, W) in [0, 1]
     task="image_quality",
     test="welch",
 )
-result.summary()   # ssim / psnr / ms_ssim / lpips + significance
+result.summary()  # ssim / psnr / ms_ssim / lpips + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:image_quality"
+--8 < --"examples/batteries.py:image_quality"
 ```
 
 **Output** (from running the toy):
@@ -594,17 +596,17 @@ from mushin.benchmark import compare
 # waveform to an enhanced (N, T) waveform at 16 kHz.
 result = compare(
     methods={"demucs": demucs_seeds},
-    data=val_loader,          # yields (noisy, clean); both (N, T) at 16 kHz
+    data=val_loader,  # yields (noisy, clean); both (N, T) at 16 kHz
     task="audio",
     test="welch",
 )
-result.summary()   # si_sdr / si_snr / stoi + significance
+result.summary()  # si_sdr / si_snr / stoi + significance
 ```
 
 ### Runnable toy
 
 ```python
---8<-- "examples/batteries.py:audio"
+--8 < --"examples/batteries.py:audio"
 ```
 
 **Output** (from running the toy):

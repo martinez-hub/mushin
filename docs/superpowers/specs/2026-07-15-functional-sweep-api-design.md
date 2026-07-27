@@ -18,6 +18,7 @@ class LRSweep(MultiRunMetricsWorkflow):
         ...
         return dict(accuracy=acc)
 
+
 wf = LRSweep()
 wf.run(lr=multirun([0.01, 0.1]), seed=multirun([0, 1]), working_dir="runs")
 ds = wf.to_xarray()
@@ -35,15 +36,18 @@ call returning the labeled dataset, while keeping the class as the full-power to
 ```python
 import mushin
 
+
 @mushin.sweep
 def experiment(lr, seed):
     ...
     return dict(accuracy=acc)
 
+
 ds = experiment.run(
     lr=mushin.multirun([0.01, 0.1]),
     seed=mushin.multirun([0, 1]),
-    working_dir="runs", on_error="nan",
+    working_dir="runs",
+    on_error="nan",
 )
 ```
 
@@ -76,17 +80,23 @@ ds = experiment.run(
 
 ```python
 @mushin.sweep
-def experiment(lr, seed, mushin_resume=None):   # mushin_resume is optional, works free
+def experiment(lr, seed, mushin_resume=None):  # mushin_resume is optional, works free
     ...
     return dict(accuracy=acc)
 
+
 # common case — one call, returns the dataset:
-ds = experiment.run(lr=mushin.multirun([...]), seed=mushin.multirun([...]),
-                    working_dir="runs", on_error="nan", resume=False)
+ds = experiment.run(
+    lr=mushin.multirun([...]),
+    seed=mushin.multirun([...]),
+    working_dir="runs",
+    on_error="nan",
+    resume=False,
+)
 
 # power drop-down, no rewrite:
-experiment.workflow            # last-run instance -> .failures / .plot(...) / .provenance / .to_xarray(...)
-experiment.workflow_cls        # the synthesized subclass -> instantiate or subclass fresh
+experiment.workflow  # last-run instance -> .failures / .plot(...) / .provenance / .to_xarray(...)
+experiment.workflow_cls  # the synthesized subclass -> instantiate or subclass fresh
 ```
 
 `experiment` is a small `Sweep` handle. `functools.wraps(fn)` gives it the
@@ -105,18 +115,18 @@ def sweep(fn):
 
 class Sweep:
     def __init__(self, fn, cls):
-        functools.wraps(fn)(self)      # name/doc/__wrapped__
+        functools.wraps(fn)(self)  # name/doc/__wrapped__
         # Make `fn` picklable despite the decorator shadowing its name: re-point
         # its qualname THROUGH this handle (which is findable at module.<name>) so
         # out-of-process launchers can serialize the task. See Risks.
         fn.__qualname__ = fn.__qualname__ + ".__mushin_task__"
         self.__mushin_task__ = fn
         self.workflow_cls = cls
-        self.workflow = None           # last-run instance (None before first run)
+        self.workflow = None  # last-run instance (None before first run)
 
     def run(self, **kwargs):
-        wf = self.workflow_cls()       # fresh per run — no state leak across runs
-        wf.run(**kwargs)               # wf.run splits its named options from the multirun params
+        wf = self.workflow_cls()  # fresh per run — no state leak across runs
+        wf.run(**kwargs)  # wf.run splits its named options from the multirun params
         self.workflow = wf
         return wf.to_xarray()
 ```
@@ -192,7 +202,7 @@ module-level participates just like a class-form task.
 
   ```python
   fn.__qualname__ = fn.__qualname__ + ".__mushin_task__"
-  self.__mushin_task__ = fn   # on the Sweep handle
+  self.__mushin_task__ = fn  # on the Sweep handle
   ```
 
   Because the handle *is* findable at `module.experiment`, pickle resolves

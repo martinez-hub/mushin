@@ -44,18 +44,18 @@ from mushin.benchmark import compare
 
 result = compare(
     methods={
-        "ours":     [m0, m1, m2, m3, m4],   # one trained model per seed
+        "ours": [m0, m1, m2, m3, m4],  # one trained model per seed
         "baseline": [b0, b1, b2, b3, b4],
     },
-    data=test_dataloader,                    # torch DataLoader yielding (x, y)
-    task="classification",                   # selects the metric battery
+    data=test_dataloader,  # torch DataLoader yielding (x, y)
+    task="classification",  # selects the metric battery
     num_classes=10,
     # optional knobs / escape hatches:
-    predict_fn=None,        # default: model(x) -> logits -> (preds, probs)
-    metrics=None,           # default battery; override to add/subset
-    test="wilcoxon",        # significance test (see registry below)
+    predict_fn=None,  # default: model(x) -> logits -> (preds, probs)
+    metrics=None,  # default battery; override to add/subset
+    test="wilcoxon",  # significance test (see registry below)
     alpha=0.05,
-    device=None,            # default: infer from first model's parameters
+    device=None,  # default: infer from first model's parameters
 )
 ```
 

@@ -96,9 +96,7 @@ class _ResumeInjector:
         self._task = task
         sig = inspect.signature(task)
         self._sig = sig.replace(
-            parameters=[
-                p for n, p in sig.parameters.items() if n != "mushin_resume"
-            ]
+            parameters=[p for n, p in sig.parameters.items() if n != "mushin_resume"]
         )
 
     @property
@@ -171,8 +169,9 @@ def test_task_runner_is_picklable(tmp_path):
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(wf_mod, "launch", capture)
-        _PicklableRunnerWF().run(seed=multirun([0, 1]),
-                                 working_dir=str(tmp_path / "s"), on_error="nan")
+        _PicklableRunnerWF().run(
+            seed=multirun([0, 1]), working_dir=str(tmp_path / "s"), on_error="nan"
+        )
 
     tc = captured["task_call"]
     assert isinstance(tc, wf_mod._TaskRunner)
@@ -197,10 +196,19 @@ class _TaskRunner:
     the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain exactly —
     see the spec's Semantics Mapping."""
 
-    def __init__(self, *, task, pre_task, swept_names, base_provenance,
-                 on_error, inject_resume, prior_manifest):
-        self.task = task                    # zen(_ResumeInjector(fn)) or zen(fn)
-        self.pre_task = pre_task            # zen(self.pre_task)
+    def __init__(
+        self,
+        *,
+        task,
+        pre_task,
+        swept_names,
+        base_provenance,
+        on_error,
+        inject_resume,
+        prior_manifest,
+    ):
+        self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
+        self.pre_task = pre_task  # zen(self.pre_task)
         self.swept_names = tuple(swept_names)
         self.base_provenance = base_provenance
         self.on_error = on_error
@@ -277,39 +285,37 @@ class _TaskRunner:
 In `run()` (`workflows.py` ~597-668), replace the block that computes `_combo_of_cell`, captures base provenance, calls `_bind_resume_kwarg`, builds `task_call` via `_task_calls`, and the two `if on_error=="nan"` / `if resume:` wrapping lines with:
 
 ```python
-        # Swept dimension names for the per-cell combo (unchanged).
-        _swept_names = tuple(
-            k
-            for k, v in self._parse_overrides(launch_overrides).items()
-            if isinstance(v, multirun)
-        )
-        # BaseWorkflow (no sanitizer) records an empty combo, as before.
-        _runner_swept = _swept_names if hasattr(
-            self, "_sanitize_coordinate_for_xarray"
-        ) else ()
+# Swept dimension names for the per-cell combo (unchanged).
+_swept_names = tuple(
+    k
+    for k, v in self._parse_overrides(launch_overrides).items()
+    if isinstance(v, multirun)
+)
+# BaseWorkflow (no sanitizer) records an empty combo, as before.
+_runner_swept = _swept_names if hasattr(self, "_sanitize_coordinate_for_xarray") else ()
 
-        from ._provenance import capture_base
+from ._provenance import capture_base
 
-        _base_provenance = capture_base()
+_base_provenance = capture_base()
 
-        # Kill-durable resume manifest (only when resuming) — built here so the
-        # runner can hold it (was built inside the old `if resume:` block).
-        _prior_manifest = None
-        if resume:
-            _prior_manifest = Manifest.from_cell_status(
-                Path(working_dir).resolve(), list(_swept_names)
-            )
+# Kill-durable resume manifest (only when resuming) — built here so the
+# runner can hold it (was built inside the old `if resume:` block).
+_prior_manifest = None
+if resume:
+    _prior_manifest = Manifest.from_cell_status(
+        Path(working_dir).resolve(), list(_swept_names)
+    )
 
-        _task_fn, _wants_resume = _prepare_task(self.task)
-        task_call = _TaskRunner(
-            task=task_fn_wrapper(_task_fn),
-            pre_task=pre_task_fn_wrapper(self.pre_task),
-            swept_names=_runner_swept,
-            base_provenance=_base_provenance,
-            on_error=on_error,
-            inject_resume=_wants_resume,
-            prior_manifest=_prior_manifest,
-        )
+_task_fn, _wants_resume = _prepare_task(self.task)
+task_call = _TaskRunner(
+    task=task_fn_wrapper(_task_fn),
+    pre_task=pre_task_fn_wrapper(self.pre_task),
+    swept_names=_runner_swept,
+    base_provenance=_base_provenance,
+    on_error=on_error,
+    inject_resume=_wants_resume,
+    prior_manifest=_prior_manifest,
+)
 ```
 
 Delete the now-unused functions `_task_calls`, `_instrument_task`, `_fail_soft`,
@@ -376,8 +382,12 @@ def test_sweep_runs_out_of_process_with_joblib(tmp_path):
 
     wf = _OOPWorkflow()
     with pytest.warns(UserWarning, match="fail"):
-        wf.run(seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"),
-               launcher="joblib", on_error="nan")
+        wf.run(
+            seed=multirun([0, 1, 2]),
+            working_dir=str(tmp_path / "s"),
+            launcher="joblib",
+            on_error="nan",
+        )
     ds = wf.to_xarray()
     assert ds.sizes == {"seed": 3}
     vals = {int(s): float(ds["v"].sel(seed=s)) for s in ds["seed"].values}

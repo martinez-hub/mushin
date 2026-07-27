@@ -602,9 +602,7 @@ def available_tests() -> list[str]:
     return list(_TESTS)
 
 
-def confidence_interval(
-    values, alpha: float = 0.05
-) -> tuple[float, float, float]:
+def confidence_interval(values, alpha: float = 0.05) -> tuple[float, float, float]:
     """Return ``(mean, ci_low, ci_high)`` using a Student-t interval."""
     values = np.asarray(values, dtype=float)
     n = len(values)
@@ -737,7 +735,12 @@ def test_summary_has_row_per_method_metric():
     # 2 methods x 1 metric
     assert len(summary) == 2
     assert set(summary.columns) >= {
-        "method", "metric", "mean", "ci_low", "ci_high", "significant_vs_ref"
+        "method",
+        "metric",
+        "mean",
+        "ci_low",
+        "ci_high",
+        "significant_vs_ref",
     }
 
 
@@ -876,7 +879,9 @@ class _Perfect(torch.nn.Module):
     def __init__(self, loader, num_classes=3):
         super().__init__()
         self.num_classes = num_classes
-        self._map = {tuple(x.tolist()): int(y) for xb, yb in loader for x, y in zip(xb, yb)}
+        self._map = {
+            tuple(x.tolist()): int(y) for xb, yb in loader for x, y in zip(xb, yb)
+        }
 
     def forward(self, x):
         idx = torch.tensor([self._map[tuple(row.tolist())] for row in x])

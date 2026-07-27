@@ -16,8 +16,11 @@
   ```python
   def setup_environment(self) -> None:
       _setup_environment()
-      _validate_external_world_size(self.num_nodes, self.num_processes, self.cluster_environment)
+      _validate_external_world_size(
+          self.num_nodes, self.num_processes, self.cluster_environment
+      )
       super().setup_environment()
+
 
   def _configure_launcher(self) -> None:
       if self.cluster_environment is None:  # pragma: no cover
@@ -27,6 +30,7 @@
               self.cluster_environment, self.num_processes, self.num_nodes
           )
           self._rank_0_will_call_children_scripts = True
+
 
   def teardown(self) -> None:
       super().teardown()

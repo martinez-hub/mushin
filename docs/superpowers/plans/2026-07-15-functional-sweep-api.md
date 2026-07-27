@@ -47,8 +47,9 @@ def test_decorated_sweep_returns_labeled_dataset(tmp_path):
     def experiment(a, b):
         return dict(v=float(a + b))
 
-    ds = experiment.run(a=multirun([1, 2]), b=multirun([0, 1]),
-                        working_dir=str(tmp_path / "s"))
+    ds = experiment.run(
+        a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s")
+    )
     assert ds.sizes == {"a": 2, "b": 2}
     assert float(ds["v"].sel(a=2, b=1)) == 3.0
 
@@ -87,8 +88,9 @@ def test_fresh_instance_per_run_no_state_leak(tmp_path):
         return dict(v=float(seed))
 
     with pytest.warns(UserWarning, match="fail"):
-        experiment.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "a"),
-                       on_error="nan")
+        experiment.run(
+            seed=multirun([0, 1]), working_dir=str(tmp_path / "a"), on_error="nan"
+        )
     assert experiment.workflow.failures  # this run failed
     # a clean run on a fresh dir must not inherit failures
     experiment.run(seed=multirun([0]), working_dir=str(tmp_path / "b"))
@@ -203,6 +205,7 @@ def test_decorated_sweep_resilience_and_resume(tmp_path):
     with pytest.warns(UserWarning, match="fail"):
         ds = experiment.run(seed=multirun([0, 1, 2]), working_dir=wd, on_error="nan")
     import numpy as np
+
     assert np.isnan(float(ds["v"].sel(seed=1)))
     assert ds.attrs["mushin_failures"]  # carried on the dataset
 
@@ -274,8 +277,9 @@ def test_decorated_sklearn_sweep_no_torch(tmp_path):
         m = LogisticRegression(C=C, max_iter=500).fit(x, y)
         return dict(accuracy=float(m.score(x, y)))
 
-    ds = experiment.run(C=multirun([0.1, 1.0]), seed=multirun([0, 1]),
-                        working_dir=str(tmp_path / "s"))
+    ds = experiment.run(
+        C=multirun([0.1, 1.0]), seed=multirun([0, 1]), working_dir=str(tmp_path / "s")
+    )
     assert ds.sizes == {"C": 2, "seed": 2}
 ```
 
@@ -319,8 +323,9 @@ def test_decorated_sweep_out_of_process_joblib(tmp_path):
     import pytest
 
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
-    ds = _oop_experiment.run(seed=multirun([0, 1, 2]),
-                             working_dir=str(tmp_path / "s"), launcher="joblib")
+    ds = _oop_experiment.run(
+        seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), launcher="joblib"
+    )
     assert ds.sizes == {"seed": 3}
     assert float(ds["v"].sel(seed=2)) == 2.0
 ```

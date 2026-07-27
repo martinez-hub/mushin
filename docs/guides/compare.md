@@ -20,7 +20,7 @@ The following example trains a small CNN and MLP across seeds on MNIST and
 compares them:
 
 ```python
---8<-- "examples/compare_classifiers.py:run"
+--8 < --"examples/compare_classifiers.py:run"
 ```
 
 `methods` maps a name to a list of trained models — one per seed. All seeds
@@ -129,7 +129,7 @@ result = compare(
     task="detection",
     test="welch",
 )
-result.summary()   # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + significance
+result.summary()  # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + significance
 ```
 
 The result xarray carries every scalar output: the 12 mAP/mAR values

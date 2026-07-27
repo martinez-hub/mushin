@@ -63,7 +63,7 @@ Then look at what happened without loading the full `xarray` dataset — these
 history tools read the sweep directory's sidecars directly:
 
 ```python
-show("runs/explore-01")              # a status/metrics table, one row per cell
+show("runs/explore-01")  # a status/metrics table, one row per cell
 best("runs/explore-01", "accuracy")  # the winning cell + its config + its dir
 diff("runs/explore-01", "runs/explore-00")  # what moved since the last idea
 ```
@@ -91,10 +91,10 @@ a cache reuse of exploration cells.
 wf = MyWorkflow()
 wf.run(
     method=multirun(["baseline", "ours"]),
-    seed=multirun(range(10)),        # enough seeds to make a claim
+    seed=multirun(range(10)),  # enough seeds to make a claim
     working_dir="runs/paper/main-result",
-    capture_env=True,                # snapshot the exact environment
-    on_error="nan",                  # fail-soft, then resume the stragglers
+    capture_env=True,  # snapshot the exact environment
+    on_error="nan",  # fail-soft, then resume the stragglers
 )
 ```
 
@@ -119,7 +119,7 @@ your friend, not an obstacle:
 from mushin.benchmark import compare_methods
 
 ds = wf.to_xarray()
-compare_methods(ds)   # runs only because the grid is complete; refuses if not
+compare_methods(ds)  # runs only because the grid is complete; refuses if not
 ```
 
 See [Comparing methods](compare.md) for the full statistical workflow.

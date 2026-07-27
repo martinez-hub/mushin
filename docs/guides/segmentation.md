@@ -15,7 +15,7 @@ probabilities for you.
 The example below compares two tiny segmentation models on synthetic pixel masks:
 
 ```python
---8<-- "examples/segmentation_demo.py:run"
+--8 < --"examples/segmentation_demo.py:run"
 ```
 
 The default segmentation battery includes:
@@ -54,7 +54,7 @@ Some models (e.g. `torchvision.models.segmentation`) return a dict instead of
 a plain tensor. Use `predict_fn` to adapt the output:
 
 ```python
---8<-- "examples/segmentation_demo.py:dict_predict"
+--8 < --"examples/segmentation_demo.py:dict_predict"
 ```
 
 Pass it to `compare`:

@@ -105,9 +105,7 @@ and, right after the existing `PredictFn = ...` line (line 12):
 # Owns all metric.update() calls for one batch: (battery, preds, probs, target).
 # `Optional[...]` (not `... | None`) because this alias is evaluated at runtime,
 # and `X | None` is a TypeError under Python 3.9.
-UpdateFn = Callable[
-    [dict, torch.Tensor, Optional[torch.Tensor], object], None
-]
+UpdateFn = Callable[[dict, torch.Tensor, Optional[torch.Tensor], object], None]
 ```
 
 Change the `evaluate` signature (line 67-74) to add the parameter:
@@ -166,9 +164,7 @@ Add the field to the `Task` dataclass (after `description: str = ""`):
 In `src/mushin/benchmark/compare.py`, the `evaluate(...)` call (lines 64-67) currently reads:
 
 ```python
-        results[name] = [
-            evaluate(model, data, battery, fn, pm, device) for model in models
-        ]
+results[name] = [evaluate(model, data, battery, fn, pm, device) for model in models]
 ```
 
 Change it to forward the resolved task's `update_fn`:
@@ -224,15 +220,15 @@ def test_regression_battery_end_to_end():
             self.w, self.b = w, b
 
         def forward(self, x):
-            return (x[:, 0] * self.w + self.b)  # shape (N,)
+            return x[:, 0] * self.w + self.b  # shape (N,)
 
     g = torch.Generator().manual_seed(0)
     x = torch.randn(32, 1, generator=g)
-    y = (x[:, 0] * 2.0 + 1.0)  # true relation
+    y = x[:, 0] * 2.0 + 1.0  # true relation
     loader = DataLoader(TensorDataset(x, y), batch_size=16)
 
-    good = [_AffineModel(2.0, 1.0) for _ in range(3)]   # exact
-    bad = [_AffineModel(0.0, 0.0) for _ in range(3)]    # constant 0
+    good = [_AffineModel(2.0, 1.0) for _ in range(3)]  # exact
+    bad = [_AffineModel(0.0, 0.0) for _ in range(3)]  # constant 0
 
     result = compare(methods={"good": good, "bad": bad}, data=loader, task="regression")
     assert isinstance(result, BenchmarkResult)

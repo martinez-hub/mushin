@@ -27,7 +27,7 @@ from torchmetrics.classification import MulticlassF1Score, MulticlassAccuracy
 compare(
     methods={"cnn": cnn_models},
     data=val_loader,
-    task="classification",     # still sets the default predict_fn
+    task="classification",  # still sets the default predict_fn
     metrics={
         "accuracy": MulticlassAccuracy(num_classes=10, average="micro"),
         "f1_macro": MulticlassF1Score(num_classes=10, average="macro"),
@@ -76,7 +76,7 @@ torchvision segmentation models return a dict `{"out": logits, ...}`. Here is
 the adapter from the segmentation example:
 
 ```python
---8<-- "examples/segmentation_demo.py:dict_predict"
+--8 < --"examples/segmentation_demo.py:dict_predict"
 ```
 
 Pass it to `compare`:
@@ -137,7 +137,7 @@ acc_only = Task(
         "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro"),
     },
     predict_fn=lambda model, x: (model(x).argmax(-1), model(x).softmax(-1)),
-    prob_metrics=frozenset(),          # which metric names consume probabilities
+    prob_metrics=frozenset(),  # which metric names consume probabilities
     description="accuracy-only classification",
 )
 
@@ -148,7 +148,7 @@ compare(methods=..., data=..., task=acc_only, num_classes=3)
 register_task("acc_only", acc_only)
 compare(methods=..., data=..., task="acc_only", num_classes=3)
 
-list_tasks()   # name-sorted: {"acc_only": "accuracy-only ...", "classification": "...", ...}
+list_tasks()  # name-sorted: {"acc_only": "accuracy-only ...", "classification": "...", ...}
 ```
 
 You can also import a built-in battery and tweak it:
@@ -157,7 +157,7 @@ You can also import a built-in battery and tweak it:
 from mushin import classification_battery
 
 battery = classification_battery(num_classes=10)
-del battery["ece"]                     # drop a metric you do not want
+del battery["ece"]  # drop a metric you do not want
 compare(methods=..., data=..., metrics=battery)
 ```
 
@@ -214,9 +214,11 @@ owns the per-batch dispatch:
 ```python
 from mushin import Task
 
+
 def my_update(battery, preds, probs, target):
     for metric in battery.values():
-        metric.update(preds, target)   # or any signature your metrics need
+        metric.update(preds, target)  # or any signature your metrics need
+
 
 task = Task(battery=..., predict_fn=..., update_fn=my_update)
 ```
