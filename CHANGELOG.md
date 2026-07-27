@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.11.1] - 2026-07-27
+
+### Changed
+
+- The PyPI summary, docs landing page, and docs-site metadata now match the README: "reproducible machine-learning experiment sweeps" (the identity line previously said "workflows" on those three surfaces). (#152)
+
+### Misc
+
+- #154
+
+
 ## [0.11.0] - 2026-07-23
 
 ### Added
@@ -504,7 +515,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/martinez-hub/mushin/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/martinez-hub/mushin/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/martinez-hub/mushin/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/martinez-hub/mushin/compare/v0.9.0...v0.10.0
