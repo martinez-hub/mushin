@@ -69,7 +69,9 @@ def test_metrics_callback_test_end_saves_only_on_global_zero(tmp_path):
 
     cb = MetricsCallback(save_dir=tmp_path)
     cb.on_test_end(
-        _make_fake_trainer(callback_metrics={"acc": torch.tensor(1.0)}, is_global_zero=False),
+        _make_fake_trainer(
+            callback_metrics={"acc": torch.tensor(1.0)}, is_global_zero=False
+        ),
         _make_fake_module(current_epoch=0),
     )
     assert not (tmp_path / "test_metrics.pt").exists()
@@ -87,24 +89,23 @@ Expected: FAIL — the callback currently saves unconditionally, so the `not exi
 In `src/mushin/lightning/callbacks.py`, change the two save sites. `on_validation_end`:
 
 ```python
-    def on_validation_end(self, trainer: Trainer, pl_module: LightningModule):
-        # Make sure PL is not doing its sanity check run
-        if trainer.sanity_checking:
-            return self.val_metrics
-        self._record(
-            self.val_metrics, trainer.callback_metrics, pl_module.current_epoch
-        )
-        # Under (multi-node) DDP every rank fires this callback; only rank 0 writes
-        # so N ranks don't clobber the same file on a shared filesystem.
-        if trainer.is_global_zero:
-            torch.save(self.val_metrics, self._get_filename("fit"))
+def on_validation_end(self, trainer: Trainer, pl_module: LightningModule):
+    # Make sure PL is not doing its sanity check run
+    if trainer.sanity_checking:
         return self.val_metrics
+    self._record(self.val_metrics, trainer.callback_metrics, pl_module.current_epoch)
+    # Under (multi-node) DDP every rank fires this callback; only rank 0 writes
+    # so N ranks don't clobber the same file on a shared filesystem.
+    if trainer.is_global_zero:
+        torch.save(self.val_metrics, self._get_filename("fit"))
+    return self.val_metrics
 
-    def on_test_end(self, trainer: Trainer, pl_module: LightningModule):
-        self._record(self.test_metrics, trainer.callback_metrics)
-        if trainer.is_global_zero:
-            torch.save(self.test_metrics, self._get_filename("test"))
-        return self.test_metrics
+
+def on_test_end(self, trainer: Trainer, pl_module: LightningModule):
+    self._record(self.test_metrics, trainer.callback_metrics)
+    if trainer.is_global_zero:
+        torch.save(self.test_metrics, self._get_filename("test"))
+    return self.test_metrics
 ```
 
 - [ ] **Step 4: Run, expect PASS** — `uv run pytest tests/test_lightning_callbacks.py -v` (new + existing all pass; existing tests use `is_global_zero=True` default).
@@ -258,7 +259,9 @@ def test_validate_external_world_size_mismatch_raises():
 
     # Trainer expects num_nodes=2 x devices=4 = 8
     with pytest.raises(RuntimeError, match="world size"):
-        _validate_external_world_size(num_nodes=2, num_processes=4, cluster_environment=_Env())
+        _validate_external_world_size(
+            num_nodes=2, num_processes=4, cluster_environment=_Env()
+        )
 
 
 def test_validate_external_world_size_match_ok():
@@ -271,7 +274,9 @@ def test_validate_external_world_size_match_ok():
             return 8
 
     # 2 nodes x 4 devices == 8 -> no error
-    _validate_external_world_size(num_nodes=2, num_processes=4, cluster_environment=_Env())
+    _validate_external_world_size(
+        num_nodes=2, num_processes=4, cluster_environment=_Env()
+    )
 
 
 def test_validate_skips_when_not_external():
@@ -283,7 +288,9 @@ def test_validate_skips_when_not_external():
         def world_size(self):
             return 999  # mismatched, but must be ignored
 
-    _validate_external_world_size(num_nodes=1, num_processes=2, cluster_environment=_Env())
+    _validate_external_world_size(
+        num_nodes=1, num_processes=2, cluster_environment=_Env()
+    )
 ```
 
 - [ ] **Step 2: Run, expect FAIL** — `uv run pytest tests/test_lightning_launchers.py -k validate -v` (no such function).
@@ -293,12 +300,17 @@ def test_validate_skips_when_not_external():
 Add the free function to `src/mushin/lightning/launchers.py` (top level, near `_setup_environment`):
 
 ```python
-def _validate_external_world_size(num_nodes, num_processes, cluster_environment) -> None:
+def _validate_external_world_size(
+    num_nodes, num_processes, cluster_environment
+) -> None:
     """Under an external launcher (SLURM/torchrun), fail fast if the number of
     launched processes doesn't match num_nodes x devices-per-node — the #1
     multi-node footgun (a mismatch otherwise hangs at rendezvous, OOMs, or
     silently runs single-GPU). No-op for the single-node subprocess path."""
-    if cluster_environment is None or not cluster_environment.creates_processes_externally:
+    if (
+        cluster_environment is None
+        or not cluster_environment.creates_processes_externally
+    ):
         return
     expected = int(num_nodes) * int(num_processes)
     actual = int(cluster_environment.world_size())
@@ -370,7 +382,7 @@ def _global_rank(node_rank: int, num_processes: int, local_rank: int) -> int:
 Change `_subprocess_call` to take a `global_rank` and use it for the output subdir. Update its signature `def _subprocess_call(local_rank, global_rank, testing, predicting):` and the override line:
 
 ```python
-        f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
+(f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",)
 ```
 
 (Keep `local_rank` for the `LOCAL_RANK` env and the `++pl_local_rank` flag.) Update the call in `_call_children_scripts` to compute and pass it:
@@ -419,7 +431,9 @@ import pytest
 def test_submitit_slurm_config_derives_tasks_per_node():
     from mushin.lightning import submitit_slurm_config
 
-    cfg = submitit_slurm_config(nodes=2, gpus_per_node=4, partition="gpu", cpus_per_task=8)
+    cfg = submitit_slurm_config(
+        nodes=2, gpus_per_node=4, partition="gpu", cpus_per_task=8
+    )
     # DDP contract: one SLURM task per GPU
     assert cfg["tasks_per_node"] == 4
     assert cfg["gpus_per_node"] == 4

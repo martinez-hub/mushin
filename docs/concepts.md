@@ -31,12 +31,15 @@ sweep scikit-learn, XGBoost, JAX, or plain NumPy and still get the labeled
 from mushin import multirun
 from mushin.workflows import MultiRunMetricsWorkflow
 
+
 class RidgeSweep(MultiRunMetricsWorkflow):
     @staticmethod
     def task(alpha: float, seed: int) -> dict:
         from sklearn.linear_model import Ridge  # nothing here requires torch
+
         model = Ridge(alpha=alpha, random_state=seed).fit(X_train, y_train)
         return dict(r2=model.score(X_val, y_val))
+
 
 wf = RidgeSweep()
 wf.run(alpha=multirun([0.1, 1.0, 10.0]), seed=multirun([0, 1, 2]))
@@ -131,5 +134,6 @@ See [Custom metrics & predict_fn](guides/custom.md).
 
     ```python
     import mushin
+
     path = mushin.original_cwd() / "data" / "train.csv"
     ```

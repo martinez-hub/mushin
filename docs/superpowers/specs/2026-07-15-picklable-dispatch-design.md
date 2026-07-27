@@ -77,21 +77,29 @@ class _TaskRunner:
     injection + fail-soft, in one object. All fields are picklable; module-level
     helpers are imported inside __call__, never captured."""
 
-    def __init__(self, *, task, wants_resume, combo_of_cfg, base_provenance,
-                 on_error, prior_manifest):
-        self.task = task                 # zen-wrapped user task (see below)
-        self.wants_resume = wants_resume # bool
-        self.combo_of_cfg = combo_of_cfg # picklable combo builder (see below)
-        self.base_provenance = base_provenance   # dict
-        self.on_error = on_error         # "raise" | "nan"
-        self.prior_manifest = prior_manifest     # Manifest | None (picklable)
+    def __init__(
+        self,
+        *,
+        task,
+        wants_resume,
+        combo_of_cfg,
+        base_provenance,
+        on_error,
+        prior_manifest,
+    ):
+        self.task = task  # zen-wrapped user task (see below)
+        self.wants_resume = wants_resume  # bool
+        self.combo_of_cfg = combo_of_cfg  # picklable combo builder (see below)
+        self.base_provenance = base_provenance  # dict
+        self.on_error = on_error  # "raise" | "nan"
+        self.prior_manifest = prior_manifest  # Manifest | None (picklable)
 
     def __call__(self, cfg):
         from pathlib import Path
         from ._provenance import write_provenance
-        from ._resume import (_CURRENT_RESUME, build_resume_context,
-                              write_cell_status)
+        from ._resume import _CURRENT_RESUME, build_resume_context, write_cell_status
         from ._sweep_io import read_metrics_sidecar, write_metrics_sidecar
+
         # 1. resume short-circuit (if prior_manifest says this combo completed)
         # 2. write provenance (base + cfg)
         # 3. build ResumeContext; set _CURRENT_RESUME if wants_resume
@@ -141,16 +149,21 @@ Each current closure maps to runner state or `__call__` logic:
       """Hides `mushin_resume` from hydra-zen (stripped __signature__) and injects
       it from the contextvar at call time. Picklable (module-level task + a
       Signature), unlike the old closure."""
+
       def __init__(self, task):
           self.task = task
           sig = inspect.signature(task)
-          self._sig = sig.replace(parameters=[p for n, p in sig.parameters.items()
-                                              if n != "mushin_resume"])
+          self._sig = sig.replace(
+              parameters=[p for n, p in sig.parameters.items() if n != "mushin_resume"]
+          )
+
       @property
-      def __signature__(self):   # inspect.signature / zen read this
+      def __signature__(self):  # inspect.signature / zen read this
           return self._sig
+
       def __call__(self, *a, **k):
           from ._resume import current_resume
+
           return self.task(*a, **k, mushin_resume=current_resume())
   ```
 
@@ -185,17 +198,18 @@ def __call__(self, cfg):
         sc = self._combo(cfg, self.prior_manifest.params)
         if self.prior_manifest.status(sc) == "completed":
             cached = read_metrics_sidecar(
-                Path(self.prior_manifest.root) / (self.prior_manifest.dir(sc) or ""))
+                Path(self.prior_manifest.root) / (self.prior_manifest.dir(sc) or "")
+            )
             if cached is not None:
-                return cached                      # short-circuit: nothing else runs
+                return cached  # short-circuit: nothing else runs
 
     # (2) fail_soft wraps EVERYTHING below — but only when on_error == "nan".
     try:
-        self.pre_task(cfg)                          # _task_calls: pre_task first
+        self.pre_task(cfg)  # _task_calls: pre_task first
         # --- instrument body ---
         cwd = Path.cwd()
         combo = self._combo(cfg, self.swept_names)  # instrument uses swept_names
-        rc = build_resume_context(cwd, combo)       # BEFORE the running-status write
+        rc = build_resume_context(cwd, combo)  # BEFORE the running-status write
         try:
             write_provenance(cwd, cfg, base=self.base_provenance)
         except Exception:  # noqa: BLE001 - best-effort
@@ -216,8 +230,8 @@ def __call__(self, cfg):
         return result
     except Exception as exc:  # noqa: BLE001
         if self.on_error == "nan":
-            return _FailedRun(exc)                  # _fail_soft sentinel
-        raise                                       # on_error=="raise": propagate
+            return _FailedRun(exc)  # _fail_soft sentinel
+        raise  # on_error=="raise": propagate
 ```
 
 `self._combo(cfg, names)` is the picklable combo projection (see below): project

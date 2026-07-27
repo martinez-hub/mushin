@@ -20,7 +20,7 @@ models works here — you just bring the systems, data, and metric.
 ## Quickstart
 
 ```python
---8<-- "examples/compare_llms_demo.py:run"
+--8 < --"examples/compare_llms_demo.py:run"
 ```
 
 `systems` maps a name to a callable `system(inputs, seed) -> outputs`. The
@@ -43,7 +43,7 @@ result = compare_llms(
     {"gpt4": gpt4_system, "claude": claude_system},
     data=eval_data,
     metric=exact_match,
-    seeds=range(10),   # 10 seeds → more power
+    seeds=range(10),  # 10 seeds → more power
     test="welch",
 )
 ```
@@ -73,6 +73,7 @@ per-example scores into one value per `(system, seed)`:
 def exact_match(output, reference):
     return float(output.strip() == reference.strip())
 
+
 result = compare_llms(systems, data, metric=exact_match, seeds=range(5))
 ```
 
@@ -88,7 +89,7 @@ from torchmetrics.text import CharErrorRate, WordErrorRate
 
 result = compare_llms(
     systems,
-    data,                 # each example's `reference` is a plain string
+    data,  # each example's `reference` is a plain string
     metric={"wer": WordErrorRate(), "cer": CharErrorRate()},
     seeds=range(5),
 )
@@ -148,9 +149,11 @@ handles the prompt template, seed passing, and reply parsing:
 ```python
 from mushin.llm import llm_judge
 
+
 def my_judge(prompt, seed):
     # call your preferred provider here
     ...
+
 
 metric = llm_judge(my_judge, rubric="Is this answer factually correct?")
 result = compare_llms(systems, data, metric=metric, seeds=range(5))
@@ -169,9 +172,9 @@ from hydra_zen import builds
 from mushin.llm import compare_llms
 
 HFGeneratorConf = builds(
-    MyHFGenerator,           # your class wrapping HF from_pretrained
+    MyHFGenerator,  # your class wrapping HF from_pretrained
     model_name="mistralai/Mistral-7B-v0.1",
-    device_map="auto",       # shard across CPU/GPU automatically
+    device_map="auto",  # shard across CPU/GPU automatically
     torch_dtype="float16",
 )
 
@@ -195,7 +198,10 @@ for resuming after failures or re-scoring with a different metric:
 
 ```python
 result = compare_llms(
-    systems, data, metric=exact_match, seeds=range(5),
+    systems,
+    data,
+    metric=exact_match,
+    seeds=range(5),
     cache="./eval_cache",
 )
 ```

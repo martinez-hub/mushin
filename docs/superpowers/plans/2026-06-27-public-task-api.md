@@ -108,8 +108,7 @@ _TASKS: dict[str, Task] = {
         segmentation_battery,
         default_segmentation_predict_fn,
         frozenset(),
-        description="Semantic segmentation (miou, dice, pixel_acc, precision, "
-        "recall).",
+        description="Semantic segmentation (miou, dice, pixel_acc, precision, recall).",
     ),
     "detection": Task(
         detection_battery,
@@ -310,9 +309,7 @@ def test_compare_accepts_registered_task_name():
         "acc_only",
         Task(
             battery=lambda num_classes, ignore_index=None: {
-                "accuracy": MulticlassAccuracy(
-                    num_classes=num_classes, average="micro"
-                )
+                "accuracy": MulticlassAccuracy(num_classes=num_classes, average="micro")
             },
             predict_fn=lambda model, x: (
                 model(x).argmax(dim=-1),
@@ -351,13 +348,13 @@ from ._tasks import Task, get_task
 Change the signature line 21 from:
 
 ```python
-    task: str = "classification",
+task: str = ("classification",)
 ```
 
 to:
 
 ```python
-    task: str | Task = "classification",
+task: str | Task = ("classification",)
 ```
 
 Change the resolution on line 45 from:
@@ -449,13 +446,13 @@ Expected: FAIL — a type-checker/`NotImplementedError` path or, if `task` is fo
 In `src/mushin/study/_study.py`, change **both** occurrences of:
 
 ```python
-        task: str = "classification",
+task: str = ("classification",)
 ```
 
 to:
 
 ```python
-        task: "str | Task" = "classification",
+task: "str | Task" = ("classification",)
 ```
 
 and add the import near the top (after line 11, the existing `from mushin.benchmark import BenchmarkResult`):
@@ -475,7 +472,7 @@ In `src/mushin/study/_load.py`, change the `evaluate_checkpoints` signature para
 to:
 
 ```python
-    task,  # str | Task — resolved inside compare()
+(task,)  # str | Task — resolved inside compare()
 ```
 
 (Leave the body unchanged; it forwards `task` to `compare`.)
@@ -593,15 +590,15 @@ from .benchmark import (
 Then extend `__all__` in `src/mushin/__init__.py` by adding these entries (keep the existing ones):
 
 ```python
-    "compare",
-    "BenchmarkResult",
-    "Task",
-    "register_task",
-    "get_task",
-    "list_tasks",
-    "classification_battery",
-    "segmentation_battery",
-    "detection_battery",
+("compare",)
+("BenchmarkResult",)
+("Task",)
+("register_task",)
+("get_task",)
+("list_tasks",)
+("classification_battery",)
+("segmentation_battery",)
+("detection_battery",)
 ```
 
 - [ ] **Step 2b: Guard against circular import**

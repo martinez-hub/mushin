@@ -44,6 +44,7 @@ or `mushin.llm`. Tests assert on those two, not on `torchmetrics`.
 ```python
 # tests/test_lazy_imports.py
 """The top-level import stays light; peripheral subsystems load on first use."""
+
 import subprocess
 import sys
 
@@ -112,7 +113,9 @@ from typing import TYPE_CHECKING
 
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
 from .lightning import HydraDDP, MetricsCallback
-from .study import Study  # keep last of eager block: avoids circular import via .study -> _sweep
+from .study import (
+    Study,
+)  # keep last of eager block: avoids circular import via .study -> _sweep
 from .workflows import MultiRunMetricsWorkflow, hydra_list, multirun
 
 # Benchmark exports are loaded on first attribute access (see __getattr__), so a
@@ -425,7 +428,9 @@ from mushin.workflows import (
 )
 
 
-@pytest.mark.parametrize("cls", [BaseWorkflow, MultiRunMetricsWorkflow, RobustnessCurve])
+@pytest.mark.parametrize(
+    "cls", [BaseWorkflow, MultiRunMetricsWorkflow, RobustnessCurve]
+)
 @pytest.mark.parametrize("param", ["config_name", "job_name"])
 def test_run_defaults_are_not_rai_branded(cls, param):
     default = inspect.signature(cls.run).parameters[param].default
@@ -446,8 +451,8 @@ In `src/mushin/workflows.py`, replace every occurrence of the defaults in the
 three `run` signatures (lines ~287-288, ~612-613, ~1063-1064):
 
 ```python
-        config_name: str = "mushin_workflow",
-        job_name: str = "mushin_workflow",
+config_name: str = ("mushin_workflow",)
+job_name: str = ("mushin_workflow",)
 ```
 
 And in the `BaseWorkflow.run` docstring (lines ~332 and ~335), change

@@ -111,10 +111,10 @@ A small immutable dataclass (new, in `_sweep_io.py` or a new `_resume.py`):
 ```python
 @dataclass(frozen=True)
 class ResumeContext:
-    dir: Path            # this cell's stable working directory (exists)
-    is_resume: bool      # True if a prior attempt left artifacts in `dir`
+    dir: Path  # this cell's stable working directory (exists)
+    is_resume: bool  # True if a prior attempt left artifacts in `dir`
     last_ckpt: Path | None  # newest *.ckpt / last.ckpt in `dir`, best-effort
-    attempt: int         # 1 on first run, incremented each re-execution
+    attempt: int  # 1 on first run, incremented each re-execution
 ```
 
 Injection happens in mushin's own task wrapper layer (around

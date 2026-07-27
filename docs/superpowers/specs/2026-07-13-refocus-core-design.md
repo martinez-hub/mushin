@@ -72,10 +72,18 @@ package-level `__getattr__` (PEP 562).
 Reduce `src/mushin/_tuning.py` (385 → ~60 LOC) to find-once-and-pin:
 
 ```python
-def tune_batch_size(trainer, module, datamodule=None, *,
-                    pin_path=None, batch_arg="batch_size", retune=False) -> BatchPin: ...
-def tune_learning_rate(trainer, module, datamodule=None, *,
-                       pin_path=None, lr_attr="lr", retune=False) -> LRPin: ...
+def tune_batch_size(
+    trainer,
+    module,
+    datamodule=None,
+    *,
+    pin_path=None,
+    batch_arg="batch_size",
+    retune=False,
+) -> BatchPin: ...
+def tune_learning_rate(
+    trainer, module, datamodule=None, *, pin_path=None, lr_attr="lr", retune=False
+) -> LRPin: ...
 ```
 
 Behavior: run Lightning's `Tuner.scale_batch_size` / `lr_find` once, write the

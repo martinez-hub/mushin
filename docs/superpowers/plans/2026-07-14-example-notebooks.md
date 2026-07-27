@@ -202,9 +202,11 @@ def make_data(seed: int, n: int = POINTS_PER_CLASS):
     y = tr.cat([tr.zeros(n), tr.ones(n)])
     return x, y
 
+
 # %% [markdown]
 # The workflow: subclass `MultiRunMetricsWorkflow` and implement `task`. Whatever
 # `dict` it returns becomes variables in the dataset.
+
 
 # %%
 class LRSweep(MultiRunMetricsWorkflow):
@@ -222,6 +224,7 @@ class LRSweep(MultiRunMetricsWorkflow):
         with tr.no_grad():
             acc = ((model(x).squeeze(1) > 0).float() == y).float().mean().item()
         return dict(accuracy=acc)
+
 
 # %% [markdown]
 # Run the `lr × seed` sweep with `multirun(...)` and read it back as a dataset.
@@ -252,8 +255,13 @@ import matplotlib.pyplot as plt
 
 fig, ax = plt.subplots(figsize=(5, 3.2))
 for s in ds["seed"].values:
-    ax.plot(ds["lr"].values, ds["accuracy"].sel(seed=s).values, "o-",
-            alpha=0.35, color="tab:blue")
+    ax.plot(
+        ds["lr"].values,
+        ds["accuracy"].sel(seed=s).values,
+        "o-",
+        alpha=0.35,
+        color="tab:blue",
+    )
 ax.plot(ds["lr"].values, mean_acc.values, "ks-", lw=2, label="mean")
 ax.set_xscale("log")
 ax.set_xlabel("learning rate")
@@ -363,11 +371,14 @@ test_loader = make_loader(n=128, seed=99)
 # %% [markdown]
 # Two tiny classifiers — a conv net and an MLP.
 
+
 # %%
 def small_cnn() -> nn.Module:
     return nn.Sequential(
-        nn.Conv2d(1, 8, 3, padding=1), nn.ReLU(),
-        nn.AdaptiveAvgPool2d(4), nn.Flatten(),
+        nn.Conv2d(1, 8, 3, padding=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(4),
+        nn.Flatten(),
         nn.Linear(8 * 4 * 4, NUM_CLASSES),
     )
 
@@ -388,6 +399,7 @@ def train(model: nn.Module) -> nn.Module:
             opt.step()
     return model.eval()
 
+
 # %% [markdown]
 # Train one of each per seed, then `compare` them on the held-out loader.
 
@@ -399,8 +411,11 @@ for seed in (0, 1, 2):
     methods["mlp"].append(train(mlp()))
 
 result = compare(
-    methods, data=test_loader, task="classification",
-    num_classes=NUM_CLASSES, test="welch",
+    methods,
+    data=test_loader,
+    task="classification",
+    num_classes=NUM_CLASSES,
+    test="welch",
 )
 result.summary()
 
@@ -421,8 +436,13 @@ acc = result.summary().query("metric == 'accuracy'")
 fig, ax = plt.subplots(figsize=(4.2, 3.2))
 lo = (acc["mean"] - acc["ci_low"]).values
 hi = (acc["ci_high"] - acc["mean"]).values
-ax.bar(acc["method"], acc["mean"], yerr=[lo, hi], capsize=6,
-       color=["tab:blue", "tab:orange"])
+ax.bar(
+    acc["method"],
+    acc["mean"],
+    yerr=[lo, hi],
+    capsize=6,
+    color=["tab:blue", "tab:orange"],
+)
 ax.set_ylabel("accuracy")
 ax.set_ylim(0, 1)
 ax.set_title("Accuracy by method (95% CI)")
@@ -548,11 +568,14 @@ test_loader = make_loader(n=128, seed=99)
 # %% [markdown]
 # A `train_fn` per method: train, save a checkpoint, return its path.
 
+
 # %%
 def make_cnn():
     return nn.Sequential(
-        nn.Conv2d(1, 8, 3, padding=1), nn.ReLU(),
-        nn.AdaptiveAvgPool2d(4), nn.Flatten(),
+        nn.Conv2d(1, 8, 3, padding=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(4),
+        nn.Flatten(),
         nn.Linear(8 * 4 * 4, NUM_CLASSES),
     )
 
@@ -583,6 +606,7 @@ def make_train_fn(name, factory):
 
     return train_fn
 
+
 # %% [markdown]
 # Hand the methods, loader, and seeds to `Study` — it does the rest.
 
@@ -612,8 +636,13 @@ acc = result.summary().query("metric == 'accuracy'")
 fig, ax = plt.subplots(figsize=(4.2, 3.2))
 lo = (acc["mean"] - acc["ci_low"]).values
 hi = (acc["ci_high"] - acc["mean"]).values
-ax.bar(acc["method"], acc["mean"], yerr=[lo, hi], capsize=6,
-       color=["tab:blue", "tab:orange"])
+ax.bar(
+    acc["method"],
+    acc["mean"],
+    yerr=[lo, hi],
+    capsize=6,
+    color=["tab:blue", "tab:orange"],
+)
 ax.set_ylabel("accuracy")
 ax.set_ylim(0, 1)
 ax.set_title("Study: accuracy by method (95% CI)")
@@ -700,6 +729,7 @@ class FlakySweep(MultiRunMetricsWorkflow):
         torch.manual_seed(seed)
         base = 0.90 if method == "cnn" else 0.82
         return dict(accuracy=base + 0.01 * torch.rand(1).item())
+
 
 # %% [markdown]
 # ## 1. Fail-soft: `on_error="nan"`
@@ -874,10 +904,12 @@ data = [{"input": i, "reference": "even" if i % 2 == 0 else "odd"} for i in rang
 def exact_match(output: str, reference: str) -> float:
     return float(output.strip() == reference.strip())
 
+
 # %% [markdown]
 # Two fake systems: a strong one that occasionally slips, and a biased one that
 # leans "even". Each wires the trial `seed` to its randomness, so the per-seed
 # scores form a real sampling distribution.
+
 
 # %%
 def strong(inputs, seed):
@@ -894,6 +926,7 @@ def strong(inputs, seed):
 def biased(inputs, seed):
     rng = random.Random(1000 + seed)
     return ["even" if rng.random() < 0.85 else "odd" for _ in inputs]
+
 
 # %% [markdown]
 # Compare them across five seeds with Welch's t-test.
@@ -993,6 +1026,7 @@ from mushin.workflows import MultiRunMetricsWorkflow
 # %% [markdown]
 # A fixed, seeded synthetic classification problem, split per seed.
 
+
 # %%
 def split(seed: int):
     x, y = make_classification(
@@ -1000,9 +1034,11 @@ def split(seed: int):
     )
     return train_test_split(x, y, test_size=0.25, random_state=seed)
 
+
 # %% [markdown]
 # Sweep the inverse-regularization strength `C` across seeds; the returned dict
 # populates the dataset — no torch, no checkpoint to save.
+
 
 # %%
 class LogRegCSweep(MultiRunMetricsWorkflow):
@@ -1032,8 +1068,13 @@ import matplotlib.pyplot as plt
 mean_acc = ds["accuracy"].mean("seed")
 fig, ax = plt.subplots(figsize=(5, 3.2))
 for s in ds["seed"].values:
-    ax.plot(ds["C"].values, ds["accuracy"].sel(seed=s).values, "o-",
-            alpha=0.35, color="tab:green")
+    ax.plot(
+        ds["C"].values,
+        ds["accuracy"].sel(seed=s).values,
+        "o-",
+        alpha=0.35,
+        color="tab:green",
+    )
 ax.plot(ds["C"].values, mean_acc.values, "ks-", lw=2, label="mean")
 ax.set_xscale("log")
 ax.set_xlabel("C (inverse regularization strength)")

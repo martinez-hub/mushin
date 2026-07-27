@@ -32,11 +32,11 @@ wf.run(
 After the run you can inspect what happened:
 
 ```python
-wf.is_complete        # False — at least one cell failed
-wf.failures           # [{"combo": "method=mlp,seed=3", "exception": "...", "working_dir": "..."}]
+wf.is_complete  # False — at least one cell failed
+wf.failures  # [{"combo": "method=mlp,seed=3", "exception": "...", "working_dir": "..."}]
 ds = wf.to_xarray()
-ds["accuracy"].sel({"method": "mlp", "seed": 3})   # nan
-ds.attrs["mushin_failures"]                         # JSON list: ["method=mlp,seed=3"]
+ds["accuracy"].sel({"method": "mlp", "seed": 3})  # nan
+ds.attrs["mushin_failures"]  # JSON list: ["method=mlp,seed=3"]
 ```
 
 To debug a failed cell, look inside its `working_dir`: mushin writes the full
@@ -62,7 +62,7 @@ try:
     compare_methods(ds)
 except IncompleteSweepError as e:
     print(e)  # "1 run(s) failed (method=mlp,seed=3); fix the cause and re-run
-              #  with resume=True to complete the sweep before comparing."
+    #  with resume=True to complete the sweep before comparing."
 ```
 
 This is keyed purely on `ds.attrs["mushin_failures"]` — a plain user dataset, or
@@ -81,12 +81,12 @@ wf = MyWorkflow()
 wf.run(
     method=multirun(["cnn", "mlp"]),
     seed=multirun([0, 1, 2, 3, 4]),
-    working_dir="runs/experiment",   # same directory as before
+    working_dir="runs/experiment",  # same directory as before
     resume=True,
 )
 
-wf.is_complete            # True — every cell now present
-compare_methods(wf.to_xarray())   # no longer raises
+wf.is_complete  # True — every cell now present
+compare_methods(wf.to_xarray())  # no longer raises
 ```
 
 `resume=True` requires `working_dir` to be set (there is nothing to resume from
@@ -117,6 +117,7 @@ A long-running cell can also resume its **own** training. Declare a
 ```python
 from mushin.workflows import MultiRunMetricsWorkflow
 
+
 class Train(MultiRunMetricsWorkflow):
     @staticmethod
     def task(lr, seed, mushin_resume=None):
@@ -124,7 +125,9 @@ class Train(MultiRunMetricsWorkflow):
         # mushin_resume.is_resume -> True when a prior attempt of THIS cell left artifacts
         # mushin_resume.last_ckpt -> newest checkpoint in dir, or None
         ckpt = mushin_resume.last_ckpt if mushin_resume else None
-        trainer.fit(model, ckpt_path=ckpt)  # Lightning: default_root_dir=mushin_resume.dir
+        trainer.fit(
+            model, ckpt_path=ckpt
+        )  # Lightning: default_root_dir=mushin_resume.dir
         return dict(accuracy=...)
 ```
 
@@ -142,8 +145,10 @@ even a failing cell leaves its lineage behind. It captures the git SHA, key
 package versions, and the resolved config:
 
 ```python
-wf.provenance                 # dict: {"git": {"sha": ...}, "packages": {...}, "config": {...}, ...}
-ds.attrs["provenance"]        # the same record, JSON-encoded, so a saved dataset carries its lineage
+wf.provenance  # dict: {"git": {"sha": ...}, "packages": {...}, "config": {...}, ...}
+ds.attrs[
+    "provenance"
+]  # the same record, JSON-encoded, so a saved dataset carries its lineage
 ```
 
 For a fuller record, pass `capture_env=True` to write a complete dependency
@@ -171,10 +176,10 @@ study = Study(
     data=test_loader,
     num_classes=10,
     working_dir="runs/study",
-    on_error="nan",     # fail-soft training
-    capture_env=True,   # snapshot the environment
+    on_error="nan",  # fail-soft training
+    capture_env=True,  # snapshot the environment
 )
-study.run()             # raises IncompleteSweepError if any (method, seed) failed
+study.run()  # raises IncompleteSweepError if any (method, seed) failed
 # ...fix the cause, then re-run with resume=True on the same working_dir:
 study = Study(..., working_dir="runs/study", resume=True)
 result = study.run()

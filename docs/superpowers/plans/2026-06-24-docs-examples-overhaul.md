@@ -114,6 +114,8 @@ def mlp() -> nn.Module:
         nn.ReLU(),
         nn.Linear(64, 10),
     )
+
+
 # --8<-- [end:models]
 
 
@@ -146,6 +148,8 @@ def run(
         num_classes=10,
         test="welch",
     )
+
+
 # --8<-- [end:run]
 
 
@@ -262,6 +266,8 @@ git commit -m "examples: runnable MNIST Study example with synthetic smoke test"
       logits = model(x)["out"]
       probs = logits.softmax(dim=1)
       return probs.argmax(dim=1), probs
+
+
   # --8<-- [end:dict_predict]
   ```
   The `__main__` builds a small synthetic `(N, C, H, W)` dataset + `(N, H, W)`

@@ -27,7 +27,7 @@ from mushin import submitit_slurm_config
 
 slurm = submitit_slurm_config(
     nodes=2,
-    gpus_per_node=4,        # -> tasks_per_node=4, one rank per GPU
+    gpus_per_node=4,  # -> tasks_per_node=4, one rank per GPU
     cpus_per_task=8,
     partition="gpu",
     timeout_min=120,
@@ -59,8 +59,8 @@ from mushin import HydraDDP
 TrainerConfig = builds(
     pl.Trainer,
     accelerator="gpu",
-    devices=4,        # == gpus_per_node
-    num_nodes=2,      # == nodes
+    devices=4,  # == gpus_per_node
+    num_nodes=2,  # == nodes
     strategy=builds(HydraDDP),
     populate_full_signature=True,
 )
@@ -73,7 +73,7 @@ Seed each rank deterministically so a 64-GPU run reproduces a 1-GPU run:
 ```python
 from mushin import seed_everything_per_rank
 
-seed_everything_per_rank(1234)   # each rank: 1234 + global_rank
+seed_everything_per_rank(1234)  # each rank: 1234 + global_rank
 ```
 
 ## Metrics

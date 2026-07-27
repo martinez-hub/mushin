@@ -84,7 +84,7 @@ in-memory `return_value`, so a died process recovers nothing).
 `BaseWorkflow.run` (and subclasses) gains:
 
 ```python
-on_error: str = "raise"   # "raise" | "nan"
+on_error: str = "raise"  # "raise" | "nan"
 ```
 
 - `"raise"` (**default**, backward-compatible): a `FAILED` job re-raises, crashing
@@ -139,7 +139,8 @@ Mechanism:
            combo = _combo_of(cfg)
            if manifest.status(combo) == "completed":
                return _read_sidecar(manifest.dir(combo))  # ms: no training
-           return task(cfg)                                # run missing/failed
+           return task(cfg)  # run missing/failed
+
        return wrapped
    ```
 

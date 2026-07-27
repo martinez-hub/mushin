@@ -54,6 +54,7 @@ def test_metrics_sidecar_roundtrip(tmp_path):
 
 def test_metrics_sidecar_coerces_numpy_and_tensors(tmp_path):
     import numpy as np
+
     write_metrics_sidecar(tmp_path, {"a": np.float32(0.5), "b": np.array([1, 2])})
     got = read_metrics_sidecar(tmp_path)
     assert got == {"a": 0.5, "b": [1, 2]}
@@ -177,7 +178,9 @@ class Manifest:
     def dir(self, combo: dict) -> str | None:
         return self.cells.get(combo_key(combo), {}).get("dir")
 
-    def mark(self, combo: dict, *, dir: str, status: str, error: str | None = None) -> None:
+    def mark(
+        self, combo: dict, *, dir: str, status: str, error: str | None = None
+    ) -> None:
         entry = {"dir": str(dir), "status": status}
         if error is not None:
             entry["error"] = error
@@ -185,7 +188,9 @@ class Manifest:
 
     def failed_cells(self) -> list[dict]:
         return [
-            {"key": k, **v} for k, v in self.cells.items() if v.get("status") == "failed"
+            {"key": k, **v}
+            for k, v in self.cells.items()
+            if v.get("status") == "failed"
         ]
 
     def is_complete(self) -> bool:
@@ -228,8 +233,8 @@ def test_to_xarray_nan_fills_missing_combo(monkeypatch, tmp_path):
     wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s"))
     ds = wf.to_xarray()
     assert ds.sizes == {"a": 2, "b": 2}
-    assert np.isnan(float(ds["val"].sel(a=2, b=1)))       # hole -> NaN
-    assert float(ds["val"].sel(a=1, b=1)) == 11.0          # others intact
+    assert np.isnan(float(ds["val"].sel(a=2, b=1)))  # hole -> NaN
+    assert float(ds["val"].sel(a=1, b=1)) == 11.0  # others intact
 ```
 
 - [ ] **Step 2: Run — expect FAIL** (today the order-based reshape mis-sizes or errors on the `None`).
@@ -239,13 +244,17 @@ def test_to_xarray_nan_fills_missing_combo(monkeypatch, tmp_path):
 In `jobs_post_process`, after `self.cfgs = [j.cfg for j in self.jobs]`, replace the order-based metric extraction with a combo-keyed map. Add a helper that reads each job's swept-param values from its `cfg` (the grid params are `self.multirun_task_overrides` keys that are `multirun(...)`):
 
 ```python
-    def _swept_param_names(self) -> list[str]:
-        from mushin import multirun as _mr
-        return [k for k, v in self.multirun_task_overrides.items() if isinstance(v, _mr)]
+def _swept_param_names(self) -> list[str]:
+    from mushin import multirun as _mr
 
-    def _combo_of_cfg(self, cfg) -> dict:
-        names = self._swept_param_names()
-        return {n: _unwrap_scalar(cfg[n]) for n in names}  # _unwrap_scalar already exists (workflows.py ~62)
+    return [k for k, v in self.multirun_task_overrides.items() if isinstance(v, _mr)]
+
+
+def _combo_of_cfg(self, cfg) -> dict:
+    names = self._swept_param_names()
+    return {
+        n: _unwrap_scalar(cfg[n]) for n in names
+    }  # _unwrap_scalar already exists (workflows.py ~62)
 ```
 
 Then build `self._metrics_by_combo: dict[str, dict]` from completed jobs (COMPLETED status → its returned dict or `mushin_metrics.json`). Keep `self.metrics` for backward-compat by deriving it from the grid order (Step 4). Store `self.working_dir` before use so sidecars/manifest resolve.
@@ -256,6 +265,7 @@ Replace the per-metric `np.asarray(v).reshape(shape + ...)` block so that, inste
 
 ```python
 import itertools, numpy as np
+
 # grid combos in row-major order (matches coords/shape ordering)
 grid_names = list(orig_coords)
 grid_values = [orig_coords[n] for n in grid_names]
@@ -319,6 +329,7 @@ def _instrument_task(task, *, write_sidecar=True):
         if write_sidecar and isinstance(result, dict):
             write_metrics_sidecar(Path.cwd(), result)  # cwd is Hydra's per-job dir
         return result
+
     return wrapped
 ```
 
@@ -337,29 +348,41 @@ Compose it around the zen-wrapped task: `task=_instrument_task(task_fn_wrapper(s
 ```python
 import pytest
 
+
 def _grid_with_one_failure():
     from mushin.workflows import MultiRunMetricsWorkflow
+
     class W(MultiRunMetricsWorkflow):
         @staticmethod
         def task(a, b):
             if a == 2 and b == 1:
                 raise RuntimeError("boom")
             return dict(val=float(a * 10 + b))
+
     return W
+
 
 def test_on_error_raise_is_default(tmp_path):
     from mushin import multirun
+
     with pytest.raises(Exception):
-        _grid_with_one_failure()().run(a=multirun([1, 2]), b=multirun([0, 1]),
-                                       working_dir=str(tmp_path / "s"))
+        _grid_with_one_failure()().run(
+            a=multirun([1, 2]), b=multirun([0, 1]), working_dir=str(tmp_path / "s")
+        )
+
 
 def test_on_error_nan_records_and_continues(tmp_path):
     import numpy as np
     from mushin import multirun
+
     wf = _grid_with_one_failure()()
     with pytest.warns(UserWarning, match="failed"):
-        wf.run(a=multirun([1, 2]), b=multirun([0, 1]),
-               working_dir=str(tmp_path / "s"), on_error="nan")
+        wf.run(
+            a=multirun([1, 2]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
     assert wf.is_complete is False
     assert any("a=2" in f["combo"] for f in wf.failures)
     ds = wf.to_xarray()
@@ -375,6 +398,7 @@ def test_on_error_nan_records_and_continues(tmp_path):
 
     ```python
     from hydra.core.utils import JobStatus
+
     self.failures = []
     manifest = Manifest.load_or_new(self.working_dir, self._swept_param_names())
     self._metrics_by_combo = {}
@@ -386,11 +410,16 @@ def test_on_error_nan_records_and_continues(tmp_path):
         else:
             if on_error == "raise":
                 raise job._return_value
-            self.failures.append({"combo": combo_key(combo),
-                                  "exception": repr(job._return_value),
-                                  "working_dir": str(wdir)})
-            manifest.mark(combo, dir=wdir.name, status="failed",
-                          error=repr(job._return_value))
+            self.failures.append(
+                {
+                    "combo": combo_key(combo),
+                    "exception": repr(job._return_value),
+                    "working_dir": str(wdir),
+                }
+            )
+            manifest.mark(
+                combo, dir=wdir.name, status="failed", error=repr(job._return_value)
+            )
     manifest.save()
     self._manifest = manifest
     ```
@@ -416,8 +445,10 @@ def test_compare_refuses_incomplete_sweep():
     from mushin.benchmark import compare_methods
     from mushin.benchmark._stats import IncompleteSweepError
 
-    ds = xr.Dataset({"acc": (("method", "seed"), np.random.rand(2, 3))},
-                    coords={"method": ["a", "b"], "seed": [0, 1, 2]})
+    ds = xr.Dataset(
+        {"acc": (("method", "seed"), np.random.rand(2, 3))},
+        coords={"method": ["a", "b"], "seed": [0, 1, 2]},
+    )
     ds.attrs["mushin_failures"] = ["method=a,seed=1"]  # marks incompleteness
     with pytest.raises(IncompleteSweepError, match="failed"):
         compare_methods(ds)
@@ -453,8 +484,10 @@ def test_resume_reruns_only_failed_cell(tmp_path):
     from mushin.workflows import MultiRunMetricsWorkflow
 
     CALLS = {"n": 0}
+
     class W(MultiRunMetricsWorkflow):
         FAIL = True
+
         @staticmethod
         def task(a, b):
             CALLS["n"] += 1
@@ -462,17 +495,19 @@ def test_resume_reruns_only_failed_cell(tmp_path):
                 raise RuntimeError("boom")
             return dict(val=float(a * 10 + b))
 
-    wf = W(); wd = str(tmp_path / "s")
+    wf = W()
+    wd = str(tmp_path / "s")
     wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
-    first_calls = CALLS["n"]                 # 4 attempts (1 failed)
-    W.FAIL = False; CALLS["n"] = 0
+    first_calls = CALLS["n"]  # 4 attempts (1 failed)
+    W.FAIL = False
+    CALLS["n"] = 0
     wf2 = W()
     wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
-    assert CALLS["n"] == 1                    # only the previously-failed cell ran
+    assert CALLS["n"] == 1  # only the previously-failed cell ran
     assert wf2.is_complete
     ds = wf2.to_xarray()
-    assert float(ds["val"].sel(a=2, b=1)) == 21.0   # cell now filled in place
-    assert ds.sizes == {"a": 2, "b": 2}             # same shape, no growth
+    assert float(ds["val"].sel(a=2, b=1)) == 21.0  # cell now filled in place
+    assert ds.sizes == {"a": 2, "b": 2}  # same shape, no growth
 ```
 
 - [ ] **Step 2: Run — expect FAIL.**
@@ -485,17 +520,19 @@ def test_resume_reruns_only_failed_cell(tmp_path):
     def _instrument_task(task, *, manifest=None, write_sidecar=True):
         from pathlib import Path
         from ._sweep_io import write_metrics_sidecar, read_metrics_sidecar, combo_key
+
         def wrapped(cfg):
             if manifest is not None:
-                combo = _combo_from_cfg(cfg)      # same swept-name extraction
+                combo = _combo_from_cfg(cfg)  # same swept-name extraction
                 if manifest.status(combo) == "completed":
                     cached = read_metrics_sidecar(Path(manifest.root) / manifest.dir(combo))
                     if cached is not None:
-                        return cached             # short-circuit: no training
+                        return cached  # short-circuit: no training
             result = task(cfg)
             if write_sidecar and isinstance(result, dict):
                 write_metrics_sidecar(Path.cwd(), result)
             return result
+
         return wrapped
     ```
 
@@ -535,6 +572,7 @@ def test_provenance_written_per_job(tmp_path):
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
 """Per-run provenance capture (git, versions, config); graceful without git."""
+
 from __future__ import annotations
 
 import json
@@ -551,10 +589,15 @@ _PKGS = ("mushin-py", "torch", "numpy", "pytorch-lightning", "hydra-core", "hydr
 def _git() -> dict:
     def run(*a):
         try:
-            return subprocess.run(a, capture_output=True, text=True,
-                                  timeout=5).stdout.strip() or None
+            return (
+                subprocess.run(
+                    a, capture_output=True, text=True, timeout=5
+                ).stdout.strip()
+                or None
+            )
         except Exception:
             return None
+
     sha = run("git", "rev-parse", "HEAD")
     if sha is None:
         return {"sha": None, "dirty": None, "branch": None}
@@ -585,12 +628,15 @@ def capture(config: Any = None) -> dict:
 
 
 def write_provenance(job_dir, config: Any = None) -> None:
-    (Path(job_dir) / "mushin_provenance.json").write_text(json.dumps(capture(config), indent=2))
+    (Path(job_dir) / "mushin_provenance.json").write_text(
+        json.dumps(capture(config), indent=2)
+    )
 
 
 def _to_plain(cfg):
     try:
         from omegaconf import OmegaConf
+
         return OmegaConf.to_container(cfg, resolve=True)
     except Exception:
         return None

@@ -55,6 +55,7 @@ import torch as tr
 from mushin import multirun
 from mushin.workflows import MultiRunMetricsWorkflow
 
+
 class LRSweep(MultiRunMetricsWorkflow):
     @staticmethod
     def task(lr: float, seed: int) -> dict:
@@ -63,6 +64,7 @@ class LRSweep(MultiRunMetricsWorkflow):
         acc = ...  # your validation accuracy
         return dict(accuracy=acc)
 
+
 wf = LRSweep()
 wf.run(lr=multirun([0.01, 0.1, 1.0]), seed=multirun([0, 1, 2]))  # 9 runs
 
@@ -70,7 +72,7 @@ ds = wf.to_xarray()
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
 #   Data variables: accuracy (lr, seed)
 
-ds["accuracy"].mean("seed")   # average over seeds, per learning rate
+ds["accuracy"].mean("seed")  # average over seeds, per learning rate
 ```
 
 ## Get started

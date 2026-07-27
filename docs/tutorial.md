@@ -16,7 +16,7 @@ mushin workflows are subclasses of `MultiRunMetricsWorkflow`. You implement a
 swept parameters:
 
 ```python
---8<-- "examples/sweep_to_dataset.py:workflow"
+--8 < --"examples/sweep_to_dataset.py:workflow"
 ```
 
 The `multirun(...)` wrapper tells Hydra to create one job per value. Here the
@@ -32,8 +32,8 @@ ds = wf.to_xarray()
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
 #   Data variables: accuracy (lr, seed)
 
-ds["accuracy"].mean("seed")   # average accuracy per learning rate
-ds.sel(lr=0.1)                # slice to a single lr
+ds["accuracy"].mean("seed")  # average accuracy per learning rate
+ds.sel(lr=0.1)  # slice to a single lr
 ```
 
 The dimensions come from the swept parameters; the data variables come from the
@@ -45,7 +45,7 @@ Once you have trained models (one list per method, one model per seed), pass
 them to `compare`:
 
 ```python
---8<-- "examples/compare_classifiers.py:run"
+--8 < --"examples/compare_classifiers.py:run"
 ```
 
 `compare` evaluates every model on `data`, assembles an `(method × seed)`
@@ -59,8 +59,8 @@ result.summary()
 # cnn    | accuracy | 0.963 | 0.951  | 0.975   |
 # mlp    | accuracy | 0.941 | 0.928  | 0.954   | *
 
-result.data           # xarray.Dataset, dims (method, seed)
-result.comparisons    # tidy DataFrame with p-values and effect sizes
+result.data  # xarray.Dataset, dims (method, seed)
+result.comparisons  # tidy DataFrame with p-values and effect sizes
 ```
 
 `"*"` in `significant_vs_ref` means the method differs significantly from the

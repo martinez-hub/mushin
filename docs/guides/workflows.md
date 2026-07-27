@@ -16,10 +16,12 @@ call `.run(...)`, which returns the labeled dataset in one step:
 ```python
 import mushin
 
+
 @mushin.sweep
 def experiment(lr, seed):
     ...
     return dict(accuracy=acc)
+
 
 ds = experiment.run(lr=mushin.multirun([0.01, 0.1]), seed=mushin.multirun([0, 1]))
 ```
@@ -44,7 +46,7 @@ The following example sweeps learning rates and seeds on a synthetic 2-class
 dataset:
 
 ```python
---8<-- "examples/sweep_to_dataset.py:workflow"
+--8 < --"examples/sweep_to_dataset.py:workflow"
 ```
 
 The dict returned from `task` becomes the data variables in the output dataset.
@@ -58,8 +60,8 @@ ds = wf.to_xarray()
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
 #   Data variables: accuracy (lr, seed)
 
-ds["accuracy"].mean("seed")     # average over seeds, per learning rate
-ds.sel(lr=0.1)                  # slice to a single lr
+ds["accuracy"].mean("seed")  # average over seeds, per learning rate
+ds.sel(lr=0.1)  # slice to a single lr
 ```
 
 You can also save and reload the dataset as NetCDF (requires the `netcdf` extra):
@@ -68,6 +70,7 @@ You can also save and reload the dataset as NetCDF (requires the `netcdf` extra)
 ds.to_netcdf("results.nc")
 
 import xarray as xr
+
 ds = xr.open_dataset("results.nc")
 ```
 
@@ -197,14 +200,16 @@ optimizer *search*, then let mushin run the reproducible *final grid* you report
 ```python
 import optuna
 
+
 def objective(trial):
     lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
     wd = trial.suggest_float("weight_decay", 0.0, 1e-2)
     return train_once(lr=lr, weight_decay=wd, seed=0)  # your training function
 
+
 study = optuna.create_study(direction="maximize")
 study.optimize(objective, n_trials=50)
-best = study.best_params            # e.g. {"lr": 3.1e-4, "weight_decay": 4e-3}
+best = study.best_params  # e.g. {"lr": 3.1e-4, "weight_decay": 4e-3}
 ```
 
 **2. Final grid.** Hand the winning config (and a baseline) to mushin and sweep
@@ -223,11 +228,13 @@ cs = ConfigStore.instance()
 cs.store(group="hp", name="baseline", node=make_config(lr=1e-3, weight_decay=0.0))
 cs.store(group="hp", name="tuned", node=make_config(**best))
 
+
 class Final(MultiRunMetricsWorkflow):
     @staticmethod
     def task(hp, seed):
         acc = train_once(lr=hp.lr, weight_decay=hp.weight_decay, seed=seed)
         return dict(accuracy=float(acc))
+
 
 wf = Final(make_config(hp=None))
 wf.run(
@@ -258,7 +265,7 @@ pip install hydra-joblib-launcher     # local multiprocessing (loky backend)
 ```
 
 ```python
---8<-- "examples/parallel_sweep.py:parallel"
+--8 < --"examples/parallel_sweep.py:parallel"
 ```
 
 Run it end to end with
@@ -308,17 +315,19 @@ only this axis — its toy task does no training). `HydraDDP` / `HydraFSDP` trai
     import pytorch_lightning as pl
     from mushin import HydraDDP
 
+
     @mushin.sweep
     def experiment(seed):
         trainer = pl.Trainer(
             strategy=HydraDDP(),
-            devices=1,            # GPUs per node (== launcher tasks_per_node)
+            devices=1,  # GPUs per node (== launcher tasks_per_node)
             num_nodes=2,
             accelerator="gpu",
             max_epochs=1,
         )
         trainer.fit(model, ...)
         return dict(accuracy=...)
+
 
     experiment.run(
         seed=mushin.multirun([0]),

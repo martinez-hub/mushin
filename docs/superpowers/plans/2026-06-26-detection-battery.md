@@ -108,11 +108,14 @@ def test_expand_metric_value_scalar_dict_and_sentinel():
     # scalar -> kept under the battery name
     assert expand_metric_value("acc", torch.tensor(0.5)) == {"acc": 0.5}
     # dict -> one entry per key (the metric's own key names)
-    out = expand_metric_value("map", {"map": torch.tensor(0.4), "map_50": torch.tensor(0.6)})
+    out = expand_metric_value(
+        "map", {"map": torch.tensor(0.4), "map_50": torch.tensor(0.6)}
+    )
     assert out == {"map": 0.4, "map_50": 0.6}
     # COCO -1.0 "not applicable" sentinel -> NaN
     sent = expand_metric_value("map", {"map_small": torch.tensor(-1.0)})
     assert math.isnan(sent["map_small"])
+
 
 def test_expand_metric_value_rejects_non_scalar():
     import pytest
@@ -187,8 +190,10 @@ def test_evaluate_expands_dict_metric_and_keeps_scalar():
         def __init__(self):
             super().__init__()
             self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
         def update(self, preds, target):
             self.v = preds.float().mean()
+
         def compute(self):
             return self.v
 
@@ -196,16 +201,23 @@ def test_evaluate_expands_dict_metric_and_keeps_scalar():
         def __init__(self):
             super().__init__()
             self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
         def update(self, preds, target):
             self.v = preds.float().mean()
+
         def compute(self):
             return {"a": self.v, "b": self.v + 1}
 
     model = torch.nn.Identity()
     data = [(torch.tensor([1.0, 1.0]), torch.tensor([0, 0]))]  # one re-iterable batch
 
-    out = evaluate(model, data, {"s": ScalarMetric(), "d": DictMetric()},
-                   predict_fn=lambda m, x: (m(x), None), prob_metrics=frozenset())
+    out = evaluate(
+        model,
+        data,
+        {"s": ScalarMetric(), "d": DictMetric()},
+        predict_fn=lambda m, x: (m(x), None),
+        prob_metrics=frozenset(),
+    )
     assert out == {"s": 1.0, "a": 1.0, "b": 2.0}
 ```
 
@@ -279,14 +291,21 @@ def test_compute_battery_expands_dict_metric():
         def __init__(self):
             super().__init__()
             self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
         def update(self, preds, target):
             self.v = preds.float().mean()
+
         def compute(self):
             return {"x": self.v, "y": torch.tensor(-1.0)}  # -1 -> NaN
 
     import math
-    out = compute_battery({"m": DictMetric()}, preds=torch.tensor([1.0]),
-                          targets=torch.tensor([1.0]), prob_metrics=frozenset())
+
+    out = compute_battery(
+        {"m": DictMetric()},
+        preds=torch.tensor([1.0]),
+        targets=torch.tensor([1.0]),
+        prob_metrics=frozenset(),
+    )
     assert out["x"] == 1.0
     assert math.isnan(out["y"])
 ```
@@ -351,8 +370,13 @@ def test_default_detection_predict_fn_returns_model_output_and_none():
     import torch
     from mushin.benchmark._predict import default_detection_predict_fn
 
-    sentinel = [{"boxes": torch.zeros(1, 4), "scores": torch.tensor([0.9]),
-                 "labels": torch.tensor([0])}]
+    sentinel = [
+        {
+            "boxes": torch.zeros(1, 4),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
 
     class FakeDetector(torch.nn.Module):
         def forward(self, x):
@@ -416,10 +440,16 @@ def test_detection_battery_contents_and_map_drops_metadata():
     battery = detection_battery()
     assert set(battery) == {"map", "iou", "giou", "ciou", "diou"}
 
-    preds = [{"boxes": torch.tensor([[0.0, 0.0, 10.0, 10.0]]),
-              "scores": torch.tensor([0.9]), "labels": torch.tensor([0])}]
-    tgts = [{"boxes": torch.tensor([[0.0, 0.0, 10.0, 10.0]]),
-             "labels": torch.tensor([0])}]
+    preds = [
+        {
+            "boxes": torch.tensor([[0.0, 0.0, 10.0, 10.0]]),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
+    tgts = [
+        {"boxes": torch.tensor([[0.0, 0.0, 10.0, 10.0]]), "labels": torch.tensor([0])}
+    ]
     battery["map"].update(preds, tgts)
     keys = set(battery["map"].compute())
     # the three non-scalar bookkeeping keys are dropped
@@ -484,9 +514,7 @@ def detection_battery(
         (``classes``/``*_per_class``), which are not single comparable scores."""
 
         def compute(self):
-            return {
-                k: v for k, v in super().compute().items() if k not in _MAP_DROP
-            }
+            return {k: v for k, v in super().compute().items() if k not in _MAP_DROP}
 
     return {
         "map": _DetectionMAP(box_format="xyxy"),
@@ -549,8 +577,10 @@ def test_compare_detection_does_not_demand_num_classes(monkeypatch):
             def __init__(self):
                 super().__init__()
                 self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
             def update(self, preds, target):
                 self.v = torch.tensor(0.5)
+
             def compute(self):
                 return self.v
 
@@ -559,9 +589,14 @@ def test_compare_detection_does_not_demand_num_classes(monkeypatch):
     spec = _tasks.get_task_spec("detection")
     monkeypatch.setattr(spec, "__dict__", spec.__dict__)  # noqa - frozen; patch registry instead
     monkeypatch.setitem(
-        _tasks._TASKS, "detection",
-        _tasks.TaskSpec(fake_battery, lambda m, x: (m(x), None), frozenset(),
-                        requires_num_classes=False),
+        _tasks._TASKS,
+        "detection",
+        _tasks.TaskSpec(
+            fake_battery,
+            lambda m, x: (m(x), None),
+            frozenset(),
+            requires_num_classes=False,
+        ),
     )
 
     class M(torch.nn.Module):
@@ -747,26 +782,46 @@ class _FixedDetector(torch.nn.Module):
 
 
 def test_perfect_predictions_score_one():
-    preds = [{"boxes": _box(0, 0, 10, 10), "scores": torch.tensor([0.9]),
-              "labels": torch.tensor([0])}]
+    preds = [
+        {
+            "boxes": _box(0, 0, 10, 10),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
     tgts = [{"boxes": _box(0, 0, 10, 10), "labels": torch.tensor([0])}]
     data = [([torch.zeros(3, 16, 16)], tgts)]
 
-    out = evaluate(_FixedDetector(preds), data, detection_battery(),
-                   default_detection_predict_fn, prob_metrics=frozenset())
+    out = evaluate(
+        _FixedDetector(preds),
+        data,
+        detection_battery(),
+        default_detection_predict_fn,
+        prob_metrics=frozenset(),
+    )
     assert out["map"] == pytest.approx(1.0)
     assert out["iou"] == pytest.approx(1.0)
     assert out["giou"] == pytest.approx(1.0)
 
 
 def test_disjoint_predictions_score_low():
-    preds = [{"boxes": _box(100, 100, 110, 110), "scores": torch.tensor([0.9]),
-              "labels": torch.tensor([0])}]
+    preds = [
+        {
+            "boxes": _box(100, 100, 110, 110),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
     tgts = [{"boxes": _box(0, 0, 10, 10), "labels": torch.tensor([0])}]
     data = [([torch.zeros(3, 16, 16)], tgts)]
 
-    out = evaluate(_FixedDetector(preds), data, detection_battery(),
-                   default_detection_predict_fn, prob_metrics=frozenset())
+    out = evaluate(
+        _FixedDetector(preds),
+        data,
+        detection_battery(),
+        default_detection_predict_fn,
+        prob_metrics=frozenset(),
+    )
     assert out["map"] == pytest.approx(0.0, abs=1e-6)
 
 
@@ -774,13 +829,23 @@ def test_battery_matches_torchmetrics_reference():
     """Our streaming/expansion path reproduces torchmetrics' own numbers."""
     from torchmetrics.detection import MeanAveragePrecision
 
-    preds = [{"boxes": _box(0, 0, 10, 10), "scores": torch.tensor([0.8]),
-              "labels": torch.tensor([1])}]
+    preds = [
+        {
+            "boxes": _box(0, 0, 10, 10),
+            "scores": torch.tensor([0.8]),
+            "labels": torch.tensor([1]),
+        }
+    ]
     tgts = [{"boxes": _box(1, 1, 11, 11), "labels": torch.tensor([1])}]
     data = [([torch.zeros(3, 16, 16)], tgts)]
 
-    out = evaluate(_FixedDetector(preds), data, detection_battery(),
-                   default_detection_predict_fn, prob_metrics=frozenset())
+    out = evaluate(
+        _FixedDetector(preds),
+        data,
+        detection_battery(),
+        default_detection_predict_fn,
+        prob_metrics=frozenset(),
+    )
 
     ref = MeanAveragePrecision(box_format="xyxy")
     ref.update(preds, tgts)
@@ -796,33 +861,59 @@ def test_battery_matches_torchmetrics_reference():
 
 def test_size_bucket_sentinel_becomes_nan():
     """A 10x10 box is 'medium' under COCO, so map_small has no GT -> -1 -> NaN."""
-    preds = [{"boxes": _box(0, 0, 10, 10), "scores": torch.tensor([0.9]),
-              "labels": torch.tensor([0])}]
+    preds = [
+        {
+            "boxes": _box(0, 0, 10, 10),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
     tgts = [{"boxes": _box(0, 0, 10, 10), "labels": torch.tensor([0])}]
     data = [([torch.zeros(3, 16, 16)], tgts)]
 
-    out = evaluate(_FixedDetector(preds), data, detection_battery(),
-                   default_detection_predict_fn, prob_metrics=frozenset())
+    out = evaluate(
+        _FixedDetector(preds),
+        data,
+        detection_battery(),
+        default_detection_predict_fn,
+        prob_metrics=frozenset(),
+    )
     assert math.isnan(out["map_small"])  # not -1.0
 
 
 def test_compare_detection_end_to_end():
-    good = [{"boxes": _box(0, 0, 10, 10), "scores": torch.tensor([0.9]),
-             "labels": torch.tensor([0])}]
-    bad = [{"boxes": _box(50, 50, 60, 60), "scores": torch.tensor([0.9]),
-            "labels": torch.tensor([0])}]
+    good = [
+        {
+            "boxes": _box(0, 0, 10, 10),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
+    bad = [
+        {
+            "boxes": _box(50, 50, 60, 60),
+            "scores": torch.tensor([0.9]),
+            "labels": torch.tensor([0]),
+        }
+    ]
     tgts = [{"boxes": _box(0, 0, 10, 10), "labels": torch.tensor([0])}]
     data = [([torch.zeros(3, 16, 16)], tgts)]
 
     result = compare(
-        {"good": [_FixedDetector(good), _FixedDetector(good)],
-         "bad": [_FixedDetector(bad), _FixedDetector(bad)]},
-        data, task="detection", test="welch",
+        {
+            "good": [_FixedDetector(good), _FixedDetector(good)],
+            "bad": [_FixedDetector(bad), _FixedDetector(bad)],
+        },
+        data,
+        task="detection",
+        test="welch",
     )
     assert isinstance(result, BenchmarkResult)
     for key in ("map", "map_50", "map_75", "mar_100", "iou", "giou", "ciou", "diou"):
         assert key in result.data.data_vars
-    assert float(result.data["map"].sel({"method": "good"}).mean()) == pytest.approx(1.0)
+    assert float(result.data["map"].sel({"method": "good"}).mean()) == pytest.approx(
+        1.0
+    )
 ```
 
 - [ ] **Step 2: Run the tests**
@@ -879,8 +970,12 @@ def test_real_coco_sample_end_to_end(tmp_path):
     # A tiny hand-built batch from a known COCO image + its annotations would go
     # here; for the smoke check we assert the pipeline runs and mAP is in [0, 1].
     img = torch.rand(3, 320, 320)
-    tgts = [{"boxes": torch.tensor([[10.0, 10.0, 200.0, 200.0]]),
-             "labels": torch.tensor([1])}]
+    tgts = [
+        {
+            "boxes": torch.tensor([[10.0, 10.0, 200.0, 200.0]]),
+            "labels": torch.tensor([1]),
+        }
+    ]
     data = [([img], tgts)]
 
     from mushin.benchmark import compare

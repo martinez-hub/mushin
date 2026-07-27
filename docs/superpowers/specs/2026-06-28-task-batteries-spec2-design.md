@@ -38,7 +38,9 @@ update_fn: UpdateFn | None = None
 with, in `src/mushin/benchmark/_inference.py`:
 
 ```python
-UpdateFn = Callable[[dict[str, Metric], torch.Tensor, Optional[torch.Tensor], object], None]
+UpdateFn = Callable[
+    [dict[str, Metric], torch.Tensor, Optional[torch.Tensor], object], None
+]
 # (battery, preds, probs, target) -> None ; owns all metric.update() calls for one batch
 ```
 
@@ -46,12 +48,16 @@ UpdateFn = Callable[[dict[str, Metric], torch.Tensor, Optional[torch.Tensor], ob
 
 ```python
 if update_fn is None:
+
     def update_fn(battery, preds, probs, target):
         for name, metric in battery.items():
             metric.update(probs if name in prob_metrics else preds, target)
+
+
 ...
 for x, y in data:
-    x = _to_device(x, device); y = _to_device(y, device)
+    x = _to_device(x, device)
+    y = _to_device(y, device)
     preds, probs = predict_fn(model, x)
     update_fn(battery, preds, probs, y)
 ```
@@ -66,12 +72,12 @@ All live in `src/mushin/benchmark/_metrics.py` (battery factories) with default 
 
 ```python
 {
-  "mse": MeanSquaredError(),
-  "mae": MeanAbsoluteError(),
-  "rmse": MeanSquaredError(squared=False),
-  "r2": R2Score(),
-  "pearson": PearsonCorrCoef(),
-  "spearman": SpearmanCorrCoef(),
+    "mse": MeanSquaredError(),
+    "mae": MeanAbsoluteError(),
+    "rmse": MeanSquaredError(squared=False),
+    "r2": R2Score(),
+    "pearson": PearsonCorrCoef(),
+    "spearman": SpearmanCorrCoef(),
 }
 ```
 Default predict_fn: `(model(x), None)`. `target = y` is a continuous tensor.
@@ -80,10 +86,10 @@ Default predict_fn: `(model(x), None)`. `target = y` is a continuous tensor.
 
 ```python
 {
-  "ssim": StructuralSimilarityIndexMeasure(),
-  "psnr": PeakSignalNoiseRatio(),
-  "ms_ssim": MultiScaleStructuralSimilarityIndexMeasure(),
-  "lpips": LearnedPerceptualImagePatchSimilarity(),   # requires [image]
+    "ssim": StructuralSimilarityIndexMeasure(),
+    "psnr": PeakSignalNoiseRatio(),
+    "ms_ssim": MultiScaleStructuralSimilarityIndexMeasure(),
+    "lpips": LearnedPerceptualImagePatchSimilarity(),  # requires [image]
 }
 ```
 Default predict_fn: `(model(x), None)` (the generated image). `target = y` is the reference image.
@@ -92,10 +98,10 @@ Default predict_fn: `(model(x), None)` (the generated image). `target = y` is th
 
 ```python
 {
-  "si_sdr": ScaleInvariantSignalDistortionRatio(),
-  "si_snr": ScaleInvariantSignalNoiseRatio(),
-  "pesq": PerceptualEvaluationSpeechQuality(fs=16000, mode="wb"),   # requires [audio]
-  "stoi": ShortTimeObjectiveIntelligibility(fs=16000),             # requires [audio]
+    "si_sdr": ScaleInvariantSignalDistortionRatio(),
+    "si_snr": ScaleInvariantSignalNoiseRatio(),
+    "pesq": PerceptualEvaluationSpeechQuality(fs=16000, mode="wb"),  # requires [audio]
+    "stoi": ShortTimeObjectiveIntelligibility(fs=16000),  # requires [audio]
 }
 ```
 Default predict_fn: `(model(x), None)` (estimated waveform). `target = y` is the reference waveform. (PESQ/STOI need a sample rate; default to 16 kHz wideband — documented, overridable via a custom `Task`.)
@@ -104,11 +110,11 @@ Default predict_fn: `(model(x), None)` (estimated waveform). `target = y` is the
 
 ```python
 {
-  "retrieval_map": RetrievalMAP(),
-  "ndcg": RetrievalNormalizedDCG(),
-  "mrr": RetrievalMRR(),
-  "precision": RetrievalPrecision(),
-  "recall": RetrievalRecall(),
+    "retrieval_map": RetrievalMAP(),
+    "ndcg": RetrievalNormalizedDCG(),
+    "mrr": RetrievalMRR(),
+    "precision": RetrievalPrecision(),
+    "recall": RetrievalRecall(),
 }
 ```
 Default predict_fn: `(model(x), None)` (relevance scores). Batches yield `y = (relevance, indexes)`. `update_fn = _retrieval_update`:

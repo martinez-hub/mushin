@@ -28,8 +28,10 @@ def make_model() -> torch.nn.Module: ...
 def run(train_loader, test_loader, *, seeds=(0, 1, 2)) -> BenchmarkResult:
     # train `len(seeds)` copies of two small models, then mushin.benchmark.compare(...)
     ...
+
+
 if __name__ == "__main__":
-    train_loader, test_loader = load_mnist()   # torchvision MNIST
+    train_loader, test_loader = load_mnist()  # torchvision MNIST
     print(run(train_loader, test_loader).summary())
 ```
 

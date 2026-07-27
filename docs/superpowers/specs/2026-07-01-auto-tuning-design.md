@@ -39,14 +39,15 @@ def tune_batch_size(
     datamodule: LightningDataModule | None = None,
     *,
     effective_batch_size: int,
-    pin_path: str | Path | None = None,   # default: <trainer.log_dir>/mushin_batch_pin.yaml
-    num_devices: int | None = None,       # default: derive from trainer
-    safety_margin: float = 0.0,           # back off the found max by this fraction (OOM noise)
-    batch_arg: str = "batch_size",        # attr on datamodule/module the tuner scales
-    retune: bool = False,                 # force re-search even if a pin exists
-    **scale_kwargs,                       # forwarded to Tuner.scale_batch_size
-) -> BatchPin:
-    ...
+    pin_path: str
+    | Path
+    | None = None,  # default: <trainer.log_dir>/mushin_batch_pin.yaml
+    num_devices: int | None = None,  # default: derive from trainer
+    safety_margin: float = 0.0,  # back off the found max by this fraction (OOM noise)
+    batch_arg: str = "batch_size",  # attr on datamodule/module the tuner scales
+    retune: bool = False,  # force re-search even if a pin exists
+    **scale_kwargs,  # forwarded to Tuner.scale_batch_size
+) -> BatchPin: ...
 ```
 
 `BatchPin` (frozen dataclass): `device_batch: int`, `accumulate_grad_batches: int`, `effective_batch_size: int` (the **actual** realized value), `num_devices: int`, `drift: int` (actual − requested).
@@ -72,12 +73,11 @@ def tune_learning_rate(
     module: LightningModule,
     datamodule: LightningDataModule | None = None,
     *,
-    pin_path: str | Path | None = None,   # default: <trainer.log_dir>/mushin_lr_pin.yaml
-    lr_attr: str = "lr",                  # attr on the module set to the found LR
+    pin_path: str | Path | None = None,  # default: <trainer.log_dir>/mushin_lr_pin.yaml
+    lr_attr: str = "lr",  # attr on the module set to the found LR
     retune: bool = False,
-    **lr_find_kwargs,                     # forwarded to Tuner.lr_find
-) -> LRPin:
-    ...
+    **lr_find_kwargs,  # forwarded to Tuner.lr_find
+) -> LRPin: ...
 ```
 
 `LRPin` (frozen dataclass): `learning_rate: float`.

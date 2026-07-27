@@ -256,7 +256,9 @@ def _instrument_task(task, combo_of_cfg=None):
         prior = read_cell_status(cwd)
         # attempt increments only for a prior attempt of the SAME combo (a numeric
         # dir reused by a different combo after a grid change resets to 1).
-        attempt = (prior["attempt"] + 1) if (prior and prior.get("combo") == combo) else 1
+        attempt = (
+            (prior["attempt"] + 1) if (prior and prior.get("combo") == combo) else 1
+        )
         try:
             write_provenance(cwd, cfg)
         except Exception:  # noqa: BLE001 - provenance is best-effort
@@ -278,12 +280,10 @@ def _instrument_task(task, combo_of_cfg=None):
 At the call site in `run()` (search `task=_instrument_task(`), pass the combo helper:
 
 ```python
-        task_call = _task_calls(
-            pre_task=pre_task_fn_wrapper(self.pre_task),
-            task=_instrument_task(
-                task_fn_wrapper(self.task), combo_of_cfg=self._combo_of_cfg
-            ),
-        )
+task_call = _task_calls(
+    pre_task=pre_task_fn_wrapper(self.pre_task),
+    task=_instrument_task(task_fn_wrapper(self.task), combo_of_cfg=self._combo_of_cfg),
+)
 ```
 
 - [ ] **Step 4: Run — verify pass**
@@ -346,7 +346,7 @@ def test_resume_after_hard_kill_skips_completed_cells(tmp_path):
     p = subprocess.Popen([sys.executable, str(script)])
     done = set()
     for _ in range(600):
-        for d in (list(wd.glob("*")) if wd.exists() else []):
+        for d in list(wd.glob("*")) if wd.exists() else []:
             s = read_cell_status(d) if d.is_dir() else None
             if s and s["status"] == "completed":
                 done.add(s["combo"]["seed"])
