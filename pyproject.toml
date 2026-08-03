@@ -71,7 +71,7 @@ dependencies = [
 # Intel-mac branch. Verified by the min-version CI job.
 viz = ["matplotlib >= 3.9"]
 netcdf = ["netCDF4 >= 1.7.0"]
-mcp = ["mcp >= 1.2, < 2"]
+mcp = ["mcp >= 2, < 3"]
 # The evaluation layer: `compare`, the metric batteries, LLM evaluation, and
 # `Study`. Kept out of the core install (whose identity is sweep -> dataset) so a
 # plain `pip install mushin-py` stays lean. torchmetrics/scipy are used ONLY here.
@@ -149,7 +149,7 @@ dev = [
     "towncrier >= 23.11",
     "matplotlib >= 3.9",
     "netCDF4 >= 1.7.0",
-    "mcp >= 1.2, < 2",
+    "mcp >= 2, < 3",
     # dev-only: powers examples/sklearn_sweep.py (a non-Lightning sweep demo) and
     # its test. mushin itself has no scikit-learn dependency or integration.
     # Floor is 1.4.2 — the first release compatible with NumPy 2 (the non-Intel

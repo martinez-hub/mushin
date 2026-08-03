@@ -32,7 +32,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     server = create_server(root=args.root)
-    server.run()  # FastMCP defaults to stdio transport
+    server.run()  # MCPServer defaults to stdio transport
 
 
 if __name__ == "__main__":

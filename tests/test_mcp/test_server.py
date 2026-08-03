@@ -176,6 +176,45 @@ def test_create_server_registers_tools():
     assert server.name == "mushin"
 
 
+def test_server_end_to_end_in_memory(tmp_path):
+    """Exercise the server over the real MCP protocol via an in-memory client."""
+    pytest.importorskip("mcp")
+    import json
+
+    import anyio  # a dependency of mcp
+    from mcp import Client
+
+    from mushin.mcp.server import create_server
+
+    (tmp_path / "run0" / ".hydra").mkdir(parents=True)
+    server = create_server(root=tmp_path)
+
+    async def scenario():
+        async with Client(server, raise_exceptions=True) as client:
+            tools = await client.list_tools()
+            ok = await client.call_tool("list_experiments", {})
+            bad = await client.call_tool("get_config", {"path": "../outside"})
+            return {t.name for t in tools.tools}, ok, bad
+
+    names, ok, bad = anyio.run(scenario)
+    assert names == {
+        "list_experiments",
+        "describe_experiment",
+        "get_metrics",
+        "get_config",
+        "read_dataset",
+        "get_failures",
+        "get_provenance",
+    }
+    assert ok.is_error is False
+    payload = json.loads(ok.content[0].text)
+    assert payload["count"] == 1
+    assert payload["runs"] == [str(tmp_path / "run0")]
+    # root containment must hold across the protocol boundary, as a tool
+    # error rather than a crashed server
+    assert bad.is_error is True
+
+
 def test_main_builds_server_without_running(monkeypatch):
     pytest.importorskip("mcp")
     import mushin.mcp.__main__ as cli
