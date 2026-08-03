@@ -463,11 +463,11 @@ def _server_root(root: str | Path | None) -> Path:
 
 
 def create_server(root: str | Path | None = None):
-    """Build the FastMCP stdio server. Importing ``mcp`` requires Python >= 3.10."""
-    from mcp.server.fastmcp import FastMCP
+    """Build the MCP stdio server. Importing ``mcp`` requires Python >= 3.10."""
+    from mcp.server.mcpserver import MCPServer
 
     rootp = _server_root(root)
-    mcp = FastMCP("mushin")
+    mcp = MCPServer("mushin")
 
     @mcp.tool()
     def list_experiments(root_dir: str | None = None) -> dict:
