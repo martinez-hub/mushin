@@ -3,6 +3,7 @@
 """Unit tests for HydraDDP launcher helpers that don't need GPUs."""
 
 import os
+from pathlib import Path
 
 from mushin.lightning import launchers
 from mushin.lightning.launchers import _set_env, _setup_environment, _teardown
@@ -222,3 +223,71 @@ def test_pl_main_pl_validating_calls_trainer_validate():
     trainer.validate.assert_called_once()
     trainer.fit.assert_not_called()
     trainer.test.assert_not_called()
+
+
+def _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, overrides):
+    """hydra-zen-launch a job and invoke the REAL _subprocess_call inside it,
+    with Popen captured. Returns (captured, launch_cwd, output_dir_seen)."""
+    import subprocess
+
+    from hydra_zen import launch, make_config
+
+    captured = {}
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(command, env=None, cwd=None):
+        captured["command"] = list(command)
+        captured["cwd"] = cwd
+        return _FakeProc()
+
+    def task(cfg):
+        from hydra.core.hydra_config import HydraConfig
+
+        captured["task_cwd"] = os.getcwd()
+        captured["output_dir"] = HydraConfig.get().runtime.output_dir
+        launchers._subprocess_call(
+            local_rank=1, global_rank=1, testing=False, predicting=False
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    # config.yaml saved by Hydra must contain `trainer` and `module` keys
+    # (the launcher validates them before spawning child ranks).
+    Config = make_config(trainer=1, module=2)
+    jr = launch(Config, task, overrides=overrides, version_base="1.3")
+    assert jr.return_value is None  # surfaces any exception raised in the task
+    return captured
+
+
+def test_subprocess_call_locates_job_dir_without_chdir(monkeypatch, tmp_path):
+    # Under version_base >= 1.2 semantics Hydra does NOT chdir into the job
+    # dir. The rank re-launcher must locate the job's saved config.yaml and
+    # spawn children via HydraConfig's runtime output dir, not os.getcwd().
+    captured = _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, [])
+
+    job_dir = Path(captured["output_dir"]).resolve()
+    assert Path(captured["task_cwd"]).resolve() != job_dir  # no chdir happened
+    assert Path(captured["cwd"]).resolve() == job_dir  # child spawns in job dir
+    # the child is pointed at the job's saved config, which really exists
+    cp = captured["command"][captured["command"].index("-cp") + 1]
+    assert Path(cp).resolve() == (job_dir / ".hydra").resolve()
+    assert (Path(cp) / "config.yaml").exists()
+    # and its own hydra.run.dir is the job dir, not the launch dir
+    run_dir = next(
+        o for o in captured["command"] if o.startswith("hydra.run.dir=")
+    ).split("=", 1)[1]
+    assert Path(run_dir.strip("'\"")).resolve() == job_dir
+
+
+def test_subprocess_call_unchanged_when_chdir_is_on(monkeypatch, tmp_path):
+    # With hydra.job.chdir=True (what mushin's run() always sets) the job dir
+    # and the CWD coincide — the launcher must resolve to the same place.
+    captured = _run_subprocess_call_in_hydra_job(
+        monkeypatch, tmp_path, ["hydra.job.chdir=True"]
+    )
+
+    job_dir = Path(captured["output_dir"]).resolve()
+    assert Path(captured["task_cwd"]).resolve() == job_dir  # chdir happened
+    assert Path(captured["cwd"]).resolve() == job_dir

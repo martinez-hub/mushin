@@ -219,7 +219,9 @@ class HydraDDP(_HydraReattachMixin, DDPStrategy):  # type: ignore
     """DDP Strategy that supports Hydra run and multirun jobs.
 
     This strategy assumes a PyTorch Lightning `Trainer.fit` or `Trainer.test` has been configured
-    to execute via Hydra.  It requires that Hydra saves a `config.yaml` in the current working directory with the following keys/properties set::
+    to execute via Hydra.  It requires that Hydra saves a `config.yaml` in the job's
+    output directory (``hydra.runtime.output_dir``, under ``hydra.output_subdir``)
+    with the following keys/properties set::
 
        ├── Config
        │    ├── trainer: A `pytorch_lightning.Trainer` configuration
