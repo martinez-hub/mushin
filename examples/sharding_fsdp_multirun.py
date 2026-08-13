@@ -64,4 +64,4 @@ def _task(trainer: pl.Trainer, module: pl.LightningModule) -> None:
 if __name__ == "__main__":
     store(Config, name="config")
     store.add_to_hydra_store()
-    zen(_task).hydra_main(config_name="config", config_path=None, version_base="1.1")
+    zen(_task).hydra_main(config_name="config", config_path=None, version_base="1.3")

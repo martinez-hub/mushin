@@ -109,8 +109,12 @@ def _subprocess_call(
 ) -> None:
     env_copy = os.environ.copy()
     env_copy["LOCAL_RANK"] = f"{local_rank}"
-    # CWD is the Hydra working directory
-    cwd = os.getcwd()
+    hydra_cfg = HydraConfig.get()
+    # The job's output directory (== its working directory when chdir is on).
+    # Resolved from HydraConfig rather than os.getcwd(): under version_base
+    # >= 1.2 Hydra no longer chdirs into the job dir, so the CWD may still be
+    # wherever the app was launched from.
+    cwd = hydra_cfg.runtime.output_dir
     os_cwd = _hydra_run_dir_override(cwd)
 
     command = [
@@ -118,7 +122,6 @@ def _subprocess_call(
         "-m",
         "mushin.lightning._pl_main",
     ]
-    hydra_cfg = HydraConfig.get()
 
     hydra_output = (
         os.path.join(cwd, hydra_cfg.output_subdir)
