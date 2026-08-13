@@ -17,7 +17,6 @@ import numpy as np
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
-from hydra_zen._compatibility import HYDRA_VERSION
 from hydra_zen._launch import _NotSet
 from typing_extensions import Self
 
@@ -36,7 +35,9 @@ T = TypeVar("T", list[Any], tuple[Any])
 T1 = TypeVar("T1")
 
 
-_VERSION_BASE_DEFAULT = _NotSet if HYDRA_VERSION < (1, 2, 0) else "1.1"
+# "1.1"-compat is deprecated (Hydra 1.4 removes it); the workflow keeps its
+# per-job chdir behavior by setting `hydra.job.chdir=True` explicitly in run().
+_VERSION_BASE_DEFAULT = "1.3"
 
 
 def _sort_x_by_k(x: T, k: Iterable[Any]) -> T:
@@ -1067,11 +1068,14 @@ class BaseWorkflow:
             Parameter overrides not considered part of the swept workflow
             parameter set (which are exposed via `multirun_task_overrides`).
 
-        version_base : Optional[str], optional (default=1.1)
-            Available starting with Hydra 1.2.0.
-            - If the `version_base parameter` is not specified, Hydra 1.x will use defaults compatible with version 1.1. Also in this case, a warning is issued to indicate an explicit version_base is preferred.
-            - If the `version_base parameter` is `None`, then the defaults are chosen for the current minor Hydra version. For example for Hydra 1.2, then would imply `config_path=None` and `hydra.job.chdir=False`.
-            - If the `version_base` parameter is an explicit version string like "1.1", then the defaults appropriate to that version are used.
+        version_base : Optional[str], optional (default="1.3")
+            The Hydra compatibility version governing default behaviors.
+            - An explicit version string like "1.3" selects the defaults of
+              that Hydra version.
+            - `None` selects the defaults of the installed Hydra version.
+            Regardless of `version_base`, `run` sets ``hydra.job.chdir=True``
+            (unless you override it) — each job runs in its own working
+            directory, which the workflow's metrics sidecars depend on.
 
         to_dictconfig: bool (default: False)
             If ``True``, convert a ``dataclasses.dataclass`` to a ``omegaconf.DictConfig``. Note, this
@@ -1195,12 +1199,11 @@ class BaseWorkflow:
                 for k, v in launcher_config.items()
             )
 
-        # Under version_base "1.1" Hydra changes the working directory per job at
-        # runtime, and the workflow depends on it: each job writes and reads its
-        # metrics sidecar in its own chdir'd directory. Set `hydra.job.chdir`
-        # explicitly to preserve that behavior AND silence Hydra's 1.1->1.2
-        # deprecation warning, which fires only while the setting is left
-        # implicit. A caller who passes their own `hydra.job.chdir` override wins.
+        # The workflow depends on Hydra changing the working directory per job
+        # at runtime: each job writes and reads its metrics sidecar in its own
+        # chdir'd directory. Under version_base >= 1.2 that is off by default,
+        # so set `hydra.job.chdir=True` explicitly. A caller who passes their
+        # own `hydra.job.chdir` override wins.
         if not any(o.split("=", 1)[0] == "hydra.job.chdir" for o in launch_overrides):
             launch_overrides.append("hydra.job.chdir=True")
 

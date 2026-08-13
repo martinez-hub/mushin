@@ -37,7 +37,7 @@ dependencies = [
     # hydra-zen floor is 0.10: `mushin.study` imports `hydra_zen.multirun`, which
     # 0.9 doesn't export. Verified by the min-version CI job.
     "hydra-zen >= 0.10.0",
-    "hydra-core >= 1.2.0",
+    "hydra-core >= 1.3.0",
     # torch floors are split by platform. Non-Intel uses NumPy 2 (below), which
     # is ABI-incompatible with torch built against NumPy 1.x; PyTorch first ships
     # NumPy-2-compatible wheels in 2.4.0 ("Numpy is not available" below that).

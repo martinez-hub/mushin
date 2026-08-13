@@ -98,7 +98,7 @@ def test_ddp_with_hydra_raises_misconfiguration():
     module = builds(SimpleLightningModule)
     Config = make_config(trainer=TrainerConfig, wrong_config_name=module, devices=2)
     with pytest.raises(ConfigAttributeError):
-        launch(Config, task_fn_raises, version_base="1.1")
+        launch(Config, task_fn_raises, version_base="1.3")
 
 
 @pytest.mark.skipif(
@@ -173,7 +173,7 @@ def test_ddp_with_hydra_with_datamodule():
     Config = make_config(
         trainer=TrainerConfig, module=module, datamodule=datamodule, devices=2
     )
-    launch(Config, task_fn_with_datamodule, version_base="1.1")
+    launch(Config, task_fn_with_datamodule, version_base="1.3")
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
@@ -203,7 +203,7 @@ def test_ddp_with_hydra_runjob(num_jobs):
         task_fn,
         overrides,
         multirun=multirun,
-        version_base="1.1",  # type: ignore
+        version_base="1.3",  # type: ignore
     )
 
     if multirun:

@@ -38,7 +38,7 @@ def task(
         trainer.fit(module, datamodule=datamodule)
 
 
-@hydra.main(config_path=None, config_name="config", version_base="1.1")
+@hydra.main(config_path=None, config_name="config", version_base="1.3")
 def main(cfg):
     zen(task)(cfg)
 
