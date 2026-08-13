@@ -1115,13 +1115,45 @@ def test_narrowed_grid_reusing_dir_is_complete(tmp_path):
     assert wf2.is_complete is True
 
 
-def test_run_sets_hydra_chdir_explicitly_and_silences_deprecation(tmp_path):
-    # Regression: under version_base "1.1" Hydra emits a UserWarning that future
-    # versions will no longer change the job working directory by default. The
-    # workflow depends on the chdir behavior (each job reads/writes its metrics
-    # sidecar in its own dir), so `run` sets `hydra.job.chdir=True` explicitly —
-    # preserving behavior and silencing the warning (which fires only while the
-    # setting is left implicit).
+def test_run_defaults_pin_chdir_and_version_base(tmp_path):
+    # The workflow depends on Hydra's per-job chdir (each job reads/writes its
+    # metrics sidecar in its own dir), which is OFF by default under
+    # version_base >= 1.2 — so `run` must pin `hydra.job.chdir=True` explicitly
+    # and default version_base to "1.3" (the 1.1 compat mode is deprecated and
+    # removed in Hydra 1.4). Assert the mechanism at the launch boundary:
+    # reverting either default must fail here.
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(val=float(seed))
+
+    captured = {}
+
+    import mushin.workflows as _wf_mod
+
+    orig_launch = _wf_mod.launch
+
+    def _spy_launch(*args, **kwargs):
+        captured["overrides"] = list(kwargs.get("overrides", []))
+        captured["version_base"] = kwargs.get("version_base")
+        return orig_launch(*args, **kwargs)
+
+    wf = W()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_wf_mod, "launch", _spy_launch)
+        wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "d"))
+
+    assert captured["version_base"] == "1.3"
+    assert "hydra.job.chdir=True" in captured["overrides"]
+    # behavior preserved: the sweep still assembles a labeled dataset
+    assert wf.to_xarray().sizes == {"seed": 2}
+
+
+def test_run_forwards_an_explicit_legacy_version_base(tmp_path):
+    # Until Hydra 1.4 removes the 1.1 compat mode, a caller may still pass
+    # version_base="1.1" explicitly — it must be forwarded verbatim and the
+    # sweep must complete. (hydra-core >= 1.3.5 emits a Hydra14MigrationWarning
+    # for it; that is expected and the caller's concern, not an error.)
     import warnings
 
     class W(MultiRunMetricsWorkflow):
@@ -1129,16 +1161,29 @@ def test_run_sets_hydra_chdir_explicitly_and_silences_deprecation(tmp_path):
         def task(seed):
             return dict(val=float(seed))
 
-    wf = W()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        wf.run(seed=multirun([0, 1]), working_dir=str(tmp_path / "d"))
+    captured = {}
 
-    chdir_warnings = [
-        w for w in caught if "no longer change working directory" in str(w.message)
-    ]
-    assert not chdir_warnings, [str(w.message) for w in chdir_warnings]
-    # behavior preserved: the sweep still assembles a labeled dataset
+    import mushin.workflows as _wf_mod
+
+    orig_launch = _wf_mod.launch
+
+    def _spy_launch(*args, **kwargs):
+        captured["version_base"] = kwargs.get("version_base")
+        return orig_launch(*args, **kwargs)
+
+    wf = W()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_wf_mod, "launch", _spy_launch)
+        with warnings.catch_warnings():
+            # hydra-core >= 1.3.5 warns on 1.1 compat; expected, not under test
+            warnings.simplefilter("ignore")
+            wf.run(
+                seed=multirun([0, 1]),
+                working_dir=str(tmp_path / "d"),
+                version_base="1.1",
+            )
+
+    assert captured["version_base"] == "1.1"
     assert wf.to_xarray().sizes == {"seed": 2}
 
 

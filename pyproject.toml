@@ -192,9 +192,6 @@ markers = [
     "config_group: names user-stored ConfigStore group(s) to remove after the test (see restore_config_group fixture)",
 ]
 filterwarnings = [
-    # mushin deliberately relies on Hydra's chdir-into-job-dir behavior to read
-    # results back; this deprecation is about that behavior changing upstream.
-    "ignore:Future Hydra versions will no longer change working directory:UserWarning",
     # matplotlib internals call deprecated pyparsing APIs; not fixable from here.
     # Scoped to pyparsing so real deprecations from torch/lightning/xarray are
     # not silently swallowed suite-wide.
