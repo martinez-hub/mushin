@@ -8,6 +8,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.12.0] - 2026-08-13
+
+### Changed
+
+- Migrated the MCP server to the MCP Python SDK v2 (the v2 SDK removes the
+  `mcp.server.fastmcp` module the server was built on, so an uncapped 1.x
+  install would break at import time): the `mcp` extra now requires
+  `mcp >= 2, < 3` (the 1.x line is in maintenance mode upstream). The server's
+  tools, transport (stdio), and `mushin-mcp --root` CLI are unchanged; if you
+  pin `mcp` 1.x elsewhere in your environment, stay on the previous mushin
+  release until you can upgrade. (#162, #163)
+- Moved off Hydra's deprecated 1.1 compatibility mode ahead of its removal in
+  Hydra 1.4: `run()`'s `version_base` now defaults to `"1.3"`, and the
+  `hydra-core` floor rises from 1.2 to 1.3. Behavior is unchanged — `run()` has
+  always pinned `hydra.job.chdir=True` explicitly, so each job still executes in
+  its own working directory — and hydra-core 1.3.5's new
+  `Hydra14MigrationWarning` no longer fires on every launch. `HydraDDP` /
+  `HydraFSDP` now locate the job's saved config via Hydra's runtime output
+  directory instead of the process CWD, so they also work when launched with
+  `version_base >= "1.2"` semantics (no per-job chdir) outside of `run()`. (#167)
+
+### Fixed
+
+- Corrected `HydraDDP`'s docstring, which still said the saved `config.yaml`
+  must live in the process's current working directory: since the
+  `version_base` migration it is located via the job's Hydra output directory,
+  so DDP re-launching no longer depends on the CWD. (#169)
+
+
 ## [0.11.1] - 2026-07-27
 
 ### Changed
@@ -515,7 +544,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/martinez-hub/mushin/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/martinez-hub/mushin/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/martinez-hub/mushin/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/martinez-hub/mushin/compare/v0.10.0...v0.10.1
