@@ -98,7 +98,7 @@ Each links to a guide with a runnable example:
 - **[Resilient & resumable sweeps](https://martinez-hub.github.io/mushin/guides/resilience/)** —
   `on_error="nan"`, durable `resume=True` across hard kills/preemption, and per-run
   provenance.
-- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel--out-of-process-launchers)** —
+- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel-out-of-process-launchers)** —
   `run(..., launcher="joblib")` or submitit; stdlib-picklable dispatch.
 - **[Multi-node & sharded training](https://martinez-hub.github.io/mushin/guides/multinode/)** —
   `HydraDDP` / `HydraFSDP` and `pin_gpu_round_robin` GPU packing, validated on a real
