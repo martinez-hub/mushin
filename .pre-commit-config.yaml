@@ -1,8 +1,12 @@
 # See https://pre-commit.com. Install with `pre-commit install`.
-# Update hook versions with `pre-commit autoupdate`.
+# Hook versions are bumped by Dependabot (see .github/dependabot.yml); run
+# `pre-commit autoupdate` for a manual bump. Keep the ruff-pre-commit `rev` in
+# step with the `ruff` pin in pyproject.toml's dev group — CI lints with the
+# latter (`uv run ruff check .`), so a skew lets local commits pass hooks that
+# CI then rejects.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -12,20 +16,26 @@ repos:
       - id: check-added-large-files
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.18
+    rev: v0.16.3
     hooks:
       - id: ruff-check     # lint
         args: ["--fix"]
       - id: ruff-format    # format
 
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.2
+    rev: v2.4.3
     hooks:
       - id: codespell
         additional_dependencies: ["tomli"]
+        # Same scope as CI and `make spell`. Left unscoped the hook also reads
+        # notebook output cells and archived plans under docs/, which are full
+        # of false positives CI never sees — so `pre-commit run --all-files`
+        # failed on a tree CI considered clean.
+        files: >-
+          ^(src/|tests/|examples/|changes/|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|RELEASING\.md|pyproject\.toml)
 
   - repo: https://github.com/kynan/nbstripout
-    rev: 0.7.1
+    rev: 0.9.1
     hooks:
       - id: nbstripout
         args: ["--keep-output"]
