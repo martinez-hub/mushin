@@ -280,10 +280,24 @@ jobs:
     needs: [changes, lint, test, batteries-clean-install, notebooks, notebook-prereqs, changelog, min-versions, docs, core-only]
     runs-on: ubuntu-latest
     steps:
-      - name: Fail if any required job failed or was cancelled
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      # Fail CLOSED: require every needed job to be success/skipped rather than
+      # enumerating the bad states. The old guard tested only for 'failure' and
+      # 'cancelled', but GitHub also reports 'abandoned' (observed when a job
+      # dies during setup, e.g. a 429 downloading an action) — so genuinely
+      # failed jobs passed the gate and this was the only required check on
+      # main. Anything not explicitly good now blocks, and a result value we
+      # have not seen yet cannot silently reopen the hole.
+      - name: Require every job to have succeeded or been skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          echo "A required job did not pass: ${{ join(needs.*.result, ', ') }}"
-          exit 1
-      - name: Success
-        run: echo "All required jobs passed or were skipped."
+          bad=$(printf '%s' "$NEEDS" | jq -r '
+            to_entries[]
+            | select(.value.result != "success" and .value.result != "skipped")
+            | "  \(.key): \(.value.result)"')
+          if [ -n "$bad" ]; then
+            echo "::error::A required job did not pass:"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          echo "All required jobs succeeded or were skipped."
