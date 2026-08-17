@@ -96,9 +96,6 @@ jobs:
         run: uv sync --extra eval --extra detection --extra image --extra audio --python ${{ matrix.python-version }}
       - name: Show resolved environment
         run: uv pip list
-      - name: TEMP probe — fail a NON-experimental leg
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        run: exit 1
       - name: Run tests
         run: uv run --extra eval --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
