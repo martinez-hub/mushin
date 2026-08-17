@@ -72,6 +72,16 @@ written with the class API. Need the full tool (`.failures`, provenance, custom
 analysis)? Drop to `experiment.workflow`, or subclass
 `MultiRunMetricsWorkflow`.
 
+Prefer to start from a notebook? There are
+[seven runnable ones](https://martinez-hub.github.io/mushin/notebooks/01_sweep_to_dataset/),
+executed in CI so they cannot rot — sweeps → datasets,
+[compare & batteries](https://martinez-hub.github.io/mushin/notebooks/02_compare_and_batteries/),
+[studies](https://martinez-hub.github.io/mushin/notebooks/03_study/),
+[resilient sweeps](https://martinez-hub.github.io/mushin/notebooks/04_resilience/),
+[LLM eval](https://martinez-hub.github.io/mushin/notebooks/05_llm_eval/),
+[scikit-learn](https://martinez-hub.github.io/mushin/notebooks/06_sklearn_framework_agnostic/),
+and [analyzing results](https://martinez-hub.github.io/mushin/notebooks/07_analyzing_results/).
+
 ## What else it does
 
 Each links to a guide with a runnable example:

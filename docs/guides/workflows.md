@@ -55,6 +55,10 @@ treated as fixed overrides for every run.
 
 ## Getting results
 
+> **Prefer to follow along?** [Notebook 07 — Analyzing your results](../notebooks/07_analyzing_results.ipynb)
+> walks the moves you repeat on every sweep: reduce over seeds, pick the best
+> config, slice, `groupby`, tabulate, plot, and save/reload.
+
 ```python
 ds = wf.to_xarray()
 # <xarray.Dataset> Dimensions: (lr: 3, seed: 3)
