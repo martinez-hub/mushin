@@ -67,12 +67,12 @@ print(result.summary().to_string(index=False))
 
 ```text
 method    metric     mean   ci_low  ci_high significant_vs_ref
-strong  accuracy 0.859375 0.824157 0.894593                   
-strong        f1 0.858928 0.823638 0.894217                   
-strong precision 0.860580 0.825959 0.895202                   
-strong    recall 0.859348 0.824177 0.894519                   
-strong     auroc 0.906214 0.882756 0.929672                   
-strong       ece 0.140488 0.105270 0.175706                   
+strong  accuracy 0.859375 0.824157 0.894593
+strong        f1 0.858928 0.823638 0.894217
+strong precision 0.860580 0.825959 0.895202
+strong    recall 0.859348 0.824177 0.894519
+strong     auroc 0.906214 0.882756 0.929672
+strong       ece 0.140488 0.105270 0.175706
   weak  accuracy 0.597500 0.564284 0.630716                  *
   weak        f1 0.596200 0.562269 0.630131                  *
   weak precision 0.599170 0.566766 0.631575                  *
@@ -192,18 +192,18 @@ result.summary()  # accuracy / f1 / precision / recall / auroc / ece + significa
 
 ```text
 method    metric     mean   ci_low  ci_high significant_vs_ref
-  good  accuracy 1.000000 1.000000 1.000000                   
-  good        f1 1.000000 1.000000 1.000000                   
-  good precision 1.000000 1.000000 1.000000                   
-  good    recall 1.000000 1.000000 1.000000                   
-  good     auroc 1.000000 1.000000 1.000000                   
-  good       ece 0.000091 0.000091 0.000091                   
-   bad  accuracy 0.276042 0.195243 0.356841                   
-   bad        f1 0.268352 0.221906 0.314797                   
-   bad precision 0.298513 0.252285 0.344741                   
-   bad    recall 0.273085 0.206776 0.339394                   
-   bad     auroc 0.479942 0.387758 0.572127                   
-   bad       ece 0.212327 0.081076 0.343579                   
+  good  accuracy 1.000000 1.000000 1.000000
+  good        f1 1.000000 1.000000 1.000000
+  good precision 1.000000 1.000000 1.000000
+  good    recall 1.000000 1.000000 1.000000
+  good     auroc 1.000000 1.000000 1.000000
+  good       ece 0.000091 0.000091 0.000091
+   bad  accuracy 0.276042 0.195243 0.356841
+   bad        f1 0.268352 0.221906 0.314797
+   bad precision 0.298513 0.252285 0.344741
+   bad    recall 0.273085 0.206776 0.339394
+   bad     auroc 0.479942 0.387758 0.572127
+   bad       ece 0.212327 0.081076 0.343579
 ```
 
 The `good` models memorize the labels (perfect, zero-variance scores); the `bad`
@@ -272,16 +272,16 @@ result.summary()  # miou / dice / pixel_acc / precision / recall + significance
 
 ```text
 method    metric     mean   ci_low  ci_high significant_vs_ref
-  good      miou 1.000000 1.000000 1.000000                   
-  good      dice 1.000000 1.000000 1.000000                   
-  good pixel_acc 1.000000 1.000000 1.000000                   
-  good precision 1.000000 1.000000 1.000000                   
-  good    recall 1.000000 1.000000 1.000000                   
-   bad      miou 0.105903 0.105903 0.105903                   
-   bad      dice 0.160738 0.160738 0.160738                   
-   bad pixel_acc 0.317708 0.317708 0.317708                   
-   bad precision 0.105903 0.105903 0.105903                   
-   bad    recall 0.333333 0.333333 0.333333                   
+  good      miou 1.000000 1.000000 1.000000
+  good      dice 1.000000 1.000000 1.000000
+  good pixel_acc 1.000000 1.000000 1.000000
+  good precision 1.000000 1.000000 1.000000
+  good    recall 1.000000 1.000000 1.000000
+   bad      miou 0.105903 0.105903 0.105903
+   bad      dice 0.160738 0.160738 0.160738
+   bad pixel_acc 0.317708 0.317708 0.317708
+   bad precision 0.105903 0.105903 0.105903
+   bad    recall 0.333333 0.333333 0.333333
 ```
 
 The `good` models paint the exact ground-truth mask (perfect scores); the `bad`
@@ -354,38 +354,38 @@ result.summary()  # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + s
 
 ```text
 method     metric      mean    ci_low   ci_high significant_vs_ref
-  good        map  1.000000  1.000000  1.000000                   
-  good     map_50  1.000000  1.000000  1.000000                   
-  good     map_75  1.000000  1.000000  1.000000                   
-  good  map_small  1.000000  1.000000  1.000000                   
-  good map_medium       NaN       NaN       NaN                   
-  good  map_large       NaN       NaN       NaN                   
-  good      mar_1  1.000000  1.000000  1.000000                   
-  good     mar_10  1.000000  1.000000  1.000000                   
-  good    mar_100  1.000000  1.000000  1.000000                   
-  good  mar_small  1.000000  1.000000  1.000000                   
-  good mar_medium       NaN       NaN       NaN                   
-  good  mar_large       NaN       NaN       NaN                   
-  good        iou  1.000000  1.000000  1.000000                   
-  good       giou  1.000000  1.000000  1.000000                   
-  good       ciou  1.000000  1.000000  1.000000                   
-  good       diou  1.000000  1.000000  1.000000                   
-   bad        map  0.000000  0.000000  0.000000                   
-   bad     map_50  0.000000  0.000000  0.000000                   
-   bad     map_75  0.000000  0.000000  0.000000                   
-   bad  map_small  0.000000  0.000000  0.000000                   
-   bad map_medium       NaN       NaN       NaN                   
-   bad  map_large       NaN       NaN       NaN                   
-   bad      mar_1  0.000000  0.000000  0.000000                   
-   bad     mar_10  0.000000  0.000000  0.000000                   
-   bad    mar_100  0.000000  0.000000  0.000000                   
-   bad  mar_small  0.000000  0.000000  0.000000                   
-   bad mar_medium       NaN       NaN       NaN                   
-   bad  mar_large       NaN       NaN       NaN                   
-   bad        iou  0.000000  0.000000  0.000000                   
-   bad       giou -0.944444 -0.944444 -0.944444                   
-   bad       ciou -0.694444 -0.694444 -0.694444                   
-   bad       diou -0.694444 -0.694444 -0.694444                   
+  good        map  1.000000  1.000000  1.000000
+  good     map_50  1.000000  1.000000  1.000000
+  good     map_75  1.000000  1.000000  1.000000
+  good  map_small  1.000000  1.000000  1.000000
+  good map_medium       NaN       NaN       NaN
+  good  map_large       NaN       NaN       NaN
+  good      mar_1  1.000000  1.000000  1.000000
+  good     mar_10  1.000000  1.000000  1.000000
+  good    mar_100  1.000000  1.000000  1.000000
+  good  mar_small  1.000000  1.000000  1.000000
+  good mar_medium       NaN       NaN       NaN
+  good  mar_large       NaN       NaN       NaN
+  good        iou  1.000000  1.000000  1.000000
+  good       giou  1.000000  1.000000  1.000000
+  good       ciou  1.000000  1.000000  1.000000
+  good       diou  1.000000  1.000000  1.000000
+   bad        map  0.000000  0.000000  0.000000
+   bad     map_50  0.000000  0.000000  0.000000
+   bad     map_75  0.000000  0.000000  0.000000
+   bad  map_small  0.000000  0.000000  0.000000
+   bad map_medium       NaN       NaN       NaN
+   bad  map_large       NaN       NaN       NaN
+   bad      mar_1  0.000000  0.000000  0.000000
+   bad     mar_10  0.000000  0.000000  0.000000
+   bad    mar_100  0.000000  0.000000  0.000000
+   bad  mar_small  0.000000  0.000000  0.000000
+   bad mar_medium       NaN       NaN       NaN
+   bad  mar_large       NaN       NaN       NaN
+   bad        iou  0.000000  0.000000  0.000000
+   bad       giou -0.944444 -0.944444 -0.944444
+   bad       ciou -0.694444 -0.694444 -0.694444
+   bad       diou -0.694444 -0.694444 -0.694444
 ```
 
 The single ground-truth box is small, so the `medium`/`large` size buckets have
@@ -431,18 +431,18 @@ result.summary()  # mse / mae / rmse / r2 / pearson / spearman + significance
 
 ```text
 method   metric      mean    ci_low   ci_high significant_vs_ref
-  good      mse  0.000000  0.000000  0.000000                   
-  good      mae  0.000000  0.000000  0.000000                   
-  good     rmse  0.000000  0.000000  0.000000                   
-  good       r2  1.000000  1.000000  1.000000                   
-  good  pearson  1.000000  1.000000  1.000000                   
-  good spearman  1.000000  1.000000  1.000000                   
-   bad      mse  5.076191  5.076191  5.076191                   
-   bad      mae  1.911885  1.911885  1.911885                   
-   bad     rmse  2.253040  2.253040  2.253040                   
-   bad       r2 -0.253489 -0.253489 -0.253489                   
-   bad  pearson       NaN       NaN       NaN                   
-   bad spearman  0.000000  0.000000  0.000000                   
+  good      mse  0.000000  0.000000  0.000000
+  good      mae  0.000000  0.000000  0.000000
+  good     rmse  0.000000  0.000000  0.000000
+  good       r2  1.000000  1.000000  1.000000
+  good  pearson  1.000000  1.000000  1.000000
+  good spearman  1.000000  1.000000  1.000000
+   bad      mse  5.076191  5.076191  5.076191
+   bad      mae  1.911885  1.911885  1.911885
+   bad     rmse  2.253040  2.253040  2.253040
+   bad       r2 -0.253489 -0.253489 -0.253489
+   bad  pearson       NaN       NaN       NaN
+   bad spearman  0.000000  0.000000  0.000000
 ```
 
 The `good` model fits the affine relation exactly (zero error, `r2 = 1`); the
@@ -495,16 +495,16 @@ result.summary()  # retrieval_map / ndcg / mrr / precision / recall + significan
 
 ```text
   method        metric     mean   ci_low  ci_high significant_vs_ref
-identity retrieval_map 0.750000 0.750000 0.750000                   
-identity          ndcg 0.815465 0.815465 0.815465                   
-identity           mrr 0.750000 0.750000 0.750000                   
-identity     precision 0.500000 0.500000 0.500000                   
-identity        recall 1.000000 1.000000 1.000000                   
-reversed retrieval_map 0.000000 0.000000 0.000000                   
-reversed          ndcg 0.815465 0.815465 0.815465                   
-reversed           mrr 0.000000 0.000000 0.000000                   
-reversed     precision 0.000000 0.000000 0.000000                   
-reversed        recall 0.000000 0.000000 0.000000                   
+identity retrieval_map 0.750000 0.750000 0.750000
+identity          ndcg 0.815465 0.815465 0.815465
+identity           mrr 0.750000 0.750000 0.750000
+identity     precision 0.500000 0.500000 0.500000
+identity        recall 1.000000 1.000000 1.000000
+reversed retrieval_map 0.000000 0.000000 0.000000
+reversed          ndcg 0.815465 0.815465 0.815465
+reversed           mrr 0.000000 0.000000 0.000000
+reversed     precision 0.000000 0.000000 0.000000
+reversed        recall 0.000000 0.000000 0.000000
 ```
 
 `identity` keeps the scores' ranking (query 0 scores AP `0.5`, query 1 AP `1.0`
@@ -557,10 +557,10 @@ result.summary()  # ssim / psnr / ms_ssim / lpips + significance
 
 ```text
 method  metric      mean    ci_low   ci_high significant_vs_ref
-     m    ssim  0.999384  0.999384  0.999384                   
-     m    psnr 40.055252 40.055252 40.055252                   
-     m ms_ssim  0.999481  0.999481  0.999481                   
-     m   lpips  0.000724  0.000724  0.000724                   
+     m    ssim  0.999384  0.999384  0.999384
+     m    psnr 40.055252 40.055252 40.055252
+     m ms_ssim  0.999481  0.999481  0.999481
+     m   lpips  0.000724  0.000724  0.000724
 ```
 
 The reconstruction is a near-copy of the reference (small added noise), so `ssim`
@@ -613,9 +613,9 @@ result.summary()  # si_sdr / si_snr / stoi + significance
 
 ```text
 method metric      mean    ci_low   ci_high significant_vs_ref
-     m si_sdr 40.029053 40.029053 40.029053                   
-     m si_snr 40.028419 40.028419 40.028419                   
-     m   stoi  0.999894  0.999894  0.999894                   
+     m si_sdr 40.029053 40.029053 40.029053
+     m si_snr 40.028419 40.028419 40.028419
+     m   stoi  0.999894  0.999894  0.999894
 ```
 
 The enhanced waveform is a near-copy of the clean reference, so `si_sdr`/`si_snr`
