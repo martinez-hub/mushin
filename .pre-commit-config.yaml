@@ -38,4 +38,7 @@ repos:
     rev: 0.9.1
     hooks:
       - id: nbstripout
-        args: ["--keep-output"]
+        # --keep-id: without it nbstripout renumbers cell ids sequentially, so
+        # inserting one cell rewrites the id of every cell after it and buries
+        # a two-line prose edit in a hundred lines of churn.
+        args: ["--keep-output", "--keep-id"]
