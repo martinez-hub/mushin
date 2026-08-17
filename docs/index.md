@@ -79,5 +79,10 @@ ds["accuracy"].mean("seed")  # average over seeds, per learning rate
 
 - [Install](install.md) — pip, extras, and the support matrix
 - [Quickstart](quickstart.md) — run the flagship sweep example end-to-end
+- [Tutorial](tutorial.md) — a longer guided pass through a real sweep
+- [Core concepts](concepts.md) — the mental model behind workflows and datasets
+- [Example notebooks](notebooks/01_sweep_to_dataset.ipynb) — seven runnable
+  notebooks, executed in CI: sweeps → datasets, compare & batteries, studies,
+  resilient sweeps, LLM eval, scikit-learn, and analyzing results
 - [Guides](guides/workflows.md) — workflows, compare, Study, segmentation, MCP
 - [API Reference](reference/benchmark.md) — full auto-generated docs

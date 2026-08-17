@@ -72,6 +72,16 @@ written with the class API. Need the full tool (`.failures`, provenance, custom
 analysis)? Drop to `experiment.workflow`, or subclass
 `MultiRunMetricsWorkflow`.
 
+Prefer to start from a notebook? There are
+[seven runnable ones](https://martinez-hub.github.io/mushin/notebooks/01_sweep_to_dataset/),
+executed in CI so they cannot rot — sweeps → datasets,
+[compare & batteries](https://martinez-hub.github.io/mushin/notebooks/02_compare_and_batteries/),
+[studies](https://martinez-hub.github.io/mushin/notebooks/03_study/),
+[resilient sweeps](https://martinez-hub.github.io/mushin/notebooks/04_resilience/),
+[LLM eval](https://martinez-hub.github.io/mushin/notebooks/05_llm_eval/),
+[scikit-learn](https://martinez-hub.github.io/mushin/notebooks/06_sklearn_framework_agnostic/),
+and [analyzing results](https://martinez-hub.github.io/mushin/notebooks/07_analyzing_results/).
+
 ## What else it does
 
 Each links to a guide with a runnable example:
@@ -88,7 +98,7 @@ Each links to a guide with a runnable example:
 - **[Resilient & resumable sweeps](https://martinez-hub.github.io/mushin/guides/resilience/)** —
   `on_error="nan"`, durable `resume=True` across hard kills/preemption, and per-run
   provenance.
-- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel--out-of-process-launchers)** —
+- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel-out-of-process-launchers)** —
   `run(..., launcher="joblib")` or submitit; stdlib-picklable dispatch.
 - **[Multi-node & sharded training](https://martinez-hub.github.io/mushin/guides/multinode/)** —
   `HydraDDP` / `HydraFSDP` and `pin_gpu_round_robin` GPU packing, validated on a real

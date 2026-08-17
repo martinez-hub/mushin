@@ -142,6 +142,24 @@ jobs:
         # the to_netcdf cell silently exercises only scipy's netCDF3 fallback.
         run: uv run --extra eval --extra viz --extra netcdf pytest --nbmake docs/notebooks/ -p no:cacheprovider
 
+  notebook-prereqs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.notebooks == 'true'
+    # The `notebooks` job above installs EVERY extra, so it cannot catch a
+    # notebook whose stated prerequisites are wrong — one that needs `eval`
+    # while its callout names only `viz` passes there and then fails for the
+    # reader on cell 1. This job runs each notebook in a throwaway venv holding
+    # exactly the `%pip install` line that notebook shows, so an
+    # under-specified callout fails CI instead of the reader.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Run each notebook with only its declared prerequisites
+        run: uv run python scripts/check_notebook_prereqs.py
+
   changelog:
     runs-on: ubuntu-latest
     # PRs only (the check diffs the base branch); never on push to main, and
@@ -259,7 +277,7 @@ jobs:
   # Set branch protection to require ONLY this check.
   ci-ok:
     if: always()
-    needs: [changes, lint, test, batteries-clean-install, notebooks, changelog, min-versions, docs, core-only]
+    needs: [changes, lint, test, batteries-clean-install, notebooks, notebook-prereqs, changelog, min-versions, docs, core-only]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled

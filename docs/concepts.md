@@ -17,6 +17,9 @@ See [Workflows & sweeps](guides/workflows.md) and the
 
 ## Frameworks: Lightning-first, sweep layer agnostic
 
+> **Prefer to follow along?** [Notebook 06 — scikit-learn, no torch](notebooks/06_sklearn_framework_agnostic.ipynb)
+> runs a full sweep with no torch anywhere.
+
 mushin is built on hydra-zen, with
 [PyTorch Lightning](https://lightning.ai/) as its first-class deep-learning
 path. The two layers differ in how tied to Lightning they are:
