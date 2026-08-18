@@ -29,6 +29,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       notebooks: ${{ steps.filter.outputs.notebooks }}
+      notebook_prereqs: ${{ steps.filter.outputs.notebook_prereqs }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -44,6 +45,17 @@ jobs:
               - '.github/workflows/**'
             notebooks:
               - 'docs/notebooks/**'
+            # `notebook-prereqs` builds one venv per distinct install line (each
+            # pulling torch), so it is too slow to run on every code change. It
+            # only verifies "what a notebook declares covers what it imports",
+            # which can change in four places: the notebooks, the extras they
+            # name, the module->extra import guards, and the checker itself.
+            notebook_prereqs:
+              - 'docs/notebooks/**'
+              - 'pyproject.toml'
+              - 'scripts/check_notebook_prereqs.py'
+              - 'src/mushin/**/__init__.py'
+              - '.github/workflows/ci.yml'
 
   lint:
     runs-on: ubuntu-latest
@@ -144,7 +156,7 @@ jobs:
 
   notebook-prereqs:
     needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.notebooks == 'true'
+    if: needs.changes.outputs.notebook_prereqs == 'true'
     # The `notebooks` job above installs EVERY extra, so it cannot catch a
     # notebook whose stated prerequisites are wrong — one that needs `eval`
     # while its callout names only `viz` passes there and then fails for the
