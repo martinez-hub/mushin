@@ -90,9 +90,12 @@ jobs:
           # supported Python, one x86_64 (macos-13) leg on the oldest.
           - { os: macos-latest, python-version: "3.13", experimental: false }
           - { os: macos-15-intel, python-version: "3.10", experimental: false }
-          # torch / Lightning may not ship 3.14 wheels yet; don't fail CI on it.
-          - { os: ubuntu-latest, python-version: "3.14", experimental: true }
-          - { os: windows-latest, python-version: "3.14", experimental: true }
+          # 3.14 is a supported, advertised version: these legs block like any
+          # other. Intel-mac is deliberately absent — it caps at torch 2.2.2,
+          # which has no 3.14 wheels.
+          - { os: ubuntu-latest, python-version: "3.14", experimental: false }
+          - { os: windows-latest, python-version: "3.14", experimental: false }
+          - { os: macos-latest, python-version: "3.14", experimental: false }
     continue-on-error: ${{ matrix.experimental }}
 
     steps:
