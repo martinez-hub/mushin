@@ -9,8 +9,8 @@ authors:
 repository-code: "https://github.com/martinez-hub/mushin"
 url: "https://martinez-hub.github.io/mushin/"
 license: MIT
-version: "0.12.0"
-date-released: "2026-08-13"
+version: "0.13.0"
+date-released: "2026-08-19"
 # Concept DOI — always resolves to the latest archived release.
 doi: "10.5281/zenodo.21436444"
 keywords:
