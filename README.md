@@ -115,17 +115,30 @@ pip install mushin-py           # the sweep -> dataset core
 pip install "mushin-py[eval]"   # + compare, metric batteries, LLM eval, Study
 ```
 
-Already use [uv](https://docs.astral.sh/uv/)? `uv add mushin-py` inside a
-project, or `uv pip install mushin-py`. The extras syntax is identical under
-either tool.
+With [uv](https://docs.astral.sh/uv/):
 
-The PyPI distribution is **`mushin-py`**, but you `import mushin` (like
-`scikit-learn` → `sklearn`). The **`eval`** extra adds the evaluation layer
-(`compare`, the metric batteries, LLM evaluation, `Study`) and its heavier
-dependencies (torchmetrics, scipy) — keeping the core install lean; accessing
-those features without it raises a clear install hint. Other optional extras:
-`viz`, `netcdf`, `detection`, `image`, `audio`, `mcp` (the battery extras imply
-`eval`) — e.g. `pip install "mushin-py[eval,viz]"`. Supported Python: 3.10 – 3.13.
+```bash
+uv add mushin-py                # the sweep -> dataset core
+uv add "mushin-py[eval]"        # + compare, metric batteries, LLM eval, Study
+```
+
+(`uv pip install mushin-py` also works outside a uv project.)
+
+The PyPI distribution is **`mushin-py`**, but you `import mushin` — the same
+pattern as `scikit-learn` → `sklearn`.
+
+The core install is the sweep → dataset workflow. The **`eval`** extra adds the
+evaluation layer (`compare`, the metric batteries, LLM evaluation, `Study`) and
+its heavier dependencies (torchmetrics, scipy), keeping the core lean — using
+those features without it raises a clear install hint. The other extras are
+`viz`, `netcdf`, `detection`, `image`, `audio`, and `mcp`; the three battery
+extras pull in `eval` for you. Combine them with commas — e.g.
+`"mushin-py[eval,viz]"`, which works verbatim with `pip install`, `uv add`, or
+`uv pip install`.
+
+Supported Python: **3.10 – 3.13**. See the
+[install guide](https://martinez-hub.github.io/mushin/install/) for the full
+extras table and the platform/torch/NumPy support matrix.
 
 ## Versioning & scope
 
