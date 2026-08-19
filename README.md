@@ -115,6 +115,10 @@ pip install mushin-py           # the sweep -> dataset core
 pip install "mushin-py[eval]"   # + compare, metric batteries, LLM eval, Study
 ```
 
+Already use [uv](https://docs.astral.sh/uv/)? `uv add mushin-py` inside a
+project, or `uv pip install mushin-py`. The extras syntax is identical under
+either tool.
+
 The PyPI distribution is **`mushin-py`**, but you `import mushin` (like
 `scikit-learn` → `sklearn`). The **`eval`** extra adds the evaluation layer
 (`compare`, the metric batteries, LLM evaluation, `Study`) and its heavier
