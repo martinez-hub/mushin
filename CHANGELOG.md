@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.13.0] - 2026-08-19
+
+### Added
+
+- Python 3.14 is now supported and tested on Linux, Windows, and Apple Silicon. (#179)
+
+### Misc
+
+- #172, #174, #175, #176, #177, #178
+
+
 ## [0.12.0] - 2026-08-13
 
 ### Changed
@@ -544,7 +555,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/martinez-hub/mushin/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/martinez-hub/mushin/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/martinez-hub/mushin/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/martinez-hub/mushin/compare/v0.10.1...v0.11.0
