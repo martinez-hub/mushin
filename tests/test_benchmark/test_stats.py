@@ -400,3 +400,43 @@ def test_item_bootstrap_chunking_is_bit_identical_and_bounded():
     finally:
         st._BOOTSTRAP_CELL_BUDGET = small_budget
     assert one == many
+
+
+def test_cluster_bootstrap_fixes_undercoverage_on_grouped_items():
+    """Grouped items break independence; resampling items alone under-covers."""
+    labels = np.repeat(np.arange(25), 8)
+    cov_naive = cov_clustered = 0
+    trials = 120
+    for k in range(trials):
+        r = np.random.default_rng(k)
+        # items in a group share a group effect; the TRUE difference is 0
+        d = r.normal(scale=1.0, size=25)[labels] + r.normal(scale=0.3, size=labels.size)
+        a, b = d, np.zeros_like(d)
+        _, lo, hi, _ = paired_item_bootstrap(a, b, n_resamples=600, seed=k)
+        cov_naive += lo <= 0 <= hi
+        _, lo2, hi2, _ = paired_item_bootstrap(
+            a, b, clusters=labels, n_resamples=600, seed=k
+        )
+        cov_clustered += lo2 <= 0 <= hi2
+    # naive badly under-covers; clustering recovers most of the nominal 95%
+    assert cov_naive / trials < 0.75
+    assert cov_clustered / trials > 0.85
+
+
+def test_cluster_bootstrap_matches_naive_for_singleton_clusters():
+    """One item per cluster is the un-clustered problem — the two must agree."""
+    r = np.random.default_rng(0)
+    a, b = r.normal(size=120), r.normal(size=120)
+    naive = paired_item_bootstrap(a, b, n_resamples=3000, seed=1)
+    singles = paired_item_bootstrap(
+        a, b, clusters=np.arange(120), n_resamples=3000, seed=1
+    )
+    assert np.allclose(naive, singles)
+
+
+def test_cluster_bootstrap_guards():
+    with pytest.raises(ValueError, match="one label per item"):
+        paired_item_bootstrap([1.0, 2.0, 3.0], [0.0, 0.0, 0.0], clusters=[1, 1])
+    # a single cluster cannot be resampled -> NaN interval rather than a fake one
+    diff, lo, hi, p = paired_item_bootstrap([1.0, 2.0], [0.0, 0.0], clusters=[7, 7])
+    assert diff == 1.5 and np.isnan(lo) and np.isnan(hi) and np.isnan(p)

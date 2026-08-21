@@ -1,0 +1,1 @@
+LLM evaluation gains `clusters=` for grouped eval items (several questions per passage), which resamples whole groups so the interval is not overconfident — ignoring grouping covers a nominal 95% interval only 45% of the time. New `compare_scores` accepts already-computed per-item scores from any harness, so you can get mushin's analysis without adopting its execution loop.
