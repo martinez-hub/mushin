@@ -18,6 +18,7 @@ from mushin.benchmark._stats import (
     available_corrections,
     available_tests,
     compare_methods,
+    paired_item_bootstrap,
 )
 
 from ._cache import OutputCache
@@ -68,8 +69,14 @@ def _to_scalar(v) -> float:
 
 def _score_one(
     name: str | None, m: Metric, outputs, refs, seed: int
-) -> dict[str, float]:
-    """Score a batch with one metric -> {data_var_name: value} (dicts expand)."""
+) -> tuple[dict[str, float], dict[str, list[float]]]:
+    """Score a batch -> ``({data_var: mean}, {data_var: per_item})``.
+
+    The second dict carries per-item scores where they exist, for the item-level
+    bootstrap. Plain callables are scored per example, so they always have them;
+    torchmetrics metrics are ``update(batch)`` -> ``compute()`` and expose only an
+    aggregate, so they return ``{}`` — scoring those per example would change what
+    the metric means (corpus BLEU is not the mean of sentence BLEU)."""
     if isinstance(m, TorchMetric):
         m.reset()
         m.update(outputs, refs)  # user shapes data per the metric's update signature
@@ -79,8 +86,8 @@ def _score_one(
             return {
                 (f"{base}_{k}" if name is not None else str(k)): _to_scalar(v)
                 for k, v in value.items()
-            }
-        return {base: _to_scalar(value)}
+            }, {}
+        return {base: _to_scalar(value)}, {}
     # plain callable: mean of per-example scores. Pass the trial seed if the metric
     # accepts one (e.g. llm_judge), so a stochastic judge is tied to the run.
     base = name if name is not None else "score"
@@ -96,14 +103,17 @@ def _score_one(
             except Exception:  # noqa: BLE001 - multi-arg ctor (UnicodeDecodeError…)
                 wrapped = RuntimeError(msg)
             raise wrapped from e
-    return {base: sum(scores) / len(scores)}
+    return {base: sum(scores) / len(scores)}, {base: scores}
 
 
-def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
+def _score(
+    metrics, outputs, refs, seed: int
+) -> tuple[dict[str, float], dict[str, list[float]]]:
     row: dict[str, float] = {}
+    items: dict[str, list[float]] = {}
     if isinstance(metrics, dict):
         for name, m in metrics.items():
-            scored = _score_one(name, m, outputs, refs, seed)
+            scored, per_item = _score_one(name, m, outputs, refs, seed)
             # A dict-returning metric expands to `<name>_<subkey>`, which can collide
             # with another battery entry (e.g. {"squad": SQuAD(), "squad_f1": ...}).
             # Silently overwriting would report the wrong metric, so reject it.
@@ -115,9 +125,12 @@ def _score(metrics, outputs, refs, seed: int) -> dict[str, float]:
                     "`<name>_<subkey>` — rename the battery key(s) to avoid the clash."
                 )
             row.update(scored)
+            items.update(per_item)
     else:
-        row.update(_score_one(None, metrics, outputs, refs, seed))
-    return row
+        scored, per_item = _score_one(None, metrics, outputs, refs, seed)
+        row.update(scored)
+        items.update(per_item)
+    return row, items
 
 
 def _normalize_output(out: Any) -> Any:
@@ -170,6 +183,7 @@ def compare_llms(
     alpha: float = 0.05,
     correction: str = "holm",
     cache: str | os.PathLike[str] | None = None,
+    item_bootstrap: int = 10_000,
 ) -> BenchmarkResult:
     if not systems:
         raise ValueError("`systems` is empty")
@@ -183,6 +197,15 @@ def compare_llms(
         )
     if isinstance(metric, dict) and not metric:
         raise ValueError("`metric` battery is empty; provide at least one metric")
+    # Validate up front, alongside test/correction: a bad value must not surface
+    # only after every (token-spending) system call has already run.
+    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
+        raise TypeError(
+            f"`item_bootstrap` must be an int (0 disables), got "
+            f"{type(item_bootstrap).__name__}"
+        )
+    if item_bootstrap < 0:
+        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
@@ -208,8 +231,11 @@ def compare_llms(
     store = OutputCache(cache) if cache is not None else None
 
     results: dict[str, list[dict[str, float]]] = {}
+    # per_items[method][metric] -> list of per-item score arrays, one per seed
+    per_items: dict[str, dict[str, list[list[float]]]] = {}
     for name, system in sysmap.items():
         per_seed = []
+        per_items[name] = {}
         for seed in seeds:
             outputs = _run(system, inputs, seed, store, name)
             if len(outputs) != len(inputs):
@@ -217,7 +243,13 @@ def compare_llms(
                     f"system {name!r} seed {seed} returned {len(outputs)} outputs "
                     f"for {len(inputs)} inputs"
                 )
-            per_seed.append(_score(metric, outputs, refs, seed))
+            row, items = _score(metric, outputs, refs, seed)
+            per_seed.append(row)
+            for metric_name, scores in items.items():
+                # str(): compare_methods stringifies metric names, and the item
+                # columns are matched back by that name — keying here by the raw
+                # object would silently NaN a non-string battery key.
+                per_items[name].setdefault(str(metric_name), []).append(scores)
         results[name] = per_seed
 
     ds = to_dataset(results)
@@ -227,4 +259,56 @@ def compare_llms(
     # and warns for systems constant in every metric — so the LLM and torch paths
     # handle deterministic systems identically.
     comparisons = compare_methods(ds, test=test, alpha=alpha, correction=correction)
+    if item_bootstrap:
+        comparisons = _attach_item_bootstrap(
+            comparisons, per_items, list(sysmap), n=item_bootstrap, alpha=alpha
+        )
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
+
+
+def _attach_item_bootstrap(comparisons, per_items, methods, *, n: int, alpha: float):
+    """Add paired item-level bootstrap columns to the comparison table.
+
+    The seed-based test in ``comparisons`` measures decoding/judge noise only; it
+    cannot answer whether a difference would survive a different sample of eval
+    items, which is usually the larger uncertainty. This adds that answer beside
+    it — deliberately in the SAME table, so a seed-significant result whose item
+    interval straddles 0 is impossible to miss.
+
+    Columns are NaN for metrics with no per-item scores (torchmetrics aggregates).
+    """
+    # A metric is eligible only if every method produced per-item scores for it.
+    eligible = [
+        m
+        for m in {k for meth in per_items.values() for k in meth}
+        if all(per_items[meth].get(m) for meth in methods)
+    ]
+    # Reduce over seeds: the per-item score a system gets on average.
+    reduced: dict[str, dict[str, np.ndarray]] = {}
+    for m in eligible:
+        lengths = {len(s) for meth in methods for s in per_items[meth][m]}
+        if len(lengths) != 1:  # ragged: cannot pair items across systems
+            continue
+        reduced[m] = {
+            meth: np.asarray(per_items[meth][m], dtype=float).mean(axis=0)
+            for meth in methods
+        }
+    cols = {c: [] for c in ("item_diff", "item_ci_low", "item_ci_high", "item_p")}
+    for _, row in comparisons.iterrows():
+        vals = reduced.get(str(row["metric"]))
+        if vals is None:
+            stats_row = (float("nan"),) * 4
+        else:
+            stats_row = paired_item_bootstrap(
+                vals[row["method_a"]],
+                vals[row["method_b"]],
+                n_resamples=n,
+                alpha=alpha,
+                seed=0,
+            )
+        for c, v in zip(cols, stats_row, strict=True):
+            cols[c].append(v)
+    out = comparisons.copy()
+    for c, v in cols.items():
+        out[c] = v
+    return out

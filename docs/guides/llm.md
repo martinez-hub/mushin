@@ -38,6 +38,20 @@ A deterministic system (same output for every seed) produces zero
 within-system variance. mushin reports this as **not** significant rather than
 producing a false positive — exactly the same behavior as the torch path.
 
+!!! danger "Seeds alone answer the *smaller* question"
+    Seed variance is decoding/judge noise. It says nothing about the **eval set**,
+    which is itself a sample — and "would this hold on a different 200 prompts?"
+    is usually both the question you care about and the far larger uncertainty.
+    A worked case in this repo's tests has a seed SD of `0.001` against an item
+    SD of `1.0` (~1000x): the seed test returns `p = 5e-15` for a difference
+    whose item-level interval straddles 0 (`item_p = 0.23`, i.e. ~12% of
+    resampled eval sets reverse the winner).
+
+    That is why `compare_llms` also runs a **paired item-level bootstrap** and
+    puts it in the same table — see [Item-level uncertainty](#item-level-uncertainty).
+    Read both. A seed-significant result whose item interval straddles 0 is not
+    a result you should report.
+
 ```python
 result = compare_llms(
     {"gpt4": gpt4_system, "claude": claude_system},
@@ -61,6 +75,38 @@ at the given seed count.
     subsample). For independent systems whose seed only drives their own
     sampling — the typical API-backed setup — the trials are uncorrelated and
     the pairing assumption does not hold; stick with the default `welch`.
+
+## Item-level uncertainty
+
+Alongside the seed-based test, `compare_llms` resamples the **eval items** with
+replacement (a paired bootstrap, Koehn 2004) and reports four extra columns on
+`result.comparisons`:
+
+| column | meaning |
+| --- | --- |
+| `item_diff` | mean per-item difference (seed-averaged) |
+| `item_ci_low` / `item_ci_high` | bootstrap CI on that difference |
+| `item_p` | two-sided bootstrap p-value |
+
+```python
+row = result.comparisons.iloc[0]
+row["p_value"]  # decoding noise only
+row["item_ci_low"], row["item_ci_high"]  # would other prompts agree?
+```
+
+Two caveats worth knowing:
+
+- **Only for per-item metrics.** Plain callables (including `llm_judge`) are
+  scored per example, so they get item statistics. torchmetrics metrics are
+  `update(batch)` → `compute()` and expose only an aggregate, so their item
+  columns are `NaN` — scoring them per example would change what the metric
+  means (corpus BLEU is not the mean of sentence BLEU).
+- **It does not rescue a deterministic system.** Item variance exists at
+  temperature 0, so the bootstrap still answers the eval-set question there,
+  but the seed-based columns remain masked.
+
+Pass `item_bootstrap=0` to skip it, or a different resample count (default
+`10_000`).
 
 ## Metric options
 
