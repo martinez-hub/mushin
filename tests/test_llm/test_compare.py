@@ -783,3 +783,47 @@ def test_compare_scores_rejects_mismatched_item_counts():
 
     with pytest.raises(ValueError, match="SAME items"):
         compare_scores({"a": [1.0, 0.0, 1.0], "b": [1.0, 0.0]})
+
+
+@pytest.mark.parametrize(
+    "scores,kwargs,match",
+    [
+        ({"a": np.zeros((4, 1)), "b": np.zeros((4, 1))}, {}, "only 1 item"),
+        ({"a": [1.0, np.nan, 0.0] * 7, "b": [0.0] * 21}, {}, "NaN or infinite"),
+        ({"a": [1.0, np.inf, 0.0] * 7, "b": [0.0] * 21}, {}, "NaN or infinite"),
+        ({"a": [], "b": []}, {}, "is empty"),
+        ({"a": 5.0, "b": 5.0}, {}, "is a scalar"),
+        ({"a": np.zeros((2, 2, 2)), "b": np.zeros((2, 2, 2))}, {}, "1-D .*or 2-D"),
+        (
+            {"a": [1.0, 0.0] * 10, "b": [0.0, 1.0] * 10},
+            {"clusters": [1, 2, 3]},
+            "one label per item",
+        ),
+    ],
+)
+def test_compare_scores_rejects_malformed_input(scores, kwargs, match):
+    from mushin.llm import compare_scores
+
+    with pytest.raises((ValueError, TypeError), match=match):
+        compare_scores(scores, **kwargs)
+
+
+def test_compare_scores_rejects_bad_item_bootstrap():
+    from mushin.llm import compare_scores
+
+    with pytest.raises(TypeError, match="must be an int"):
+        compare_scores({"a": [1.0, 0.0] * 10, "b": [0.0, 1.0] * 10}, item_bootstrap="x")
+
+
+def test_compare_scores_single_run_is_clean_under_error_warnings():
+    """The documented 1-D path must not emit numpy RuntimeWarnings."""
+    import warnings as _w
+
+    from mushin.llm import compare_scores
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", RuntimeWarning)
+        _w.simplefilter("ignore", UserWarning)
+        compare_scores(
+            {"a": np.array([1.0, 0.0, 1.0] * 10), "b": np.array([0.0, 1.0, 0.0] * 10)}
+        )

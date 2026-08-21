@@ -8,6 +8,7 @@ from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
     cohens_d,
+    cohens_dz,
     compare_methods,
     confidence_interval,
     holm_correction,
@@ -440,3 +441,52 @@ def test_cluster_bootstrap_guards():
     # a single cluster cannot be resampled -> NaN interval rather than a fake one
     diff, lo, hi, p = paired_item_bootstrap([1.0, 2.0], [0.0, 0.0], clusters=[7, 7])
     assert diff == 1.5 and np.isnan(lo) and np.isnan(hi) and np.isnan(p)
+
+
+def test_cluster_bootstrap_rejects_nan_labels():
+    """NaN labels would be silently dropped from every resample.
+
+    `labels == nan` is False everywhere, so grouping by equality gives the NaN
+    entry a zero-size group: those items vanish from the resampling while still
+    counting toward the point estimate, yielding a CI that need not contain its
+    own estimate. `pd.to_numeric(ids, errors="coerce")` produces exactly this.
+    """
+    labels = np.array([float(i // 3) for i in range(27)] + [np.nan] * 3)
+    d = np.zeros(30)
+    d[27:] = 50.0
+    with pytest.raises(ValueError, match="NaN label"):
+        paired_item_bootstrap(d, np.zeros(30), clusters=labels, n_resamples=100)
+
+
+def test_small_sample_warning_counts_clusters_not_items():
+    """A 500-item, 4-cluster eval set is a 4-sample problem."""
+    labels = np.repeat(np.arange(4), 125)
+    rng = np.random.default_rng(1)
+    d = rng.normal(scale=0.8, size=4)[labels] + rng.normal(scale=0.3, size=500)
+    with pytest.warns(UserWarning, match="only 4 clusters"):
+        paired_item_bootstrap(d, np.zeros(500), clusters=labels, n_resamples=400)
+
+
+def test_cluster_bootstrap_masks_identical_cluster_means():
+    """Degeneracy is a property of the resampled unit, not of the items.
+
+    Items vary inside every group but each group mean is identical, so the
+    cluster resample is a point mass — which the item-level ptp() cannot see.
+    """
+    labels = np.repeat(np.arange(6), 4)
+    d = np.tile([1.0, 2.0, 3.0, 4.0], 6)  # every cluster mean is 2.5
+    with pytest.warns(UserWarning, match="identical difference"):
+        _, lo, hi, p = paired_item_bootstrap(
+            d, np.zeros(24), clusters=labels, n_resamples=200
+        )
+    assert np.isnan(lo) and np.isnan(hi) and np.isnan(p)
+
+
+def test_effect_sizes_are_nan_for_single_observation():
+    """Single-run inputs are ordinary via compare_scores; ddof=1 must not warn."""
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", RuntimeWarning)
+        assert np.isnan(cohens_d([1.0], [0.0]))
+        assert np.isnan(cohens_dz([1.0], [0.0]))

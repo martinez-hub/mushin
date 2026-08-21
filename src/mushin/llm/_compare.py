@@ -364,13 +364,50 @@ def compare_scores(
             f"unknown correction {correction!r}; choose from {available_corrections()}"
         )
 
+    # Validate everything BEFORE building the dataset, and mirror the checks
+    # compare_llms performs — a caller reaching compare_scores has already spent
+    # the tokens elsewhere, but a silently misread array is worse than an error.
+    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
+        raise TypeError(
+            f"`item_bootstrap` must be an int (0 disables), got "
+            f"{type(item_bootstrap).__name__}"
+        )
+    if item_bootstrap < 0:
+        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
+    metric_name = str(metric_name)  # comparisons stringifies; keep the keys aligned
+
     arrays: dict[str, np.ndarray] = {}
     for name, raw in scores.items():
-        arr = np.atleast_2d(np.asarray(raw, dtype=float))
-        if arr.ndim != 2:
+        arr = np.asarray(raw, dtype=float)
+        if arr.ndim == 0:
+            raise ValueError(
+                f"scores for {name!r} is a scalar; pass a sequence of per-item "
+                "scores (1-D) or an (n_runs, n_items) array"
+            )
+        if arr.ndim > 2:
             raise ValueError(
                 f"scores for {name!r} must be 1-D (one run) or 2-D "
-                f"(n_seeds x n_items), got shape {np.shape(raw)}"
+                f"(n_runs x n_items), got shape {arr.shape}"
+            )
+        if arr.ndim == 1:
+            arr = arr[np.newaxis, :]
+        if arr.size == 0:
+            raise ValueError(f"scores for {name!r} is empty")
+        if arr.shape[1] < 2:
+            # (n, 1) is n runs of ONE item, which supports no item-level
+            # inference and is nearly always a column vector the caller meant as
+            # a single run of n items.
+            raise ValueError(
+                f"scores for {name!r} has only {arr.shape[1]} item(s) per run "
+                f"(shape {arr.shape}). If this is one run of {arr.shape[0]} "
+                "items, pass a 1-D sequence or transpose it — a column vector is "
+                "read as one item per run."
+            )
+        if not np.isfinite(arr).all():
+            raise ValueError(
+                f"scores for {name!r} contain NaN or infinite values; the "
+                "comparison would silently collapse to NaN. Drop or impute those "
+                "items (in every system, to keep the pairing) first."
             )
         arrays[name] = arr
     widths = {a.shape[1] for a in arrays.values()}
@@ -382,6 +419,11 @@ def compare_scores(
     if len(depths) != 1:
         raise ValueError(
             f"every system must have the same number of runs, got {sorted(depths)}"
+        )
+    if clusters is not None and len(clusters) != next(iter(widths)):
+        raise ValueError(
+            f"`clusters` must have one label per item, got {len(clusters)} "
+            f"labels for {next(iter(widths))} items"
         )
 
     results = {
