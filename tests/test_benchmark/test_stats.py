@@ -352,3 +352,51 @@ def test_paired_item_bootstrap_rejects_ragged_and_handles_tiny_input():
         paired_item_bootstrap([1.0, 2.0], [1.0])
     diff, lo, hi, p = paired_item_bootstrap([1.0], [0.0])
     assert diff == 1.0 and np.isnan(lo) and np.isnan(hi) and np.isnan(p)
+
+
+def test_item_bootstrap_masks_constant_nonzero_difference():
+    """A constant per-item difference has no sampling distribution.
+
+    Every d_i identical makes the resampled distribution a point mass, which
+    naively yields a zero-width CI and the floor p-value at ANY n — total
+    domination on a small binary eval set is ordinary, not contrived. Mirror the
+    seed axis: mask it instead of asserting certainty.
+    """
+    with pytest.warns(UserWarning, match="identical difference"):
+        diff, lo, hi, p = paired_item_bootstrap(
+            [1.0] * 4, [0.0] * 4, n_resamples=1000, seed=0
+        )
+    assert diff == 1.0
+    assert np.isnan(lo) and np.isnan(hi) and np.isnan(p)
+
+
+def test_item_bootstrap_identical_systems_still_report_no_difference():
+    """d == 0 everywhere is informative (they match), not a masked unknown."""
+    a = np.arange(30) * 0.1
+    diff, lo, hi, p = paired_item_bootstrap(a, a, n_resamples=500, seed=0)
+    assert (diff, lo, hi, p) == (0.0, 0.0, 0.0, 1.0)
+
+
+def test_item_bootstrap_warns_on_too_few_items():
+    """The percentile bootstrap is ~49% false-positive at n=2, ~16% at n=5."""
+    with pytest.warns(UserWarning, match="only 5 items"):
+        paired_item_bootstrap(
+            [1.0, 0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0, 0.0], n_resamples=500
+        )
+
+
+def test_item_bootstrap_chunking_is_bit_identical_and_bounded():
+    """Chunked resampling must consume the same rng stream as one big draw."""
+    import mushin.benchmark._stats as st
+
+    r = np.random.default_rng(0)
+    a, b = r.normal(size=500), r.normal(size=500)
+    small_budget = st._BOOTSTRAP_CELL_BUDGET
+    try:
+        st._BOOTSTRAP_CELL_BUDGET = 10**9  # effectively one chunk
+        one = paired_item_bootstrap(a, b, n_resamples=2000, seed=1)
+        st._BOOTSTRAP_CELL_BUDGET = 5000  # many small chunks
+        many = paired_item_bootstrap(a, b, n_resamples=2000, seed=1)
+    finally:
+        st._BOOTSTRAP_CELL_BUDGET = small_budget
+    assert one == many

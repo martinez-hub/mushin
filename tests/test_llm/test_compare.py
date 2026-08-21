@@ -687,3 +687,44 @@ def test_item_bootstrap_can_be_disabled():
             item_bootstrap=0,
         )
     assert "item_diff" not in res.comparisons.columns
+
+
+def test_item_bootstrap_validated_before_any_system_call():
+    """A bad value must not surface only after every paid system call has run."""
+    calls = []
+
+    def spy(inputs, seed):
+        calls.append(1)
+        return ["x"] * len(inputs)
+
+    for bad, exc in ((-1, ValueError), ("10", TypeError), (3.5, TypeError)):
+        with pytest.raises(exc):
+            compare_llms(
+                {"a": spy, "b": spy},
+                data=[{"input": 1}],
+                metric=lambda o, r: 1.0,
+                item_bootstrap=bad,
+            )
+    assert calls == []
+
+
+def test_item_columns_populated_for_non_string_metric_keys():
+    """compare_methods stringifies metric names; per-item keys must match."""
+    data = [{"input": i, "reference": None} for i in range(40)]
+
+    def mk(offset):
+        def system(inputs, seed):
+            r = np.random.default_rng(seed)
+            return [float(offset + 0.1 * r.standard_normal()) for _ in inputs]
+
+        return system
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_llms(
+            {"a": mk(0.7), "b": mk(0.5)},
+            data=data,
+            metric={1: lambda o, r: o},  # int key, not str
+            seeds=range(4),
+        )
+    assert res.comparisons["item_diff"].notna().all()

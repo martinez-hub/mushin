@@ -197,6 +197,15 @@ def compare_llms(
         )
     if isinstance(metric, dict) and not metric:
         raise ValueError("`metric` battery is empty; provide at least one metric")
+    # Validate up front, alongside test/correction: a bad value must not surface
+    # only after every (token-spending) system call has already run.
+    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
+        raise TypeError(
+            f"`item_bootstrap` must be an int (0 disables), got "
+            f"{type(item_bootstrap).__name__}"
+        )
+    if item_bootstrap < 0:
+        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
@@ -237,7 +246,10 @@ def compare_llms(
             row, items = _score(metric, outputs, refs, seed)
             per_seed.append(row)
             for metric_name, scores in items.items():
-                per_items[name].setdefault(metric_name, []).append(scores)
+                # str(): compare_methods stringifies metric names, and the item
+                # columns are matched back by that name — keying here by the raw
+                # object would silently NaN a non-string battery key.
+                per_items[name].setdefault(str(metric_name), []).append(scores)
         results[name] = per_seed
 
     ds = to_dataset(results)

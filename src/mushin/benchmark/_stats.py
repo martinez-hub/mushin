@@ -194,6 +194,15 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
         )
 
 
+#: Below this many eval items the percentile bootstrap is too miscalibrated to
+#: trust (measured ~49% false-positive rate at n=2, ~16% at n=5).
+_MIN_BOOTSTRAP_ITEMS = 20
+
+#: Cap on index cells materialized per resampling block, bounding peak memory
+#: independently of the eval-set size.
+_BOOTSTRAP_CELL_BUDGET = 2_000_000
+
+
 class IncompleteSweepError(RuntimeError):
     """Raised when statistics are requested on a sweep that has failed/missing runs."""
 
@@ -439,9 +448,45 @@ def paired_item_bootstrap(
     observed = float(d.mean())
     if n < 2 or not np.isfinite(d).all():
         return observed, float("nan"), float("nan"), float("nan")
+    if np.ptp(d) == 0:
+        # Every item shows the SAME difference, so the resampled distribution is
+        # a point mass: the naive result is a zero-width interval and the floor
+        # p-value at any n. Mirror how compare_methods treats the seed axis —
+        # indistinguishable -> p=1, constant-but-nonzero -> masked.
+        if np.isclose(observed, 0.0):
+            return observed, observed, observed, 1.0
+        warnings.warn(
+            f"every item shows an identical difference of {observed:g}, so the "
+            "item bootstrap has no sampling distribution and cannot bound the "
+            "eval-set uncertainty (reporting NaN rather than a zero-width "
+            "interval). For an all-or-nothing binary metric, use an exact sign "
+            "test on the discordant items instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return observed, float("nan"), float("nan"), float("nan")
+    if n < _MIN_BOOTSTRAP_ITEMS:
+        # The percentile bootstrap is badly miscalibrated on a handful of items
+        # (measured: ~49% false-positive rate at n=2, ~16% at n=5). Warn rather
+        # than mask, matching warn_if_underpowered on the seed axis.
+        warnings.warn(
+            f"item bootstrap over only {n} items: the percentile interval is "
+            f"unreliable below ~{_MIN_BOOTSTRAP_ITEMS} items and the p-value is "
+            "anti-conservative. Treat the interval as indicative only.",
+            UserWarning,
+            stacklevel=2,
+        )
     rng = np.random.default_rng(seed)
-    idx = rng.integers(0, n, size=(n_resamples, n))
-    means = d[idx].mean(axis=1)
+    # Chunked so peak memory does not scale with n_resamples * n_items (a
+    # 20k-item eval set would otherwise allocate gigabytes at the default 10_000
+    # resamples). Drawing in blocks consumes the SAME rng stream, so results are
+    # bit-identical to the unchunked version.
+    means = np.empty(n_resamples)
+    block = max(1, _BOOTSTRAP_CELL_BUDGET // n)
+    for start in range(0, n_resamples, block):
+        k = min(block, n_resamples - start)
+        idx = rng.integers(0, n, size=(k, n))
+        means[start : start + k] = d[idx].mean(axis=1)
     low, high = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     # Two-sided: how often does a resample land on the other side of 0?
     opposite = (means <= 0).sum() if observed > 0 else (means >= 0).sum()

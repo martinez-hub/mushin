@@ -43,13 +43,38 @@ producing a false positive — exactly the same behavior as the torch path.
     which is itself a sample — and "would this hold on a different 200 prompts?"
     is usually both the question you care about and the far larger uncertainty.
     A worked case in this repo's tests has a seed SD of `0.001` against an item
-    SD of `1.0` (~1000x): the seed test returns `p = 5e-15` for a difference that
-    reverses on 8.8% of resampled eval sets.
+    SD of `1.0` (~1000x): the seed test returns `p = 5e-15` for a difference
+    whose item-level interval straddles 0 (`item_p = 0.23`, i.e. ~12% of
+    resampled eval sets reverse the winner).
 
     That is why `compare_llms` also runs a **paired item-level bootstrap** and
     puts it in the same table — see [Item-level uncertainty](#item-level-uncertainty).
     Read both. A seed-significant result whose item interval straddles 0 is not
     a result you should report.
+
+```python
+result = compare_llms(
+    {"gpt4": gpt4_system, "claude": claude_system},
+    data=eval_data,
+    metric=exact_match,
+    seeds=range(10),  # 10 seeds → more power
+    test="welch",
+)
+```
+
+Use more seeds (≥ 5) for a robust estimate. Welch's t-test (the default) already
+has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
+`ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
+below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
+at the given seed count.
+
+!!! warning "Paired tests need a *shared* per-seed random effect"
+    `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
+    other. That pairing is only meaningful when seed *k* induces a shared
+    random effect across systems (e.g. both score the same seed-*k* data
+    subsample). For independent systems whose seed only drives their own
+    sampling — the typical API-backed setup — the trials are uncorrelated and
+    the pairing assumption does not hold; stick with the default `welch`.
 
 ## Item-level uncertainty
 
@@ -82,30 +107,6 @@ Two caveats worth knowing:
 
 Pass `item_bootstrap=0` to skip it, or a different resample count (default
 `10_000`).
-
-```python
-result = compare_llms(
-    {"gpt4": gpt4_system, "claude": claude_system},
-    data=eval_data,
-    metric=exact_match,
-    seeds=range(10),  # 10 seeds → more power
-    test="welch",
-)
-```
-
-Use more seeds (≥ 5) for a robust estimate. Welch's t-test (the default) already
-has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
-`ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
-below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
-at the given seed count.
-
-!!! warning "Paired tests need a *shared* per-seed random effect"
-    `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
-    other. That pairing is only meaningful when seed *k* induces a shared
-    random effect across systems (e.g. both score the same seed-*k* data
-    subsample). For independent systems whose seed only drives their own
-    sampling — the typical API-backed setup — the trials are uncorrelated and
-    the pairing assumption does not hold; stick with the default `welch`.
 
 ## Metric options
 
