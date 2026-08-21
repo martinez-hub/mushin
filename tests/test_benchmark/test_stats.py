@@ -5,6 +5,7 @@ import pytest
 import xarray as xr
 
 from mushin.benchmark._aggregate import to_dataset
+from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
     cohens_d,
     compare_methods,
@@ -18,6 +19,44 @@ def test_confidence_interval_brackets_mean():
     mean, lo, hi = confidence_interval([0.8, 0.82, 0.79, 0.81, 0.80])
     assert lo < mean < hi
     assert abs(mean - 0.804) < 1e-6
+
+
+def test_confidence_interval_degenerate_for_constant_values():
+    """A method constant across seeds gets the degenerate point, never NaN bounds.
+
+    `confidence_interval` delegates to `scipy.stats.t.interval`, which returns
+    `(nan, nan)` when the standard error is 0 (`inf * 0`). Without the explicit
+    zero-sem guard this surfaces as NaN `ci_low`/`ci_high` in `.summary()` for a
+    deterministic method — see `test_summary_bounds_finite_for_constant_method`.
+    """
+    assert confidence_interval([0.9, 0.9, 0.9]) == (0.9, 0.9, 0.9)
+    # a single observation has no spread either
+    assert confidence_interval([2.5]) == (2.5, 2.5, 2.5)
+    # and the guard must not swallow a genuine interval
+    mean, lo, hi = confidence_interval([0.9, 0.9, 0.9, 0.91])
+    assert lo < mean < hi
+
+
+def test_summary_bounds_finite_for_constant_method():
+    """`.summary()` never reports NaN bounds for a method constant across seeds."""
+    ds = xr.Dataset(
+        {
+            "accuracy": (
+                ("method", "seed"),
+                np.array([[0.90, 0.90, 0.90], [0.70, 0.71, 0.72]]),
+            )
+        },
+        coords={"method": ["deterministic", "base"], "seed": [0, 1, 2]},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        comparisons = compare_methods(ds, test="welch")
+        summary = BenchmarkResult(
+            data=ds, comparisons=comparisons, alpha=0.05
+        ).summary()
+    row = summary[summary["method"] == "deterministic"].iloc[0]
+    assert not np.isnan(row["ci_low"]) and not np.isnan(row["ci_high"])
+    assert row["ci_low"] == row["ci_high"] == row["mean"] == 0.90
 
 
 def test_cohens_d_zero_for_identical():
