@@ -28,14 +28,20 @@ def available_tests() -> list[str]:
 
 
 def confidence_interval(values, alpha: float = 0.05) -> tuple[float, float, float]:
-    """Return ``(mean, ci_low, ci_high)`` using a Student-t interval."""
+    """Return ``(mean, ci_low, ci_high)`` using scipy's Student-t interval."""
     values = np.asarray(values, dtype=float)
     n = len(values)
     mean = float(values.mean())
     if n < 2:
         return mean, mean, mean
-    half = float(stats.sem(values) * stats.t.ppf(1 - alpha / 2, n - 1))
-    return mean, mean - half, mean + half
+    sem = float(stats.sem(values))
+    if sem == 0.0:
+        # Identical values every seed: the honest interval is the degenerate
+        # point. scipy's t.interval would return (nan, nan) here (inf * 0), which
+        # would show up as NaN bounds in `.summary()` for a deterministic method.
+        return mean, mean, mean
+    low, high = stats.t.interval(1 - alpha, n - 1, loc=mean, scale=sem)
+    return mean, float(low), float(high)
 
 
 def cohens_d(a, b) -> float:
@@ -135,21 +141,15 @@ def bonferroni_correction(pvalues) -> list[float]:
 def bh_correction(pvalues) -> list[float]:
     """Benjamini-Hochberg (FDR) adjusted p-values, returned in original order.
 
-    ``adj_(i) = min_{j >= i}( p_(j) * n / rank_j )`` over the ascending order,
-    capped at 1. NaN p-values stay NaN and are excluded from the family."""
+    Delegates to :func:`scipy.stats.false_discovery_control` (scipy >= 1.11;
+    our floor is 1.13) rather than reimplementing the step-up. scipy has no NaN
+    handling, so NaN p-values are held out of the family and restored as NaN —
+    matching :func:`holm_correction`."""
     pvalues = np.asarray(pvalues, dtype=float)
-    m = len(pvalues)
+    corrected = np.full(pvalues.shape, np.nan)
     valid = ~np.isnan(pvalues)
-    n_valid = int(np.count_nonzero(valid))
-    corrected = np.full(m, np.nan)
-    if n_valid:
-        idx = np.flatnonzero(valid)
-        order = idx[np.argsort(pvalues[idx])]  # ascending among valid
-        running = 1.0
-        for rank in range(n_valid, 0, -1):  # largest p first
-            i = order[rank - 1]
-            running = min(running, pvalues[i] * n_valid / rank)
-            corrected[i] = min(running, 1.0)
+    if valid.any():
+        corrected[valid] = stats.false_discovery_control(pvalues[valid], method="bh")
     return [float(c) for c in corrected]
 
 
