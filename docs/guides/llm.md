@@ -65,8 +65,8 @@ replacement (a paired bootstrap, Koehn 2004) and reports four extra columns on
 
 ```python
 row = result.comparisons.iloc[0]
-row["p_value"]                            # decoding noise only
-row["item_ci_low"], row["item_ci_high"]   # would other prompts agree?
+row["p_value"]  # decoding noise only
+row["item_ci_low"], row["item_ci_high"]  # would other prompts agree?
 ```
 
 Two caveats worth knowing:
