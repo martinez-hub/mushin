@@ -1,0 +1,1 @@
+`compare_llms` now reports a paired item-level bootstrap (`item_diff`, `item_ci_low`, `item_ci_high`, `item_p`) beside the seed-based test, so you can see whether a difference would survive a different sample of eval items — usually the larger uncertainty. Disable with `item_bootstrap=0`.

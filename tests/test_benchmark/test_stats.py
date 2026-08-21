@@ -11,6 +11,7 @@ from mushin.benchmark._stats import (
     compare_methods,
     confidence_interval,
     holm_correction,
+    paired_item_bootstrap,
     warn_if_underpowered,
 )
 
@@ -316,3 +317,38 @@ def test_incomplete_path_keeps_infinite_cells():
     # the Inf pair participates: the mean difference is -Inf, not a finite
     # value computed over a silently reduced sample
     assert np.isinf(row["mean_diff"])
+
+
+def test_paired_item_bootstrap_detects_consistent_difference():
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=150) + 0.5
+    b = a - 0.5 + rng.normal(scale=0.2, size=150)
+    diff, lo, hi, p = paired_item_bootstrap(a, b, n_resamples=2000, seed=1)
+    assert diff > 0 and lo > 0 and p < 0.05  # consistent per-item win
+
+
+def test_paired_item_bootstrap_straddles_zero_when_items_disagree():
+    """An aggregate edge built on inconsistent per-item wins is not robust."""
+    rng = np.random.default_rng(7)
+    n = 200
+    adv = rng.choice([1.0, -1.0], size=n, p=[0.55, 0.45])
+    base = rng.random(n)
+    diff, lo, hi, p = paired_item_bootstrap(
+        base + 0.5 * adv, base - 0.5 * adv, n_resamples=4000, seed=0
+    )
+    assert diff > 0  # A does lead on this eval set...
+    assert lo < 0 < hi and p > 0.05  # ...but it would not survive other items
+
+
+def test_paired_item_bootstrap_is_deterministic():
+    a, b = [1.0, 2.0, 3.0, 4.0], [1.1, 1.8, 3.3, 3.6]
+    assert paired_item_bootstrap(a, b, n_resamples=500, seed=3) == (
+        paired_item_bootstrap(a, b, n_resamples=500, seed=3)
+    )
+
+
+def test_paired_item_bootstrap_rejects_ragged_and_handles_tiny_input():
+    with pytest.raises(ValueError, match="equal-length"):
+        paired_item_bootstrap([1.0, 2.0], [1.0])
+    diff, lo, hi, p = paired_item_bootstrap([1.0], [0.0])
+    assert diff == 1.0 and np.isnan(lo) and np.isnan(hi) and np.isnan(p)

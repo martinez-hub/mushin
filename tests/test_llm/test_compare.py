@@ -1,3 +1,6 @@
+import warnings
+
+import numpy as np
 import pytest
 
 from mushin.benchmark import BenchmarkResult
@@ -600,3 +603,87 @@ def test_metric_failure_reraise_survives_multi_arg_exceptions():
     with pytest.raises(RuntimeError, match="failed on example 0") as ei:
         _score_one("m", bad_metric, ["out"], ["ref"], seed=0)
     assert isinstance(ei.value.__cause__, UnicodeDecodeError)
+
+
+def test_item_bootstrap_contradicts_seed_significance():
+    """The point of the item bootstrap: seed-significant != robust to the eval set.
+
+    Two systems whose per-item advantage is inconsistent (A wins 55% of items,
+    loses 45%) but whose per-seed means barely move. The seed test sees a huge
+    effect; the item bootstrap shows the difference would not survive a different
+    sample of items.
+    """
+    rng = np.random.default_rng(7)
+    n = 200
+    adv = rng.choice([1.0, -1.0], size=n, p=[0.55, 0.45])
+    base = rng.random(n)
+    data = [{"input": i, "reference": None} for i in range(n)]
+
+    def make(sign):
+        def system(inputs, seed):
+            r = np.random.default_rng(1000 + seed)
+            return [
+                float(base[i] + 0.5 * sign * adv[i] + 0.01 * r.standard_normal())
+                for i in inputs
+            ]
+
+        return system
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_llms(
+            {"A": make(+1), "B": make(-1)},
+            data=data,
+            metric=lambda o, r: o,
+            seeds=range(5),
+            test="welch",
+        )
+    row = res.comparisons.iloc[0]
+    assert row["significant"]  # seed-based test is confident...
+    assert row["item_ci_low"] < 0 < row["item_ci_high"]  # ...items are not
+    assert row["item_p"] > 0.05
+
+
+def test_item_bootstrap_absent_for_torchmetrics_metrics():
+    """torchmetrics metrics expose no per-item scores, so item columns are NaN."""
+    pytest.importorskip("torchmetrics.text")
+    from torchmetrics.text import BLEUScore
+
+    data = [{"input": i, "reference": ["the cat sat"]} for i in range(6)]
+
+    def system(inputs, seed):
+        return ["the cat sat" for _ in inputs]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_llms(
+            {"x": system, "y": system},
+            data=data,
+            metric={"bleu": BLEUScore(), "exact": lambda o, r: float(o == r[0])},
+            seeds=range(3),
+        )
+    bleu = res.comparisons[res.comparisons["metric"].str.contains("bleu")]
+    assert (
+        bleu[["item_diff", "item_ci_low", "item_ci_high", "item_p"]].isna().all().all()
+    )
+    exact = res.comparisons[res.comparisons["metric"] == "exact"]
+    assert exact["item_diff"].notna().all()
+
+
+def test_item_bootstrap_can_be_disabled():
+    data = [{"input": i, "reference": None} for i in range(10)]
+
+    def system(inputs, seed):
+        r = np.random.default_rng(seed)
+        return [float(r.random()) for _ in inputs]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_llms(
+            {"a": system, "b": system},
+            data=data,
+            metric=lambda o, r: o,
+            seeds=range(3),
+            item_bootstrap=0,
+        )
+    assert "item_diff" not in res.comparisons.columns

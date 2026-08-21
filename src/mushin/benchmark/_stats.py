@@ -400,3 +400,50 @@ def compare_methods(
             "significant",
         ],
     )
+
+
+def paired_item_bootstrap(
+    a_items,
+    b_items,
+    *,
+    n_resamples: int = 10_000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> tuple[float, float, float, float]:
+    """Paired bootstrap over EVAL ITEMS -> ``(mean_diff, ci_low, ci_high, p_value)``.
+
+    ``a_items``/``b_items`` are per-item scores for two systems on the *same* eval
+    set (already reduced over seeds), so ``d_i = a_i - b_i`` is a paired
+    per-item difference. Resampling items with replacement answers the question
+    seed-based testing cannot: *would this difference survive a different sample
+    of eval items?* — the standard paired bootstrap of Koehn (2004).
+
+    This is complementary to, not a replacement for, the seed-based test:
+    seeds capture decoding/judge noise, items capture eval-set uncertainty. The
+    latter is usually far larger, so a seed-significant difference whose item
+    interval straddles 0 is not a result you should report.
+
+    ``p_value`` is the two-sided proportion of resamples whose mean difference
+    falls on the opposite side of 0 from the observed one (doubled, capped at 1),
+    with the standard +1 smoothing so it is never exactly 0.
+    """
+    a = np.asarray(a_items, dtype=float)
+    b = np.asarray(b_items, dtype=float)
+    if a.shape != b.shape:
+        raise ValueError(
+            f"paired bootstrap needs equal-length per-item scores, got "
+            f"{a.shape} and {b.shape}"
+        )
+    d = a - b
+    n = d.size
+    observed = float(d.mean())
+    if n < 2 or not np.isfinite(d).all():
+        return observed, float("nan"), float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_resamples, n))
+    means = d[idx].mean(axis=1)
+    low, high = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    # Two-sided: how often does a resample land on the other side of 0?
+    opposite = (means <= 0).sum() if observed > 0 else (means >= 0).sum()
+    p = min(1.0, 2.0 * (opposite + 1) / (n_resamples + 1))
+    return observed, float(low), float(high), float(p)
