@@ -108,6 +108,69 @@ Two caveats worth knowing:
 Pass `item_bootstrap=0` to skip it, or a different resample count (default
 `10_000`).
 
+### Grouped items need `clusters=`
+
+Eval items are often **not independent** — several questions about one passage,
+several prompts from one document. Those items share whatever makes their source
+easy or hard, so resampling them individually treats correlated observations as
+independent and reports an interval that is too narrow.
+
+Pass a per-item group label and the bootstrap resamples **whole groups** instead:
+
+```python
+result = compare_llms(..., clusters=passage_id_per_item)
+```
+
+In this repo's tests, ignoring grouping gives 45% coverage of a nominal 95%
+interval; clustering restores it to ~93% and widens the interval about 3x. If
+your items are genuinely independent, omit it — with one item per group the two
+are identical.
+
+## Bring your own scores
+
+If another harness already produced per-item results — inspect-ai, lm-eval-harness,
+your own runner — you do not have to hand mushin your execution loop to get the
+analysis:
+
+```python
+from mushin.llm import compare_scores
+
+result = compare_scores(
+    {"gpt": gpt_per_item_scores, "claude": claude_per_item_scores},
+    clusters=passage_id_per_item,  # optional
+)
+```
+
+Each system maps to either a 1-D sequence of per-item scores (a single run — the
+item-level columns are populated and the seed-based ones are masked, because one
+run says nothing about decoding noise) or a 2-D `(n_seeds, n_items)` array, which
+gives both dimensions. Systems must cover the same items in the same order; call
+once per metric.
+
+```python
+result = compare_llms(
+    {"gpt4": gpt4_system, "claude": claude_system},
+    data=eval_data,
+    metric=exact_match,
+    seeds=range(10),  # 10 seeds → more power
+    test="welch",
+)
+```
+
+Use more seeds (≥ 5) for a robust estimate. Welch's t-test (the default) already
+has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
+`ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
+below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
+at the given seed count.
+
+!!! warning "Paired tests need a *shared* per-seed random effect"
+    `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
+    other. That pairing is only meaningful when seed *k* induces a shared
+    random effect across systems (e.g. both score the same seed-*k* data
+    subsample). For independent systems whose seed only drives their own
+    sampling — the typical API-backed setup — the trials are uncorrelated and
+    the pairing assumption does not hold; stick with the default `welch`.
+
 ## Metric options
 
 ### Plain callable

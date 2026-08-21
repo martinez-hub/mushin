@@ -728,3 +728,58 @@ def test_item_columns_populated_for_non_string_metric_keys():
             seeds=range(4),
         )
     assert res.comparisons["item_diff"].notna().all()
+
+
+def test_compare_scores_from_precomputed_per_item_scores():
+    """Bring-your-own scores: a single run gives item stats, no seed inference."""
+    from mushin.llm import compare_scores
+
+    r = np.random.default_rng(0)
+    a = (r.random(200) < 0.75).astype(float)
+    b = (r.random(200) < 0.60).astype(float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_scores({"gpt": a, "claude": b})
+    row = res.comparisons.iloc[0]
+    assert np.isnan(row["p_value"])  # one run -> no decoding-noise inference
+    assert row["item_ci_low"] < row["item_diff"] < row["item_ci_high"]
+    assert row["item_diff"] > 0
+
+
+def test_compare_scores_two_dimensional_gives_both_dimensions():
+    from mushin.llm import compare_scores
+
+    r = np.random.default_rng(1)
+    a = np.stack([(r.random(150) < 0.8).astype(float) for _ in range(5)])
+    b = np.stack([(r.random(150) < 0.5).astype(float) for _ in range(5)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_scores({"a": a, "b": b})
+    row = res.comparisons.iloc[0]
+    assert not np.isnan(row["p_value"])  # seeds present
+    assert not np.isnan(row["item_ci_low"])  # items too
+    assert res.data.sizes["seed"] == 5
+
+
+def test_compare_scores_clusters_widen_the_interval():
+    """Ignoring grouped items is overconfident; `clusters=` corrects it."""
+    from mushin.llm import compare_scores
+
+    r = np.random.default_rng(3)
+    labels = np.repeat(np.arange(20), 10)
+    d = r.normal(scale=0.8, size=20)[labels] + r.normal(scale=0.3, size=200)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        flat = compare_scores({"x": d, "y": np.zeros(200)}).comparisons.iloc[0]
+        clus = compare_scores(
+            {"x": d, "y": np.zeros(200)}, clusters=labels
+        ).comparisons.iloc[0]
+    width = lambda row: row["item_ci_high"] - row["item_ci_low"]  # noqa: E731
+    assert width(clus) > 2 * width(flat)
+
+
+def test_compare_scores_rejects_mismatched_item_counts():
+    from mushin.llm import compare_scores
+
+    with pytest.raises(ValueError, match="SAME items"):
+        compare_scores({"a": [1.0, 0.0, 1.0], "b": [1.0, 0.0]})

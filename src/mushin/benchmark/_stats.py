@@ -415,6 +415,7 @@ def paired_item_bootstrap(
     a_items,
     b_items,
     *,
+    clusters=None,
     n_resamples: int = 10_000,
     alpha: float = 0.05,
     seed: int = 0,
@@ -435,6 +436,15 @@ def paired_item_bootstrap(
     ``p_value`` is the two-sided proportion of resamples whose mean difference
     falls on the opposite side of 0 from the observed one (doubled, capped at 1),
     with the standard +1 smoothing so it is never exactly 0.
+
+    ``clusters`` — an optional per-item group label. Eval items are often **not
+    independent**: several questions about one passage, or several prompts from
+    one document, share whatever makes that source easy or hard. Resampling such
+    items individually treats correlated observations as independent and yields
+    an interval that is too narrow. Passing ``clusters`` switches the resampling
+    unit from the item to the **cluster** (the standard cluster bootstrap) —
+    whole groups are drawn with replacement, so within-group correlation is
+    preserved and unequal group sizes are handled automatically.
     """
     a = np.asarray(a_items, dtype=float)
     b = np.asarray(b_items, dtype=float)
@@ -477,16 +487,38 @@ def paired_item_bootstrap(
             stacklevel=2,
         )
     rng = np.random.default_rng(seed)
-    # Chunked so peak memory does not scale with n_resamples * n_items (a
-    # 20k-item eval set would otherwise allocate gigabytes at the default 10_000
-    # resamples). Drawing in blocks consumes the SAME rng stream, so results are
-    # bit-identical to the unchunked version.
     means = np.empty(n_resamples)
-    block = max(1, _BOOTSTRAP_CELL_BUDGET // n)
-    for start in range(0, n_resamples, block):
-        k = min(block, n_resamples - start)
-        idx = rng.integers(0, n, size=(k, n))
-        means[start : start + k] = d[idx].mean(axis=1)
+    if clusters is None:
+        # Chunked so peak memory does not scale with n_resamples * n_items (a
+        # 20k-item eval set would otherwise allocate gigabytes at the default
+        # 10_000 resamples). Drawing in blocks consumes the SAME rng stream, so
+        # results are bit-identical to the unchunked version.
+        block = max(1, _BOOTSTRAP_CELL_BUDGET // n)
+        for begin in range(0, n_resamples, block):
+            k = min(block, n_resamples - begin)
+            idx = rng.integers(0, n, size=(k, n))
+            means[begin : begin + k] = d[idx].mean(axis=1)
+    else:
+        labels = np.asarray(clusters)
+        if labels.shape != d.shape:
+            raise ValueError(
+                f"`clusters` must have one label per item, got {labels.shape} "
+                f"for {d.shape} items"
+            )
+        # Resample WHOLE groups with replacement. Concatenating the drawn groups
+        # and taking the mean over all their items is the usual cluster-bootstrap
+        # estimator, and handles unequal group sizes without reweighting.
+        groups = [np.flatnonzero(labels == lab) for lab in np.unique(labels)]
+        n_groups = len(groups)
+        if n_groups < 2:
+            return observed, float("nan"), float("nan"), float("nan")
+        sums = np.array([d[g].sum() for g in groups])
+        sizes = np.array([g.size for g in groups], dtype=float)
+        block = max(1, _BOOTSTRAP_CELL_BUDGET // n_groups)
+        for begin in range(0, n_resamples, block):
+            k = min(block, n_resamples - begin)
+            draw = rng.integers(0, n_groups, size=(k, n_groups))
+            means[begin : begin + k] = sums[draw].sum(axis=1) / sizes[draw].sum(axis=1)
     low, high = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     # Two-sided: how often does a resample land on the other side of 0?
     opposite = (means <= 0).sum() if observed > 0 else (means >= 0).sum()
