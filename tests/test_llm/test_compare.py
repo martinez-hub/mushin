@@ -814,8 +814,16 @@ def test_compare_scores_rejects_bad_item_bootstrap():
         compare_scores({"a": [1.0, 0.0] * 10, "b": [0.0, 1.0] * 10}, item_bootstrap="x")
 
 
-def test_compare_scores_single_run_is_clean_under_error_warnings():
-    """The documented 1-D path must not emit numpy RuntimeWarnings."""
+@pytest.mark.parametrize(
+    "test", ["wilcoxon", "ttest_rel", "welch", "ttest_ind", "mannwhitney"]
+)
+def test_compare_scores_single_run_is_clean_under_error_warnings(test):
+    """The documented 1-D path must not emit numpy RuntimeWarnings.
+
+    Parametrized over every test: ttest_rel/ttest_ind divide by zero on a
+    single run, and whether that surfaces as a RuntimeWarning is scipy-version
+    dependent — it reached CI only via the min-versions job.
+    """
     import warnings as _w
 
     from mushin.llm import compare_scores
@@ -823,9 +831,14 @@ def test_compare_scores_single_run_is_clean_under_error_warnings():
     with _w.catch_warnings():
         _w.simplefilter("error", RuntimeWarning)
         _w.simplefilter("ignore", UserWarning)
-        compare_scores(
-            {"a": np.array([1.0, 0.0, 1.0] * 10), "b": np.array([0.0, 1.0, 0.0] * 10)}
+        res = compare_scores(
+            {"a": np.array([1.0, 0.0, 1.0] * 10), "b": np.array([0.0, 1.0, 0.0] * 10)},
+            test=test,
         )
+    row = res.comparisons.iloc[0]
+    # a single run cannot support seed-based inference, but items still can
+    assert np.isnan(row["p_value"])
+    assert not np.isnan(row["item_p"])
 
 
 def test_clusters_validated_before_any_system_call():

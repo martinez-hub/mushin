@@ -187,7 +187,13 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
     a = np.arange(n_seeds, dtype=float) + 1000.0
     b = np.arange(n_seeds, dtype=float)
     try:
-        _, p = func(a, b)
+        with warnings.catch_warnings():
+            # This is a synthetic best-case probe, not a real comparison. Any
+            # numeric warning it provokes is an artefact of the probe and varies
+            # by scipy version (the floor warns where current scipy does not), so
+            # it must never surface to the caller.
+            warnings.simplefilter("ignore")
+            _, p = func(a, b)
     except ValueError:
         return  # test could not even run at this n; nothing useful to say
     if float(p) > alpha:
@@ -324,7 +330,14 @@ def compare_methods(
             for m in methods
         }
         constant = {
-            m for m in methods if completed[m].size > 1 and _is_constant(completed[m])
+            m
+            for m in methods
+            # Fewer than 2 completed seeds is the same situation as zero
+            # variance: no sampling distribution. Running the test anyway makes
+            # scipy divide by zero (ttest_rel/ttest_ind leak a RuntimeWarning,
+            # version-dependently) for a result that is NaN regardless. Single-run
+            # inputs are ordinary via compare_scores.
+            if completed[m].size < 2 or _is_constant(completed[m])
         }
         for m in constant:
             constant_metric_count[m] = constant_metric_count.get(m, 0) + 1
