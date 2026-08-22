@@ -60,3 +60,24 @@ than in CI. See the linked guides for the full recipe and validation runbook.
 
 - [Quickstart](quickstart.md) — the flagship example, run end-to-end.
 - [Guides](guides/workflows.md) — workflows, compare, Study, resilience, and more.
+
+### `prompt_injection_eval.py` — is your model actually more injection-resistant?
+
+Measures resistance to **indirect** prompt injection: the attack arrives inside
+content the model retrieves (a memo, a page, a tool result), not from the user.
+Detection uses an inert canary — if the sentinel appears in the output, the
+retrieved text steered the model — so the payloads measure the control failure
+without carrying a real one.
+
+Resistance is binary per document, which is exactly the shape where a headline
+score misleads: attacks vary enormously in difficulty, so a different attack set
+can reverse the ranking. The example reports whether a gap survives a re-run and
+a different set of attacks, and prints a per-attack breakdown — in the demo, the
+"better" system is 33 points *worse* on one attack shape that the aggregate hides.
+
+```bash
+python examples/prompt_injection_eval.py --demo
+```
+
+Point it at your own systems (baseline vs. hardened, or two providers) to compare
+mitigations with an honest uncertainty on the difference.
