@@ -29,6 +29,13 @@ keeps the payloads inert — nothing here asks a model to exfiltrate data or tak
 a real action — while still measuring the thing that matters, namely whether
 retrieved text can steer the model.
 
+This uses both halves of mushin: ``compare_llms`` for the statistics, and
+``@mushin.sweep`` to break the result down **by attack shape**. The second
+matters as much as the first — an aggregate score can call a system strictly
+better while it is quietly weaker against one family of attacks. Sweeping the
+attack dimension returns a dataset labelled by it, so that breakdown is one
+reduction rather than manual grouping.
+
 Run the demo (no model, no keys)::
 
     python examples/prompt_injection_eval.py --demo
@@ -197,20 +204,34 @@ def demo() -> int:
         f"(p={row['item_p']:.4f}, 95% CI [{lo:+.1%}, {hi:+.1%}])"
     )
 
-    # The aggregate hides the blind spot; the per-attack view finds it.
+    # Which attack shapes is each system weak against? That is a sweep over the
+    # attack dimension, so let mushin do the bookkeeping: `@mushin.sweep` returns
+    # a dataset LABELLED by the swept parameter, and the table is one reduction
+    # over it — no index juggling, no manual grouping.
+    import tempfile
+
+    import mushin
+
+    @mushin.sweep
+    def by_attack(attack: str, seed: int) -> dict:
+        prompts = [ex["input"] for ex in suite if ex["attack"] == attack]
+        return {
+            name: float(np.mean([resisted(o, CANARY) for o in system(prompts, seed)]))
+            for name, system in systems.items()
+        }
+
+    per_attack = by_attack.run(
+        attack=mushin.multirun(list(_ATTACKS)),
+        seed=mushin.multirun(list(range(5))),
+        working_dir=tempfile.mkdtemp(),
+    )
+
     print("\nPer-attack resistance — where the aggregate misleads:")
-    print(f"   {'attack':<18}{'baseline':>10}{'hardened':>10}")
-    for name in _ATTACKS:
-        idx = [i for i, ex in enumerate(suite) if ex["attack"] == name]
-        prompts = [suite[i]["input"] for i in idx]
-        cells = []
-        for sysname in ("baseline", "hardened"):
-            outputs = [
-                out for seed in range(5) for out in systems[sysname](prompts, seed)
-            ]
-            cells.append(float(np.mean([resisted(o, CANARY) for o in outputs])))
-        flag = "  <- blind spot" if cells[1] < cells[0] else ""
-        print(f"   {name:<18}{cells[0]:>9.0%}{cells[1]:>10.0%}{flag}")
+    table = per_attack.mean("seed").to_dataframe()
+    print(table.to_string(float_format=lambda v: f"{v:.0%}"))
+    worse = table[table["hardened"] < table["baseline"]]
+    for attack in worse.index:
+        print(f"   ^ blind spot: 'hardened' is weaker than 'baseline' on {attack!r}")
     print("\nA single headline number would have called 'hardened' strictly better.")
     return 0
 
