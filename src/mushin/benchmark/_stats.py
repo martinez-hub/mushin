@@ -476,19 +476,31 @@ def paired_item_bootstrap(
                 f"`clusters` must have one label per item, got {labels.shape} "
                 f"for {d.shape} items"
             )
-        if labels.dtype.kind == "f" and np.isnan(labels).any():
-            # NaN never compares equal to itself. Grouping by equality would give
-            # the NaN entry a zero-size group, silently dropping those items from
-            # every resample while `observed` still counted them — yielding a CI
-            # that need not even contain its own point estimate. Refuse instead.
+        # Missing labels, checked dtype-agnostically: `v != v` is True for float,
+        # complex and OBJECT-dtype NaN alike (a float-only `dtype.kind == "f"`
+        # test misses `df.to_numpy()[:, 0]`, which upcasts to object). NaT is
+        # excluded deliberately — datetime64 groups correctly.
+        flat = labels.tolist()
+        if any(
+            v is None or (v != v and not isinstance(v, np.datetime64)) for v in flat
+        ):
             raise ValueError(
-                "`clusters` contains NaN label(s); every item must carry a real "
-                "group id, or it would be silently excluded from the resampling. "
-                "Drop or impute those items first."
+                "`clusters` contains missing label(s) (NaN/None); every item must "
+                "carry a real group id, or it would be excluded from or split out "
+                "of the resampling. Drop or impute those items first."
             )
-        # return_inverse gives every item a code, so groups always partition the
-        # data (and it avoids an O(n_groups * n) rescan).
-        codes = np.unique(labels, return_inverse=True)[1].ravel()
+        if labels.dtype.kind == "O":
+            # np.unique sorts, and object arrays sort unreliably (mixed types
+            # raise; NaN is unorderable), which silently splits equal labels into
+            # separate codes. A dict factorization groups by equality directly.
+            mapping: dict = {}
+            codes = np.array(
+                [mapping.setdefault(v, len(mapping)) for v in flat], dtype=np.intp
+            )
+        else:
+            # return_inverse gives every item a code, so groups always partition
+            # the data (and it avoids an O(n_groups * n) rescan).
+            codes = np.unique(labels, return_inverse=True)[1].ravel()
         sizes = np.bincount(codes).astype(float)
         sums = np.bincount(codes, weights=d)
 
@@ -501,8 +513,11 @@ def paired_item_bootstrap(
     # Degeneracy is a property of the RESAMPLED distribution. Un-clustered that
     # means every item difference identical; clustered it means every cluster
     # MEAN identical, which the item-level ptp() would miss.
-    spread = np.ptp(d) if codes is None else np.ptp(sums / sizes)
-    if spread == 0:
+    # np.allclose, not exact equality: _is_constant already treats sub-epsilon
+    # jitter as constant on the seed axis, and exact `ptp == 0` would let
+    # rounding-degenerate values through into a zero-width interval.
+    unit_values = d if codes is None else sums / sizes
+    if _is_constant(unit_values):
         # Point-mass resample: naively a zero-width interval and the floor
         # p-value at any n. Mirror how compare_methods treats the seed axis —
         # indistinguishable -> p=1, constant-but-nonzero -> masked.

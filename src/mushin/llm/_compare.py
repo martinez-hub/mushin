@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -210,6 +211,15 @@ def compare_llms(
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
+    # Validate `clusters` here, with the other up-front checks: len(inputs) is
+    # already known, and deferring to paired_item_bootstrap meant a wrong-length
+    # label array surfaced only after every system call had been paid for — or,
+    # with item_bootstrap=0 or a torchmetrics-only battery, was never checked.
+    if clusters is not None and len(clusters) != len(inputs):
+        raise ValueError(
+            f"`clusters` must have one label per item, got {len(clusters)} "
+            f"labels for {len(inputs)} items"
+        )
     # Normalize references through the same JSON round-trip applied to outputs (see
     # _normalize_output), so output and reference are scored on equal footing — e.g.
     # a structured label like ("a", 1) matches an identical output, which would
@@ -393,15 +403,18 @@ def compare_scores(
             arr = arr[np.newaxis, :]
         if arr.size == 0:
             raise ValueError(f"scores for {name!r} is empty")
-        if arr.shape[1] < 2:
-            # (n, 1) is n runs of ONE item, which supports no item-level
-            # inference and is nearly always a column vector the caller meant as
-            # a single run of n items.
-            raise ValueError(
-                f"scores for {name!r} has only {arr.shape[1]} item(s) per run "
-                f"(shape {arr.shape}). If this is one run of {arr.shape[0]} "
-                "items, pass a 1-D sequence or transpose it — a column vector is "
-                "read as one item per run."
+        if arr.shape[1] < 2 and arr.shape[0] > 1:
+            # (n, 1) is n runs of ONE item. That is legal — the seed-based
+            # analysis still applies — but it is nearly always a column vector
+            # the caller meant as a single run of n items, so say so loudly
+            # rather than silently analysing the transpose of their data.
+            warnings.warn(
+                f"scores for {name!r} have shape {arr.shape}: that is "
+                f"{arr.shape[0]} runs of 1 item, so no item-level statistics are "
+                f"possible. If you meant one run of {arr.shape[0]} items, pass a "
+                "1-D sequence or transpose it.",
+                UserWarning,
+                stacklevel=2,
             )
         if not np.isfinite(arr).all():
             raise ValueError(

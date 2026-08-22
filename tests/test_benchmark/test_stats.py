@@ -454,7 +454,7 @@ def test_cluster_bootstrap_rejects_nan_labels():
     labels = np.array([float(i // 3) for i in range(27)] + [np.nan] * 3)
     d = np.zeros(30)
     d[27:] = 50.0
-    with pytest.raises(ValueError, match="NaN label"):
+    with pytest.raises(ValueError, match="missing label"):
         paired_item_bootstrap(d, np.zeros(30), clusters=labels, n_resamples=100)
 
 
@@ -490,3 +490,54 @@ def test_effect_sizes_are_nan_for_single_observation():
         _w.simplefilter("error", RuntimeWarning)
         assert np.isnan(cohens_d([1.0], [0.0]))
         assert np.isnan(cohens_dz([1.0], [0.0]))
+
+
+def test_cluster_labels_reject_missing_values_of_any_dtype():
+    """The float-only guard missed object dtype, the common pandas output.
+
+    `df.to_numpy()[:, 0]` upcasts to object; NaN then skips a `dtype.kind == "f"`
+    check and breaks np.unique's sort-based grouping, splitting every real group
+    into singletons — silently degenerating back toward the naive bootstrap.
+    """
+    for dtype in (float, object):
+        labels = np.array([0.0, np.nan, 0.0, 1.0, np.nan, 1.0] * 5, dtype=dtype)
+        with pytest.raises(ValueError, match="missing label"):
+            paired_item_bootstrap(
+                np.arange(30.0), np.zeros(30), clusters=labels, n_resamples=50
+            )
+    with pytest.raises(ValueError, match="missing label"):
+        paired_item_bootstrap(
+            np.arange(6.0),
+            np.zeros(6),
+            clusters=np.array([1, 1, None, 2, 2, 2], dtype=object),
+        )
+
+
+def test_object_dtype_labels_without_nan_group_correctly():
+    """String/object labels must group by equality, not by numpy's sort order."""
+    labels = np.array(["p1", "p1", "p2", "p2", "p3", "p3"] * 5, dtype=object)
+    rng = np.random.default_rng(0)
+    d = rng.normal(scale=0.8, size=3)[np.tile([0, 1, 2], 10)] + rng.normal(
+        scale=0.2, size=30
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        clustered = paired_item_bootstrap(
+            d, np.zeros(30), clusters=labels, n_resamples=800, seed=0
+        )
+        singles = paired_item_bootstrap(
+            d, np.zeros(30), clusters=np.arange(30), n_resamples=800, seed=0
+        )
+    # 3 real groups must give a wider interval than 30 singleton "groups"
+    assert (clustered[2] - clustered[1]) > (singles[2] - singles[1])
+
+
+def test_cluster_degeneracy_tolerates_float_noise():
+    """Exact `ptp == 0` missed rounding-degenerate cluster means."""
+    labels = np.repeat(np.arange(6), 2)
+    d = np.tile([0.1 + 0.2, 0.3 - 5e-17], 6)  # means equal only up to float noise
+    with pytest.warns(UserWarning, match="identical difference"):
+        _, lo, hi, p = paired_item_bootstrap(
+            d, np.zeros(12), clusters=labels, n_resamples=200
+        )
+    assert np.isnan(lo) and np.isnan(hi) and np.isnan(p)

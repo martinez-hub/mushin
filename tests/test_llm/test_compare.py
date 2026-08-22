@@ -788,7 +788,6 @@ def test_compare_scores_rejects_mismatched_item_counts():
 @pytest.mark.parametrize(
     "scores,kwargs,match",
     [
-        ({"a": np.zeros((4, 1)), "b": np.zeros((4, 1))}, {}, "only 1 item"),
         ({"a": [1.0, np.nan, 0.0] * 7, "b": [0.0] * 21}, {}, "NaN or infinite"),
         ({"a": [1.0, np.inf, 0.0] * 7, "b": [0.0] * 21}, {}, "NaN or infinite"),
         ({"a": [], "b": []}, {}, "is empty"),
@@ -827,3 +826,36 @@ def test_compare_scores_single_run_is_clean_under_error_warnings():
         compare_scores(
             {"a": np.array([1.0, 0.0, 1.0] * 10), "b": np.array([0.0, 1.0, 0.0] * 10)}
         )
+
+
+def test_clusters_validated_before_any_system_call():
+    """`clusters` was the only compare_llms argument checked after the token spend."""
+    calls = []
+
+    def spy(inputs, seed):
+        calls.append(1)
+        return ["x"] * len(inputs)
+
+    with pytest.raises(ValueError, match="one label per item"):
+        compare_llms(
+            {"a": spy, "b": spy},
+            data=[{"input": i} for i in range(30)],
+            metric=lambda o, r: 1.0,
+            seeds=[0, 1, 2],
+            clusters=[1, 2, 3, 4, 5],
+        )
+    assert calls == []
+
+
+def test_compare_scores_column_vector_warns_but_runs():
+    """(n, 1) is legal (n runs of 1 item) but is usually a transposed column."""
+    from mushin.llm import compare_scores
+
+    with pytest.warns(UserWarning, match="runs of 1 item"):
+        res = compare_scores(
+            {
+                "a": np.array([[1.0], [0.0], [1.0], [0.0]]),
+                "b": np.array([[0.0], [1.0], [0.0], [1.0]]),
+            }
+        )
+    assert res is not None
