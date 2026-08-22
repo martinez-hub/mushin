@@ -49,6 +49,10 @@ def cohens_d(a, b) -> float:
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     na, nb = len(a), len(b)
+    if na < 2 or nb < 2:
+        # A single observation has no variance; ddof=1 would emit "Degrees of
+        # freedom <= 0". Single-run inputs are ordinary via compare_scores.
+        return float("nan")
     pooled_var = ((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1)) / (na + nb - 2)
     pooled_sd = float(np.sqrt(pooled_var))
     diff = float(a.mean() - b.mean())
@@ -71,6 +75,8 @@ def cohens_dz(a, b) -> float:
     the effect when the per-seed differences are consistent.
     """
     d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    if d.size < 2:
+        return float("nan")
     sd = float(d.std(ddof=1))
     mean = float(d.mean())
     if sd == 0.0:
@@ -181,7 +187,13 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
     a = np.arange(n_seeds, dtype=float) + 1000.0
     b = np.arange(n_seeds, dtype=float)
     try:
-        _, p = func(a, b)
+        with warnings.catch_warnings():
+            # This is a synthetic best-case probe, not a real comparison. Any
+            # numeric warning it provokes is an artefact of the probe and varies
+            # by scipy version (the floor warns where current scipy does not), so
+            # it must never surface to the caller.
+            warnings.simplefilter("ignore")
+            _, p = func(a, b)
     except ValueError:
         return  # test could not even run at this n; nothing useful to say
     if float(p) > alpha:
@@ -194,9 +206,10 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
         )
 
 
-#: Below this many eval items the percentile bootstrap is too miscalibrated to
-#: trust (measured ~49% false-positive rate at n=2, ~16% at n=5).
-_MIN_BOOTSTRAP_ITEMS = 20
+#: Below this many resampling UNITS (items, or clusters when grouped) the
+#: percentile bootstrap is too miscalibrated to trust (measured ~49%
+#: false-positive rate at 2 units, ~16% at 5).
+_MIN_BOOTSTRAP_UNITS = 20
 
 #: Cap on index cells materialized per resampling block, bounding peak memory
 #: independently of the eval-set size.
@@ -317,7 +330,14 @@ def compare_methods(
             for m in methods
         }
         constant = {
-            m for m in methods if completed[m].size > 1 and _is_constant(completed[m])
+            m
+            for m in methods
+            # Fewer than 2 completed seeds is the same situation as zero
+            # variance: no sampling distribution. Running the test anyway makes
+            # scipy divide by zero (ttest_rel/ttest_ind leak a RuntimeWarning,
+            # version-dependently) for a result that is NaN regardless. Single-run
+            # inputs are ordinary via compare_scores.
+            if completed[m].size < 2 or _is_constant(completed[m])
         }
         for m in constant:
             constant_metric_count[m] = constant_metric_count.get(m, 0) + 1
@@ -415,6 +435,7 @@ def paired_item_bootstrap(
     a_items,
     b_items,
     *,
+    clusters=None,
     n_resamples: int = 10_000,
     alpha: float = 0.05,
     seed: int = 0,
@@ -435,6 +456,15 @@ def paired_item_bootstrap(
     ``p_value`` is the two-sided proportion of resamples whose mean difference
     falls on the opposite side of 0 from the observed one (doubled, capped at 1),
     with the standard +1 smoothing so it is never exactly 0.
+
+    ``clusters`` — an optional per-item group label. Eval items are often **not
+    independent**: several questions about one passage, or several prompts from
+    one document, share whatever makes that source easy or hard. Resampling such
+    items individually treats correlated observations as independent and yields
+    an interval that is too narrow. Passing ``clusters`` switches the resampling
+    unit from the item to the **cluster** (the standard cluster bootstrap) —
+    whole groups are drawn with replacement, so within-group correlation is
+    preserved and unequal group sizes are handled automatically.
     """
     a = np.asarray(a_items, dtype=float)
     b = np.asarray(b_items, dtype=float)
@@ -448,16 +478,67 @@ def paired_item_bootstrap(
     observed = float(d.mean())
     if n < 2 or not np.isfinite(d).all():
         return observed, float("nan"), float("nan"), float("nan")
-    if np.ptp(d) == 0:
-        # Every item shows the SAME difference, so the resampled distribution is
-        # a point mass: the naive result is a zero-width interval and the floor
+    # Resolve the resampling unit first: with clusters the effective sample size
+    # is the number of GROUPS, not items, and both the degeneracy and small-n
+    # checks below must be judged on that unit.
+    codes = sizes = sums = None
+    if clusters is not None:
+        labels = np.asarray(clusters)
+        if labels.shape != d.shape:
+            raise ValueError(
+                f"`clusters` must have one label per item, got {labels.shape} "
+                f"for {d.shape} items"
+            )
+        # Missing labels, checked dtype-agnostically: `v != v` is True for float,
+        # complex and OBJECT-dtype NaN alike (a float-only `dtype.kind == "f"`
+        # test misses `df.to_numpy()[:, 0]`, which upcasts to object). NaT is
+        # excluded deliberately — datetime64 groups correctly.
+        flat = labels.tolist()
+        if any(
+            v is None or (v != v and not isinstance(v, np.datetime64)) for v in flat
+        ):
+            raise ValueError(
+                "`clusters` contains missing label(s) (NaN/None); every item must "
+                "carry a real group id, or it would be excluded from or split out "
+                "of the resampling. Drop or impute those items first."
+            )
+        if labels.dtype.kind == "O":
+            # np.unique sorts, and object arrays sort unreliably (mixed types
+            # raise; NaN is unorderable), which silently splits equal labels into
+            # separate codes. A dict factorization groups by equality directly.
+            mapping: dict = {}
+            codes = np.array(
+                [mapping.setdefault(v, len(mapping)) for v in flat], dtype=np.intp
+            )
+        else:
+            # return_inverse gives every item a code, so groups always partition
+            # the data (and it avoids an O(n_groups * n) rescan).
+            codes = np.unique(labels, return_inverse=True)[1].ravel()
+        sizes = np.bincount(codes).astype(float)
+        sums = np.bincount(codes, weights=d)
+
+    n_units = n if codes is None else sizes.size
+    unit = "items" if codes is None else "clusters"
+    if n_units < 2:
+        # One resampling unit has no sampling distribution at all.
+        return observed, float("nan"), float("nan"), float("nan")
+
+    # Degeneracy is a property of the RESAMPLED distribution. Un-clustered that
+    # means every item difference identical; clustered it means every cluster
+    # MEAN identical, which the item-level ptp() would miss.
+    # np.allclose, not exact equality: _is_constant already treats sub-epsilon
+    # jitter as constant on the seed axis, and exact `ptp == 0` would let
+    # rounding-degenerate values through into a zero-width interval.
+    unit_values = d if codes is None else sums / sizes
+    if _is_constant(unit_values):
+        # Point-mass resample: naively a zero-width interval and the floor
         # p-value at any n. Mirror how compare_methods treats the seed axis —
         # indistinguishable -> p=1, constant-but-nonzero -> masked.
         if np.isclose(observed, 0.0):
             return observed, observed, observed, 1.0
         warnings.warn(
-            f"every item shows an identical difference of {observed:g}, so the "
-            "item bootstrap has no sampling distribution and cannot bound the "
+            f"every {unit[:-1]} shows an identical difference of {observed:g}, so "
+            "the bootstrap has no sampling distribution and cannot bound the "
             "eval-set uncertainty (reporting NaN rather than a zero-width "
             "interval). For an all-or-nothing binary metric, use an exact sign "
             "test on the discordant items instead.",
@@ -465,28 +546,36 @@ def paired_item_bootstrap(
             stacklevel=2,
         )
         return observed, float("nan"), float("nan"), float("nan")
-    if n < _MIN_BOOTSTRAP_ITEMS:
-        # The percentile bootstrap is badly miscalibrated on a handful of items
-        # (measured: ~49% false-positive rate at n=2, ~16% at n=5). Warn rather
-        # than mask, matching warn_if_underpowered on the seed axis.
+
+    if n_units < _MIN_BOOTSTRAP_UNITS:
+        # Measured under a true null: ~49% false-positive rate at 2 units, ~16%
+        # at 5. Judged on CLUSTERS when clustered — a 500-item/4-cluster eval is
+        # a 4-sample problem, not a 500-sample one. Warn rather than mask,
+        # matching warn_if_underpowered on the seed axis.
         warnings.warn(
-            f"item bootstrap over only {n} items: the percentile interval is "
-            f"unreliable below ~{_MIN_BOOTSTRAP_ITEMS} items and the p-value is "
+            f"bootstrap over only {n_units} {unit}: the percentile interval is "
+            f"unreliable below ~{_MIN_BOOTSTRAP_UNITS} {unit} and the p-value is "
             "anti-conservative. Treat the interval as indicative only.",
             UserWarning,
             stacklevel=2,
         )
+
     rng = np.random.default_rng(seed)
-    # Chunked so peak memory does not scale with n_resamples * n_items (a
-    # 20k-item eval set would otherwise allocate gigabytes at the default 10_000
-    # resamples). Drawing in blocks consumes the SAME rng stream, so results are
-    # bit-identical to the unchunked version.
     means = np.empty(n_resamples)
-    block = max(1, _BOOTSTRAP_CELL_BUDGET // n)
-    for start in range(0, n_resamples, block):
-        k = min(block, n_resamples - start)
-        idx = rng.integers(0, n, size=(k, n))
-        means[start : start + k] = d[idx].mean(axis=1)
+    # Chunked so peak memory does not scale with n_resamples * n_units (a 20k-item
+    # eval set would otherwise allocate gigabytes at the default 10_000
+    # resamples). Drawing in blocks consumes the SAME rng stream, so results stay
+    # bit-identical to an unchunked draw.
+    block = max(1, _BOOTSTRAP_CELL_BUDGET // n_units)
+    for begin in range(0, n_resamples, block):
+        k = min(block, n_resamples - begin)
+        draw = rng.integers(0, n_units, size=(k, n_units))
+        if codes is None:
+            means[begin : begin + k] = d[draw].mean(axis=1)
+        else:
+            # Ratio of sums over the drawn groups: the usual cluster-bootstrap
+            # estimator, which weights each drawn group by its own size.
+            means[begin : begin + k] = sums[draw].sum(axis=1) / sizes[draw].sum(axis=1)
     low, high = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     # Two-sided: how often does a resample land on the other side of 0?
     opposite = (means <= 0).sum() if observed > 0 else (means >= 0).sum()

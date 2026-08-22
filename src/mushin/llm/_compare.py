@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -184,6 +185,7 @@ def compare_llms(
     correction: str = "holm",
     cache: str | os.PathLike[str] | None = None,
     item_bootstrap: int = 10_000,
+    clusters: Sequence[Any] | None = None,
 ) -> BenchmarkResult:
     if not systems:
         raise ValueError("`systems` is empty")
@@ -209,6 +211,15 @@ def compare_llms(
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
+    # Validate `clusters` here, with the other up-front checks: len(inputs) is
+    # already known, and deferring to paired_item_bootstrap meant a wrong-length
+    # label array surfaced only after every system call had been paid for — or,
+    # with item_bootstrap=0 or a torchmetrics-only battery, was never checked.
+    if clusters is not None and len(clusters) != len(inputs):
+        raise ValueError(
+            f"`clusters` must have one label per item, got {len(clusters)} "
+            f"labels for {len(inputs)} items"
+        )
     # Normalize references through the same JSON round-trip applied to outputs (see
     # _normalize_output), so output and reference are scored on equal footing — e.g.
     # a structured label like ("a", 1) matches an identical output, which would
@@ -261,12 +272,19 @@ def compare_llms(
     comparisons = compare_methods(ds, test=test, alpha=alpha, correction=correction)
     if item_bootstrap:
         comparisons = _attach_item_bootstrap(
-            comparisons, per_items, list(sysmap), n=item_bootstrap, alpha=alpha
+            comparisons,
+            per_items,
+            list(sysmap),
+            n=item_bootstrap,
+            alpha=alpha,
+            clusters=clusters,
         )
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
 
 
-def _attach_item_bootstrap(comparisons, per_items, methods, *, n: int, alpha: float):
+def _attach_item_bootstrap(
+    comparisons, per_items, methods, *, n: int, alpha: float, clusters=None
+):
     """Add paired item-level bootstrap columns to the comparison table.
 
     The seed-based test in ``comparisons`` measures decoding/judge noise only; it
@@ -302,6 +320,7 @@ def _attach_item_bootstrap(comparisons, per_items, methods, *, n: int, alpha: fl
             stats_row = paired_item_bootstrap(
                 vals[row["method_a"]],
                 vals[row["method_b"]],
+                clusters=clusters,
                 n_resamples=n,
                 alpha=alpha,
                 seed=0,
@@ -312,3 +331,131 @@ def _attach_item_bootstrap(comparisons, per_items, methods, *, n: int, alpha: fl
     for c, v in cols.items():
         out[c] = v
     return out
+
+
+def compare_scores(
+    scores: dict[str, Any],
+    *,
+    metric_name: str = "score",
+    clusters: Sequence[Any] | None = None,
+    test: str = "welch",
+    alpha: float = 0.05,
+    correction: str = "holm",
+    item_bootstrap: int = 10_000,
+) -> BenchmarkResult:
+    """Compare systems from **already-computed per-item scores**.
+
+    Use this when another harness (inspect-ai, lm-eval-harness, your own runner)
+    already produced per-item results and you only want the analysis: you get the
+    same :class:`BenchmarkResult`, corrections and item-level bootstrap as
+    :func:`compare_llms` without handing mushin your execution loop.
+
+    ``scores`` maps a system name to either
+
+    * a 1-D sequence of per-item scores — a single run. There is no seed
+      dimension, so the seed-based columns are masked (a single run says nothing
+      about decoding noise) while the item-level columns are fully populated; or
+    * a 2-D ``(n_seeds, n_items)`` array — repeated runs, giving both the
+      seed-based test and the item-level bootstrap.
+
+    Every system must cover the *same* items in the *same order*: item ``i`` of
+    one system is paired with item ``i`` of another. Call once per metric.
+
+    ``clusters`` is passed to :func:`~mushin.benchmark._stats.paired_item_bootstrap`
+    — supply it when items are grouped (several questions per passage), or the
+    interval will be too narrow.
+    """
+    if not scores:
+        raise ValueError("`scores` is empty")
+    if test not in available_tests():
+        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    if correction not in available_corrections():
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
+
+    # Validate everything BEFORE building the dataset, and mirror the checks
+    # compare_llms performs — a caller reaching compare_scores has already spent
+    # the tokens elsewhere, but a silently misread array is worse than an error.
+    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
+        raise TypeError(
+            f"`item_bootstrap` must be an int (0 disables), got "
+            f"{type(item_bootstrap).__name__}"
+        )
+    if item_bootstrap < 0:
+        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
+    metric_name = str(metric_name)  # comparisons stringifies; keep the keys aligned
+
+    arrays: dict[str, np.ndarray] = {}
+    for name, raw in scores.items():
+        arr = np.asarray(raw, dtype=float)
+        if arr.ndim == 0:
+            raise ValueError(
+                f"scores for {name!r} is a scalar; pass a sequence of per-item "
+                "scores (1-D) or an (n_runs, n_items) array"
+            )
+        if arr.ndim > 2:
+            raise ValueError(
+                f"scores for {name!r} must be 1-D (one run) or 2-D "
+                f"(n_runs x n_items), got shape {arr.shape}"
+            )
+        if arr.ndim == 1:
+            arr = arr[np.newaxis, :]
+        if arr.size == 0:
+            raise ValueError(f"scores for {name!r} is empty")
+        if arr.shape[1] < 2 and arr.shape[0] > 1:
+            # (n, 1) is n runs of ONE item. That is legal — the seed-based
+            # analysis still applies — but it is nearly always a column vector
+            # the caller meant as a single run of n items, so say so loudly
+            # rather than silently analysing the transpose of their data.
+            warnings.warn(
+                f"scores for {name!r} have shape {arr.shape}: that is "
+                f"{arr.shape[0]} runs of 1 item, so no item-level statistics are "
+                f"possible. If you meant one run of {arr.shape[0]} items, pass a "
+                "1-D sequence or transpose it.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if not np.isfinite(arr).all():
+            raise ValueError(
+                f"scores for {name!r} contain NaN or infinite values; the "
+                "comparison would silently collapse to NaN. Drop or impute those "
+                "items (in every system, to keep the pairing) first."
+            )
+        arrays[name] = arr
+    widths = {a.shape[1] for a in arrays.values()}
+    if len(widths) != 1:
+        raise ValueError(
+            f"every system must score the SAME items, got item counts {sorted(widths)}"
+        )
+    depths = {a.shape[0] for a in arrays.values()}
+    if len(depths) != 1:
+        raise ValueError(
+            f"every system must have the same number of runs, got {sorted(depths)}"
+        )
+    if clusters is not None and len(clusters) != next(iter(widths)):
+        raise ValueError(
+            f"`clusters` must have one label per item, got {len(clusters)} "
+            f"labels for {next(iter(widths))} items"
+        )
+
+    results = {
+        name: [{metric_name: float(row.mean())} for row in arr]
+        for name, arr in arrays.items()
+    }
+    per_items = {
+        name: {metric_name: [list(row) for row in arr]} for name, arr in arrays.items()
+    }
+    ds = to_dataset(results)
+    ds = ds.assign_coords(seed=list(range(next(iter(depths)))))
+    comparisons = compare_methods(ds, test=test, alpha=alpha, correction=correction)
+    if item_bootstrap:
+        comparisons = _attach_item_bootstrap(
+            comparisons,
+            per_items,
+            list(arrays),
+            n=item_bootstrap,
+            alpha=alpha,
+            clusters=clusters,
+        )
+    return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)

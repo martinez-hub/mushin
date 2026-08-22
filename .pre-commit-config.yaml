@@ -18,9 +18,14 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.3
     hooks:
+      # types_or adds markdown: ruff formats python code blocks inside .md, and
+      # CI runs `ruff format --check .` over the whole tree — without this the
+      # hook passes locally on a doc snippet that CI then rejects.
       - id: ruff-check     # lint
         args: ["--fix"]
+        types_or: [python, pyi, markdown]
       - id: ruff-format    # format
+        types_or: [python, pyi, markdown]
 
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.3

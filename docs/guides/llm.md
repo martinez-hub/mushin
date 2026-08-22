@@ -108,6 +108,54 @@ Two caveats worth knowing:
 Pass `item_bootstrap=0` to skip it, or a different resample count (default
 `10_000`).
 
+### Grouped items need `clusters=`
+
+Eval items are often **not independent** — several questions about one passage,
+several prompts from one document. Those items share whatever makes their source
+easy or hard, so resampling them individually treats correlated observations as
+independent and reports an interval that is too narrow.
+
+Pass a per-item group label and the bootstrap resamples **whole groups** instead:
+
+```python
+result = compare_llms(..., clusters=passage_id_per_item)
+```
+
+In this repo's tests (25 groups of 8, true difference 0), ignoring the grouping
+covers a nominal 95% interval only about half the time; clustering restores it to
+~93% and widens the interval roughly 3x. If your items are genuinely independent,
+omit it — with one item per group the two paths are numerically identical.
+
+!!! warning "Few clusters are still unreliable"
+    The correction fixes the *unit* of resampling, not the sample size. With a
+    handful of groups the interval is still miscalibrated — measured ~53%
+    false-positive rate at 2 clusters and ~15% at 5, against a nominal 5%. What
+    counts is the number of **groups**, not items: a 500-item eval set with 4
+    passages is a 4-sample problem. `mushin` warns below ~20 groups. NaN group
+    labels are rejected outright, because an unlabelled item would otherwise be
+    dropped from every resample while still counting toward the point estimate.
+
+## Bring your own scores
+
+If another harness already produced per-item results — inspect-ai, lm-eval-harness,
+your own runner — you do not have to hand mushin your execution loop to get the
+analysis:
+
+```python
+from mushin.llm import compare_scores
+
+result = compare_scores(
+    {"gpt": gpt_per_item_scores, "claude": claude_per_item_scores},
+    clusters=passage_id_per_item,  # optional
+)
+```
+
+Each system maps to either a 1-D sequence of per-item scores (a single run — the
+item-level columns are populated and the seed-based ones are masked, because one
+run says nothing about decoding noise) or a 2-D `(n_seeds, n_items)` array, which
+gives both dimensions. Systems must cover the same items in the same order; call
+once per metric.
+
 ## Metric options
 
 ### Plain callable

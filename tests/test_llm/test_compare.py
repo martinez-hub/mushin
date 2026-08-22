@@ -728,3 +728,147 @@ def test_item_columns_populated_for_non_string_metric_keys():
             seeds=range(4),
         )
     assert res.comparisons["item_diff"].notna().all()
+
+
+def test_compare_scores_from_precomputed_per_item_scores():
+    """Bring-your-own scores: a single run gives item stats, no seed inference."""
+    from mushin.llm import compare_scores
+
+    r = np.random.default_rng(0)
+    a = (r.random(200) < 0.75).astype(float)
+    b = (r.random(200) < 0.60).astype(float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_scores({"gpt": a, "claude": b})
+    row = res.comparisons.iloc[0]
+    assert np.isnan(row["p_value"])  # one run -> no decoding-noise inference
+    assert row["item_ci_low"] < row["item_diff"] < row["item_ci_high"]
+    assert row["item_diff"] > 0
+
+
+def test_compare_scores_two_dimensional_gives_both_dimensions():
+    from mushin.llm import compare_scores
+
+    r = np.random.default_rng(1)
+    a = np.stack([(r.random(150) < 0.8).astype(float) for _ in range(5)])
+    b = np.stack([(r.random(150) < 0.5).astype(float) for _ in range(5)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = compare_scores({"a": a, "b": b})
+    row = res.comparisons.iloc[0]
+    assert not np.isnan(row["p_value"])  # seeds present
+    assert not np.isnan(row["item_ci_low"])  # items too
+    assert res.data.sizes["seed"] == 5
+
+
+def test_compare_scores_clusters_widen_the_interval():
+    """Ignoring grouped items is overconfident; `clusters=` corrects it."""
+    from mushin.llm import compare_scores
+
+    r = np.random.default_rng(3)
+    labels = np.repeat(np.arange(20), 10)
+    d = r.normal(scale=0.8, size=20)[labels] + r.normal(scale=0.3, size=200)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        flat = compare_scores({"x": d, "y": np.zeros(200)}).comparisons.iloc[0]
+        clus = compare_scores(
+            {"x": d, "y": np.zeros(200)}, clusters=labels
+        ).comparisons.iloc[0]
+    width = lambda row: row["item_ci_high"] - row["item_ci_low"]  # noqa: E731
+    assert width(clus) > 2 * width(flat)
+
+
+def test_compare_scores_rejects_mismatched_item_counts():
+    from mushin.llm import compare_scores
+
+    with pytest.raises(ValueError, match="SAME items"):
+        compare_scores({"a": [1.0, 0.0, 1.0], "b": [1.0, 0.0]})
+
+
+@pytest.mark.parametrize(
+    "scores,kwargs,match",
+    [
+        ({"a": [1.0, np.nan, 0.0] * 7, "b": [0.0] * 21}, {}, "NaN or infinite"),
+        ({"a": [1.0, np.inf, 0.0] * 7, "b": [0.0] * 21}, {}, "NaN or infinite"),
+        ({"a": [], "b": []}, {}, "is empty"),
+        ({"a": 5.0, "b": 5.0}, {}, "is a scalar"),
+        ({"a": np.zeros((2, 2, 2)), "b": np.zeros((2, 2, 2))}, {}, "1-D .*or 2-D"),
+        (
+            {"a": [1.0, 0.0] * 10, "b": [0.0, 1.0] * 10},
+            {"clusters": [1, 2, 3]},
+            "one label per item",
+        ),
+    ],
+)
+def test_compare_scores_rejects_malformed_input(scores, kwargs, match):
+    from mushin.llm import compare_scores
+
+    with pytest.raises((ValueError, TypeError), match=match):
+        compare_scores(scores, **kwargs)
+
+
+def test_compare_scores_rejects_bad_item_bootstrap():
+    from mushin.llm import compare_scores
+
+    with pytest.raises(TypeError, match="must be an int"):
+        compare_scores({"a": [1.0, 0.0] * 10, "b": [0.0, 1.0] * 10}, item_bootstrap="x")
+
+
+@pytest.mark.parametrize(
+    "test", ["wilcoxon", "ttest_rel", "welch", "ttest_ind", "mannwhitney"]
+)
+def test_compare_scores_single_run_is_clean_under_error_warnings(test):
+    """The documented 1-D path must not emit numpy RuntimeWarnings.
+
+    Parametrized over every test: ttest_rel/ttest_ind divide by zero on a
+    single run, and whether that surfaces as a RuntimeWarning is scipy-version
+    dependent — it reached CI only via the min-versions job.
+    """
+    import warnings as _w
+
+    from mushin.llm import compare_scores
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", RuntimeWarning)
+        _w.simplefilter("ignore", UserWarning)
+        res = compare_scores(
+            {"a": np.array([1.0, 0.0, 1.0] * 10), "b": np.array([0.0, 1.0, 0.0] * 10)},
+            test=test,
+        )
+    row = res.comparisons.iloc[0]
+    # a single run cannot support seed-based inference, but items still can
+    assert np.isnan(row["p_value"])
+    assert not np.isnan(row["item_p"])
+
+
+def test_clusters_validated_before_any_system_call():
+    """`clusters` was the only compare_llms argument checked after the token spend."""
+    calls = []
+
+    def spy(inputs, seed):
+        calls.append(1)
+        return ["x"] * len(inputs)
+
+    with pytest.raises(ValueError, match="one label per item"):
+        compare_llms(
+            {"a": spy, "b": spy},
+            data=[{"input": i} for i in range(30)],
+            metric=lambda o, r: 1.0,
+            seeds=[0, 1, 2],
+            clusters=[1, 2, 3, 4, 5],
+        )
+    assert calls == []
+
+
+def test_compare_scores_column_vector_warns_but_runs():
+    """(n, 1) is legal (n runs of 1 item) but is usually a transposed column."""
+    from mushin.llm import compare_scores
+
+    with pytest.warns(UserWarning, match="runs of 1 item"):
+        res = compare_scores(
+            {
+                "a": np.array([[1.0], [0.0], [1.0], [0.0]]),
+                "b": np.array([[0.0], [1.0], [0.0], [1.0]]),
+            }
+        )
+    assert res is not None
