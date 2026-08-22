@@ -156,6 +156,68 @@ run says nothing about decoding noise) or a 2-D `(n_seeds, n_items)` array, whic
 gives both dimensions. Systems must cover the same items in the same order; call
 once per metric.
 
+## Using another harness (Inspect AI)
+
+You ran the same eval on two models with [Inspect AI](https://inspect.aisi.org.uk).
+One scored 60%, the other 56.7%. **Should you switch?**
+
+Inspect runs the evaluation and reports those headline numbers; it does not tell
+you whether the gap is real. A gap can be luck in two ways, and mushin measures
+both:
+
+| the question | what could go wrong | where the evidence comes from |
+| --- | --- | --- |
+| Would a **re-run** agree? | models sample randomly, so the score wiggles run to run | Inspect's `--epochs` repeats |
+| Would **other questions** agree? | you picked 50 questions; another 50 might rank them the other way | a bootstrap over the eval items |
+
+A difference worth acting on has to survive both. The second is usually the
+larger risk, and it is the one most harnesses never report.
+
+See it work with no install and no eval run:
+
+```bash
+python examples/inspect_ai_compare.py --demo
+```
+
+That runs two scenarios with **known ground truth** — two identical models, and
+one genuinely better — so you can check the verdicts rather than trust them:
+
+```
+SCENARIO 1 — the two models are IDENTICAL  (any gap here is luck)
+   gpt-4       50.8%
+   claude-3-5  46.0%
+gpt-4 leads claude-3-5 by 4.8%. Is that real?
+   would a RE-RUN agree?          could be re-run noise (p=0.2484)
+   would OTHER QUESTIONS agree?   NOT established (95% CI [-3.6%, +13.2%] includes 0)
+   -> not a difference you can defend
+```
+
+On your own logs:
+
+```bash
+inspect eval theory_of_mind.py --model openai/gpt-4 --epochs 5
+inspect eval theory_of_mind.py --model anthropic/claude-3-5-sonnet --epochs 5
+python examples/inspect_ai_compare.py logs/*.eval
+```
+
+The two tools line up directly: an Inspect **sample** is a mushin **item**, and
+an Inspect **epoch** is a mushin **run** — so `--epochs 5` gives both dimensions.
+
+!!! warning "Match questions by id, not position"
+    The comparison pairs question *i* of one model with question *i* of the
+    other. Two Inspect logs can list their samples in different orders — retries,
+    parallelism, a shuffled dataset — so matching positionally would compare
+    "capital of France" against "solve this integral" and report a confident,
+    meaningless answer. `scores_from_logs` matches on `sample.id` and raises if
+    the models did not answer the same questions. Do the same in any adapter you
+    write.
+
+[`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
+carries the adapter (~70 lines to copy — mushin takes no Inspect AI dependency,
+so it does not ship as an import). It also converts Inspect's `"C"`/`"I"`
+verdicts. If your questions are grouped — several per passage — pass the group
+ids as `clusters=` (see [Grouped items](#grouped-items-need-clusters)).
+
 ## Metric options
 
 ### Plain callable
