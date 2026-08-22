@@ -156,6 +156,55 @@ run says nothing about decoding noise) or a 2-D `(n_seeds, n_items)` array, whic
 gives both dimensions. Systems must cover the same items in the same order; call
 once per metric.
 
+## Using another harness (Inspect AI)
+
+If you already run evals in [Inspect AI](https://inspect.aisi.org.uk), you do not
+have to move your evaluation into mushin to get the statistics. Inspect runs the
+eval — solvers, tool use, scoring, sandboxing — and reports per-sample scores and
+standard errors, but not model-vs-model inference. mushin takes it from there.
+
+The two dimensions line up:
+
+| Inspect AI | mushin |
+| --- | --- |
+| one sample | one **item** — eval-set uncertainty |
+| one epoch | one **run** — decoding/sampling noise |
+
+so an Inspect run with `--epochs 5` produces exactly the `(n_runs, n_items)`
+array `compare_scores` wants:
+
+```bash
+inspect eval theory_of_mind.py --model openai/gpt-4 --epochs 5
+inspect eval theory_of_mind.py --model anthropic/claude-3-5-sonnet --epochs 5
+```
+
+```python
+from inspect_ai.log import read_eval_log
+from mushin.llm import compare_scores
+
+# scores_from_logs is ~60 lines in the example below — copy it into your project
+# (mushin takes no Inspect AI dependency, so it does not ship as an import).
+logs = [read_eval_log(p) for p in ("logs/gpt4.eval", "logs/claude.eval")]
+scores, sample_ids = scores_from_logs(logs)
+result = compare_scores(scores)
+```
+
+[`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
+has that helper and runs as a script: `python examples/inspect_ai_compare.py logs/*.eval`.
+
+!!! warning "Align by sample id, not position"
+    `compare_scores` pairs item *i* of one model with item *i* of another. Two
+    Inspect logs can list their samples in different orders — retries,
+    parallelism, a shuffled dataset — so pairing them positionally would
+    silently compare unrelated questions. `scores_from_logs` aligns on
+    `sample.id` and raises if the models did not evaluate the same sample set.
+    If you write your own adapter, do the same.
+
+Inspect's built-in scorers record `"C"`/`"I"` rather than numbers;
+`scores_from_logs` converts those, and takes a `value_fn` for anything custom.
+If your samples are grouped — several questions per passage — pass the group ids
+through as `clusters=` (see [Grouped items](#grouped-items-need-clusters)).
+
 ## Metric options
 
 ### Plain callable

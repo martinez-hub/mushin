@@ -60,3 +60,17 @@ than in CI. See the linked guides for the full recipe and validation runbook.
 
 - [Quickstart](quickstart.md) — the flagship example, run end-to-end.
 - [Guides](guides/workflows.md) — workflows, compare, Study, resilience, and more.
+
+### `inspect_ai_compare.py` — statistics for an Inspect AI eval
+
+Reads [Inspect AI](https://inspect.aisi.org.uk) eval logs and compares the models
+with mushin: paired item-level bootstrap, epoch-to-epoch variance, and
+multiple-comparison correction. Inspect runs the eval; mushin says which
+differences are real.
+
+```bash
+inspect eval theory_of_mind.py --model openai/gpt-4 --epochs 5
+python examples/inspect_ai_compare.py logs/*.eval
+```
+
+Needs `pip install inspect-ai "mushin-py[eval]"`.
