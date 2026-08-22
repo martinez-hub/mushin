@@ -158,52 +158,65 @@ once per metric.
 
 ## Using another harness (Inspect AI)
 
-If you already run evals in [Inspect AI](https://inspect.aisi.org.uk), you do not
-have to move your evaluation into mushin to get the statistics. Inspect runs the
-eval — solvers, tool use, scoring, sandboxing — and reports per-sample scores and
-standard errors, but not model-vs-model inference. mushin takes it from there.
+You ran the same eval on two models with [Inspect AI](https://inspect.aisi.org.uk).
+One scored 60%, the other 56.7%. **Should you switch?**
 
-The two dimensions line up:
+Inspect runs the evaluation and reports those headline numbers; it does not tell
+you whether the gap is real. A gap can be luck in two ways, and mushin measures
+both:
 
-| Inspect AI | mushin |
-| --- | --- |
-| one sample | one **item** — eval-set uncertainty |
-| one epoch | one **run** — decoding/sampling noise |
+| the question | what could go wrong | where the evidence comes from |
+| --- | --- | --- |
+| Would a **re-run** agree? | models sample randomly, so the score wiggles run to run | Inspect's `--epochs` repeats |
+| Would **other questions** agree? | you picked 50 questions; another 50 might rank them the other way | a bootstrap over the eval items |
 
-so an Inspect run with `--epochs 5` produces exactly the `(n_runs, n_items)`
-array `compare_scores` wants:
+A difference worth acting on has to survive both. The second is usually the
+larger risk, and it is the one most harnesses never report.
+
+See it work with no install and no eval run:
+
+```bash
+python examples/inspect_ai_compare.py --demo
+```
+
+That runs two scenarios with **known ground truth** — two identical models, and
+one genuinely better — so you can check the verdicts rather than trust them:
+
+```
+SCENARIO 1 — the two models are IDENTICAL  (any gap here is luck)
+   gpt-4       50.8%
+   claude-3-5  46.0%
+gpt-4 leads claude-3-5 by 4.8%. Is that real?
+   would a RE-RUN agree?          could be re-run noise (p=0.2484)
+   would OTHER QUESTIONS agree?   NOT established (95% CI [-3.6%, +13.2%] includes 0)
+   -> not a difference you can defend
+```
+
+On your own logs:
 
 ```bash
 inspect eval theory_of_mind.py --model openai/gpt-4 --epochs 5
 inspect eval theory_of_mind.py --model anthropic/claude-3-5-sonnet --epochs 5
+python examples/inspect_ai_compare.py logs/*.eval
 ```
 
-```python
-from inspect_ai.log import read_eval_log
-from mushin.llm import compare_scores
+The two tools line up directly: an Inspect **sample** is a mushin **item**, and
+an Inspect **epoch** is a mushin **run** — so `--epochs 5` gives both dimensions.
 
-# scores_from_logs is ~60 lines in the example below — copy it into your project
-# (mushin takes no Inspect AI dependency, so it does not ship as an import).
-logs = [read_eval_log(p) for p in ("logs/gpt4.eval", "logs/claude.eval")]
-scores, sample_ids = scores_from_logs(logs)
-result = compare_scores(scores)
-```
+!!! warning "Match questions by id, not position"
+    The comparison pairs question *i* of one model with question *i* of the
+    other. Two Inspect logs can list their samples in different orders — retries,
+    parallelism, a shuffled dataset — so matching positionally would compare
+    "capital of France" against "solve this integral" and report a confident,
+    meaningless answer. `scores_from_logs` matches on `sample.id` and raises if
+    the models did not answer the same questions. Do the same in any adapter you
+    write.
 
 [`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
-has that helper and runs as a script: `python examples/inspect_ai_compare.py logs/*.eval`.
-
-!!! warning "Align by sample id, not position"
-    `compare_scores` pairs item *i* of one model with item *i* of another. Two
-    Inspect logs can list their samples in different orders — retries,
-    parallelism, a shuffled dataset — so pairing them positionally would
-    silently compare unrelated questions. `scores_from_logs` aligns on
-    `sample.id` and raises if the models did not evaluate the same sample set.
-    If you write your own adapter, do the same.
-
-Inspect's built-in scorers record `"C"`/`"I"` rather than numbers;
-`scores_from_logs` converts those, and takes a `value_fn` for anything custom.
-If your samples are grouped — several questions per passage — pass the group ids
-through as `clusters=` (see [Grouped items](#grouped-items-need-clusters)).
+carries the adapter (~70 lines to copy — mushin takes no Inspect AI dependency,
+so it does not ship as an import). It also converts Inspect's `"C"`/`"I"`
+verdicts. If your questions are grouped — several per passage — pass the group
+ids as `clusters=` (see [Grouped items](#grouped-items-need-clusters)).
 
 ## Metric options
 

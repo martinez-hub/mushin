@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -70,7 +71,7 @@ def test_mismatched_sample_sets_are_rejected():
     """Different datasets cannot be paired — mushin pairs item i to item i."""
     a = _log("m/a", [("q1", 1, 1.0), ("q2", 1, 1.0)])
     b = _log("m/b", [("q1", 1, 1.0), ("q9", 1, 1.0)])
-    with pytest.raises(ValueError, match="different samples"):
+    with pytest.raises(ValueError, match="different questions"):
         adapter.scores_from_logs([a, b])
 
 
@@ -134,3 +135,35 @@ def test_end_to_end_into_compare_scores():
     row = result.comparisons.iloc[0]
     assert not np.isnan(row["item_diff"])
     assert not np.isnan(row["p_value"])  # 3 epochs -> seed dimension exists
+
+
+def test_demo_runs_and_reaches_the_right_verdicts(capsys):
+    """`--demo` must work with no Inspect AI and no logs, and be *correct*.
+
+    It is the example's own regression test: two identical models must not be
+    called different, and a genuinely better model must be.
+    """
+    pytest.importorskip("scipy")
+    assert adapter.main(["--demo"]) == 0
+    out = capsys.readouterr().out
+    scenarios = out.split("SCENARIO")
+    assert len(scenarios) == 3  # preamble + two scenarios
+    identical, better = scenarios[1], scenarios[2]
+    assert "not a difference you can defend" in identical
+    assert "a difference worth acting on" in better
+
+
+def test_report_handles_a_single_run(capsys):
+    """One epoch cannot answer the re-run question; say so instead of guessing."""
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(0)
+    scores = {
+        "a": (rng.random((1, 40)) < 0.8).astype(float),
+        "b": (rng.random((1, 40)) < 0.5).astype(float),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "only one epoch" in out  # re-run question unanswerable
+    assert "would OTHER QUESTIONS agree?" in out  # item question still answered
