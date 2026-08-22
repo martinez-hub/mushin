@@ -60,3 +60,18 @@ than in CI. See the linked guides for the full recipe and validation runbook.
 
 - [Quickstart](quickstart.md) — the flagship example, run end-to-end.
 - [Guides](guides/workflows.md) — workflows, compare, Study, resilience, and more.
+
+### `llm_prompt_sweep.py` — tuning a prompt without paying twice
+
+Sweeps prompt template x temperature x seed and reads the winner off a labelled
+dataset. The point is the sweep machinery, not the statistics: transient API
+failures become NaN cells instead of discarding the run (`on_error="nan"`), a
+re-run reuses what already completed (`resume=True`), and the result is keyed by
+the parameters you swept so picking the best configuration is one reduction.
+
+```bash
+python examples/llm_prompt_sweep.py --demo
+```
+
+In the demo 18 of 60 cells fail transiently; a strict harness would have thrown
+away the other 42 paid calls. Needs no keys or network.
