@@ -68,3 +68,73 @@ def test_demo_runs_and_surfaces_the_blind_spot(capsys):
     out = capsys.readouterr().out
     assert "blind spot" in out  # the per-attack view found it
     assert "would OTHER ATTACKS agree?" in out
+
+
+def test_per_attack_rows_are_genuinely_distinct():
+    """The breakdown must measure the attacks, not replay one RNG stream.
+
+    The first version seeded sequentially per batch position, so every attack
+    subset drew the same numbers and four of five rows were bit-identical — a
+    table that looked informative and carried nothing.
+    """
+    suite = inj.injection_suite()
+    system = inj._simulated_system(0.7)
+    rates = {}
+    for attack in inj._ATTACKS:
+        prompts = [ex["input"] for ex in suite if ex["attack"] == attack]
+        outputs = system(prompts, 0)
+        rates[attack] = sum(inj.resisted(o, inj.CANARY) for o in outputs) / len(outputs)
+    assert len(set(rates.values())) > 1, f"all attacks scored identically: {rates}"
+
+
+def test_outcome_is_independent_of_batch_composition():
+    """Scoring one attack's documents must match scoring all of them together.
+
+    This is the contract mushin's output cache assumes, and it is what makes the
+    sweep breakdown a decomposition of the headline number rather than a second,
+    unrelated measurement.
+    """
+    suite = inj.injection_suite()
+    system = inj._simulated_system(0.7, weak_against="authority")
+    whole = {
+        ex["input"]["document"]: inj.resisted(o, inj.CANARY)
+        for ex, o in zip(suite, system([e["input"] for e in suite], 3), strict=True)
+    }
+    for attack in inj._ATTACKS:
+        subset = [e["input"] for e in suite if e["attack"] == attack]
+        for item, out in zip(subset, system(subset, 3), strict=True):
+            assert inj.resisted(out, inj.CANARY) == whole[item["document"]]
+
+
+def test_simulated_weakness_keys_on_the_attack_name():
+    """`weak_against` takes an attack name, and rejects one that does not exist."""
+    with pytest.raises(ValueError, match="unknown attack"):
+        inj._simulated_system(0.8, weak_against="SYSTEM NOTICE")
+    suite = inj.injection_suite()
+    system = inj._simulated_system(0.9, weak_against="roleplay")
+    rate = {}
+    for attack in ("roleplay", "naive"):
+        prompts = [ex["input"] for ex in suite if ex["attack"] == attack]
+        outs = system(prompts, 0)
+        rate[attack] = sum(inj.resisted(o, inj.CANARY) for o in outs) / len(outs)
+    assert rate["roleplay"] < rate["naive"]
+
+
+def test_draws_are_stable_across_processes():
+    """hash() is randomised per process; the demo must not be."""
+    import subprocess
+    import sys as _sys
+
+    code = (
+        "import importlib.util,sys;"
+        "spec=importlib.util.spec_from_file_location('inj','examples/prompt_injection_eval.py');"
+        "m=importlib.util.module_from_spec(spec);sys.modules['inj']=m;spec.loader.exec_module(m);"
+        "print(round(m._uniform('doc-under-test', 7), 12))"
+    )
+    outs = {
+        subprocess.run(
+            [_sys.executable, "-c", code], capture_output=True, text=True
+        ).stdout.strip()
+        for _ in range(3)
+    }
+    assert len(outs) == 1, f"per-process variation: {outs}"

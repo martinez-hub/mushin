@@ -71,9 +71,11 @@ without carrying a real one.
 
 Resistance is binary per document, which is exactly the shape where a headline
 score misleads: attacks vary enormously in difficulty, so a different attack set
-can reverse the ranking. The example reports whether a gap survives a re-run and
-a different set of attacks, and prints a per-attack breakdown — in the demo, the
-"better" system is 33 points *worse* on one attack shape that the aggregate hides.
+can reverse the ranking. The example reports whether a gap survives a re-run and a different set of
+attacks, and prints a per-attack breakdown. In the demo the "better" system is
+15 points *worse* on one attack shape, and — because five attack shapes are five
+grouped observations, not forty independent ones — the aggregate gap does not
+actually reach significance once `clusters=` accounts for the grouping.
 
 ```bash
 python examples/prompt_injection_eval.py --demo
