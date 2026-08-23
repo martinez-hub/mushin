@@ -17,19 +17,19 @@ This example shows the sweep half of mushin handling exactly that:
 
 ``on_error="nan"``     a rate-limited cell becomes NaN; the rest of the grid finishes
 ``resume=True``        re-running reuses completed cells and only retries the holes
+``to_xarray()``        results labelled by prompt/temperature/seed — no bookkeeping
 ``max_total_seconds``  a wall-clock budget, so a runaway sweep stops itself
 ``sample=``            try a fraction of the grid before committing to all of it
 
-The demo exercises ``on_error``, ``resume`` and the labelled result; the budget
-and sampling knobs are listed because they belong to the same problem, and take
-one argument each — see the resilient-sweeps guide.
-``to_xarray()``        results labelled by prompt/temperature/seed — no bookkeeping
-
-and then hands the winner to the statistics, so "prompt B is better" is a claim
-about a difference that survived re-running rather than a single lucky run.
+The demo exercises the first three, and then hands the winner to the statistics,
+so "prompt B is better" is a claim about a difference that survived re-running
+rather than a single lucky run. The budget and sampling knobs are listed because
+they belong to the same problem and take one argument each — the demo does not
+exercise them; see the resilient-sweeps guide.
 
 Run the demo (no keys, no network — failures are simulated)::
 
+    pip install "mushin-py[eval]"     # the significance step needs the extra
     python examples/llm_prompt_sweep.py --demo
 """
 
@@ -114,8 +114,10 @@ def demo(argv: Sequence[str]) -> int:
 
     print("PASS 1 — the sweep, with transient API failures\n")
     sweep = mushin.sweep(score_config)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    # Captured, not silenced: mushin reports "N run(s) failed" and that is the
+    # headline of this pass, not noise to be filtered out.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         sweep.run(
             prompt=mushin.multirun(list(PROMPTS)),
             temperature=mushin.multirun([0.0, 0.4, 0.8]),
@@ -130,6 +132,10 @@ def demo(argv: Sequence[str]) -> int:
     print(f"   grid: {dict(ds.sizes)}  = {total} cells")
     print(f"   completed: {total - failed},  failed transiently: {failed}")
     print(f"   is_complete: {wf.is_complete}")
+    for w in caught:
+        # mushin says it out loud; a harness that hides this is how a half-empty
+        # sweep gets written up as a finished one.
+        print(f"   mushin: {w.message}")
     if failed:
         done = total - failed
         print(
@@ -152,8 +158,8 @@ def demo(argv: Sequence[str]) -> int:
 def _resume_and_report(workdir: str, sweep) -> None:
     import warnings
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         sweep2 = mushin.sweep(score_config)
         sweep2.run(
             prompt=mushin.multirun(list(PROMPTS)),
@@ -169,6 +175,8 @@ def _resume_and_report(workdir: str, sweep) -> None:
         f"   after resume: {ds2['accuracy'].size - still_missing} completed, "
         f"{still_missing} still missing"
     )
+    for w in caught:
+        print(f"   mushin: {w.message}")
 
     print("\nWHICH CONFIGURATION WON — one reduction over named dimensions\n")
     mean_acc = ds2["accuracy"].mean("seed")
@@ -190,10 +198,18 @@ def _resume_and_report(workdir: str, sweep) -> None:
     # the winner against the by-design worst prompt makes the test trivially easy
     # and says nothing about the choice you actually face.
     at_best = mean_acc.sel(temperature=bt)
-    runner_up = str(at_best.sortby(at_best, ascending=False)["prompt"].values[1])
+    # Drop the winner FIRST. Sorting and taking [1] returns the winner itself
+    # whenever another prompt ties it — the sort is not guaranteed to put the
+    # winning cell first among equals — and comparing a system against itself
+    # collapses compare_scores to one system and raises.
+    others = at_best.drop_sel(prompt=bp)
+    if others.sizes.get("prompt", 0) == 0:
+        print("   only one prompt swept — nothing to compare the winner against.")
+        return
+    runner_up = str(others["prompt"].values[int(others.argmax("prompt"))])
     at = lambda p: ds2["accuracy"].sel(prompt=p, temperature=bt).values[:, None]  # noqa: E731
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with warnings.catch_warnings(record=True) as stat_warnings:
+        warnings.simplefilter("always")
         row = compare_scores({bp: at(bp), runner_up: at(runner_up)}).comparisons.iloc[0]
     print(f"   {bp} vs {runner_up} at temperature={bt}")
     print(f"      mean difference {row['mean_diff']:+.1%}")
@@ -202,6 +218,14 @@ def _resume_and_report(workdir: str, sweep) -> None:
         f"{'yes' if row['p_value'] < 0.05 else 'not established'} "
         f"(p={row['p_value']:.4f})"
     )
+    # One expected warning is filtered by MESSAGE, not by a blanket ignore: the
+    # (n_seeds, 1) shape is deliberate here — each cell is already a mean over
+    # the 40 questions, so there is one "item" per run and no item-level
+    # statistics are possible. That is the trade-off the closing note describes.
+    # Anything mushin says beyond it is printed.
+    for w in stat_warnings:
+        if "no item-level statistics are possible" not in str(w.message):
+            print(f"      ! mushin warns: {w.message}")
     print(
         "\n(The seeds here are whole re-runs of the eval set, so this asks whether\n"
         " the prompt difference survives sampling noise — not whether it would\n"

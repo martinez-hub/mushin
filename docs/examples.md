@@ -12,7 +12,8 @@ uv run python examples/<name>.py
 
 !!! note "Some examples need the `eval` extra"
     The comparison/Study/battery/LLM examples (`compare_classifiers`,
-    `study_mnist`, `segmentation_demo`, `compare_llms_demo`, `batteries`) use
+    `study_mnist`, `segmentation_demo`, `compare_llms_demo`, `batteries`,
+    `inspect_ai_compare`, `prompt_injection_eval`, `llm_prompt_sweep`) use
     mushin's optional evaluation layer. On a plain `pip install mushin-py` they
     raise an install hint — run them with `pip install "mushin-py[eval]"`
     (`uv run` in this repo already includes it). `batteries.py` additionally
@@ -70,10 +71,13 @@ re-run reuses what already completed (`resume=True`), and the result is keyed by
 the parameters you swept so picking the best configuration is one reduction.
 
 ```bash
+pip install "mushin-py[eval]"   # the closing significance step needs the extra
 python examples/llm_prompt_sweep.py --demo
 ```
 
 In the demo 8 of 60 cells fail transiently; a strict harness would have discarded
 the other 52 completed cells — 2,080 paid calls — along with them. Runs
 identically every time (no keys, no network), which is the point: `resume` can
-only reuse a cell whose value is reproducible.
+only reuse a cell whose value is reproducible. The demo prints mushin's own
+`8 run(s) failed … set to NaN` report rather than filtering it out — a partial
+sweep should be impossible to mistake for a complete one.
