@@ -77,6 +77,10 @@ attacks, and prints a per-attack breakdown. In the demo the "better" system is
 grouped observations, not forty independent ones — the aggregate gap does not
 actually reach significance once `clusters=` accounts for the grouping.
 
+Five clusters is also few enough that mushin warns the interval is unreliable,
+and the demo prints that warning rather than hiding it: the fix for a too-narrow
+interval is more attack *shapes*, not more topics wrapped around the same five.
+
 ```bash
 python examples/prompt_injection_eval.py --demo
 ```
