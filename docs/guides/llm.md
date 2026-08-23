@@ -79,14 +79,20 @@ at the given seed count.
 ## Item-level uncertainty
 
 Alongside the seed-based test, `compare_llms` resamples the **eval items** with
-replacement (a paired bootstrap, Koehn 2004) and reports four extra columns on
+replacement (a paired bootstrap, Koehn 2004) and reports five extra columns on
 `result.comparisons`:
 
 | column | meaning |
 | --- | --- |
 | `item_diff` | mean per-item difference (seed-averaged) |
-| `item_ci_low` / `item_ci_high` | bootstrap CI on that difference |
-| `item_p` | two-sided bootstrap p-value |
+| `item_ci_low` / `item_ci_high` | bootstrap CI on that difference (per-comparison, **not** simultaneous) |
+| `item_p` | two-sided bootstrap p-value, per comparison |
+| `item_p_corrected` | the same p-value under the `correction=` you chose |
+
+Comparing three systems gives three pairs on *both* axes, so `item_p` needs the
+same multiplicity correction as `p_value`. Use `item_p_corrected` next to
+`p_corrected` — mixing a corrected seed p with a raw item p understates one of
+the two risks. With a single comparison the two columns are equal.
 
 ```python
 row = result.comparisons.iloc[0]
@@ -214,6 +220,11 @@ an Inspect **epoch** is a mushin **run** — so `--epochs 5` gives both dimensio
     meaningless answer. `scores_from_logs` matches on `sample.id` and raises if
     the models did not answer the same questions. Do the same in any adapter you
     write.
+
+    Ids alone are not enough, though: Inspect numbers samples `1..N` *within a
+    task*, so logs from two different tasks have colliding ids that pair up
+    perfectly and mean nothing. `scores_from_logs` also refuses logs whose
+    `eval.task` differs.
 
 [`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
 carries the adapter (~70 lines to copy — mushin takes no Inspect AI dependency,

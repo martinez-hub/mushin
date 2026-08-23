@@ -11,6 +11,7 @@ questions rather than failing.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import types
 import warnings
@@ -202,18 +203,149 @@ def test_ci_is_oriented_to_the_announced_lead(capsys):
     assert not ci.strip().startswith("-"), f"interval contradicts the lead: {ci}"
 
 
-def test_three_models_use_the_corrected_p_value(capsys):
-    """With 3+ models there are 3 pairs; the raw p-value over-states significance."""
+def _printed_pvalues(out):
+    """Every ``p=`` number in report()'s output, in printed order."""
+    return [float(m) for m in re.findall(r"p=([0-9.]+)", out)]
+
+
+def test_three_models_print_the_corrected_p_values_on_BOTH_axes(capsys):
+    """With 3+ models there are 3 pairs; the raw p-values over-state significance.
+
+    Asserting the printed NUMBERS, not just the word "Holm-corrected": a test that
+    only checks the banner passes with either p-value column wired up, which is
+    how a raw item p sat under a "corrected" banner in the first place.
+    """
     pytest.importorskip("scipy")
+    from mushin.llm import compare_scores
+
     scores, _ = adapter.scores_from_logs(
         [_rows("m1", seed=1), _rows("m2", seed=2), _rows("m3", seed=3)]
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        expected = compare_scores(scores)
         adapter.report(scores)
     out = capsys.readouterr().out
-    assert "Holm-corrected" in out  # the reader is told the p-values are corrected
     assert out.count("Is that real?") == 3
+
+    corrected = [
+        p
+        for _, row in expected.comparisons.iterrows()
+        for p in (row["p_corrected"], row["item_p_corrected"])
+        if not np.isnan(p)
+    ]
+    raw = [
+        p
+        for _, row in expected.comparisons.iterrows()
+        for p in (row["p_value"], row["item_p"])
+        if not np.isnan(p)
+    ]
+    # The correction has to actually bite, or this test proves nothing.
+    assert any(c > r + 1e-9 for c, r in zip(corrected, raw, strict=True))
+    assert _printed_pvalues(out) == pytest.approx(
+        [round(p, 4) for p in corrected], abs=5e-5
+    )
+
+
+def test_item_p_is_corrected_over_the_same_family_as_the_seed_p():
+    """The library, not the example, owns the correction — check it directly."""
+    pytest.importorskip("scipy")
+    from mushin.benchmark._stats import holm_correction
+    from mushin.llm import compare_scores
+
+    scores, _ = adapter.scores_from_logs(
+        [_rows("m1", seed=1), _rows("m2", seed=2), _rows("m3", seed=3)]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = compare_scores(scores)
+    np.testing.assert_allclose(
+        result.comparisons["item_p_corrected"].to_numpy(),
+        holm_correction(result.comparisons["item_p"].to_numpy()),
+    )
+
+
+def test_two_models_leave_the_p_values_uncorrected_and_say_nothing(capsys):
+    """One comparison is not a family: no banner, and no inflated p-value."""
+    pytest.importorskip("scipy")
+    from mushin.llm import compare_scores
+
+    scores, _ = adapter.scores_from_logs([_rows("m1", seed=1), _rows("m2", seed=2)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = compare_scores(scores)
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "Holm-corrected" not in out
+    row = expected.comparisons.iloc[0]
+    assert row["item_p_corrected"] == pytest.approx(row["item_p"])
+
+
+def test_logs_from_different_tasks_are_refused():
+    """Inspect numbers samples 1..N per task, so ids collide across tasks."""
+    a = _log("m/a", [(i, 1, 1.0) for i in range(1, 6)])
+    b = _log("m/b", [(i, 1, 0.0) for i in range(1, 6)])
+    a.eval.task = "theory_of_mind"
+    b.eval.task = "gsm8k"
+    with pytest.raises(ValueError, match="different Inspect tasks"):
+        adapter.scores_from_logs([a, b])
+    # ...and the same task on both logs is fine.
+    b.eval.task = "theory_of_mind"
+    scores, _ = adapter.scores_from_logs([a, b])
+    assert set(scores) == {"m/a", "m/b"}
+
+
+def test_non_fractional_scores_are_not_printed_as_percentages(capsys):
+    """A 1-10 rubric scorer must not render 7.4 as 744.2%."""
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(0)
+    scores = {
+        "a": 7.0 + rng.normal(scale=0.4, size=(4, 30)),
+        "b": 6.0 + rng.normal(scale=0.4, size=(4, 30)),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "score units" in out
+    assert "points" not in out
+    # "95% CI" is the only legitimate percent sign; no SCORE may be rendered as one.
+    assert re.sub(r"95% CI", "", out).count("%") == 0
+    assert "7.0" in out or "6.9" in out or "7.1" in out  # the mean, in its own units
+
+
+def test_an_unmeasurable_check_is_reported_as_unproven_not_as_a_refutation(capsys):
+    """A temperature-0 model has no re-run distribution. That is not a failure."""
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(1)
+    items = rng.random(40)
+    scores = {
+        # identical every epoch: the seed axis cannot be tested...
+        "temp0": np.tile(items + 0.25, (4, 1)),
+        # ...but the item axis is decisive.
+        "other": items + rng.normal(scale=0.01, size=(4, 40)),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "no re-run distribution" in out
+    assert "holds up" in out
+    assert "UNPROVEN" in out
+    assert "not a difference you can defend" not in out
+
+
+def test_a_degenerate_item_bootstrap_is_not_blamed_on_missing_scores(capsys):
+    """Per-question scores are always present on this path; say the real cause."""
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(2)
+    base = rng.random((4, 30))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report({"a": base + 0.1, "b": base})  # identical gap on every item
+    out = capsys.readouterr().out
+    assert "every question shows the same gap" in out
+    assert "per-question scores unavailable" not in out
 
 
 def test_masked_seed_test_is_not_blamed_on_a_single_epoch(capsys):

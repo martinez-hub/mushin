@@ -106,9 +106,13 @@ def scores_from_logs(
     """
     per_model: dict[str, dict[tuple[Any, int], float]] = {}
     ids_seen: dict[str, set[Any]] = {}
+    tasks: dict[str, str] = {}
 
     for log in logs:
         model = log.eval.model
+        task = getattr(log.eval, "task", None)
+        if task is not None:
+            tasks[model] = str(task)
         if model in per_model:
             raise ValueError(
                 f"two logs for model {model!r}; pass one log per model (or rename "
@@ -155,6 +159,18 @@ def scores_from_logs(
         ids_seen[model] = {sid for sid, _ in cells}
 
     models = list(per_model)
+    # Inspect numbers samples 1..N *within a task*, so two logs from DIFFERENT
+    # tasks have colliding ids that the id-based pairing below would happily
+    # match: question 7 of one eval against question 7 of an unrelated one. The
+    # ids alone cannot detect that, so check the task name before trusting them.
+    if len(set(tasks.values())) > 1:
+        listing = ", ".join(f"{m}={tasks[m]!r}" for m in sorted(tasks))
+        raise ValueError(
+            f"logs come from different Inspect tasks ({listing}), so their sample "
+            "ids refer to different questions and cannot be paired. Compare models "
+            "on one task at a time."
+        )
+
     shared = ids_seen[models[0]]
     for model in models[1:]:
         if ids_seen[model] != shared:
@@ -183,7 +199,27 @@ def scores_from_logs(
     return arrays, question_ids
 
 
-def report(scores: dict[str, np.ndarray], *, clusters=None) -> None:
+def _units(scores: dict[str, np.ndarray]):
+    """Choose the display units, and return ``(level, signed, noun)`` formatters.
+
+    Inspect's built-in scorers are 0-1, so percentages read naturally — but a
+    custom scorer can return anything (a 1-10 rubric, a token count, a negative
+    log-likelihood), and formatting 7.442 as ``744.2%`` is nonsense. Percentages
+    are used only when every score actually lies in [0, 1].
+    """
+    finite = np.concatenate(
+        [np.asarray(a, dtype=float).ravel() for a in scores.values()]
+    )
+    finite = finite[np.isfinite(finite)]
+    fractional = bool(finite.size) and finite.min() >= 0.0 and finite.max() <= 1.0
+    if fractional:
+        return (lambda v: f"{v:6.1%}", lambda v: f"{v * 100:+.1f}", "points")
+    return (lambda v: f"{v:6.3f}", lambda v: f"{v:+.3f}", "score units")
+
+
+def report(
+    scores: dict[str, np.ndarray], *, clusters=None, alpha: float = 0.05
+) -> None:
     """Print the headline numbers, then whether each gap survives both checks.
 
     ``clusters`` is positional against the item axis, which is the sorted
@@ -201,20 +237,22 @@ def report(scores: dict[str, np.ndarray], *, clusters=None) -> None:
         )
         return
 
+    level, signed, noun = _units(scores)
     n_runs = {name: arr.shape[0] for name, arr in scores.items()}
     # Recomputed from the per-sample scores, so it is the mean over the epochs
     # and samples present in the log — not necessarily the figure Inspect's own
     # aggregate metric printed (a different reducer would give a different one).
     print("Mean score per model (recomputed from the per-sample scores):")
     for name in names:
-        print(f"   {name:<32} {scores[name].mean():6.1%}  ({n_runs[name]} epoch(s))")
+        print(f"   {name:<32} {level(scores[name].mean())}  ({n_runs[name]} epoch(s))")
 
-    result = compare_scores(scores, clusters=clusters)
+    result = compare_scores(scores, clusters=clusters, alpha=alpha)
     n_pairs = len(result.comparisons)
     if n_pairs > 1:
         print(
-            f"\n{n_pairs} pairwise comparisons — p-values below are Holm-corrected "
-            "for multiplicity."
+            f"\n{n_pairs} pairwise comparisons — BOTH p-values below are "
+            "Holm-corrected for multiplicity (the confidence intervals are "
+            "per-comparison, not simultaneous)."
         )
 
     for _, row in result.comparisons.iterrows():
@@ -222,7 +260,8 @@ def report(scores: dict[str, np.ndarray], *, clusters=None) -> None:
         gap = row["mean_diff"]
         leader, trailer = (a, b) if gap >= 0 else (b, a)
         print(
-            f"\n{leader} leads {trailer} by {abs(gap) * 100:.1f} points. Is that real?"
+            f"\n{leader} leads {trailer} by {signed(abs(gap)).lstrip('+')} {noun}. "
+            "Is that real?"
         )
 
         # 1. sampling noise across Inspect epochs. Use the CORRECTED p-value:
@@ -237,35 +276,61 @@ def report(scores: dict[str, np.ndarray], *, clusters=None) -> None:
                     "one model scored identically in every epoch, so it has no "
                     "re-run distribution to test"
                 )
+            seed_ok = None
             verdict = f"no answer — {why}"
-        elif p_seed < 0.05:
-            verdict = f"survives re-running (p={p_seed:.4f})"
         else:
-            verdict = f"could be re-run noise (p={p_seed:.4f})"
+            seed_ok = bool(row["significant"])
+            verdict = (
+                f"survives re-running (p={p_seed:.4f})"
+                if seed_ok
+                else f"could be re-run noise (p={p_seed:.4f})"
+            )
         print(f"   would a RE-RUN agree?          {verdict}")
 
-        # 2. eval-set uncertainty across questions. The interval is signed
-        # method_a - method_b; orient it to the lead just announced, or it reads
-        # as contradicting the sentence above.
+        # 2. eval-set uncertainty across questions. Corrected over the same family
+        # as the seed axis: comparing three models multiplies the chance of a
+        # spurious item-level win exactly as it does on the seed axis.
         lo, hi = row["item_ci_low"], row["item_ci_high"]
-        if gap < 0:
-            lo, hi = -hi, -lo
-        if np.isnan(row["item_p"]):
-            items = "no answer — per-question scores unavailable"
-        elif row["item_p"] < 0.05:
-            items = f"holds up (p={row['item_p']:.4f}, 95% CI [{lo * 100:+.1f}, {hi * 100:+.1f}] points)"
+        if gap < 0:  # the interval is signed method_a - method_b; orient it to
+            lo, hi = -hi, -lo  # the lead just announced, or it reads as a denial
+        p_item = row["item_p_corrected"]
+        if np.isnan(p_item):
+            # compare_scores always has per-question scores, so the only way the
+            # bootstrap declines to answer is a degenerate eval set.
+            per_item_gap = scores[a].mean(axis=0) - scores[b].mean(axis=0)
+            why = (
+                "every question shows the same gap, so there is no eval-set "
+                "variation to resample"
+                if np.allclose(per_item_gap, per_item_gap.flat[0])
+                else "the item bootstrap could not be computed"
+            )
+            item_ok = None
+            items = f"no answer — {why}"
         else:
+            item_ok = p_item < alpha
+            interval = f"95% CI [{signed(lo)}, {signed(hi)}] {noun}"
             items = (
-                f"NOT established (p={row['item_p']:.4f}, 95% CI "
-                f"[{lo * 100:+.1f}, {hi * 100:+.1f}] points includes 0 — another question set "
-                "could flip it)"
+                f"holds up (p={p_item:.4f}, {interval})"
+                if item_ok
+                else f"NOT established (p={p_item:.4f}, {interval} includes 0 — "
+                "another question set could flip it)"
             )
         print(f"   would OTHER QUESTIONS agree?   {items}")
 
-        real = bool(row["significant"]) and row["item_p"] < 0.05
-        print(
-            f"   -> {'a difference worth acting on' if real else 'not a difference you can defend'}"
-        )
+        # Three outcomes, not two: a check that could not be RUN is not a check
+        # that FAILED. A temperature-0 model has no re-run distribution, and
+        # calling its large, item-significant gap "not defensible" is wrong.
+        if seed_ok is False or item_ok is False:
+            outcome = "not a difference you can defend"
+        elif seed_ok and item_ok:
+            outcome = "a difference worth acting on"
+        else:
+            unmeasured = "re-run" if seed_ok is None else "other-questions"
+            outcome = (
+                f"UNPROVEN — the {unmeasured} check could not be run, so only one "
+                "of the two risks was ruled out"
+            )
+        print(f"   -> {outcome}")
 
 
 def _fake_log(model: str, question_skill, bonus: float, rng, epochs: int = 5):
