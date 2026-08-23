@@ -167,3 +167,79 @@ def test_report_handles_a_single_run(capsys):
     out = capsys.readouterr().out
     assert "only one epoch" in out  # re-run question unanswerable
     assert "would OTHER QUESTIONS agree?" in out  # item question still answered
+
+
+def _rows(model, n_items=30, n_epochs=3, bonus=0.0, seed=0):
+    rng = np.random.default_rng(seed)
+    return _log(
+        model,
+        [
+            (f"q{i}", ep, 1.0 if rng.random() < 0.5 + bonus else 0.0)
+            for ep in range(1, n_epochs + 1)
+            for i in range(n_items)
+        ],
+    )
+
+
+def test_ci_is_oriented_to_the_announced_lead(capsys):
+    """When the SECOND model wins, the interval must not print negative.
+
+    The bounds are signed method_a - method_b, and method_a is just the first key
+    of the dict — i.e. the order the log files were passed. Printing them raw
+    means about half of real invocations show a positive lead above a wholly
+    negative interval.
+    """
+    pytest.importorskip("scipy")
+    scores, _ = adapter.scores_from_logs(
+        [_rows("weak", bonus=-0.25, seed=1), _rows("strong", bonus=0.25, seed=2)]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "strong leads weak" in out
+    ci = out.split("95% CI [")[1].split("]")[0]
+    assert not ci.strip().startswith("-"), f"interval contradicts the lead: {ci}"
+
+
+def test_three_models_use_the_corrected_p_value(capsys):
+    """With 3+ models there are 3 pairs; the raw p-value over-states significance."""
+    pytest.importorskip("scipy")
+    scores, _ = adapter.scores_from_logs(
+        [_rows("m1", seed=1), _rows("m2", seed=2), _rows("m3", seed=3)]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "Holm-corrected" in out  # the reader is told the p-values are corrected
+    assert out.count("Is that real?") == 3
+
+
+def test_masked_seed_test_is_not_blamed_on_a_single_epoch(capsys):
+    """A deterministic model masks the seed test even with many epochs."""
+    pytest.importorskip("scipy")
+    const = _log("const", [(f"q{i}", ep, 1.0) for ep in (1, 2, 3) for i in range(30)])
+    scores, _ = adapter.scores_from_logs([const, _rows("varies", seed=4)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    out = capsys.readouterr().out
+    assert "no re-run distribution" in out
+    assert "only one epoch" not in out
+
+
+def test_single_log_says_so_instead_of_printing_nothing(capsys):
+    scores, _ = adapter.scores_from_logs([_rows("solo")])
+    adapter.report(scores)
+    assert "at least two logs" in capsys.readouterr().out
+
+
+def test_unscored_sample_gets_its_own_error():
+    """An errored Inspect sample has scores=None; that is not scorer ambiguity."""
+    bad = types.SimpleNamespace(
+        eval=types.SimpleNamespace(model="m"),
+        samples=[types.SimpleNamespace(id="q1", epoch=1, scores=None)],
+    )
+    with pytest.raises(ValueError, match="no scores"):
+        adapter.scores_from_logs([bad])

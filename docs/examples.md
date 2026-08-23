@@ -72,4 +72,5 @@ python examples/inspect_ai_compare.py --demo      # two scenarios, known ground 
 python examples/inspect_ai_compare.py logs/*.eval # your own Inspect logs
 ```
 
-`--demo` needs only mushin; reading real logs needs `pip install inspect-ai`.
+Needs `pip install "mushin-py[eval]"`; reading real logs additionally needs
+`pip install inspect-ai`.

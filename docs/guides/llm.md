@@ -176,6 +176,7 @@ larger risk, and it is the one most harnesses never report.
 See it work with no install and no eval run:
 
 ```bash
+pip install "mushin-py[eval]"
 python examples/inspect_ai_compare.py --demo
 ```
 
@@ -184,11 +185,13 @@ one genuinely better — so you can check the verdicts rather than trust them:
 
 ```
 SCENARIO 1 — the two models are IDENTICAL  (any gap here is luck)
-   gpt-4       50.8%
-   claude-3-5  46.0%
-gpt-4 leads claude-3-5 by 4.8%. Is that real?
+Mean score per model (recomputed from the per-sample scores):
+   gpt-4        50.8%  (5 epoch(s))
+   claude-3-5   46.0%  (5 epoch(s))
+
+gpt-4 leads claude-3-5 by 4.8 points. Is that real?
    would a RE-RUN agree?          could be re-run noise (p=0.2484)
-   would OTHER QUESTIONS agree?   NOT established (95% CI [-3.6%, +13.2%] includes 0)
+   would OTHER QUESTIONS agree?   NOT established (p=0.2560, 95% CI [-3.6, +13.2] points includes 0)
    -> not a difference you can defend
 ```
 
@@ -215,8 +218,11 @@ an Inspect **epoch** is a mushin **run** — so `--epochs 5` gives both dimensio
 [`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
 carries the adapter (~70 lines to copy — mushin takes no Inspect AI dependency,
 so it does not ship as an import). It also converts Inspect's `"C"`/`"I"`
-verdicts. If your questions are grouped — several per passage — pass the group
-ids as `clusters=` (see [Grouped items](#grouped-items-need-clusters)).
+verdicts. If your questions are grouped — several per passage — pass the group ids as
+`clusters=` (see [Grouped items](#grouped-items-need-clusters)). It is positional
+against the item axis, which is the **sorted question-id order** that
+`scores_from_logs` returns as its second value — build the labels from that list,
+not from the log order.
 
 ## Metric options
 

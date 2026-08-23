@@ -32,8 +32,8 @@ On your own logs::
     inspect eval theory_of_mind.py --model anthropic/claude-3-5-sonnet --epochs 5
     python examples/inspect_ai_compare.py logs/*.eval
 
-Requires ``pip install inspect-ai "mushin-py[eval]"`` for the log-reading path;
-``--demo`` needs only mushin.
+Requires ``pip install "mushin-py[eval]"``; the log-reading path additionally
+needs ``pip install inspect-ai``.
 
 How the two tools line up:
 
@@ -122,7 +122,13 @@ def scores_from_logs(
                 "header_only=True — use read_eval_log(...) instead"
             )
         for sample in samples:
-            scores = sample.scores or {}
+            if sample.scores is None:
+                raise ValueError(
+                    f"sample {sample.id!r} in the log for {model!r} has no scores "
+                    "(an errored or unscored Inspect sample). Re-run or filter "
+                    "those samples out before comparing."
+                )
+            scores = sample.scores
             if scorer is None:
                 if len(scores) != 1:
                     raise ValueError(
@@ -178,47 +184,85 @@ def scores_from_logs(
 
 
 def report(scores: dict[str, np.ndarray], *, clusters=None) -> None:
-    """Print the headline numbers, then whether the gap survives both checks."""
+    """Print the headline numbers, then whether each gap survives both checks.
+
+    ``clusters`` is positional against the item axis, which is the sorted
+    question-id order :func:`scores_from_logs` returns — pass its second return
+    value through your grouping lookup, not the raw log order.
+    """
     from mushin.llm import compare_scores
 
     names = list(scores)
-    print("Inspect AI reports:")
+    if len(names) < 2:
+        print(
+            f"only one model ({names[0]}) — a comparison needs at least two logs."
+            if names
+            else "no models to compare."
+        )
+        return
+
+    n_runs = {name: arr.shape[0] for name, arr in scores.items()}
+    # Recomputed from the per-sample scores, so it is the mean over the epochs
+    # and samples present in the log — not necessarily the figure Inspect's own
+    # aggregate metric printed (a different reducer would give a different one).
+    print("Mean score per model (recomputed from the per-sample scores):")
     for name in names:
-        print(f"   {name:<32} {scores[name].mean():6.1%}")
+        print(f"   {name:<32} {scores[name].mean():6.1%}  ({n_runs[name]} epoch(s))")
 
     result = compare_scores(scores, clusters=clusters)
+    n_pairs = len(result.comparisons)
+    if n_pairs > 1:
+        print(
+            f"\n{n_pairs} pairwise comparisons — p-values below are Holm-corrected "
+            "for multiplicity."
+        )
+
     for _, row in result.comparisons.iterrows():
         a, b = row["method_a"], row["method_b"]
         gap = row["mean_diff"]
         leader, trailer = (a, b) if gap >= 0 else (b, a)
-        print(f"\n{leader} leads {trailer} by {abs(gap):.1%}. Is that real?")
+        print(
+            f"\n{leader} leads {trailer} by {abs(gap) * 100:.1f} points. Is that real?"
+        )
 
-        # 1. sampling noise, across Inspect epochs
-        if np.isnan(row["p_value"]):
-            verdict = "no answer — only one epoch, so re-run variation is unmeasured"
-        elif row["p_value"] < 0.05:
-            verdict = f"survives re-running (p={row['p_value']:.4f})"
+        # 1. sampling noise across Inspect epochs. Use the CORRECTED p-value:
+        # with three or more logs the raw one over-states significance, and the
+        # library already did the correction for us.
+        p_seed = row["p_corrected"]
+        if np.isnan(p_seed):
+            if min(n_runs[a], n_runs[b]) < 2:
+                why = "only one epoch, so re-run variation is unmeasured"
+            else:
+                why = (
+                    "one model scored identically in every epoch, so it has no "
+                    "re-run distribution to test"
+                )
+            verdict = f"no answer — {why}"
+        elif p_seed < 0.05:
+            verdict = f"survives re-running (p={p_seed:.4f})"
         else:
-            verdict = f"could be re-run noise (p={row['p_value']:.4f})"
+            verdict = f"could be re-run noise (p={p_seed:.4f})"
         print(f"   would a RE-RUN agree?          {verdict}")
 
-        # 2. eval-set uncertainty, across questions
+        # 2. eval-set uncertainty across questions. The interval is signed
+        # method_a - method_b; orient it to the lead just announced, or it reads
+        # as contradicting the sentence above.
+        lo, hi = row["item_ci_low"], row["item_ci_high"]
+        if gap < 0:
+            lo, hi = -hi, -lo
         if np.isnan(row["item_p"]):
             items = "no answer — per-question scores unavailable"
         elif row["item_p"] < 0.05:
-            items = (
-                f"holds up (p={row['item_p']:.4f}, 95% CI "
-                f"[{row['item_ci_low']:+.1%}, {row['item_ci_high']:+.1%}])"
-            )
+            items = f"holds up (p={row['item_p']:.4f}, 95% CI [{lo * 100:+.1f}, {hi * 100:+.1f}] points)"
         else:
             items = (
                 f"NOT established (p={row['item_p']:.4f}, 95% CI "
-                f"[{row['item_ci_low']:+.1%}, {row['item_ci_high']:+.1%}] "
-                "includes 0 — another question set could flip it)"
+                f"[{lo * 100:+.1f}, {hi * 100:+.1f}] points includes 0 — another question set "
+                "could flip it)"
             )
         print(f"   would OTHER QUESTIONS agree?   {items}")
 
-        real = row["p_value"] < 0.05 and row["item_p"] < 0.05
+        real = bool(row["significant"]) and row["item_p"] < 0.05
         print(
             f"   -> {'a difference worth acting on' if real else 'not a difference you can defend'}"
         )
