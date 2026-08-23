@@ -60,3 +60,17 @@ than in CI. See the linked guides for the full recipe and validation runbook.
 
 - [Quickstart](quickstart.md) — the flagship example, run end-to-end.
 - [Guides](guides/workflows.md) — workflows, compare, Study, resilience, and more.
+
+### `inspect_ai_compare.py` — is that eval gap real?
+
+[Inspect AI](https://inspect.aisi.org.uk) tells you gpt-4 scored 60% and claude
+scored 56.7%. This tells you whether the gap survives two checks: would a re-run
+agree, and would a different set of questions agree.
+
+```bash
+python examples/inspect_ai_compare.py --demo      # two scenarios, known ground truth
+python examples/inspect_ai_compare.py logs/*.eval # your own Inspect logs
+```
+
+Needs `pip install "mushin-py[eval]"`; reading real logs additionally needs
+`pip install inspect-ai`.

@@ -79,14 +79,20 @@ at the given seed count.
 ## Item-level uncertainty
 
 Alongside the seed-based test, `compare_llms` resamples the **eval items** with
-replacement (a paired bootstrap, Koehn 2004) and reports four extra columns on
+replacement (a paired bootstrap, Koehn 2004) and reports five extra columns on
 `result.comparisons`:
 
 | column | meaning |
 | --- | --- |
 | `item_diff` | mean per-item difference (seed-averaged) |
-| `item_ci_low` / `item_ci_high` | bootstrap CI on that difference |
-| `item_p` | two-sided bootstrap p-value |
+| `item_ci_low` / `item_ci_high` | bootstrap CI on that difference (per-comparison, **not** simultaneous) |
+| `item_p` | two-sided bootstrap p-value, per comparison |
+| `item_p_corrected` | the same p-value under the `correction=` you chose |
+
+Comparing three systems gives three pairs on *both* axes, so `item_p` needs the
+same multiplicity correction as `p_value`. Use `item_p_corrected` next to
+`p_corrected` — mixing a corrected seed p with a raw item p understates one of
+the two risks. With a single comparison the two columns are equal.
 
 ```python
 row = result.comparisons.iloc[0]
@@ -155,6 +161,79 @@ item-level columns are populated and the seed-based ones are masked, because one
 run says nothing about decoding noise) or a 2-D `(n_seeds, n_items)` array, which
 gives both dimensions. Systems must cover the same items in the same order; call
 once per metric.
+
+## Using another harness (Inspect AI)
+
+You ran the same eval on two models with [Inspect AI](https://inspect.aisi.org.uk).
+One scored 60%, the other 56.7%. **Should you switch?**
+
+Inspect runs the evaluation and reports those headline numbers; it does not tell
+you whether the gap is real. A gap can be luck in two ways, and mushin measures
+both:
+
+| the question | what could go wrong | where the evidence comes from |
+| --- | --- | --- |
+| Would a **re-run** agree? | models sample randomly, so the score wiggles run to run | Inspect's `--epochs` repeats |
+| Would **other questions** agree? | you picked 50 questions; another 50 might rank them the other way | a bootstrap over the eval items |
+
+A difference worth acting on has to survive both. The second is usually the
+larger risk, and it is the one most harnesses never report.
+
+See it work with no install and no eval run:
+
+```bash
+pip install "mushin-py[eval]"
+python examples/inspect_ai_compare.py --demo
+```
+
+That runs two scenarios with **known ground truth** — two identical models, and
+one genuinely better — so you can check the verdicts rather than trust them:
+
+```
+SCENARIO 1 — the two models are IDENTICAL  (any gap here is luck)
+Mean score per model (recomputed from the per-sample scores):
+   gpt-4        50.8%  (5 epoch(s))
+   claude-3-5   46.0%  (5 epoch(s))
+
+gpt-4 leads claude-3-5 by 4.8 points. Is that real?
+   would a RE-RUN agree?          could be re-run noise (p=0.2484)
+   would OTHER QUESTIONS agree?   NOT established (p=0.2560, 95% CI [-3.6, +13.2] points includes 0)
+   -> not a difference you can defend
+```
+
+On your own logs:
+
+```bash
+inspect eval theory_of_mind.py --model openai/gpt-4 --epochs 5
+inspect eval theory_of_mind.py --model anthropic/claude-3-5-sonnet --epochs 5
+python examples/inspect_ai_compare.py logs/*.eval
+```
+
+The two tools line up directly: an Inspect **sample** is a mushin **item**, and
+an Inspect **epoch** is a mushin **run** — so `--epochs 5` gives both dimensions.
+
+!!! warning "Match questions by id, not position"
+    The comparison pairs question *i* of one model with question *i* of the
+    other. Two Inspect logs can list their samples in different orders — retries,
+    parallelism, a shuffled dataset — so matching positionally would compare
+    "capital of France" against "solve this integral" and report a confident,
+    meaningless answer. `scores_from_logs` matches on `sample.id` and raises if
+    the models did not answer the same questions. Do the same in any adapter you
+    write.
+
+    Ids alone are not enough, though: Inspect numbers samples `1..N` *within a
+    task*, so logs from two different tasks have colliding ids that pair up
+    perfectly and mean nothing. `scores_from_logs` also refuses logs whose
+    `eval.task` differs.
+
+[`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
+carries the adapter (~70 lines to copy — mushin takes no Inspect AI dependency,
+so it does not ship as an import). It also converts Inspect's `"C"`/`"I"`
+verdicts. If your questions are grouped — several per passage — pass the group ids as
+`clusters=` (see [Grouped items](#grouped-items-need-clusters)). It is positional
+against the item axis, which is the **sorted question-id order** that
+`scores_from_logs` returns as its second value — build the labels from that list,
+not from the log order.
 
 ## Metric options
 
