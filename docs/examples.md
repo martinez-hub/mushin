@@ -69,6 +69,9 @@ Detection uses an inert canary — if the sentinel appears in the output, the
 retrieved text steered the model — so the payloads measure the control failure
 without carrying a real one.
 
+The metric is the **complement of attack success rate** — the mean is `1 - ASR`,
+so higher is better, the opposite of the convention most of the literature uses.
+
 Resistance is binary per document, which is exactly the shape where a headline
 score misleads: attacks vary enormously in difficulty, so a different attack set
 can reverse the ranking. The example reports whether a gap survives a re-run and a different set of
