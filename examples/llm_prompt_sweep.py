@@ -19,6 +19,10 @@ This example shows the sweep half of mushin handling exactly that:
 ``resume=True``        re-running reuses completed cells and only retries the holes
 ``max_total_seconds``  a wall-clock budget, so a runaway sweep stops itself
 ``sample=``            try a fraction of the grid before committing to all of it
+
+The demo exercises ``on_error``, ``resume`` and the labelled result; the budget
+and sampling knobs are listed because they belong to the same problem, and take
+one argument each — see the resilient-sweeps guide.
 ``to_xarray()``        results labelled by prompt/temperature/seed — no bookkeeping
 
 and then hands the winner to the statistics, so "prompt B is better" is a claim
@@ -31,6 +35,7 @@ Run the demo (no keys, no network — failures are simulated)::
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -61,11 +66,30 @@ _FAILURE_RATE = 0.15
 _OUTAGE = True
 
 
-def _simulated_call(prompt_name: str, temperature: float, question: str, rng) -> float:
-    """Score one (prompt, temperature, question)."""
+def _draw(*key) -> float:
+    """A stable [0, 1) draw for a key, independent of process and call order.
+
+    blake2b rather than hash(), which numpy would happily seed from but which
+    Python randomises per process: the same cell would then score differently on
+    every run, and `resume` would be reusing values it could not reproduce.
+    """
+    digest = hashlib.blake2b("|".join(map(str, key)).encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2**64
+
+
+def _simulated_call(
+    prompt_name: str, temperature: float, seed: int, question: str
+) -> float:
+    """Score one (prompt, temperature, seed, question).
+
+    Depends on the seed, because that is exactly what the seed dimension
+    measures: re-running one configuration must be able to give a different
+    answer, or the significance test has nothing to test.
+    """
     # cot helps; high temperature hurts; role helps a little
     base = {"terse": 0.55, "cot": 0.72, "role": 0.63, "fewshot": 0.66}[prompt_name]
-    return float(rng.random() < base - 0.25 * temperature)
+    draw = _draw("score", prompt_name, temperature, seed, question)
+    return float(draw < base - 0.25 * temperature)
 
 
 def score_config(prompt: str, temperature: float, seed: int) -> dict:
@@ -74,10 +98,12 @@ def score_config(prompt: str, temperature: float, seed: int) -> dict:
     Whatever dict this returns becomes data variables in the labelled dataset,
     keyed by the swept parameters — that is the whole contract.
     """
-    rng = np.random.default_rng(abs(hash((prompt, temperature, seed))) % 2**32)
-    if _OUTAGE and rng.random() < _FAILURE_RATE:
+    # The outage roll is drawn from its own stream, so clearing _OUTAGE does not
+    # shift the scores: a cell filled in by `resume` is the SAME cell that failed,
+    # which is what makes reuse meaningful rather than merely convenient.
+    if _OUTAGE and _draw("outage", prompt, temperature, seed) < _FAILURE_RATE:
         raise RuntimeError("429 rate limited (simulated)")
-    scores = [_simulated_call(prompt, temperature, q, rng) for q in QUESTIONS]
+    scores = [_simulated_call(prompt, temperature, seed, q) for q in QUESTIONS]
     return {"accuracy": float(np.mean(scores))}
 
 
@@ -105,14 +131,27 @@ def demo(argv: Sequence[str]) -> int:
     print(f"   completed: {total - failed},  failed transiently: {failed}")
     print(f"   is_complete: {wf.is_complete}")
     if failed:
+        done = total - failed
         print(
-            "   -> a strict harness would have lost the other "
-            f"{total - failed} paid calls too"
+            f"   -> a strict harness would have discarded those {done} completed "
+            f"cells too — {done * len(QUESTIONS)} paid calls"
         )
 
     print("\nPASS 2 — the outage is over; resume retries only the holes\n")
     global _OUTAGE
     _OUTAGE = False  # "we fixed the cause", as in the resilient-sweeps notebook
+    try:
+        _resume_and_report(workdir, sweep)
+    finally:
+        # Restore it, or a second demo() in the same process would start with the
+        # outage already over and silently demonstrate nothing.
+        _OUTAGE = True
+    return 0
+
+
+def _resume_and_report(workdir: str, sweep) -> None:
+    import warnings
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sweep2 = mushin.sweep(score_config)
@@ -122,6 +161,7 @@ def demo(argv: Sequence[str]) -> int:
             seed=mushin.multirun(list(range(5))),
             working_dir=workdir,
             resume=True,
+            on_error="nan",  # a cell still failing must not abort the retry
         )
     ds2 = sweep2.workflow.to_xarray()
     still_missing = int(np.isnan(ds2["accuracy"].values).sum())
@@ -134,17 +174,23 @@ def demo(argv: Sequence[str]) -> int:
     mean_acc = ds2["accuracy"].mean("seed")
     table = mean_acc.to_dataframe().unstack("temperature")
     print(table.to_string(float_format=lambda v: f"{v:.1%}"))
-    best = mean_acc.where(mean_acc == mean_acc.max(), drop=True)
-    bp = str(best["prompt"].values[0])
-    bt = float(best["temperature"].values[0])
-    print(
-        f"\n   best: prompt={bp!r} temperature={bt}  ({float(best.values.ravel()[0]):.1%})"
-    )
+    # argmax over the flattened grid: `where(== max, drop=True)` keeps a whole
+    # sub-block when cells tie, and taking [0] of each coordinate can then name a
+    # cell that is not the maximum at all (or a NaN one).
+    flat = mean_acc.stack(cell=("prompt", "temperature"))
+    best_cell = flat.isel(cell=int(flat.argmax("cell")))
+    bp = str(best_cell["prompt"].values)
+    bt = float(best_cell["temperature"].values)
+    print(f"\n   best: prompt={bp!r} temperature={bt}  ({float(best_cell):.1%})")
 
     print("\nIS THE WINNER ACTUALLY BETTER? — the per-seed scores, tested\n")
     from mushin.llm import compare_scores
 
-    runner_up = "terse" if bp != "terse" else "role"
+    # The RUNNER-UP at the winning temperature, not a fixed baseline: comparing
+    # the winner against the by-design worst prompt makes the test trivially easy
+    # and says nothing about the choice you actually face.
+    at_best = mean_acc.sel(temperature=bt)
+    runner_up = str(at_best.sortby(at_best, ascending=False)["prompt"].values[1])
     at = lambda p: ds2["accuracy"].sel(prompt=p, temperature=bt).values[:, None]  # noqa: E731
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -161,7 +207,6 @@ def demo(argv: Sequence[str]) -> int:
         " the prompt difference survives sampling noise — not whether it would\n"
         " survive different questions; pass per-question scores for that.)"
     )
-    return 0
 
 
 def main(argv: Sequence[str]) -> int:

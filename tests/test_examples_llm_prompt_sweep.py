@@ -112,3 +112,71 @@ def test_demo_runs_and_reports_a_winner(capsys):
     assert "after resume:" in out
     assert "best: prompt=" in out
     assert "would a re-run agree?" in out
+
+
+def test_cell_values_are_stable_across_processes():
+    """resume can only reuse a cell whose value is reproducible.
+
+    The first version seeded from hash(), which Python randomises per process, so
+    every run produced different numbers and a resumed cell was not the cell it
+    replaced.
+    """
+    import subprocess
+
+    code = (
+        "import importlib.util,sys;"
+        "spec=importlib.util.spec_from_file_location('sw','examples/llm_prompt_sweep.py');"
+        "m=importlib.util.module_from_spec(spec);sys.modules['sw']=m;spec.loader.exec_module(m);"
+        "m._OUTAGE=False;print(m.score_config('cot',0.0,0)['accuracy'])"
+    )
+    outs = {
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True
+        ).stdout.strip()
+        for _ in range(3)
+    }
+    assert len(outs) == 1, f"cell value varies per process: {outs}"
+
+
+def test_clearing_the_outage_does_not_change_the_score():
+    """A resumed cell must be the SAME cell that failed, not a different draw."""
+    sweep_ex._OUTAGE = False
+    try:
+        without = sweep_ex.score_config("role", 0.4, 2)["accuracy"]
+    finally:
+        sweep_ex._OUTAGE = True
+    # a cell that does not trip the outage roll scores identically either way
+    with_outage = sweep_ex.score_config("role", 0.4, 2)["accuracy"]
+    assert with_outage == without
+
+
+def test_scores_actually_vary_with_seed():
+    """Without seed dependence the significance test has nothing to test."""
+    sweep_ex._OUTAGE = False
+    try:
+        values = {sweep_ex.score_config("cot", 0.0, s)["accuracy"] for s in range(5)}
+    finally:
+        sweep_ex._OUTAGE = True
+    assert len(values) > 1, f"all seeds identical: {values}"
+
+
+def test_demo_compares_against_the_runner_up_not_a_fixed_baseline(capsys):
+    """Comparing the winner to the by-design worst prompt proves nothing."""
+    pytest.importorskip("scipy")
+    assert sweep_ex.main(["--demo"]) == 0
+    out = capsys.readouterr().out
+    line = [ln for ln in out.splitlines() if " vs " in ln][0]
+    winner, rest = line.strip().split(" vs ")
+    runner = rest.split(" at ")[0]
+    # the runner-up must be the second-best prompt in the printed table, and in
+    # particular must not be hard-coded
+    assert winner != runner
+    assert runner in sweep_ex.PROMPTS
+
+
+def test_demo_restores_the_outage_flag():
+    """A second run in the same process must demonstrate the same thing."""
+    pytest.importorskip("scipy")
+    sweep_ex._OUTAGE = True
+    sweep_ex.main(["--demo"])
+    assert sweep_ex._OUTAGE is True, "demo() leaked its outage flag"

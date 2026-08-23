@@ -73,5 +73,7 @@ the parameters you swept so picking the best configuration is one reduction.
 python examples/llm_prompt_sweep.py --demo
 ```
 
-In the demo 18 of 60 cells fail transiently; a strict harness would have thrown
-away the other 42 paid calls. Needs no keys or network.
+In the demo 8 of 60 cells fail transiently; a strict harness would have discarded
+the other 52 completed cells — 2,080 paid calls — along with them. Runs
+identically every time (no keys, no network), which is the point: `resume` can
+only reuse a cell whose value is reproducible.
