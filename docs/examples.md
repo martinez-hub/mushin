@@ -74,3 +74,33 @@ python examples/inspect_ai_compare.py logs/*.eval # your own Inspect logs
 
 Needs `pip install "mushin-py[eval]"`; reading real logs additionally needs
 `pip install inspect-ai`.
+
+### `prompt_injection_eval.py` — is your model actually more injection-resistant?
+
+Measures resistance to **indirect** prompt injection: the attack arrives inside
+content the model retrieves (a memo, a page, a tool result), not from the user.
+Detection uses an inert canary — if the sentinel appears in the output, the
+retrieved text steered the model — so the payloads measure the control failure
+without carrying a real one.
+
+The metric is the **complement of attack success rate** — the mean is `1 - ASR`,
+so higher is better, the opposite of the convention most of the literature uses.
+
+Resistance is binary per document, which is exactly the shape where a headline
+score misleads: attacks vary enormously in difficulty, so a different attack set
+can reverse the ranking. The example reports whether a gap survives a re-run and a different set of
+attacks, and prints a per-attack breakdown. In the demo the "better" system is
+15 points *worse* on one attack shape, and — because five attack shapes are five
+grouped observations, not forty independent ones — the aggregate gap does not
+actually reach significance once `clusters=` accounts for the grouping.
+
+Five clusters is also few enough that mushin warns the interval is unreliable,
+and the demo prints that warning rather than hiding it: the fix for a too-narrow
+interval is more attack *shapes*, not more topics wrapped around the same five.
+
+```bash
+python examples/prompt_injection_eval.py --demo
+```
+
+Point it at your own systems (baseline vs. hardened, or two providers) to compare
+mitigations with an honest uncertainty on the difference.
