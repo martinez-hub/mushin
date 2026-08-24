@@ -198,7 +198,15 @@ def scores_from_logs(
                 "on the same dataset."
             )
 
-    question_ids = sorted(shared, key=str)  # deterministic, order-independent
+    # Deterministic and order-independent, but sort ids in their OWN order where
+    # they have one. Inspect numbers samples 1, 2, 3... by default, and sorting
+    # those as strings gives 1, 10, 11, ... 2, 20 — internally consistent, so the
+    # pairing stays correct, but this list is what a caller lines `clusters=` up
+    # against, and a surprising order there misaligns the groups silently.
+    try:
+        question_ids = sorted(shared)
+    except TypeError:  # mixed id types have no total order; fall back to str
+        question_ids = sorted(shared, key=str)
     arrays: dict[str, np.ndarray] = {}
     for model, cells in per_model.items():
         epochs = sorted({ep for _, ep in cells})
