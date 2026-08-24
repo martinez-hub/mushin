@@ -16,6 +16,7 @@ from torchmetrics import Metric as TorchMetric
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
+    _CORRECTIONS,
     available_corrections,
     available_tests,
     compare_methods,
@@ -278,12 +279,20 @@ def compare_llms(
             n=item_bootstrap,
             alpha=alpha,
             clusters=clusters,
+            correction=correction,
         )
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
 
 
 def _attach_item_bootstrap(
-    comparisons, per_items, methods, *, n: int, alpha: float, clusters=None
+    comparisons,
+    per_items,
+    methods,
+    *,
+    n: int,
+    alpha: float,
+    clusters=None,
+    correction: str = "holm",
 ):
     """Add paired item-level bootstrap columns to the comparison table.
 
@@ -292,6 +301,15 @@ def _attach_item_bootstrap(
     items, which is usually the larger uncertainty. This adds that answer beside
     it — deliberately in the SAME table, so a seed-significant result whose item
     interval straddles 0 is impossible to miss.
+
+    ``item_p`` is the per-comparison bootstrap p-value; ``item_p_corrected``
+    applies the same multiplicity correction, over the same family (the
+    comparisons within one metric), that ``p_value`` -> ``p_corrected`` gets on
+    the seed axis. Comparing three systems multiplies the chances of a spurious
+    item-level "win" exactly as it does on the seed axis, so reporting a raw
+    ``item_p`` beside a corrected ``p_corrected`` understates one of the two
+    risks. ``item_ci_low``/``item_ci_high`` remain per-comparison intervals and
+    are NOT simultaneous.
 
     Columns are NaN for metrics with no per-item scores (torchmetrics aggregates).
     """
@@ -330,6 +348,17 @@ def _attach_item_bootstrap(
     out = comparisons.copy()
     for c, v in cols.items():
         out[c] = v
+    # Correct within metric, matching the family compare_methods uses for the
+    # seed axis. A single comparison is left untouched (nothing to correct for).
+    correct = _CORRECTIONS[correction]
+    item_p = np.asarray(cols["item_p"], dtype=float)
+    corrected = np.full(item_p.shape, np.nan)
+    metrics = out["metric"].to_numpy()
+    for metric in dict.fromkeys(metrics.tolist()):
+        where = metrics == metric
+        family = item_p[where]
+        corrected[where] = correct(family) if family.size > 1 else family
+    out["item_p_corrected"] = corrected
     return out
 
 
@@ -457,5 +486,6 @@ def compare_scores(
             n=item_bootstrap,
             alpha=alpha,
             clusters=clusters,
+            correction=correction,
         )
     return BenchmarkResult(data=ds, comparisons=comparisons, alpha=alpha)
