@@ -368,13 +368,20 @@ def test_single_log_says_so_instead_of_printing_nothing(capsys):
 
 
 def test_unscored_sample_gets_its_own_error():
-    """An errored Inspect sample has scores=None; that is not scorer ambiguity."""
-    bad = types.SimpleNamespace(
-        eval=types.SimpleNamespace(model="m"),
-        samples=[types.SimpleNamespace(id="q1", epoch=1, scores=None)],
-    )
-    with pytest.raises(ValueError, match="no scores"):
-        adapter.scores_from_logs([bad])
+    """A sample with no scores is not scorer ambiguity, and says so.
+
+    Real Inspect writes `scores={}` for a sample that errored; `None` only shows
+    up on a header-only read. Both must reach the same actionable message — the
+    duck-typed `None` case alone let the real one fall through to
+    "pass scorer=<name> to choose one", where there is no name to pass.
+    """
+    for empty in (None, {}):
+        bad = types.SimpleNamespace(
+            eval=types.SimpleNamespace(model="m"),
+            samples=[types.SimpleNamespace(id="q1", epoch=1, scores=empty)],
+        )
+        with pytest.raises(ValueError, match="no scores"):
+            adapter.scores_from_logs([bad])
 
 
 def _real_eval_log(model, task, rows):
@@ -485,3 +492,22 @@ def test_integer_sample_ids_sort_numerically_not_lexicographically():
         _log("m/b", [(i, 1, 0.0) for i in mixed]),
     ]
     assert adapter.scores_from_logs(both)[1] == [1, 2, "b"]
+
+
+def test_real_errored_sample_is_reported_as_unscored_not_as_scorer_ambiguity():
+    """A REAL errored sample carries `scores={}`, which `is None` never caught.
+
+    With `fail_on_error=False` — normal for a long run — an errored sample comes
+    back scored `{}` and the log's status is still "success", so there is no
+    other signal. Guarding on `is None` let it reach the scorer-selection branch,
+    which told the user to "pass scorer=<name>" when no such name exists. This is
+    precisely the class of wrong belief the duck-typed tests cannot catch, which
+    is why it is checked against the real class.
+    """
+    pytest.importorskip("inspect_ai")
+    log = _real_eval_log("m/a", "theory_of_mind", [(1, 1, "C")])
+    from inspect_ai.log import EvalSample
+
+    log.samples.append(EvalSample(id=2, epoch=1, input="q", target="t", scores={}))
+    with pytest.raises(ValueError, match="no scores"):
+        adapter.scores_from_logs([log])
