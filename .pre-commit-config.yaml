@@ -18,14 +18,16 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.3
     hooks:
-      # types_or adds markdown: ruff formats python code blocks inside .md, and
-      # CI runs `ruff format --check .` over the whole tree — without this the
-      # hook passes locally on a doc snippet that CI then rejects.
+      # types_or adds markdown AND jupyter: ruff formats python code blocks
+      # inside .md and code cells inside .ipynb, and CI runs `ruff format
+      # --check .` over the whole tree — without these the hook passes locally
+      # on a doc snippet or a notebook cell that CI then rejects. Both gaps have
+      # bitten: markdown once, then notebooks when 08_llm_examples was added.
       - id: ruff-check     # lint
         args: ["--fix"]
-        types_or: [python, pyi, markdown]
+        types_or: [python, pyi, markdown, jupyter]
       - id: ruff-format    # format
-        types_or: [python, pyi, markdown]
+        types_or: [python, pyi, markdown, jupyter]
 
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.3
