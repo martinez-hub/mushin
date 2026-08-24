@@ -18,6 +18,22 @@ be luck in two different ways, and this script measures both:
 
 A difference worth acting on has to survive both.
 
+**The mushin part, in full.** Everything else in this file is the Inspect
+adapter (:func:`scores_from_logs`) and the printing — worth reading if you are
+writing your own adapter, but not what the library asks of you::
+
+    from mushin.llm import compare_scores
+
+    result = compare_scores(scores)          # {model: (n_epochs, n_items) array}
+    row = result.comparisons.iloc[0]
+
+    row["p_corrected"]                       # would a RE-RUN agree?
+    row["item_p_corrected"]                  # would OTHER QUESTIONS agree?
+    row["item_ci_low"], row["item_ci_high"]  # by how much, with an interval
+
+Pass ``clusters=`` too when the questions are grouped (several per passage), or
+the interval comes out too narrow.
+
 Try it without installing anything or running a real eval::
 
     python examples/inspect_ai_compare.py --demo
@@ -217,6 +233,76 @@ def _units(scores: dict[str, np.ndarray]):
     return (lambda v: f"{v:6.3f}", lambda v: f"{v:+.3f}", "score units")
 
 
+def _seed_verdict(row, n_runs, a, b):
+    """The re-run axis -> ``(ok, sentence)``, where ok is None if unmeasurable.
+
+    Uses the CORRECTED p-value: with three or more logs the raw one over-states
+    significance, and the library already did the correction.
+    """
+    p = row["p_corrected"]
+    if np.isnan(p):
+        why = (
+            "only one epoch, so re-run variation is unmeasured"
+            if min(n_runs[a], n_runs[b]) < 2
+            else "one model scored identically in every epoch, so it has no "
+            "re-run distribution to test"
+        )
+        return None, f"no answer — {why}"
+    ok = bool(row["significant"])
+    return ok, (
+        f"survives re-running (p={p:.4f})"
+        if ok
+        else f"could be re-run noise (p={p:.4f})"
+    )
+
+
+def _item_verdict(row, scores, a, b, gap, alpha, signed, noun):
+    """The eval-set axis -> ``(ok, sentence)``, where ok is None if unmeasurable.
+
+    Corrected over the same family as the seed axis: comparing three models
+    multiplies the chance of a spurious item-level win exactly as it does on the
+    seed axis.
+    """
+    lo, hi = row["item_ci_low"], row["item_ci_high"]
+    if gap < 0:  # the interval is signed method_a - method_b; orient it to the
+        lo, hi = -hi, -lo  # lead just announced, or it reads as a denial of it
+    p = row["item_p_corrected"]
+    if np.isnan(p):
+        # compare_scores always has per-question scores, so the only way the
+        # bootstrap declines to answer is a degenerate eval set.
+        per_item_gap = scores[a].mean(axis=0) - scores[b].mean(axis=0)
+        why = (
+            "every question shows the same gap, so there is no eval-set "
+            "variation to resample"
+            if np.allclose(per_item_gap, per_item_gap.flat[0])
+            else "the item bootstrap could not be computed"
+        )
+        return None, f"no answer — {why}"
+    ok = p < alpha
+    interval = f"95% CI [{signed(lo)}, {signed(hi)}] {noun}"
+    return ok, (
+        f"holds up (p={p:.4f}, {interval})"
+        if ok
+        else f"NOT established (p={p:.4f}, {interval} includes 0 — "
+        "another question set could flip it)"
+    )
+
+
+def _outcome(seed_ok, item_ok) -> str:
+    """Three outcomes, not two: a check that could not be RUN is not a check that
+    FAILED. A temperature-0 model has no re-run distribution, and calling its
+    large, item-significant gap "not defensible" would be wrong."""
+    if seed_ok is False or item_ok is False:
+        return "not a difference you can defend"
+    if seed_ok and item_ok:
+        return "a difference worth acting on"
+    unmeasured = "re-run" if seed_ok is None else "other-questions"
+    return (
+        f"UNPROVEN — the {unmeasured} check could not be run, so only one of the "
+        "two risks was ruled out"
+    )
+
+
 def report(
     scores: dict[str, np.ndarray], *, clusters=None, alpha: float = 0.05
 ) -> None:
@@ -264,73 +350,13 @@ def report(
             "Is that real?"
         )
 
-        # 1. sampling noise across Inspect epochs. Use the CORRECTED p-value:
-        # with three or more logs the raw one over-states significance, and the
-        # library already did the correction for us.
-        p_seed = row["p_corrected"]
-        if np.isnan(p_seed):
-            if min(n_runs[a], n_runs[b]) < 2:
-                why = "only one epoch, so re-run variation is unmeasured"
-            else:
-                why = (
-                    "one model scored identically in every epoch, so it has no "
-                    "re-run distribution to test"
-                )
-            seed_ok = None
-            verdict = f"no answer — {why}"
-        else:
-            seed_ok = bool(row["significant"])
-            verdict = (
-                f"survives re-running (p={p_seed:.4f})"
-                if seed_ok
-                else f"could be re-run noise (p={p_seed:.4f})"
-            )
+        seed_ok, verdict = _seed_verdict(row, n_runs, a, b)
         print(f"   would a RE-RUN agree?          {verdict}")
 
-        # 2. eval-set uncertainty across questions. Corrected over the same family
-        # as the seed axis: comparing three models multiplies the chance of a
-        # spurious item-level win exactly as it does on the seed axis.
-        lo, hi = row["item_ci_low"], row["item_ci_high"]
-        if gap < 0:  # the interval is signed method_a - method_b; orient it to
-            lo, hi = -hi, -lo  # the lead just announced, or it reads as a denial
-        p_item = row["item_p_corrected"]
-        if np.isnan(p_item):
-            # compare_scores always has per-question scores, so the only way the
-            # bootstrap declines to answer is a degenerate eval set.
-            per_item_gap = scores[a].mean(axis=0) - scores[b].mean(axis=0)
-            why = (
-                "every question shows the same gap, so there is no eval-set "
-                "variation to resample"
-                if np.allclose(per_item_gap, per_item_gap.flat[0])
-                else "the item bootstrap could not be computed"
-            )
-            item_ok = None
-            items = f"no answer — {why}"
-        else:
-            item_ok = p_item < alpha
-            interval = f"95% CI [{signed(lo)}, {signed(hi)}] {noun}"
-            items = (
-                f"holds up (p={p_item:.4f}, {interval})"
-                if item_ok
-                else f"NOT established (p={p_item:.4f}, {interval} includes 0 — "
-                "another question set could flip it)"
-            )
+        item_ok, items = _item_verdict(row, scores, a, b, gap, alpha, signed, noun)
         print(f"   would OTHER QUESTIONS agree?   {items}")
 
-        # Three outcomes, not two: a check that could not be RUN is not a check
-        # that FAILED. A temperature-0 model has no re-run distribution, and
-        # calling its large, item-significant gap "not defensible" is wrong.
-        if seed_ok is False or item_ok is False:
-            outcome = "not a difference you can defend"
-        elif seed_ok and item_ok:
-            outcome = "a difference worth acting on"
-        else:
-            unmeasured = "re-run" if seed_ok is None else "other-questions"
-            outcome = (
-                f"UNPROVEN — the {unmeasured} check could not be run, so only one "
-                "of the two risks was ruled out"
-            )
-        print(f"   -> {outcome}")
+        print(f"   -> {_outcome(seed_ok, item_ok)}")
 
 
 def _fake_log(model: str, question_skill, bonus: float, rng, epochs: int = 5):

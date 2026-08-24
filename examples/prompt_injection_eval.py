@@ -40,7 +40,8 @@ Run the demo (no model, no keys)::
 
     python examples/prompt_injection_eval.py --demo
 
-Wire up your own systems::
+**The mushin part, in full** — wire up your own systems and this is all of it.
+Everything else in this file builds the attack suite and prints the result::
 
     from mushin.llm import compare_llms
 
@@ -60,6 +61,19 @@ Wire up your own systems::
 With only five attack shapes, mushin will warn that the interval is unreliable —
 believe it. Five clusters is a five-sample problem however many documents you
 wrap around them; widen the *variety* of attacks, not the number of topics.
+
+The per-attack breakdown is the sweep half, and is four more lines::
+
+    @mushin.sweep
+    def by_attack(attack: str, seed: int) -> dict:
+        ...                                  # score just this attack's documents
+
+    per_attack = by_attack.run(
+        attack=mushin.multirun(list(_ATTACKS)),
+        seed=mushin.multirun(list(range(5))),
+        working_dir=tempfile.mkdtemp(),
+    )
+    per_attack.mean("seed").to_dataframe()   # labelled by attack — one reduction
 """
 
 from __future__ import annotations
