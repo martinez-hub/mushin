@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.14.0] - 2026-08-23
+
+### Added
+
+- `compare_llms` now reports a paired item-level bootstrap (`item_diff`, `item_ci_low`, `item_ci_high`, `item_p`) beside the seed-based test, so you can see whether a difference would survive a different sample of eval items — usually the larger uncertainty. Disable with `item_bootstrap=0`. (#183)
+- LLM evaluation gains `clusters=` for grouped eval items (several questions per passage): resampling whole groups instead of individual items, because ignoring the grouping covers a nominal 95% interval only about half the time. NaN group labels are rejected rather than silently dropped, and the small-sample warning counts groups rather than items. New `compare_scores` runs the same analysis on per-item scores you already have from another harness, so you can use mushin's statistics without adopting its execution loop. (#185)
+- New `examples/inspect_ai_compare.py` answers the question [Inspect AI](https://inspect.aisi.org.uk) leaves open — your eval says one model scored 60% and another 56.7%, but is that gap real? It checks whether the difference survives a re-run (Inspect epochs) and whether it would survive a different set of questions (an item bootstrap), and reports a plain verdict. Run `--demo` to see it on two scenarios with known ground truth. Questions are matched across logs by `sample.id` rather than by position, since matching positionally would compare unrelated questions. (#186)
+- New `examples/prompt_injection_eval.py` measures resistance to indirect prompt injection — the attack arriving inside retrieved content rather than from the user — using both halves of mushin: `compare_llms` for whether a resistance gap survives a re-run and a different attack set, and `@mushin.sweep` to break the result down by attack shape. The demo shows why the breakdown matters: the system with the better aggregate score is quietly weaker against one attack family. Detection uses an inert canary; `--demo` needs no model or keys. (#187)
+- New `examples/llm_prompt_sweep.py` shows the sweep half of mushin on an LLM tuning problem: prompt template x temperature x seed, where every cell costs money and cells fail transiently. `on_error="nan"` keeps the completed cells when a call is rate-limited, `resume=True` retries only the holes, and the labelled dataset makes picking the best configuration one reduction over named dimensions. Run `--demo` to see it without keys or network. (#188)
+- `compare_llms` and `compare_scores` now report `item_p_corrected` beside `item_p`: the item-level bootstrap p-value under the same multiplicity correction, and over the same family (the comparisons within one metric), that `p_value` gets as `p_corrected`. Comparing three systems multiplies the chance of a spurious item-level "win" exactly as it does on the seed axis, so a corrected seed p-value reported next to a raw item p-value understated one of the two risks. With a single comparison the two columns are equal.
+
+### Misc
+
+- #182, #189
+
+
 ## [0.13.0] - 2026-08-19
 
 ### Added
