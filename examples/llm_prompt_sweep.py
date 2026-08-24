@@ -27,6 +27,23 @@ rather than a single lucky run. The budget and sampling knobs are listed because
 they belong to the same problem and take one argument each — the demo does not
 exercise them; see the resilient-sweeps guide.
 
+**The mushin part, in full.** The rest of this file simulates an LLM and prints
+the result::
+
+    import mushin
+
+    sweep = mushin.sweep(score_config)       # score_config(prompt, temperature, seed)
+    sweep.run(
+        prompt=mushin.multirun(list(PROMPTS)),
+        temperature=mushin.multirun([0.0, 0.4, 0.8]),
+        seed=mushin.multirun(list(range(5))),
+        working_dir=workdir,
+        on_error="nan",                      # a 429 must not discard the grid
+    )
+    ds = sweep.workflow.to_xarray()          # labelled by prompt/temperature/seed
+
+    sweep.run(..., working_dir=workdir, resume=True)   # retries only the holes
+
 Run the demo (no keys, no network — failures are simulated)::
 
     pip install "mushin-py[eval]"     # the significance step needs the extra
