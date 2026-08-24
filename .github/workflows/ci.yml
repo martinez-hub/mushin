@@ -114,6 +114,34 @@ jobs:
       - name: Run tests
         run: uv run --extra eval --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
+  inspect-ai-adapter:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # The Inspect AI adapter example is tested two ways: duck-typed stand-ins in
+    # the main `test` job, and REAL inspect_ai objects here. Duck-types encode our
+    # belief about EvalLog's shape — if a field were renamed upstream they would
+    # all keep passing while real logs broke. inspect-ai pulls ~110 packages, so
+    # it is not a dev dependency; it gets its own throwaway venv instead.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Clean-env install (inspect-ai + eval extra) and run the adapter tests
+        run: |
+          uv venv /tmp/inspect
+          uv pip install --python /tmp/inspect/bin/python \
+            inspect-ai pytest hypothesis matplotlib ".[eval]"
+          # -W error::pytest.PytestUnraisableExceptionWarning is not enough: the
+          # point is that these must RUN, so fail if any of them skipped.
+          /tmp/inspect/bin/python -m pytest tests/test_examples_inspect_ai.py \
+            -p no:cacheprovider -rs -q | tee /tmp/inspect-out.txt
+          if grep -q "skipped" /tmp/inspect-out.txt; then
+            echo "::error::Inspect AI adapter tests skipped in the job that exists to run them"
+            exit 1
+          fi
+
   batteries-clean-install:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -292,7 +320,7 @@ jobs:
   # Set branch protection to require ONLY this check.
   ci-ok:
     if: always()
-    needs: [changes, lint, test, batteries-clean-install, notebooks, notebook-prereqs, changelog, min-versions, docs, core-only]
+    needs: [changes, lint, test, batteries-clean-install, inspect-ai-adapter, notebooks, notebook-prereqs, changelog, min-versions, docs, core-only]
     runs-on: ubuntu-latest
     steps:
       # Fail CLOSED: require every needed job to be success/skipped rather than

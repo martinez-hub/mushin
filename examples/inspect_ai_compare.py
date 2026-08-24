@@ -142,7 +142,14 @@ def scores_from_logs(
                 "header_only=True — use read_eval_log(...) instead"
             )
         for sample in samples:
-            if sample.scores is None:
+            # `not scores` rather than `is None`: a sample that ERRORED during a
+            # real run comes back with `scores={}`, not None — and with
+            # `fail_on_error=False` (normal for long runs) the log's status is
+            # still "success", so there is no other signal. Testing `is None`
+            # only caught the header-only case, and let a real errored sample
+            # fall through to the scorer-selection branch below, where it
+            # produced "pass scorer=<name> to choose one" with no name to pass.
+            if not sample.scores:
                 raise ValueError(
                     f"sample {sample.id!r} in the log for {model!r} has no scores "
                     "(an errored or unscored Inspect sample). Re-run or filter "
@@ -198,7 +205,16 @@ def scores_from_logs(
                 "on the same dataset."
             )
 
-    question_ids = sorted(shared, key=str)  # deterministic, order-independent
+    # Deterministic and order-independent, but sort ids in their OWN order where
+    # they have one. Inspect numbers samples 1, 2, 3... by default, and sorting
+    # those as strings gives 1, 10, 11, ... 2, 20. That is internally consistent
+    # — the pairing stays correct, and `clusters=` built from this list (as the
+    # docstring instructs) is unaffected — but it is a trap for anyone who lines
+    # their groups up against their own ascending id order instead of this one.
+    try:
+        question_ids = sorted(shared)
+    except TypeError:  # mixed id types have no total order; fall back to str
+        question_ids = sorted(shared, key=str)
     arrays: dict[str, np.ndarray] = {}
     for model, cells in per_model.items():
         epochs = sorted({ep for _, ep in cells})

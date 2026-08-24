@@ -368,10 +368,146 @@ def test_single_log_says_so_instead_of_printing_nothing(capsys):
 
 
 def test_unscored_sample_gets_its_own_error():
-    """An errored Inspect sample has scores=None; that is not scorer ambiguity."""
-    bad = types.SimpleNamespace(
-        eval=types.SimpleNamespace(model="m"),
-        samples=[types.SimpleNamespace(id="q1", epoch=1, scores=None)],
+    """A sample with no scores is not scorer ambiguity, and says so.
+
+    Real Inspect writes `scores={}` for a sample that errored; `None` only shows
+    up on a header-only read. Both must reach the same actionable message — the
+    duck-typed `None` case alone let the real one fall through to
+    "pass scorer=<name> to choose one", where there is no name to pass.
+    """
+    for empty in (None, {}):
+        bad = types.SimpleNamespace(
+            eval=types.SimpleNamespace(model="m"),
+            samples=[types.SimpleNamespace(id="q1", epoch=1, scores=empty)],
+        )
+        with pytest.raises(ValueError, match="no scores"):
+            adapter.scores_from_logs([bad])
+
+
+def _real_eval_log(model, task, rows):
+    """Build a genuine Inspect `EvalLog`, not a duck-type."""
+    from inspect_ai.log import (
+        EvalConfig,
+        EvalDataset,
+        EvalLog,
+        EvalSample,
+        EvalSpec,
+        EvalStats,
     )
+    from inspect_ai.scorer import Score
+
+    return EvalLog(
+        version=2,
+        status="success",
+        eval=EvalSpec(
+            task=task,
+            task_id="t1",
+            task_version=0,
+            model=model,
+            dataset=EvalDataset(),
+            config=EvalConfig(),
+            created="2026-01-01",
+        ),
+        stats=EvalStats(started_at="2026-01-01", completed_at="2026-01-01"),
+        samples=[
+            EvalSample(
+                id=sid,
+                epoch=ep,
+                input="q",
+                target="t",
+                scores={"accuracy": Score(value=val)},
+            )
+            for sid, ep, val in rows
+        ],
+    )
+
+
+def test_adapter_works_against_real_inspect_ai_objects():
+    """The other tests duck-type `EvalLog`; this one uses the real class.
+
+    Duck-types encode our *belief* about Inspect's shape. If `sample.scores`,
+    `sample.epoch`, `sample.id` or `eval.model` were renamed upstream, every
+    other test here would still pass while real logs broke on first contact.
+    Skipped when inspect-ai is absent — it pulls ~110 packages, so it is not a
+    dev dependency.
+    """
+    pytest.importorskip("inspect_ai")
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(0)
+    rows_a = [
+        (i, ep, "C" if rng.random() < 0.75 else "I")
+        for ep in (1, 2, 3)
+        for i in range(1, 21)
+    ]
+    rows_b = [
+        (i, ep, "C" if rng.random() < 0.50 else "I")
+        for ep in (1, 2, 3)
+        for i in range(1, 21)
+    ]
+    scores, ids = adapter.scores_from_logs(
+        [
+            _real_eval_log("openai/gpt-4", "theory_of_mind", rows_a),
+            _real_eval_log("anthropic/claude-3-5-sonnet", "theory_of_mind", rows_b),
+        ]
+    )
+    assert set(scores) == {"openai/gpt-4", "anthropic/claude-3-5-sonnet"}
+    assert all(arr.shape == (3, 20) for arr in scores.values())
+    # Inspect numbers samples 1..N; they must come back in NUMERIC order, since
+    # this list is what a caller lines `clusters=` up against.
+    assert ids == list(range(1, 21))
+    # "C"/"I" resolve through the real Score object.
+    assert set(np.unique(scores["openai/gpt-4"])) <= {0.0, 1.0}
+
+
+def test_real_inspect_logs_from_different_tasks_are_refused():
+    """Inspect ids are 1..N per task, so cross-task pairing is meaningless."""
+    pytest.importorskip("inspect_ai")
+    rows = [(i, 1, "C") for i in range(1, 6)]
+    with pytest.raises(ValueError, match="different Inspect tasks"):
+        adapter.scores_from_logs(
+            [
+                _real_eval_log("m/a", "theory_of_mind", rows),
+                _real_eval_log("m/b", "gsm8k", rows),
+            ]
+        )
+
+
+def test_integer_sample_ids_sort_numerically_not_lexicographically():
+    """Inspect's default ids are ints; str-sorting gives 1, 10, 11, ... 2, 20.
+
+    The pairing stays correct either way (every model gets the same order), but
+    `question_ids` is what a caller maps `clusters=` onto, so a surprising order
+    silently misaligns the groups.
+    """
+    ids = list(range(1, 13))
+    logs = [
+        _log("m/a", [(i, 1, 1.0) for i in ids]),
+        _log("m/b", [(i, 1, 0.0) for i in ids]),
+    ]
+    assert adapter.scores_from_logs(logs)[1] == ids
+    # Mixed id types have no total order — must still be deterministic.
+    mixed = [1, "b", 2]
+    both = [
+        _log("m/a", [(i, 1, 1.0) for i in mixed]),
+        _log("m/b", [(i, 1, 0.0) for i in mixed]),
+    ]
+    assert adapter.scores_from_logs(both)[1] == [1, 2, "b"]
+
+
+def test_real_errored_sample_is_reported_as_unscored_not_as_scorer_ambiguity():
+    """A REAL errored sample carries `scores={}`, which `is None` never caught.
+
+    With `fail_on_error=False` — normal for a long run — an errored sample comes
+    back scored `{}` and the log's status is still "success", so there is no
+    other signal. Guarding on `is None` let it reach the scorer-selection branch,
+    which told the user to "pass scorer=<name>" when no such name exists. This is
+    precisely the class of wrong belief the duck-typed tests cannot catch, which
+    is why it is checked against the real class.
+    """
+    pytest.importorskip("inspect_ai")
+    log = _real_eval_log("m/a", "theory_of_mind", [(1, 1, "C")])
+    from inspect_ai.log import EvalSample
+
+    log.samples.append(EvalSample(id=2, epoch=1, input="q", target="t", scores={}))
     with pytest.raises(ValueError, match="no scores"):
-        adapter.scores_from_logs([bad])
+        adapter.scores_from_logs([log])
