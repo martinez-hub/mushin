@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.14.1] - 2026-08-24
+
+### Added
+
+- New notebook [LLM examples end to end](https://martinez-hub.github.io/mushin/notebooks/08_llm_examples/) walks the LLM-evaluation layer in one place: `compare_scores` when another harness already produced your per-item scores, why the seed axis and the item axis can disagree, `clusters=` for grouped items, `compare_llms` when you want mushin to run the systems, and the sweep half surviving a simulated rate-limit outage with `on_error="nan"` and `resume=True`. Self-contained — no API keys, no network, and deterministic, so the numbers are the same on every machine.
+
+### Changed
+
+- Each of the three LLM examples now opens with a **"The mushin part, in full"** block in its module docstring, showing the actual API calls before the scaffolding that surrounds them. `examples/inspect_ai_compare.py` is 395 lines of which two call mushin — the Inspect adapter and the print formatting are the bulk — so a reader opening the file to learn the library could reasonably conclude they never saw any mushin code. `report()` in that example also drops from 117 lines to 57 by extracting its two verdict formatters, leaving the `compare_scores` call and the columns it returns visible rather than buried. No behaviour changes: all three demos produce byte-identical output.
+
+### Fixed
+
+- `examples/inspect_ai_compare.py` now sorts question ids in their own order rather than as strings. Inspect numbers samples `1, 2, 3...` by default, and sorting those lexicographically returned `[1, 10, 11, ... 2, 20]`. Comparisons were correct either way — every model got the same order, and building `clusters=` from the returned id list (as documented) gave identical results before and after — but the surprising order was a trap for anyone lining `clusters=` up against their own ascending item order instead. Ids with no total order (mixed types) still fall back to string ordering. Separately, a sample that errored during a real run is now reported as unscored: Inspect writes `scores={}` for those, not `None`, so the check missed them and they surfaced as a confusing "pass scorer=<name>" error instead. The adapter is now tested against real `inspect_ai` `EvalLog` objects rather than only duck-typed stand-ins, which is what surfaced the `scores={}` behaviour.
+
+
 ## [0.14.0] - 2026-08-23
 
 ### Added
