@@ -12,6 +12,16 @@ updates:
       python-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # netCDF4's floor is deliberately permissive. netcdf4 >= 1.7.4 requires
+      # numpy >= 2.3, which requires Python >= 3.11 — so raising the floor makes
+      # the (Python 3.10, ARM64, win32) resolution split unsatisfiable and
+      # `uv lock` fails outright. Keeping `>= 1.7.0` lets uv split the lock
+      # instead: 1.7.3 on that platform, 1.7.4 everywhere else. Dependabot has
+      # no way to know that and retried the bump weekly, failing every time.
+      # Revisit when requires-python moves past 3.10.
+      - dependency-name: "netCDF4"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
 
   # GitHub Actions used in CI
   - package-ecosystem: "github-actions"
