@@ -23,6 +23,36 @@ updates:
       - dependency-name: "netCDF4"
         update-types: ["version-update:semver-minor", "version-update:semver-patch"]
 
+      # torch / numpy / torchvision are declared TWICE in one requirement list,
+      # split by mutually exclusive markers with different pins — the Intel-Mac
+      # boundary (darwin + x86_64 caps torch <2.3, numpy <2, torchvision <0.18;
+      # every other platform gets current versions). Dependabot's Python file
+      # updater cannot rewrite a marker-split declaration: it looks for a single
+      # declaration string and aborts with "Declaration not found for torch!"
+      # (RequirementReplacer#original_dependency_declaration_string). So these
+      # have never actually produced update PRs — the failure was masked by the
+      # netCDF4 error above until that was silenced.
+      #
+      # Ignoring them does not cost coverage we still had: the same file-updater
+      # bug would block a security update's write for these packages too, and
+      # per GitHub's docs `ignore` governs version updates rather than security
+      # advisories. What it does buy is a GREEN updater run, so the next genuine
+      # failure is visible instead of buried under a standing red.
+      #
+      # TRADE-OFF, stated plainly: torch and numpy now need periodic MANUAL
+      # review. Revisit if the marker split goes away (dropping Intel-Mac
+      # support would do it) or if Dependabot learns to handle split
+      # declarations.
+      - dependency-name: "torch"
+      - dependency-name: "numpy"
+      - dependency-name: "torchvision"
+
+      # setuptools lives in [build-system] requires, which the uv ecosystem
+      # updater does not edit at all — same "Declaration not found" failure,
+      # different root cause. The pin is a build-time floor, not a runtime
+      # dependency, and it is exercised on every sdist build in CI.
+      - dependency-name: "setuptools"
+
   # GitHub Actions used in CI
   - package-ecosystem: "github-actions"
     directory: "/"
