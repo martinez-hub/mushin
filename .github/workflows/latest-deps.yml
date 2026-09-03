@@ -1,0 +1,98 @@
+name: Latest dependencies
+
+# The mirror of CI's `min-versions` job. That one resolves the LOWEST declared
+# versions so the floors in pyproject.toml stay honest; this one resolves the
+# HIGHEST, ignoring uv.lock, so a breaking upstream release is found here rather
+# than on a user's machine.
+#
+# Why this is needed even though Dependabot bumps the lock weekly and CI runs the
+# full matrix on that PR: between an upstream release and our next Dependabot run,
+# `pip install mushin-py` resolves to versions nothing has tested. hydra-core
+# 1.3.6 is the motivating case — it shipped a behaviour change in a PATCH release
+# (instantiate now rejects functools.partial subclasses), so no upper bound at
+# minor granularity would have caught it, and capping at patch granularity would
+# block security patches. Testing latest is the option that costs users nothing.
+#
+# Deliberately NOT part of CI: it can go red because someone else published
+# something, and that must never block a merge here. It runs on a schedule and
+# files an issue instead.
+on:
+  schedule:
+    # Daily. Weekly would be no faster than the Dependabot bump it exists to beat.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write          # to file/update the failure report; see `report` below
+
+concurrency:
+  group: latest-deps
+  cancel-in-progress: true
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # `uv lock --upgrade` re-resolves every dependency to the newest version
+      # the declared constraints allow, discarding the pins in uv.lock. The
+      # lockfile is NOT committed — this job only reports.
+      - name: Re-resolve every dependency to its latest allowed version
+        run: uv lock --upgrade
+
+      - name: Show what that resolved to
+        run: |
+          uv sync --extra eval --extra viz --extra netcdf
+          uv pip list
+
+      # What actually changed versus the committed lock. Printed before the tests
+      # so a failure can be read against it without digging through the diff.
+      - name: Diff against the committed lock
+        run: |
+          echo '### Versions differing from `uv.lock`' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          git diff --no-color -U0 uv.lock \
+            | grep -E '^[+-]version = |^[+-]name = ' \
+            | head -80 >> "$GITHUB_STEP_SUMMARY" || echo '(no version changes)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run tests
+        # --no-sync so this cannot quietly re-resolve back to the committed lock,
+        # the same guard `min-versions` uses in the opposite direction.
+        run: uv run --no-sync pytest tests/ -p no:cacheprovider
+
+      # A scheduled job whose failure only appears in the Actions tab is a job
+      # nobody reads. File an issue — and reuse the open one rather than posting a
+      # duplicate every morning until it is fixed.
+      - name: Report a failure as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list --state open --label latest-deps \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing on latest dependencies: $RUN_URL"
+          else
+            gh issue create --title "Test failure against latest dependencies" \
+              --label latest-deps \
+              --body "$(printf '%s\n' \
+                "The scheduled \`Latest dependencies\` run failed." \
+                "" \
+                "This job re-resolves every dependency to the newest version our constraints allow, ignoring \`uv.lock\`. A failure here means **a released upstream version breaks mushin** — anyone installing today may hit it, since the constraints permit that version." \
+                "" \
+                "Run (the step summary lists which versions differ from the lock): $RUN_URL" \
+                "" \
+                "Triage:" \
+                "1. Read the version diff in the step summary to find the culprit." \
+                "2. If the upstream change is intended, adapt mushin." \
+                "3. If it is an upstream regression, pin *that version* out (\`!= x.y.z\`) rather than adding a blanket ceiling, and link the upstream issue." \
+                "" \
+                "This issue is reused while it stays open, so it will be commented on rather than duplicated.")"
+          fi
