@@ -348,6 +348,41 @@ exercised by the CPU-only examples or CI. See the
 [lightning reference](../reference/lightning.md) for the fully declarative
 `builds(Trainer, module)` form.
 
+## Known upstream issue: `zen_partial` + `zen_wrappers` on hydra-core 1.3.6
+
+If you build your configs with **both** hydra-zen options at once:
+
+```python
+builds(my_target, zen_partial=True, zen_wrappers=my_wrapper)  # both set
+```
+
+then on `hydra-core == 1.3.6` instantiating that config raises:
+
+```
+InstantiationException: Callable targets cannot return partial subclasses ...
+```
+
+**Why.** hydra-core 1.3.6 hardened `instantiate` so a callable target may no
+longer return a subclass of `functools.partial`. hydra-zen returns one only when
+those two options are combined — either alone is fine.
+
+**Not a mushin bug, and mushin is unaffected**: nothing in mushin uses
+`zen_wrappers`. But the error names neither Hydra nor hydra-zen, so it is easy to
+mistake for a problem in your task function.
+
+**Fixes**, in order of preference:
+
+1. drop one of the two options — apply the wrapper to the target yourself and
+   keep `zen_partial=True`, or keep the wrapper and bind arguments another way;
+2. pin the single bad version out, `hydra-core != 1.3.6`, rather than adding a
+   blanket ceiling like `< 1.4` — the change arrived in a *patch* release, so a
+   minor-level cap would not have prevented it and would block security patches.
+
+!!! note "Not to be confused with `zen()`"
+    `zen(fn)` — the callable wrapper mushin itself uses to let a function take a
+    config — is a different feature and is **not** affected. Only the
+    `builds(..., zen_wrappers=...)` argument is.
+
 ## See also
 
 - [Tutorial](../tutorial.md) — end-to-end: sweep → dataset → compare
