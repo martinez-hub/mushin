@@ -2,6 +2,7 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
+import contextlib
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from inspect import getattr_static
@@ -21,6 +22,38 @@ from hydra_zen._launch import _NotSet
 from typing_extensions import Self
 
 from ._validate import value_check
+
+# hydra-core 1.3.7 refuses to instantiate any `hydra._internal.*` target named by
+# declarative configuration. Hydra exempts its own sweeper by building it through
+# `Plugins.instantiate_sweeper`, which marks the target trusted for that call
+# (hydra/core/plugins.py). hydra-zen's `launch` deliberately does not — its
+# comment reads "Instantiate sweeper without using Hydra's Plugin discovery
+# (Zen!)" — so the stock `hydra/sweeper=basic` target is rejected and EVERY
+# multirun raises. mushin has exactly one launch call site, so we mark the same
+# target trusted around it, the same way Hydra does for itself.
+#
+# The context manager is private and exists only in 1.3.7, hence the guard: on
+# 1.3.0-1.3.6 there is nothing to trust because the policy does not exist. The
+# widening is one string, for the duration of our own launch; every other
+# `hydra._internal` reference stays rejected. Delete this once hydra-zen routes
+# the sweeper through `Plugins` — tests/test_hydra_trusted_sweeper.py is the
+# alarm for that.
+try:  # hydra-core >= 1.3.7
+    from hydra._internal.target_policy import (
+        _trusted_internal_target as _hydra_trusted_internal_target,
+    )
+except ImportError:  # hydra-core < 1.3.7 has no target policy to satisfy
+    _hydra_trusted_internal_target = None
+
+BASIC_SWEEPER_TARGET = "hydra._internal.core_plugins.basic_sweeper.BasicSweeper"
+
+
+def _trusted_sweeper_target(target: str = BASIC_SWEEPER_TARGET):
+    """Mark the stock sweeper target trusted for the enclosing `launch`."""
+    if _hydra_trusted_internal_target is None:
+        return contextlib.nullcontext()
+    return _hydra_trusted_internal_target(target)
+
 
 LoadedValue: TypeAlias = str | int | float | bool | list[Any] | dict[str, Any]
 
@@ -1543,17 +1576,21 @@ class BaseWorkflow:
 
         # Run a Multirun over epsilons
         try:
-            jobs = launch(
-                self.eval_task_cfg,
-                task_call,
-                overrides=launch_overrides,
-                multirun=True,
-                version_base=version_base,
-                to_dictconfig=to_dictconfig,
-                config_name=config_name,
-                job_name=job_name,
-                with_log_configuration=with_log_configuration,
-            )
+            # See `_trusted_sweeper_target`: hydra-core >= 1.3.7 rejects the
+            # stock sweeper target unless it is marked trusted, as Hydra does
+            # for its own launch path.
+            with _trusted_sweeper_target():
+                jobs = launch(
+                    self.eval_task_cfg,
+                    task_call,
+                    overrides=launch_overrides,
+                    multirun=True,
+                    version_base=version_base,
+                    to_dictconfig=to_dictconfig,
+                    config_name=config_name,
+                    job_name=job_name,
+                    with_log_configuration=with_log_configuration,
+                )
         except Exception as e:
             # A missing launcher plugin is the FIRST error every cluster user
             # hits; Hydra's raw message lists options but never names the pip
