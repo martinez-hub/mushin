@@ -348,7 +348,7 @@ exercised by the CPU-only examples or CI. See the
 [lightning reference](../reference/lightning.md) for the fully declarative
 `builds(Trainer, module)` form.
 
-## Known upstream issue: `zen_partial` + `zen_wrappers` on hydra-core 1.3.6
+## Known upstream issue: `zen_partial` + `zen_wrappers` on hydra-core 1.3.6+
 
 If you build your configs with **both** hydra-zen options at once:
 
@@ -356,7 +356,7 @@ If you build your configs with **both** hydra-zen options at once:
 builds(my_target, zen_partial=True, zen_wrappers=my_wrapper)  # both set
 ```
 
-then on `hydra-core == 1.3.6` instantiating that config raises:
+then on `hydra-core >= 1.3.6` instantiating that config raises:
 
 ```
 InstantiationException: Callable targets cannot return partial subclasses ...
@@ -370,13 +370,19 @@ those two options are combined — either alone is fine.
 `zen_wrappers`. But the error names neither Hydra nor hydra-zen, so it is easy to
 mistake for a problem in your task function.
 
-**Fixes**, in order of preference:
+**The fix is to change the config, not the dependency**: drop one of the two
+options — apply the wrapper to the target yourself and keep `zen_partial=True`,
+or keep the wrapper and bind arguments another way.
 
-1. drop one of the two options — apply the wrapper to the target yourself and
-   keep `zen_partial=True`, or keep the wrapper and bind arguments another way;
-2. pin the single bad version out, `hydra-core != 1.3.6`, rather than adding a
-   blanket ceiling like `< 1.4` — the change arrived in a *patch* release, so a
-   minor-level cap would not have prevented it and would block security patches.
+!!! warning "Do not try to pin around this"
+    An earlier version of this page suggested `hydra-core != 1.3.6`. That advice
+    was wrong and has been removed. The rejection is **deliberate security
+    hardening that carries forward**: it still applies on 1.3.7, so excluding one
+    version does not avoid it, and every version you would pin back to carries a
+    high-severity advisory that the newer release fixes (1.3.6 fixes
+    GHSA-rqx7-p7vv-w7hr and GHSA-c3wx-c55w-pxjq; 1.3.7 fixes
+    GHSA-mwj6-rfh8-7qf4). Version exclusions cannot undo intentional hardening —
+    only a code change can.
 
 !!! note "Not to be confused with `zen()`"
     `zen(fn)` — the callable wrapper mushin itself uses to let a function take a
