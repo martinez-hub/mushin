@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.14.2] - 2026-09-23
+
+### Added
+
+- The workflows guide now documents a known upstream incompatibility: on `hydra-core >= 1.3.6`, a config built with **both** `zen_partial=True` and `zen_wrappers=` raises `InstantiationException: Callable targets cannot return partial subclasses`. hydra-core 1.3.6 hardened `instantiate` so a callable target may no longer return a `functools.partial` subclass, which is what hydra-zen produces when those two options are combined — either alone is fine. The hardening carries forward, so 1.3.7 rejects it too. mushin itself is unaffected (it uses `zen()`, a different feature, and never `zen_wrappers`), but the error names neither Hydra nor hydra-zen, so it is easy to mistake for a bug in your own task function. The note gives the fix: change the config — drop one of the two options — rather than the dependency. (Pinning cannot help here: the rejection is deliberate security hardening that still applies on 1.3.7, and every version an exclusion falls back to carries a high-severity advisory the newer release fixes.) (#205)
+
+### Fixed
+
+- Sweeps work again on hydra-core 1.3.7. 1.3.7 refuses to instantiate the `hydra._internal` sweeper target that hydra-zen's `launch` names directly, so every `multirun` raised `InstantiationException` on a fresh install. mushin now marks that one target trusted around its own launch call — the same exemption Hydra applies to its own sweeper — rather than capping `hydra-core`, which would have withheld 1.3.7's security fix ([GHSA-mwj6-rfh8-7qf4](https://github.com/hydra-ecosystem/hydra/security/advisories/GHSA-mwj6-rfh8-7qf4), high, `hydra-core >= 1.3.4, < 1.3.7`) and put a hard upper bound on a library. The fix belongs upstream in hydra-zen; it can be deleted once `launch` routes the sweeper through `Plugins`. (#211)
+- Corrected the workflows guide's advice on the `zen_partial` + `zen_wrappers` incompatibility. It previously suggested pinning `hydra-core != 1.3.6`, which does not work: the rejection is deliberate security hardening that still applies on 1.3.7, and every version the exclusion would fall back to carries a high-severity advisory the newer release fixes. The guide now says to change the config instead, and the section is retitled for `hydra-core >= 1.3.6` rather than 1.3.6 alone. (#214)
+
+### Misc
+
+- #198, #200, #201, #203, #204
+
+
 ## [0.14.1] - 2026-08-24
 
 ### Added
