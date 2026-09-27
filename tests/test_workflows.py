@@ -13,8 +13,6 @@ import numpy as np
 import pytest
 import torch as tr
 import xarray as xr
-from hydra.core.config_store import ConfigStore
-from hydra.plugins.sweeper import Sweeper
 from hydra_zen import builds, load_from_yaml, make_config
 from hydra_zen.errors import HydraZenValidationError
 from hypothesis import given, settings
@@ -351,19 +349,11 @@ def test_xarray_from_loaded_workflow():
     assert_identical(xarray1, xarray4)
 
 
-class LocalBasicSweeper(Sweeper):
-    def setup(self, *, hydra_context, task_function, config):
-        pass
-
-    def sweep(self, arguments):
-        return dict(hi=1)
-
-
 @pytest.mark.usefixtures("cleandir")
 def test_return_not_list_jobreturn():
-    cs = ConfigStore.instance()
-    cs.store(group="hydra/sweeper", name="local_test", node=builds(LocalBasicSweeper))
-
+    # `hydra/sweeper=local_test` is the plugin in tests/plugins/hydra_plugins/
+    # mushin_test_sweeper: Hydra only admits sweepers defined under
+    # `hydra_plugins`, and hydra-zen's launch is moving onto Hydra's registry.
     wf = MyWorkflow()
     wf.run(epsilon=multirun([1.0, 3.0, 2.0]), overrides=["hydra/sweeper=local_test"])
     assert wf.jobs == dict(hi=1)
