@@ -34,16 +34,30 @@ from ._validate import value_check
 #
 # The context manager is private and exists only in 1.3.7, hence the guard: on
 # 1.3.0-1.3.6 there is nothing to trust because the policy does not exist. The
-# widening is one string, for the duration of our own launch; every other
-# `hydra._internal` reference stays rejected. Delete this once hydra-zen routes
-# the sweeper through `Plugins` — tests/test_hydra_trusted_sweeper.py is the
-# alarm for that.
-try:  # hydra-core >= 1.3.7
+# widening is one string, for the duration of our own launch — which, with the
+# in-process basic launcher, includes the task functions themselves, so a task
+# config could name the BasicSweeper target while the sweep runs; every other
+# `hydra._internal` reference stays rejected throughout. Delete this once
+# hydra-zen routes the sweeper through `Plugins` (hydra-zen#885) — and raise the
+# hydra-zen floor in pyproject.toml to that release in the same change, or every
+# hydra-zen <= 0.16.0 install on hydra-core >= 1.3.7 breaks again and no CI job
+# (latest resolves new hydra-zen, min-versions resolves old hydra-core) can see
+# it. tests/test_hydra_trusted_sweeper.py::test_the_wrap_is_still_needed fires
+# when the time comes.
+#
+# hydra-core 1.3.7 keeps the policy in `hydra._internal.target_policy`; the 1.4
+# branch moved it to `hydra._internal.execution_policy` with the same helper.
+try:  # hydra-core 1.3.7
     from hydra._internal.target_policy import (
         _trusted_internal_target as _hydra_trusted_internal_target,
     )
-except ImportError:  # hydra-core < 1.3.7 has no target policy to satisfy
-    _hydra_trusted_internal_target = None
+except ImportError:
+    try:  # hydra-core >= 1.4
+        from hydra._internal.execution_policy import (
+            _trusted_internal_target as _hydra_trusted_internal_target,
+        )
+    except ImportError:  # hydra-core < 1.3.7 has no target policy to satisfy
+        _hydra_trusted_internal_target = None
 
 BASIC_SWEEPER_TARGET = "hydra._internal.core_plugins.basic_sweeper.BasicSweeper"
 
