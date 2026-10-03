@@ -66,7 +66,7 @@ reference (first method listed) after Holm correction at `alpha=0.05`.
 
 ## Next steps
 
-- [Core concepts](concepts.md) — the mental model behind mushin
-- [Comparing methods](guides/compare.md) — deeper coverage of `compare`
-- [Studies](guides/study.md) — combine training and comparison in one call
-- [Understanding the statistics](guides/statistics.md) — which test to choose
+- [Core concepts](concepts.md): the mental model behind mushin
+- [Comparing methods](guides/compare.md): deeper coverage of `compare`
+- [Studies](guides/study.md): combine training and comparison in one call
+- [Understanding the statistics](guides/statistics.md): which test to choose

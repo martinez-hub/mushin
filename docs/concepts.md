@@ -13,11 +13,11 @@ The dataset dimensions are your swept parameters (e.g. `lr`,
 list of floats.
 
 See [Workflows & sweeps](guides/workflows.md) and the
-[API Reference — workflows](reference/workflows.md).
+[API Reference: workflows](reference/workflows.md).
 
 ## Frameworks: Lightning-first, sweep layer agnostic
 
-> **Prefer to follow along?** [Notebook 06 — scikit-learn, no torch](notebooks/06_sklearn_framework_agnostic.ipynb)
+> **Prefer to follow along?** [Notebook 06: scikit-learn, no torch](notebooks/06_sklearn_framework_agnostic.ipynb)
 > runs a full sweep with no torch anywhere.
 
 mushin is built on hydra-zen, with
@@ -25,7 +25,7 @@ mushin is built on hydra-zen, with
 path. The two layers differ in how tied to Lightning they are:
 
 **The sweep layer is framework-agnostic.** `MultiRunMetricsWorkflow` never
-inspects your model — it only sweeps configurations and collects the `dict` your
+inspects your model; it only sweeps configurations and collects the `dict` your
 `task` returns. Whatever you train inside `task` is your business, so you can
 sweep scikit-learn, XGBoost, JAX, or plain NumPy and still get the labeled
 `xarray.Dataset` back:
@@ -51,22 +51,22 @@ ds = wf.to_xarray()  # dims (alpha, seed), data var r2
 
 For a complete, runnable version see
 [`examples/sklearn_sweep.py`](https://github.com/martinez-hub/mushin/blob/main/examples/sklearn_sweep.py)
-(a `LogisticRegression` sweep — pure scikit-learn, no torch).
+(a `LogisticRegression` sweep: pure scikit-learn, no torch).
 
 **The convenience and evaluation layers are PyTorch/Lightning-specific.** These
 assume torch models and won't apply to a scikit-learn estimator:
 
-- `HydraDDP` and `MetricsCallback` — Lightning strategy/callback.
-- Auto-tuning (`tune_batch_size` / `tune_learning_rate`) — drives Lightning's `Tuner`.
+- `HydraDDP` and `MetricsCallback`: Lightning strategy/callback.
+- Auto-tuning (`tune_batch_size` / `tune_learning_rate`): drives Lightning's `Tuner`.
 - `compare` and the batteries (`classification`, `segmentation`, `detection`,
-  `regression`, `retrieval`, `image_quality`, `audio`) — take
+  `regression`, `retrieval`, `image_quality`, `audio`): take
   `torch.nn.Module` models and score them with `torchmetrics`.
 
 The evaluation layer (`compare`, the batteries, LLM eval, `Study`) is the
-optional [`eval` extra](install.md#optional-extras) —
-`pip install "mushin-py[eval]"` — so the core sweep→dataset install stays lean.
+optional [`eval` extra](install.md#optional-extras)
+(`pip install "mushin-py[eval]"`), so the core sweep→dataset install stays lean.
 
-There is no scikit-learn *integration* — only the framework-neutral workflow
+There is no scikit-learn *integration*, only the framework-neutral workflow
 that happily wraps it.
 
 ## The (method × seed) dataset
@@ -113,8 +113,8 @@ and the default prediction logic:
 | `"classification"` | accuracy, f1, precision, recall, auroc, ece | argmax + softmax |
 | `"segmentation"` | miou, dice, pixel_acc, precision, recall | argmax + softmax over spatial dims |
 
-Five more batteries ship — `detection`, `regression`, `retrieval`,
-`image_quality`, `audio` — for all seven see the
+Five more batteries ship (`detection`, `regression`, `retrieval`,
+`image_quality`, `audio`); for all seven see the
 [batteries guide](guides/batteries.md); register your own with `register_task`.
 
 You can override either end:

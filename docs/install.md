@@ -15,14 +15,14 @@ uv add mushin-py
 ```
 
 !!! note "Install name vs. import name"
-    The PyPI distribution is **`mushin-py`**, but you `import mushin` —
-    the same pattern as `scikit-learn` → `sklearn`.
+    The PyPI distribution is **`mushin-py`**, but you `import mushin`, the
+    same pattern as `scikit-learn` → `sklearn`.
 
 ## Optional extras
 
 The core install is the sweep → dataset workflow. The **evaluation layer**
 (`compare`, the metric batteries, LLM evaluation, and `Study`) is the `eval`
-extra — accessing those features without it raises a clear install hint.
+extra. Accessing those features without it raises a clear install hint.
 
 | Extra | What it adds | Install |
 |---|---|---|
@@ -44,14 +44,14 @@ Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 A few notes:
 
 - **pytorch-lightning ≥ 2.4** is required on all platforms.
-- **Apple Silicon (M-series)**: fully supported — the CI suite runs on Apple
+- **Apple Silicon (M-series)**: fully supported; the CI suite runs on Apple
   Silicon on every pull request. The sweep engine has no device code, and
   training on the M-series GPU goes through Lightning's MPS accelerator: build
   your `Trainer` with `accelerator="mps"` (or `"auto"`, which selects MPS)
   inside your task. Auto-tuning and the eval layer follow your model's device,
   and provenance records the MPS chip. The multi-GPU / cluster features
   (`HydraDDP`/`HydraFSDP`, `pin_gpu_round_robin`, `submitit_slurm_config`) are
-  simply not applicable on a single-chip Mac — `launcher="joblib"` still
+  simply not applicable on a single-chip Mac; `launcher="joblib"` still
   parallelizes sweep *cells* across CPU cores as usual.
 - **Intel macOS**: Apple has not shipped PyTorch wheels past 2.2.x for the
   x86_64 architecture. `mushin` supports this platform at torch 2.2.x and

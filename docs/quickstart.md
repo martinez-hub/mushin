@@ -8,7 +8,7 @@ repository; `examples/sweep_to_dataset.py` is the same flow written with the
 class API (`MultiRunMetricsWorkflow`), which this page introduces further down.
 
 Decorate a function with `@mushin.sweep`, sweep it over a grid, and get results
-back as a labeled `xarray.Dataset` — no subclassing, no callbacks. Whatever the
+back as a labeled `xarray.Dataset`: no subclassing, no callbacks. Whatever the
 function returns as a `dict` becomes data variables in the output dataset.
 
 ```python
@@ -40,10 +40,10 @@ df.groupby("lr")["accuracy"].mean()  # plain pandas from here on
 ```
 
 The labeled dataset is still the richer object (`.sel`, `.mean("seed")`,
-provenance in `attrs`, netCDF round-trip) — but it's an option, not a
+provenance in `attrs`, netCDF round-trip), but it's an option, not a
 prerequisite.
 
-Need the full tool — `.failures`, `.plot()`, provenance, custom `to_xarray`? Drop
+Need the full tool (`.failures`, `.plot()`, provenance, custom `to_xarray`)? Drop
 to `experiment.workflow` (the last-run instance), or use the `MultiRunMetricsWorkflow`
 class directly (shown next).
 
@@ -51,7 +51,7 @@ class directly (shown next).
 
 For advanced control (custom `pre_task`, `jobs_post_process`, subclassing like
 `RobustnessCurve`), subclass `MultiRunMetricsWorkflow` and implement a static
-`task` method — this is exactly what `@mushin.sweep` builds for you:
+`task` method. This is exactly what `@mushin.sweep` builds for you:
 
 ```python
 import torch as tr
@@ -97,7 +97,7 @@ class LRSweep(MultiRunMetricsWorkflow):
 ## Run the sweep
 
 Call `wf.run(...)` with `multirun(...)` wrapped arguments. Hydra launches one
-job per combination — 3 learning rates × 3 seeds = 9 runs total.
+job per combination: 3 learning rates × 3 seeds = 9 runs total.
 
 ```python
 wf = LRSweep()
@@ -108,7 +108,7 @@ wf.run(
 ```
 
 > **Heads up:** your `task()` runs in a per-job directory. If it reads or writes
-> files by relative path, wrap them with `mushin.original_cwd() / "..."` — see
+> files by relative path, wrap them with `mushin.original_cwd() / "..."`. See
 > [Concepts](concepts.md#working-directories).
 
 ## Get results as a dataset
@@ -153,7 +153,7 @@ uv run python examples/sweep_to_dataset.py
 
 ## Next steps
 
-- [Workflows & sweeps guide](guides/workflows.md) — more on `BaseWorkflow` and `MultiRunMetricsWorkflow`
-- [Comparing methods guide](guides/compare.md) — evaluate trained models with statistics
-- [Studies guide](guides/study.md) — combine training + compare in one call
-- [API Reference — workflows](reference/workflows.md)
+- [Workflows & sweeps guide](guides/workflows.md): more on `BaseWorkflow` and `MultiRunMetricsWorkflow`
+- [Comparing methods guide](guides/compare.md): evaluate trained models with statistics
+- [Studies guide](guides/study.md): combine training + compare in one call
+- [API Reference: workflows](reference/workflows.md)
