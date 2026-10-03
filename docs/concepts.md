@@ -98,9 +98,7 @@ captures the natural variance of training and uses it to answer the question: *i
 the observed difference likely to hold up on a new seed?*
 
 mushin applies a pairwise significance test (Welch, Wilcoxon, or Mann-Whitney U)
-and corrects for multiple comparisons with the Holm–Bonferroni procedure. The
-result tells you not just *which method scored higher on average*, but *whether
-that difference is statistically reliable*.
+and corrects for multiple comparisons with the Holm–Bonferroni procedure.
 
 See [Understanding the statistics](guides/statistics.md) for details on test
 selection and the Holm correction.
