@@ -34,7 +34,7 @@ search is skipped, and `device_batch`/accumulation are re-derived for that run's
 `effective_batch_size`/`num_devices`, so the same pin works unchanged across
 different GPU counts. Pass `retune=True` to search again.
 
-Pick a rounder `effective_batch_size` (256/512/1024, many divisors) for the best
+Pick a rounder `effective_batch_size` (256/512/1024, each with many divisors) for the best
 GPU utilization; a near-prime target may force a small device batch, and the
 helper warns when that happens.
 

@@ -178,7 +178,7 @@ log dir instead.
 
 ## Hyperparameter search
 
-mushin *does* hyperparameter search: as **grid search** (a `multirun` per axis)
+mushin *does* hyperparameter search: **grid search** (a `multirun` per axis)
 or **random search** (`sample=K` over the grid). For a small, discrete space that
 is often the whole job, and you get more than the winning config: the full
 labeled `xarray` dataset over every cell, `compare_methods` statistics, and
@@ -254,8 +254,8 @@ test: a defensible claim over fresh seeds, not the optimizer's optimistic
 best-trial number (which suffers the winner's curse; see
 [From exploration to a paper](exploration-to-paper.md)).
 
-The same shape works for any searcher: Ax, Nevergrad, a hand-rolled random
-search, and adds **no dependency to mushin**: the search lives entirely in your
+The same shape works for any searcher (Ax, Nevergrad, a hand-rolled random
+search), and adds **no dependency to mushin**: the search lives entirely in your
 code, and mushin only ever sees the discrete configs you chose to report.
 
 ## Parallel & out-of-process launchers

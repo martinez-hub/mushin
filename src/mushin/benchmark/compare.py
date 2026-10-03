@@ -46,7 +46,7 @@ def compare(
         ``"audio"``, or a custom one; see ``list_tasks()``) or a ``Task`` object.
     num_classes : int or None
         Required (when ``metrics`` is not provided) only for tasks whose battery
-        needs it; ``"classification"`` and ``"segmentation"``; ignored for the
+        needs it (``"classification"`` and ``"segmentation"``), and ignored for the
         others.
     predict_fn : callable or None
         ``(model, x) -> (preds, probs)``; defaults to the task's.

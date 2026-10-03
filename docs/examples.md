@@ -1,9 +1,9 @@
 # Examples
 
 Every example below is a **runnable** script in the
-[`examples/`](https://github.com/martinez-hub/mushin/tree/main/examples) directory,
-CI-tested, except the multi-GPU scaling examples (which need real GPUs, so they run
-on a cluster rather than in CI). The guides embed pieces of them; this page indexes
+[`examples/`](https://github.com/martinez-hub/mushin/tree/main/examples) directory.
+All are CI-tested, except the multi-GPU scaling examples (which need real GPUs,
+so they run on a cluster rather than in CI). The guides embed pieces of them; this page indexes
 them all. Clone the repo and run any one with:
 
 ```bash

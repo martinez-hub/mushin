@@ -5,7 +5,7 @@ sweep engine built on
 [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen), with
 first-class [PyTorch Lightning](https://lightning.ai/) integration.
 
-`mushin` is the evaluate-and-report layer sitting on top of hydra-zen, and,
+`mushin` is the evaluate-and-report layer sitting on top of hydra-zen and,
 for deep learning, Lightning. Define your experiment as a function, sweep over
 parameters with Hydra, and get results back as a labeled `xarray.Dataset`, not
 rows in a dashboard you have to export.

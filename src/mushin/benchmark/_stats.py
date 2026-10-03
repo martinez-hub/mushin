@@ -252,7 +252,7 @@ def compare_methods(
     Emits a warning when ``test`` cannot reach ``alpha`` at the dataset's seed
     count, and when a method is constant across seeds in *every* metric.
 
-    ``allow_incomplete`` (default ``False``); when ``True``, an incomplete sweep
+    ``allow_incomplete`` (default ``False``): when ``True``, an incomplete sweep
     is compared anyway (with a warning) instead of raising, computing stats over
     only the completed cells. Use it for exploratory analysis of a ``sample=`` or
     budget-limited sweep; the result may be under-powered or biased.

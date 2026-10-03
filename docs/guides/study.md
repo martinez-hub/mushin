@@ -42,7 +42,7 @@ and stores the resulting paths.
 | `seeds` | List of integer seeds to train each method on. |
 | `data` | Re-iterable data loader for evaluation. |
 | `num_classes` | Number of classes: required for the `classification`/`segmentation` batteries, ignored for the others. |
-| `task` | Any registered task (default `"classification"`): `classification`, `segmentation`, `detection`, `regression`, `retrieval`, `image_quality`, `audio`, or a custom `Task`: see `list_tasks()`. |
+| `task` | Any registered task (default `"classification"`): `classification`, `segmentation`, `detection`, `regression`, `retrieval`, `image_quality`, `audio`, or a custom `Task` (see `list_tasks()`). |
 | `test` | Statistical test: `"welch"`, `"wilcoxon"`, `"mannwhitney"`, etc. |
 | `alpha` | Significance threshold (default `0.05`). |
 | `ignore_index` | For segmentation: label to exclude (e.g. void class). |

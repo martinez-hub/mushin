@@ -141,7 +141,7 @@ The summary reports what each method scores; the CIs quantify how confident that
 estimate is (they shrink as you add seeds). The significance verdict answers the
 *comparative* question: with `strong` accuracy per seed clustered near `0.86` and
 `weak` near `0.60`, and the two bands separated by far more than their
-seed-to-seed jitter; Welch's t-test returns `p = 4.27e-09`, and Holm keeps it
+seed-to-seed jitter, Welch's t-test returns `p = 4.27e-09`, and Holm keeps it
 significant after correcting for the six simultaneous metric tests. The verdict
 is trustworthy precisely **because** each method carries real variance across
 seeds: had a method produced identical scores on every seed (a deterministic

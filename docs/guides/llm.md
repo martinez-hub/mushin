@@ -189,8 +189,8 @@ pip install "mushin-py[eval]"
 python examples/inspect_ai_compare.py --demo
 ```
 
-That runs two scenarios with **known ground truth**: two identical models, and
-one genuinely better, so you can check the verdicts rather than trust them:
+That runs two scenarios with **known ground truth** (two identical models, and
+one genuinely better), so you can check the verdicts rather than trust them:
 
 ```
 SCENARIO 1 — the two models are IDENTICAL  (any gap here is luck)
@@ -217,8 +217,8 @@ an Inspect **epoch** is a mushin **run**, so `--epochs 5` gives both dimensions.
 
 !!! warning "Match questions by id, not position"
     The comparison pairs question *i* of one model with question *i* of the
-    other. Two Inspect logs can list their samples in different orders: retries,
-    parallelism, a shuffled dataset, so matching positionally would compare
+    other. Two Inspect logs can list their samples in different orders (retries,
+    parallelism, a shuffled dataset), so matching positionally would compare
     "capital of France" against "solve this integral" and report a confident,
     meaningless answer. `scores_from_logs` matches on `sample.id` and raises if
     the models did not answer the same questions. Do the same in any adapter you

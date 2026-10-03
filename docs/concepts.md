@@ -59,7 +59,7 @@ assume torch models and won't apply to a scikit-learn estimator:
 - `HydraDDP` and `MetricsCallback`: Lightning strategy/callback.
 - Auto-tuning (`tune_batch_size` / `tune_learning_rate`): drives Lightning's `Tuner`.
 - `compare` and the batteries (`classification`, `segmentation`, `detection`,
-  `regression`, `retrieval`, `image_quality`, `audio`): take
+  `regression`, `retrieval`, `image_quality`, `audio`) take
   `torch.nn.Module` models and score them with `torchmetrics`.
 
 The evaluation layer (`compare`, the batteries, LLM eval, `Study`) is the

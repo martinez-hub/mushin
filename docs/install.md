@@ -15,7 +15,7 @@ uv add mushin-py
 ```
 
 !!! note "Install name vs. import name"
-    The PyPI distribution is **`mushin-py`**, but you `import mushin`, the
+    The PyPI distribution is **`mushin-py`**, but you `import mushin`: the
     same pattern as `scikit-learn` → `sklearn`.
 
 ## Optional extras
