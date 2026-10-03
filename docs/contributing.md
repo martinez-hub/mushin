@@ -36,9 +36,11 @@ changes/<id>.<type>.md
 ```
 
 Where `<id>` is the GitHub issue or PR number (or a short slug for pre-issue
-work), and `<type>` is one of `added`, `changed`, `fixed`, `removed`, or
-`deprecated`. The fragment body is a single plain-English sentence describing
-the change.
+work), and `<type>` is one of `added`, `changed`, `fixed`, `removed`,
+`deprecated`, or `misc`. The fragment body is a single plain-English sentence
+describing the change — except `misc`, the escape hatch for PRs with nothing
+user-facing, which renders without that text (see
+[`changes/README.md`](https://github.com/martinez-hub/mushin/blob/main/changes/README.md)).
 
 Example:
 ```

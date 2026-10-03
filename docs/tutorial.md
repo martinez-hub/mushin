@@ -1,8 +1,6 @@
 # Tutorial
 
-This tutorial walks you through the full mushin workflow end to end: define a
-sweep, collect a labeled dataset, compare methods with statistical significance,
-and interpret the result.
+This tutorial walks you through the full mushin workflow end to end.
 
 !!! note "The comparison steps need the `eval` extra"
     The sweep → dataset steps run on the core install. The later `compare` +
