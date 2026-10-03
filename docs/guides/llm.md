@@ -62,11 +62,14 @@ result = compare_llms(
 )
 ```
 
-Use more seeds (≥ 5) for a robust estimate. Welch's t-test (the default) already
-has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
-`ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
-below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
-at the given seed count.
+More seeds narrow the confidence interval, so prefer more when you can afford
+them; how many you need depends on the effect size and the seed-to-seed
+variance, not on a fixed threshold. What a given seed count can rule out is
+fixed, though: the parametric tests (`welch`, the default, and `ttest_rel`) can
+reach `alpha` at 3 seeds, while the rank tests have a floor below which no
+effect size reaches it. `wilcoxon` needs 6 seeds and `mannwhitney` 4, because a
+paired Wilcoxon bottoms out at p = 0.25 over 3 seeds. `compare_llms` warns when
+the test you chose cannot reach `alpha` at the given seed count.
 
 !!! warning "Paired tests need a *shared* per-seed random effect"
     `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
@@ -399,11 +402,13 @@ the metric and re-run without re-calling the systems.
   system with identical scores across all seeds. Wire the seed to sampling
   (temperature, a provider seed) to get real variance, or treat that system's
   score as a single point estimate rather than a distribution.
-- **Too few seeds for the chosen test.** The rank/paired tests can't reach
-  p < 0.05 at small _n_ (a Wilcoxon over 3 seeds bottoms out at p = 0.25);
-  `compare_llms` warns when the test you picked cannot reach `alpha` at the given
-  seed count. Welch (the default) is fine at 3–5 seeds — still prefer ≥ 5 seeds
-  for a more robust estimate.
+- **Too few seeds for the chosen test.** The rank tests can't reach p < 0.05
+  below their floor (`wilcoxon` needs 6 seeds, `mannwhitney` 4; a paired
+  Wilcoxon bottoms out at p = 0.25 over 3 seeds); `compare_llms` warns when the
+  test you picked cannot reach `alpha` at the given seed count. The parametric
+  tests (`welch`, the default, and `ttest_rel`) can reach `alpha` at 3 seeds,
+  but how many seeds you actually need depends on the effect size and the
+  seed-to-seed variance.
 - **Wrong output length.** A system must return exactly `len(inputs)` outputs
   in the same order; mushin raises `ValueError` immediately if it doesn't.
 - **Seeds must be unique.** Each seed is one trial; a repeated seed is the same

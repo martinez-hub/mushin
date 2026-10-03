@@ -8,7 +8,7 @@ enough seeds to make a claim, captured well enough that a reviewer can reproduce
 it.
 
 mushin does not have an "explore mode" or a `promote()` button, and that is
-deliberate. The two phases are the *same sweep primitive* run with different
+deliberate. The two phases are the *same sweep* run with different
 options, and the transition between them is a convention, not a feature. This
 guide is that convention — the safe path from a scratch grid to a claim you can
 defend.
@@ -143,9 +143,6 @@ resuming. Don't — and mushin actively stops you from doing it by accident.
   a lucky draw. The only cure is a fresh evaluation on new seeds. Reusing the
   exploration cells that won bakes the optimism straight into your headline
   number.
-
-So the handoff is a re-run, by design. Exploration tells you *which*
-configuration to run for the paper; the paper run is what you actually report.
 
 Two mushin features make the re-run cheap and honest at the same time:
 
