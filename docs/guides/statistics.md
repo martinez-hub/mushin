@@ -2,8 +2,7 @@
 
 mushin's statistical comparison layer is designed to give you honest answers:
 not just *which method scored higher on average*, but *whether that difference
-is reliable* given the seed-to-seed variance of training. This page explains the
-tests, the Holm correction, and how to interpret the results.
+is reliable* given the seed-to-seed variance of training.
 
 ## The tests
 

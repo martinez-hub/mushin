@@ -144,9 +144,6 @@ resuming. Don't — and mushin actively stops you from doing it by accident.
   exploration cells that won bakes the optimism straight into your headline
   number.
 
-So the handoff is a re-run, by design. Exploration tells you *which*
-configuration to run for the paper; the paper run is what you actually report.
-
 Two mushin features make the re-run cheap and honest at the same time:
 
 - `cache_dir=` reuse is safe here because it is keyed on config **and** code — a

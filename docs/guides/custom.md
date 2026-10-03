@@ -5,9 +5,7 @@
     install them with `pip install "mushin-py[eval]"`. Importing them without it
     raises a clear install hint. See [Installation](../install.md#optional-extras).
 
-mushin's metric batteries and prediction logic are fully replaceable. This guide
-shows how to extend mushin with custom metrics and how to adapt models that
-don't return plain tensors.
+mushin's metric batteries and prediction logic are fully replaceable.
 
 !!! note "These are `compare` arguments"
     `metrics`, `predict_fn`, and `prob_metrics` are per-call arguments to
