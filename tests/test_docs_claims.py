@@ -22,7 +22,9 @@ import pytest
 
 from mushin.benchmark._stats import warn_if_underpowered
 
-STATISTICS_GUIDE = Path(__file__).resolve().parent.parent / "docs" / "guides" / "statistics.md"
+STATISTICS_GUIDE = (
+    Path(__file__).resolve().parent.parent / "docs" / "guides" / "statistics.md"
+)
 ALPHA = 0.05
 
 
