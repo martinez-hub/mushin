@@ -42,8 +42,8 @@ def run_training_sweep(
     names here.
 
     ``on_error`` is forwarded to the underlying ``MultiRunMetricsWorkflow.run``
-    (``"raise"`` — default, abort on first failure; ``"nan"`` — fail-soft, keep
-    going and record failures). Regardless of ``on_error``, this function never
+    (``"raise"`` is the default and aborts on the first failure; ``"nan"`` is
+    fail-soft: it keeps going and records failures). Regardless of ``on_error``, this function never
     returns checkpoints for an incomplete sweep: if the workflow finishes with
     any recorded failures (``wf.is_complete`` is ``False``), it raises
     ``IncompleteSweepError`` instead, so ``Study.run`` can never proceed to
@@ -57,7 +57,7 @@ def run_training_sweep(
     methods mapping itself (each name paired with its function's source hash):
     renaming, reordering, adding/removing a method, or editing any method's
     body invalidates every completed cell (with a warning) rather than silently
-    reusing checkpoints trained by different code — coarse, but never stale.
+    reusing checkpoints trained by different code. Coarse, but never stale.
     Like the core resume guard, the fingerprint covers each function's own
     source only, not helpers it calls or values it closes over.
     """

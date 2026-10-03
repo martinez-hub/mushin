@@ -149,7 +149,7 @@ def bh_correction(pvalues) -> list[float]:
 
     Delegates to :func:`scipy.stats.false_discovery_control` (scipy >= 1.11;
     our floor is 1.13) rather than reimplementing the step-up. scipy has no NaN
-    handling, so NaN p-values are held out of the family and restored as NaN —
+    handling, so NaN p-values are held out of the family and restored as NaN,
     matching :func:`holm_correction`."""
     pvalues = np.asarray(pvalues, dtype=float)
     corrected = np.full(pvalues.shape, np.nan)
@@ -238,21 +238,21 @@ def compare_methods(
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
-    ``correction`` — one of :func:`available_corrections` (``"holm"`` default,
+    ``correction`` (one of :func:`available_corrections`: ``"holm"`` default,
     ``"bonferroni"``, ``"fdr_bh"`` for Benjamini-Hochberg FDR, ``"none"`` for
-    raw p-values) — is applied **per metric** across the method pairs; the
+    raw p-values) is applied **per metric** across the method pairs; the
     family is one metric's pairs, not the whole battery, so scanning for
     "significant on any metric" across a large battery still inflates
     family-wise error. A method whose
     scores are constant across all seeds (for a metric) has no sampling
-    distribution, so comparisons involving it are masked — ``p_value``,
+    distribution, so comparisons involving it are masked; ``p_value``,
     ``p_corrected`` and ``effect_size`` become ``NaN`` and ``significant`` is
-    ``False`` — rather than reporting a duplicated-point p-value of ~0 and a
+    ``False``, rather than reporting a duplicated-point p-value of ~0 and a
     meaningless ±huge effect size; Holm is then applied over the surviving pairs.
     Emits a warning when ``test`` cannot reach ``alpha`` at the dataset's seed
     count, and when a method is constant across seeds in *every* metric.
 
-    ``allow_incomplete`` (default ``False``) — when ``True``, an incomplete sweep
+    ``allow_incomplete`` (default ``False``); when ``True``, an incomplete sweep
     is compared anyway (with a warning) instead of raising, computing stats over
     only the completed cells. Use it for exploratory analysis of a ``sample=`` or
     budget-limited sweep; the result may be under-powered or biased.
@@ -261,11 +261,11 @@ def compare_methods(
     ------
     IncompleteSweepError
         If ``ds.attrs["mushin_failures"]`` or ``ds.attrs["mushin_skipped"]`` is a
-        non-empty list — the sweep that produced ``ds`` had failed runs (recorded
+        non-empty list: the sweep that produced ``ds`` had failed runs (recorded
         under ``on_error="nan"``) or cells that were never run (skipped by a
-        ``sample=`` subset or an exhausted ``max_total_seconds`` budget) — unless
-        ``allow_incomplete=True``. A dataset without those attrs — a plain user
-        dataset or a clean, fully-completed sweep — is unaffected. This is keyed
+        ``sample=`` subset or an exhausted ``max_total_seconds`` budget), unless
+        ``allow_incomplete=True``. A dataset without those attrs (a plain user
+        dataset or a clean, fully-completed sweep) is unaffected. This is keyed
         purely on the completeness signals, never on raw NaN values in the data,
         so a metric that is legitimately NaN for other reasons does not trigger
         it.
@@ -446,7 +446,7 @@ def paired_item_bootstrap(
     set (already reduced over seeds), so ``d_i = a_i - b_i`` is a paired
     per-item difference. Resampling items with replacement answers the question
     seed-based testing cannot: *would this difference survive a different sample
-    of eval items?* — the standard paired bootstrap of Koehn (2004).
+    of eval items?*: the standard paired bootstrap of Koehn (2004).
 
     This is complementary to, not a replacement for, the seed-based test:
     seeds capture decoding/judge noise, items capture eval-set uncertainty. The
@@ -457,12 +457,12 @@ def paired_item_bootstrap(
     falls on the opposite side of 0 from the observed one (doubled, capped at 1),
     with the standard +1 smoothing so it is never exactly 0.
 
-    ``clusters`` — an optional per-item group label. Eval items are often **not
+    ``clusters``: an optional per-item group label. Eval items are often **not
     independent**: several questions about one passage, or several prompts from
     one document, share whatever makes that source easy or hard. Resampling such
     items individually treats correlated observations as independent and yields
     an interval that is too narrow. Passing ``clusters`` switches the resampling
-    unit from the item to the **cluster** (the standard cluster bootstrap) —
+    unit from the item to the **cluster** (the standard cluster bootstrap):
     whole groups are drawn with replacement, so within-group correlation is
     preserved and unequal group sizes are handled automatically.
     """

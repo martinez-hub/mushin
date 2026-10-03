@@ -59,7 +59,7 @@ def config_fingerprint(cfg) -> str | None:
     config cannot be resolved/serialized.
 
     Guards resume reuse: a completed cell's cached metrics are only returned
-    when the config that would run now matches the one that produced them —
+    when the config that would run now matches the one that produced them;
     otherwise a changed NON-swept value (same combo key) would silently mix
     results from two configurations into one dataset. Task *source* changes are
     guarded separately by :func:`code_fingerprint`."""
@@ -86,7 +86,7 @@ def code_fingerprint(fn) -> str | None:
     Complements :func:`config_fingerprint` in the resume guard: a task whose
     *body* was edited between runs (same config, same combo key) would
     otherwise have its stale cached metrics silently returned. Only the task
-    function's own source is hashed — helpers it calls and module-level
+    function's own source is hashed; helpers it calls and module-level
     constants it reads are not covered, so a fresh ``working_dir`` is still the
     safe choice for a larger refactor."""
     import inspect
@@ -143,7 +143,7 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     """Compute the ResumeContext for a cell about to (re-)execute in ``cell_dir``.
 
     Combo-match guard: a prior status sidecar is honored ONLY if its recorded
-    combo equals ``combo``. This makes numeric-dir reuse safe — if a grid change
+    combo equals ``combo``. This makes numeric-dir reuse safe; if a grid change
     reused this dir for a different cell, we neither resume nor surface that
     cell's checkpoint. (Resume is only meaningful for a workflow that records a
     non-degenerate per-cell combo; an empty combo cannot distinguish cells.)"""

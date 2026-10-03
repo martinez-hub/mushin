@@ -16,7 +16,7 @@ def _mangled_task_copy(fn):
     (``<name>.__mushin_task__``). The copy is used as the synthesized workflow's
     ``task`` so out-of-process launchers can pickle it by reference
     (``module.<name>`` is the handle, whose ``__mushin_task__`` is this copy). The
-    caller's original ``fn`` is left untouched — its qualname, repr, and its own
+    caller's original ``fn`` is left untouched; its qualname, repr, and its own
     picklability are unchanged."""
     task = types.FunctionType(
         fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__

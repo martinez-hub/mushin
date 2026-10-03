@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class _LazyModels(Sequence):
     """Sequence view over checkpoint paths that loads each model on access and
     keeps no reference afterward. ``compare`` consumes models strictly one at a
-    time, so peak memory is one model — not method × seed models resident at
+    time, so peak memory is one model, not method × seed models resident at
     once (a 10-method × 20-seed study would otherwise hold 200 models)."""
 
     def __init__(self, paths: Sequence[str], load_fn: Callable[[str], Any]):

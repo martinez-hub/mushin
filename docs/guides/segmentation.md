@@ -1,7 +1,7 @@
 # Segmentation
 
 !!! note "Requires the `eval` extra"
-    `compare` and `Study` are mushin's optional evaluation layer — install them
+    `compare` and `Study` are mushin's optional evaluation layer; install them
     with `pip install "mushin-py[eval]"`. Importing them without it raises a
     clear install hint. See [Installation](../install.md#optional-extras).
 
@@ -101,13 +101,13 @@ result = study.run()
     - **Input shape:** Models must accept `(N, C, H, W)` and return
       `(N, num_classes, H, W)` logits. A 1×1 `Conv2d` is the minimal example.
     - **ignore_index:** Not supported by AUROC/ECE, but the segmentation
-      battery has neither — `ignore_index` works correctly for all five
+      battery has neither; `ignore_index` works correctly for all five
       segmentation metrics.
     - **Dict-output models:** Always wrap them with a `predict_fn`; passing
       a dict to the default `predict_fn` will raise an error.
 
 ## See also
 
-- [Comparing methods guide](compare.md) — statistical tests and result reading
-- [Custom metrics & predict_fn](custom.md) — override the metric battery
-- [API Reference — benchmark](../reference/benchmark.md)
+- [Comparing methods guide](compare.md): statistical tests and result reading
+- [Custom metrics & predict_fn](custom.md): override the metric battery
+- [API Reference: benchmark](../reference/benchmark.md)

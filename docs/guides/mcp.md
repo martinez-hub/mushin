@@ -3,7 +3,7 @@
 `mushin-mcp` is a read-only [Model Context Protocol](https://modelcontextprotocol.io)
 server. Point it at a directory of completed mushin runs and an MCP client
 (Claude Code, Claude Desktop, or any MCP-compatible tool) can load, summarize,
-and compare them conversationally — without training, launching sweeps, or
+and compare them conversationally, without training, launching sweeps, or
 loading model weights.
 
 ## Install
@@ -48,7 +48,7 @@ Add an entry to your `claude_desktop_config.json`:
 | `get_metrics` | Per-run metrics; optional `mean`/`std` reduction across runs. |
 | `get_config` | The resolved Hydra config for a run (or all runs). |
 | `read_dataset` | Dimensions, coordinates, data variables, and basic statistics of a saved netCDF file. |
-| `get_failures` | Failed sweep cells from the manifest — combo, directory, error, and the recorded traceback. |
+| `get_failures` | Failed sweep cells from the manifest: combo, directory, error, and the recorded traceback. |
 | `get_provenance` | Per-run provenance records: git SHA, package versions, accelerator (CUDA/cuDNN/device). |
 
 All tools are read-only. The server never writes files, trains models, or

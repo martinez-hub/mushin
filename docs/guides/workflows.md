@@ -5,12 +5,12 @@ define your experiment as a method, run it once with swept parameters, and
 mushin handles config logging, output directories, and assembling results into
 a labeled `xarray.Dataset`.
 
-> **Prefer to follow along?** [Notebook 01 — Sweeps → datasets](../notebooks/01_sweep_to_dataset.ipynb)
+> **Prefer to follow along?** [Notebook 01: Sweeps → datasets](../notebooks/01_sweep_to_dataset.ipynb)
 > builds a sweep end to end and plots the result.
 
 ## The quick path: `@mushin.sweep`
 
-For most sweeps, skip the subclass entirely — decorate a `task`-style function and
+For most sweeps, skip the subclass entirely: decorate a `task`-style function and
 call `.run(...)`, which returns the labeled dataset in one step:
 
 ```python
@@ -36,9 +36,9 @@ form to show what is happening under the hood.
 
 A mushin workflow has three steps:
 
-1. **Define** — subclass `MultiRunMetricsWorkflow` and implement a `task(...)` method that returns a dict of metrics (or decorate a function with `@mushin.sweep`).
-2. **Run** — call `.run(...)` with `multirun(...)` wrapped arguments to launch a Hydra sweep.
-3. **Collect** — call `.to_xarray()` to get a labeled dataset keyed by swept dimensions.
+1. **Define**: subclass `MultiRunMetricsWorkflow` and implement a `task(...)` method that returns a dict of metrics (or decorate a function with `@mushin.sweep`).
+2. **Run**: call `.run(...)` with `multirun(...)` wrapped arguments to launch a Hydra sweep.
+3. **Collect**: call `.to_xarray()` to get a labeled dataset keyed by swept dimensions.
 
 ## Runnable example
 
@@ -55,7 +55,7 @@ treated as fixed overrides for every run.
 
 ## Getting results
 
-> **Prefer to follow along?** [Notebook 07 — Analyzing your results](../notebooks/07_analyzing_results.ipynb)
+> **Prefer to follow along?** [Notebook 07: Analyzing your results](../notebooks/07_analyzing_results.ipynb)
 > walks the moves you repeat on every sweep: reduce over seeds, pick the best
 > config, slice, `groupby`, tabulate, plot, and save/reload.
 
@@ -84,7 +84,7 @@ ds = xr.open_dataset("results.nc")
 Hydra jobs and exposes the raw results via `.cfgs`, `.metrics`, and `.jobs`
 attributes after `.run(...)` completes.
 
-You rarely subclass `BaseWorkflow` directly — use `MultiRunMetricsWorkflow`
+You rarely subclass `BaseWorkflow` directly; use `MultiRunMetricsWorkflow`
 instead, which adds the `to_xarray()` result aggregation layer.
 
 ## RobustnessCurve
@@ -93,14 +93,14 @@ instead, which adds the `to_xarray()` result aggregation layer.
 perturbation strengths (e.g. noise levels, attack epsilons). It shares the same
 sweep-and-aggregate interface as `MultiRunMetricsWorkflow`.
 
-See the [API Reference — workflows](../reference/workflows.md) for full
+See the [API Reference: workflows](../reference/workflows.md) for full
 parameter documentation.
 
 !!! note "Import path"
     `MultiRunMetricsWorkflow` is the class most experiments use, and it stays a
     top-level import (`from mushin import MultiRunMetricsWorkflow`). Its base
     `BaseWorkflow` and the `RobustnessCurve` variant now live in
-    `mushin.workflows` — import them as
+    `mushin.workflows`; import them as
     `from mushin.workflows import BaseWorkflow, RobustnessCurve`. Accessing them
     as `mushin.BaseWorkflow` / `mushin.RobustnessCurve` still works but is
     deprecated and emits a `DeprecationWarning`.
@@ -111,9 +111,9 @@ parameter documentation.
 from mushin import multirun, hydra_list
 ```
 
-- `multirun(values)` — wraps a list as a Hydra multirun override; Hydra creates
+- `multirun(values)`: wraps a list as a Hydra multirun override; Hydra creates
   one job per value.
-- `hydra_list(values)` — wraps a list as a single Hydra list override; all
+- `hydra_list(values)`: wraps a list as a single Hydra list override; all
   values are passed as a list to one job.
 
 !!! tip "Pitfalls"
@@ -145,14 +145,14 @@ list of values, and every combination is one cell.
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
   than producing an all-NaN dataset. To use a searcher, run it as a separate
-  step and feed the winners to a mushin grid — see
+  step and feed the winners to a mushin grid; see
   [Hyperparameter search](#hyperparameter-search).
 
 ## Using mushin alongside your experiment tracker
 
 mushin is *not* a tracker and does not replace one: it owns the sidecar
 metrics and the final dataset; W&B/TensorBoard/MLflow own live curves,
-system metrics, and collaboration. They compose cleanly — mushin never
+system metrics, and collaboration. They compose cleanly; mushin never
 touches your `Trainer`'s logger, so attach one inside `task()` as usual:
 
 ```python
@@ -172,19 +172,19 @@ class Experiment(MultiRunMetricsWorkflow):
 ```
 
 Each sweep cell runs in its own Hydra job directory (Hydra `chdir`s into it),
-so file-based loggers like TensorBoard write per-cell logs there — point
+so file-based loggers like TensorBoard write per-cell logs there; point
 `TensorBoardLogger(save_dir=...)` at a fixed path if you want one aggregate
 log dir instead.
 
 ## Hyperparameter search
 
-mushin *does* hyperparameter search — as **grid search** (a `multirun` per axis)
+mushin *does* hyperparameter search: as **grid search** (a `multirun` per axis)
 or **random search** (`sample=K` over the grid). For a small, discrete space that
 is often the whole job, and you get more than the winning config: the full
 labeled `xarray` dataset over every cell, `compare_methods` statistics, and
 per-cell provenance, all reproducibly.
 
-What mushin does *not* do is **adaptive / Bayesian** search — TPE, CMA-ES,
+What mushin does *not* do is **adaptive / Bayesian** search: TPE, CMA-ES,
 pruning of unpromising trials, or continuous/conditional spaces. Those steer the
 next trial from past ones over a continuous domain, which a fixed grid cannot
 express (mushin rejects continuous `interval(...)` syntax; see
@@ -195,7 +195,7 @@ exhaustive grid.
 
 So the two are complementary, not exclusive. Reach for mushin's grid/random
 search when the space is small and discrete; reach for Optuna when it is large or
-continuous. And the strongest combination is a **two-phase workflow** — let the
+continuous. And the strongest combination is a **two-phase workflow**: let the
 optimizer *search*, then let mushin run the reproducible *final grid* you report:
 
 **1. Search.** The optimizer owns the adaptive part. Give it a cheap objective
@@ -250,19 +250,19 @@ wf.run(
 
 `wf.to_xarray()` now has an `hp` dimension and a `seed` dimension, so
 `compare_methods(wf.to_xarray().rename(hp="method"))` gives the baseline-vs-tuned
-test — a defensible claim over fresh seeds, not the optimizer's optimistic
+test: a defensible claim over fresh seeds, not the optimizer's optimistic
 best-trial number (which suffers the winner's curse; see
 [From exploration to a paper](exploration-to-paper.md)).
 
-The same shape works for any searcher — Ax, Nevergrad, a hand-rolled random
-search — and adds **no dependency to mushin**: the search lives entirely in your
+The same shape works for any searcher: Ax, Nevergrad, a hand-rolled random
+search, and adds **no dependency to mushin**: the search lives entirely in your
 code, and mushin only ever sees the discrete configs you chose to report.
 
 ## Parallel & out-of-process launchers
 
 By default a sweep runs its cells in-process, sequentially (Hydra's `basic`
 launcher). Install a Hydra launcher plugin and pass `launcher=` to run the cells
-across worker processes — locally with joblib, or on a scheduler with submitit:
+across worker processes: locally with joblib, or on a scheduler with submitit:
 
 ```bash
 pip install hydra-joblib-launcher     # local multiprocessing (loky backend)
@@ -279,7 +279,7 @@ Run it end to end with
 
 Out-of-process launchers serialize each cell's task to ship it to a worker. The
 default joblib (loky) and submitit backends use `cloudpickle`, which handles most
-tasks — including lambdas and nested functions. Some backends (joblib's
+tasks, including lambdas and nested functions. Some backends (joblib's
 `multiprocessing` backend, or a pickle-based submitit setup) use the standard
 library's `pickle`, which requires your `task` (and any custom `pre_task`) to be
 importable (module-level). Keeping tasks module-level is the portable choice.
@@ -293,18 +293,18 @@ things:
 
 | | Parallelizes | What it is | Where it goes |
 |---|---|---|---|
-| `launcher="joblib"` / `submitit` | the sweep's **cells** — each `(lr, seed)` combo runs in its own worker process / node | a Hydra **launcher** | passed to `run(...)` |
-| `HydraDDP` / `HydraFSDP` | **one training run** — a single model trained data-parallel (DDP) or sharded (FSDP) across multiple GPUs | a Lightning **`DDPStrategy`** | passed to a `Trainer` **inside your `task`** |
+| `launcher="joblib"` / `submitit` | the sweep's **cells**: each `(lr, seed)` combo runs in its own worker process / node | a Hydra **launcher** | passed to `run(...)` |
+| `HydraDDP` / `HydraFSDP` | **one training run**: a single model trained data-parallel (DDP) or sharded (FSDP) across multiple GPUs | a Lightning **`DDPStrategy`** | passed to a `Trainer` **inside your `task`** |
 
 `launcher=` distributes the *grid* (the `parallel_sweep.py` example above shows
-only this axis — its toy task does no training). `HydraDDP` / `HydraFSDP` train a
+only this axis; its toy task does no training). `HydraDDP` / `HydraFSDP` train a
 *single* model across GPUs.
 
 !!! warning "`HydraDDP` needs the launcher to provide its ranks"
     `HydraDDP` / `HydraFSDP` do **not** spawn extra GPU workers by themselves from
     an imperative `@mushin.sweep` task. Writing
     `pl.Trainer(strategy=HydraDDP(), devices=2)` and running with the default
-    (local) launcher **silently trains on a single GPU** — Lightning reports a
+    (local) launcher **silently trains on a single GPU**; Lightning reports a
     `1/1` world. The strategy's self-launch path rebuilds each extra rank from a
     Hydra `config.yaml` that must contain declarative `trainer` and `module` keys,
     which an imperative task never writes.
@@ -364,14 +364,14 @@ InstantiationException: Callable targets cannot return partial subclasses ...
 
 **Why.** hydra-core 1.3.6 hardened `instantiate` so a callable target may no
 longer return a subclass of `functools.partial`. hydra-zen returns one only when
-those two options are combined — either alone is fine.
+those two options are combined; either alone is fine.
 
 **Not a mushin bug, and mushin is unaffected**: nothing in mushin uses
 `zen_wrappers`. But the error names neither Hydra nor hydra-zen, so it is easy to
 mistake for a problem in your task function.
 
 **The fix is to change the config, not the dependency**: drop one of the two
-options — apply the wrapper to the target yourself and keep `zen_partial=True`,
+options; apply the wrapper to the target yourself and keep `zen_partial=True`,
 or keep the wrapper and bind arguments another way.
 
 !!! warning "Do not try to pin around this"
@@ -381,15 +381,15 @@ or keep the wrapper and bind arguments another way.
     version does not avoid it, and every version you would pin back to carries a
     high-severity advisory that the newer release fixes (1.3.6 fixes
     GHSA-rqx7-p7vv-w7hr and GHSA-c3wx-c55w-pxjq; 1.3.7 fixes
-    GHSA-mwj6-rfh8-7qf4). Version exclusions cannot undo intentional hardening —
+    GHSA-mwj6-rfh8-7qf4). Version exclusions cannot undo intentional hardening;
     only a code change can.
 
 !!! note "Not to be confused with `zen()`"
-    `zen(fn)` — the callable wrapper mushin itself uses to let a function take a
-    config — is a different feature and is **not** affected. Only the
+    `zen(fn)`, the callable wrapper mushin itself uses to let a function take a
+    config, is a different feature and is **not** affected. Only the
     `builds(..., zen_wrappers=...)` argument is.
 
 ## See also
 
-- [Tutorial](../tutorial.md) — end-to-end: sweep → dataset → compare
-- [API Reference — workflows](../reference/workflows.md)
+- [Tutorial](../tutorial.md): end-to-end: sweep → dataset → compare
+- [API Reference: workflows](../reference/workflows.md)

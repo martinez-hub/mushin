@@ -86,7 +86,7 @@ def _data_only_load(path: Path):
 
     Only the modern zip serialization is supported. A legacy (non-zip) file
     starts with torch's magic/protocol headers, so unpickling it at byte 0 would
-    return that header garbage instead of the saved object — so we fail closed
+    return that header garbage instead of the saved object, so we fail closed
     for non-zip files and let the caller skip them. On torch >= 2.6 such files
     are already read safely by ``torch.load(weights_only=True)`` before this
     fallback runs.
@@ -372,7 +372,7 @@ def _get_provenance(
 ) -> dict:
     """Per-run ``mushin_provenance.json`` records (git/packages/accelerator).
 
-    The per-run resolved config is omitted unless ``include_config`` — it is
+    The per-run resolved config is omitted unless ``include_config``; it is
     the bulky part and ``get_config`` already serves it."""
     import json as _json
 

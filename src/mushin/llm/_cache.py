@@ -16,8 +16,8 @@ def _canonical(value: Any) -> Any:
     `json.dumps` is **not** injective for Python inputs: it coerces non-string
     dict keys to strings (`{1: ...}` and `{"1": ...}` serialize identically) and
     renders tuples and lists the same way. Two distinct inputs hashing alike would
-    make the cache replay the wrong output. Tagging every node with its type — and
-    sorting dict items by a stable key — keeps distinct inputs distinct while
+    make the cache replay the wrong output. Tagging every node with its type, and
+    sorting dict items by a stable key, keeps distinct inputs distinct while
     staying independent of dict insertion order."""
     if isinstance(value, dict):
         items = ((_canonical(k), _canonical(v)) for k, v in value.items())
