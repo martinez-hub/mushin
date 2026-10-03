@@ -52,7 +52,7 @@ def compare(
         ``(model, x) -> (preds, probs)``; defaults to the task's.
     metrics : dict[str, torchmetrics.Metric] or None
         Replaces the task's battery entirely. A custom battery gets no implicit
-        probability routing, name the probability-consuming entries in
+        probability routing, so name the probability-consuming entries in
         ``prob_metrics``.
     prob_metrics : frozenset[str] or None
         Battery entries fed probabilities instead of hard predictions. ``None``

@@ -149,7 +149,8 @@ def bh_correction(pvalues) -> list[float]:
 
     Delegates to :func:`scipy.stats.false_discovery_control` (scipy >= 1.11;
     our floor is 1.13) rather than reimplementing the step-up. scipy has no NaN
-    handling, so NaN p-values are held out of the family and restored as NaN;     matching :func:`holm_correction`."""
+    handling, so NaN p-values are held out of the family and restored as NaN,
+    matching :func:`holm_correction`."""
     pvalues = np.asarray(pvalues, dtype=float)
     corrected = np.full(pvalues.shape, np.nan)
     valid = ~np.isnan(pvalues)
@@ -237,9 +238,9 @@ def compare_methods(
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
-    ``correction``: one of :func:`available_corrections` (``"holm"`` default,
+    ``correction`` (one of :func:`available_corrections`: ``"holm"`` default,
     ``"bonferroni"``, ``"fdr_bh"`` for Benjamini-Hochberg FDR, ``"none"`` for
-    raw p-values); is applied **per metric** across the method pairs; the
+    raw p-values) is applied **per metric** across the method pairs; the
     family is one metric's pairs, not the whole battery, so scanning for
     "significant on any metric" across a large battery still inflates
     family-wise error. A method whose
@@ -263,8 +264,8 @@ def compare_methods(
         non-empty list: the sweep that produced ``ds`` had failed runs (recorded
         under ``on_error="nan"``) or cells that were never run (skipped by a
         ``sample=`` subset or an exhausted ``max_total_seconds`` budget), unless
-        ``allow_incomplete=True``. A dataset without those attrs: a plain user
-        dataset or a clean, fully-completed sweep; is unaffected. This is keyed
+        ``allow_incomplete=True``. A dataset without those attrs (a plain user
+        dataset or a clean, fully-completed sweep) is unaffected. This is keyed
         purely on the completeness signals, never on raw NaN values in the data,
         so a metric that is legitimately NaN for other reasons does not trigger
         it.

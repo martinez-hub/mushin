@@ -76,7 +76,7 @@ the test you chose cannot reach `alpha` at the given seed count.
     other. That pairing is only meaningful when seed *k* induces a shared
     random effect across systems (e.g. both score the same seed-*k* data
     subsample). For independent systems whose seed only drives their own
-    sampling (the typical API-backed setup) the trials are uncorrelated and
+    sampling (the typical API-backed setup), the trials are uncorrelated and
     the pairing assumption does not hold; stick with the default `welch`.
 
 ## Item-level uncertainty
@@ -146,8 +146,8 @@ omit it; with one item per group the two paths are numerically identical.
 
 ## Bring your own scores
 
-If another harness already produced per-item results: inspect-ai, lm-eval-harness,
-your own runner; you do not have to hand mushin your execution loop to get the
+If another harness already produced per-item results (inspect-ai, lm-eval-harness,
+your own runner), you do not have to hand mushin your execution loop to get the
 analysis:
 
 ```python
@@ -232,7 +232,7 @@ an Inspect **epoch** is a mushin **run**, so `--epochs 5` gives both dimensions.
 [`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
 carries the adapter (~70 lines to copy; mushin takes no Inspect AI dependency,
 so it does not ship as an import). It also converts Inspect's `"C"`/`"I"`
-verdicts. If your questions are grouped (several per passage) pass the group ids as
+verdicts. If your questions are grouped (several per passage), pass the group ids as
 `clusters=` (see [Grouped items](#grouped-items-need-clusters)). It is positional
 against the item axis, which is the **sorted question-id order** that
 `scores_from_logs` returns as its second value; build the labels from that list,

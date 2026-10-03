@@ -372,7 +372,8 @@ class _TaskRunner:
     (_task_calls / _instrument_task / _fail_soft / _resume_short_circuit) into one
     object so out-of-process launchers (joblib/submitit) can pickle it. Holds only
     picklable state; imports module-level helpers inside __call__ (never captures
-    the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain exactly;     see the spec's Semantics Mapping."""
+    the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain
+    exactly; see the spec's Semantics Mapping."""
 
     def __init__(
         self,
@@ -429,7 +430,8 @@ class _TaskRunner:
     @staticmethod
     def _multi_rank_world() -> bool:
         """True when this process is one rank of an EXTERNAL multi-rank launch
-        (SLURM/submitit set SLURM_NTASKS; torchrun sets WORLD_SIZE + RANK;         both before the process starts). Requires a per-rank marker alongside
+        (SLURM/submitit set SLURM_NTASKS; torchrun sets WORLD_SIZE + RANK,
+        both before the process starts). Requires a per-rank marker alongside
         WORLD_SIZE so mushin's own single-node launcher (which exports
         WORLD_SIZE in rank 0 but never RANK/SLURM_PROCID) is not mistaken for
         an external rank."""
@@ -1964,7 +1966,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             match; a changed non-swept value or an edited task body re-runs that
             cell (with a warning). The fingerprint does not cover helper
             functions the task calls, module-level constants, or the
-            environment, for a larger refactor, re-run from a fresh
+            environment. For a larger refactor, re-run from a fresh
             ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
