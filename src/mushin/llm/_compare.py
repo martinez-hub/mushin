@@ -61,8 +61,8 @@ def _accepts_seed(m) -> bool:
 def _to_scalar(v) -> float:
     """Reduce a metric value to one float. A scalar passes through; a per-example
     sequence/tensor (e.g. `BERTScore` returns per-prediction precision/recall/f1)
-    is averaged over examples: the same reduction applied to plain-callable
-    scores, instead of raising on `float()` of a multi-element tensor."""
+    is averaged over examples (the same reduction applied to plain-callable
+    scores) instead of raising on `float()` of a multi-element tensor."""
     if hasattr(v, "detach"):  # torch tensor -> CPU numpy
         v = v.detach().cpu().numpy()
     arr = np.asarray(v, dtype=float)

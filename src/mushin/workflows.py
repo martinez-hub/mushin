@@ -1159,7 +1159,8 @@ class BaseWorkflow:
             Graceful wall-clock budget: once exhausted, remaining cells are
             skipped (NaN, ``self.skipped``) and a later ``resume=True`` finishes
             them. Disabled (with a warning) for cells running under an external
-            multi-rank launch, per-rank deadlines could diverge and hang DDP.
+            multi-rank launch, because per-rank deadlines could diverge and
+            hang DDP.
 
         sample : int | None (default: None)
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast

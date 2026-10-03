@@ -446,7 +446,7 @@ def paired_item_bootstrap(
     set (already reduced over seeds), so ``d_i = a_i - b_i`` is a paired
     per-item difference. Resampling items with replacement answers the question
     seed-based testing cannot: *would this difference survive a different sample
-    of eval items?*: the standard paired bootstrap of Koehn (2004).
+    of eval items?* This is the standard paired bootstrap of Koehn (2004).
 
     This is complementary to, not a replacement for, the seed-based test:
     seeds capture decoding/judge noise, items capture eval-set uncertainty. The
