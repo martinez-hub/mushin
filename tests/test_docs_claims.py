@@ -90,7 +90,75 @@ def test_guide_does_not_recommend_the_default_test_for_small_n():
     )
 
 
-@pytest.mark.parametrize("test", ["welch", "ttest_ind"])
+# Every test's floor, not just Wilcoxon's. The LLM guide once grouped
+# `ttest_rel` with the rank tests and said the group "cannot" reach alpha at
+# small n. `ttest_rel` is paired but parametric and its floor is 2, so that was
+# false: only the RANK tests have a floor above the minimum. Pinning all five
+# keeps any future claim about any of them honest.
+EXPECTED_FLOORS = {
+    "wilcoxon": 6,
+    "mannwhitney": 4,
+    "welch": 2,
+    "ttest_rel": 2,
+    "ttest_ind": 2,
+}
+
+
+@pytest.mark.parametrize("test,expected", sorted(EXPECTED_FLOORS.items()))
+def test_seed_floor_per_test(test: str, expected: int):
+    assert _seed_floor(test) == expected, (
+        f"{test}'s seed floor moved; the guides quote these numbers"
+    )
+
+
+@pytest.mark.parametrize("test", ["welch", "ttest_rel", "ttest_ind"])
 def test_parametric_tests_can_reach_alpha_at_three_seeds(test: str):
-    """The guide's other remedy — switch to a parametric test — must hold."""
+    """The guide's other remedy — switch to a parametric test — must hold.
+
+    `ttest_rel` is included deliberately: it is *paired*, and the guide used to
+    imply the paired tests were all underpowered at small n.
+    """
     assert not _warns(test, 3)
+
+
+def test_guides_do_not_call_a_parametric_test_underpowered():
+    """No "cannot reach alpha" sentence may name a test whose floor is 2.
+
+    This is the claim that was wrong: a sentence saying the "rank/paired tests
+    ... cannot" reach alpha, naming `ttest_rel` alongside `wilcoxon`.
+    """
+    parametric = [t for t, floor in EXPECTED_FLOORS.items() if floor <= 2]
+    # The original defect elided the verb: "Welch ... can at least reach `alpha`
+    # at 3 seeds, whereas the rank/paired tests (`wilcoxon`, `ttest_rel`) cannot
+    # at small _n_". So match the negation plus any underpowered-ness marker,
+    # not "cannot reach" specifically.
+    negation = re.compile(r"\bcan(?:not|'t)\b|\bunable to\b")
+    marker = re.compile(
+        r"`?alpha`?|p *[<=] *0?\.\d|small _?n_?|underpowered|too few seeds"
+    )
+    for guide in ("llm.md", "statistics.md"):
+        text = (STATISTICS_GUIDE.parent / guide).read_text(encoding="utf-8")
+        for sentence in re.split(r"(?<=[.!?])\s", text):
+            flat = " ".join(sentence.split())
+            hit = negation.search(flat)
+            if not (hit and marker.search(flat)):
+                continue
+            # Only the SUBJECT of the negation matters. "the parametric tests
+            # (`welch`, `ttest_rel`) can reach alpha, while the rank tests
+            # cannot" is correct and must not trip this.
+            before = flat[: hit.start()]
+            boundary = max(
+                (
+                    m.end()
+                    for m in re.finditer(
+                        r"[,;:]|\b(?:while|whereas|but|though|although)\b", before
+                    )
+                ),
+                default=0,
+            )
+            subject = before[boundary:]
+            named = [t for t in parametric if f"`{t}`" in subject]
+            assert not named, (
+                f"docs/guides/{guide} implies {named} cannot reach alpha at "
+                f"small n, but their floor is 2 seeds: {flat[:170]}"
+            )
