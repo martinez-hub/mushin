@@ -43,16 +43,16 @@ def compare(
     task : str or Task
         A registered task name (``"classification"``, ``"segmentation"``,
         ``"detection"``, ``"regression"``, ``"retrieval"``, ``"image_quality"``,
-        ``"audio"``, or a custom one — see ``list_tasks()``) or a ``Task`` object.
+        ``"audio"``, or a custom one; see ``list_tasks()``) or a ``Task`` object.
     num_classes : int or None
         Required (when ``metrics`` is not provided) only for tasks whose battery
-        needs it — ``"classification"`` and ``"segmentation"``; ignored for the
+        needs it; ``"classification"`` and ``"segmentation"``; ignored for the
         others.
     predict_fn : callable or None
         ``(model, x) -> (preds, probs)``; defaults to the task's.
     metrics : dict[str, torchmetrics.Metric] or None
         Replaces the task's battery entirely. A custom battery gets no implicit
-        probability routing — name the probability-consuming entries in
+        probability routing, name the probability-consuming entries in
         ``prob_metrics``.
     prob_metrics : frozenset[str] or None
         Battery entries fed probabilities instead of hard predictions. ``None``

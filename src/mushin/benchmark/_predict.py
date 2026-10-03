@@ -48,7 +48,7 @@ def default_detection_predict_fn(model: torch.nn.Module, x):
 
 
 def default_passthrough_predict_fn(model: torch.nn.Module, x):
-    """Return ``(model(x), None)`` — the model's raw output is the prediction and
+    """Return ``(model(x), None)``: the model's raw output is the prediction and
     there are no probabilities. Used by tasks with no probability metrics
     (regression, image quality, audio, retrieval), where metrics consume the raw
     output directly against the target."""

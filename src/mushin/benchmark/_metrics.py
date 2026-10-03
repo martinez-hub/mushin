@@ -87,7 +87,7 @@ def regression_battery(
     """Scalar-regression battery. ``num_classes``/``ignore_index`` are accepted for
     the uniform task interface but unused. This is a SINGLE-TARGET battery:
     predictions and targets are continuous tensors of shape ``(N,)`` or ``(N, 1)``.
-    Multi-output targets ``(N, D>1)`` are not supported here — ``pearson``/
+    Multi-output targets ``(N, D>1)`` are not supported here; ``pearson``/
     ``spearman`` are built with ``num_outputs=1`` and raise on ``D>1``; use a custom
     Task with ``num_outputs=D`` for multi-output regression."""
     return {

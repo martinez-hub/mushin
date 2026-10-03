@@ -24,10 +24,10 @@ def submitit_slurm_config(
     """Build a ``hydra-submitit-launcher`` SLURM config for multi-node DDP.
 
     ``tasks_per_node`` is derived as ``gpus_per_node`` so the two can never desync
-    (DDP needs one SLURM task per GPU). Returns a plain dict — pass it to
+    (DDP needs one SLURM task per GPU). Returns a plain dict, pass it to
     ``run(launcher="submitit_slurm", launcher_config=...)`` (see the multi-node
     guide); it submits nothing. Extra keyword args (e.g. ``account``, ``qos``,
-    ``constraint``) pass through verbatim — including preemption knobs such as
+    ``constraint``) pass through verbatim, including preemption knobs such as
     ``signal_delay_s`` (grace signal before the kill, time to checkpoint) and
     ``additional_parameters={"requeue": True}`` for SLURM auto-requeue.
     """
@@ -60,7 +60,7 @@ def submitit_slurm_config(
 def _rank_from_env() -> int:
     """Best-effort global rank: ``RANK`` (torchrun/external launchers), then
     ``SLURM_PROCID``, then ``LOCAL_RANK`` (the only variable a plain
-    single-node HydraDDP child exports — equal to the global rank there).
+    single-node HydraDDP child exports, equal to the global rank there).
     A malformed value degrades to the next source rather than crashing."""
     for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
         v = os.environ.get(var)

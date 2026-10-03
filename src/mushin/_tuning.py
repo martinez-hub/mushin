@@ -83,7 +83,7 @@ def _set_attr(target, name: str, value) -> None:
 
     ``pytorch_lightning.utilities.parsing.lightning_setattr`` requires a
     ``_trainer`` attribute (it is designed for attached modules); this helper
-    provides the same hparams-awareness for standalone objects — used by
+    provides the same hparams-awareness for standalone objects, used by
     :func:`tune_batch_size` and :func:`tune_learning_rate` when applying the
     found value before training begins.
     """
@@ -140,7 +140,7 @@ def tune_batch_size(
     ``effective_batch_size / num_devices`` that is ``<= found_max`` and sets
     ``trainer.accumulate_grad_batches`` accordingly. Because ``device_batch``
     divides the per-device target exactly, the realized effective batch always
-    equals ``effective_batch_size`` on any hardware — no drift.
+    equals ``effective_batch_size`` on any hardware: no drift.
 
     ``found_max`` (the raw hardware probe) is written to ``pin_path``; a later run
     reads it and skips the search, re-deriving ``device_batch``/accumulation for

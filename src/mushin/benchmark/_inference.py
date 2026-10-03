@@ -37,7 +37,7 @@ def _to_device(obj, device: torch.device):
 def _as_float(v) -> float:
     """Coerce one scalar metric value to a float. (The COCO ``-1.0`` 'not
     applicable' sentinel is normalized to ``NaN`` upstream, inside the detection
-    mAP battery — not here — so it is not applied to metrics like the IoU variants
+    mAP battery (not here) so it is not applied to metrics like the IoU variants
     whose range legitimately includes ``-1``.)"""
     # torch tensors expose numel(); numpy arrays expose an int .size — guard both
     # (and any list) so a non-scalar gives the crafted message, not a raw cast error.
@@ -68,7 +68,7 @@ def expand_metric_value(name: str, value) -> dict[str, float]:
 
 def accumulate_metric(out: dict[str, float], name: str, value) -> None:
     """Expand ``value`` into ``out``, raising on a data-variable name collision (two
-    metrics producing the same key — e.g. a scalar ``score`` metric alongside one
+    metrics producing the same key; e.g. a scalar ``score`` metric alongside one
     returning ``{"score": ...}``) rather than silently overwriting the earlier one."""
     scored = expand_metric_value(name, value)
     clash = out.keys() & scored.keys()
