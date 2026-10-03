@@ -62,10 +62,12 @@ result = compare_llms(
 )
 ```
 
-Use more seeds (≥ 5) for a robust estimate. Welch's t-test (the default) already
-has reasonable power at 3–5 seeds; the rank/paired tests (`wilcoxon`,
-`ttest_rel`) are weak at small _n_ — a paired Wilcoxon over 3 seeds can never go
-below p = 0.25. `compare_llms` warns when the test you chose cannot reach `alpha`
+More seeds narrow the confidence interval, so prefer more when you can afford
+them; how many you need depends on the effect size and the seed-to-seed
+variance, not on a fixed threshold. Welch's t-test (the default) can at least
+reach `alpha` at 3 seeds, whereas the rank/paired tests (`wilcoxon`,
+`ttest_rel`) cannot at small _n_ — a paired Wilcoxon bottoms out at p = 0.25
+over 3 seeds and needs 6 seeds to reach `alpha=0.05` at all. `compare_llms` warns when the test you chose cannot reach `alpha`
 at the given seed count.
 
 !!! warning "Paired tests need a *shared* per-seed random effect"
@@ -400,10 +402,11 @@ the metric and re-run without re-calling the systems.
   (temperature, a provider seed) to get real variance, or treat that system's
   score as a single point estimate rather than a distribution.
 - **Too few seeds for the chosen test.** The rank/paired tests can't reach
-  p < 0.05 at small _n_ (a Wilcoxon over 3 seeds bottoms out at p = 0.25);
-  `compare_llms` warns when the test you picked cannot reach `alpha` at the given
-  seed count. Welch (the default) is fine at 3–5 seeds — still prefer ≥ 5 seeds
-  for a more robust estimate.
+  p < 0.05 at small _n_ (a Wilcoxon bottoms out at p = 0.25 over 3 seeds and
+  needs 6 to reach `alpha=0.05`); `compare_llms` warns when the test you picked
+  cannot reach `alpha` at the given seed count. Welch (the default) can reach
+  `alpha` at 3 seeds, but how many seeds you actually need depends on the effect
+  size and the seed-to-seed variance.
 - **Wrong output length.** A system must return exactly `len(inputs)` outputs
   in the same order; mushin raises `ValueError` immediately if it doesn't.
 - **Seeds must be unique.** Each seed is one trial; a repeated seed is the same
