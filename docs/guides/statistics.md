@@ -10,7 +10,7 @@ Pass `test=` to `compare` or `Study` to select the pairwise significance test:
 
 | `test=` | Underlying scipy call | Paired? | When to use |
 |---|---|---|---|
-| `"wilcoxon"` | `scipy.stats.wilcoxon` | Yes | Default; non-normal distributions, ordinal metrics. Needs 6+ seeds to reach `alpha=0.05` — see [below](#underpowered-test-warning) |
+| `"wilcoxon"` | `scipy.stats.wilcoxon` | Yes | Default; non-normal distributions, ordinal metrics. Needs 6+ seeds to reach `alpha=0.05`: see [below](#underpowered-test-warning) |
 | `"ttest_rel"` | `scipy.stats.ttest_rel` | Yes | Paired t-test; approximately normal data, equal variance assumed |
 | `"welch"` | `scipy.stats.ttest_ind(equal_var=False)` | No | Gaussian metrics, unequal variance; good general choice |
 | `"ttest_ind"` | `scipy.stats.ttest_ind(equal_var=True)` | No | Independent t-test, equal variance assumed |
@@ -34,21 +34,21 @@ The family-wise error rate is controlled at your chosen `alpha` (default 0.05).
 
 Pass `correction=` to `compare`/`compare_methods`/`compare_llms` to choose the
 scheme: `"holm"` (default, family-wise error control), `"bonferroni"` (more
-conservative), `"fdr_bh"` (Benjamini–Hochberg false-discovery-rate control —
+conservative), `"fdr_bh"` (Benjamini–Hochberg false-discovery-rate control,
 less strict, common for large method×metric grids), or `"none"` for raw
 p-values (e.g. to apply your own correction downstream).
 
 Note the correction family is **one metric's method pairs**, not the whole
 battery: scanning for "significant on *any* metric" across many metrics still
-inflates family-wise error — pre-register the metric you care about, or apply
+inflates family-wise error; pre-register the metric you care about, or apply
 your own battery-wide correction to the raw p-values.
 
 ## Effect size
 
 In addition to the p-value, mushin reports **Cohen's d** as
 `result.comparisons["effect_size"]`, matched to the test: paired tests
-(`wilcoxon`, `ttest_rel`) report the paired *d<sub>z</sub>* — mean of the
-per-seed differences over their standard deviation — while unpaired tests
+(`wilcoxon`, `ttest_rel`) report the paired *d<sub>z</sub>*: mean of the
+per-seed differences over their standard deviation, while unpaired tests
 report the classic pooled-variance d. Both measure the magnitude of the
 difference in units of standard deviations:
 
@@ -74,7 +74,7 @@ correction so they cannot corrupt the correction of valid pairs.
 
 Some tests cannot reach a given `alpha` no matter how large the between-method
 difference is, if the seed count is too low. For example, Wilcoxon over 3 seeds
-has a best-case p-value of 0.25 — it can never reach the default `alpha=0.05`.
+has a best-case p-value of 0.25; it can never reach the default `alpha=0.05`.
 mushin warns you:
 
 ```
@@ -112,5 +112,5 @@ result.summary()
 
 ## See also
 
-- [Comparing methods](compare.md) — the `compare` API
-- [API Reference — benchmark](../reference/benchmark.md)
+- [Comparing methods](compare.md): the `compare` API
+- [API Reference: benchmark](../reference/benchmark.md)

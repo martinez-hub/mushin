@@ -1,7 +1,7 @@
 # Custom metrics & predict_fn
 
 !!! note "Requires the `eval` extra"
-    Tasks, batteries, and `compare` are mushin's optional evaluation layer —
+    Tasks, batteries, and `compare` are mushin's optional evaluation layer:
     install them with `pip install "mushin-py[eval]"`. Importing them without it
     raises a clear install hint. See [Installation](../install.md#optional-extras).
 
@@ -10,7 +10,7 @@ mushin's metric batteries and prediction logic are fully replaceable.
 !!! note "These are `compare` arguments"
     `metrics`, `predict_fn`, and `prob_metrics` are per-call arguments to
     **`compare`**; `Study` does not take them directly. To customize evaluation
-    under `Study`, pass a `Task` object (or a registered task name) as `task=` —
+    under `Study`, pass a `Task` object (or a registered task name) as `task=`;
     it is forwarded to `compare`, and its `battery`/`predict_fn`/`prob_metrics`
     are honored. See [Define a reusable task](#define-a-reusable-task) below.
 
@@ -101,9 +101,9 @@ def predict_fn(model: nn.Module, x: Tensor) -> tuple[Tensor, Tensor]:
     return predictions, probabilities
 ```
 
-- `predictions`: long tensor of class indices — `(N,)` for classification,
+- `predictions`: long tensor of class indices: `(N,)` for classification,
   `(N, H, W)` for segmentation.
-- `probabilities`: float tensor of per-class probabilities — `(N, C)` for
+- `probabilities`: float tensor of per-class probabilities: `(N, C)` for
   classification, `(N, C, H, W)` for segmentation.
 
 If no probabilities are available, return predictions twice; the second element
@@ -173,12 +173,12 @@ batteries. Each is `requires_num_classes=False`; the default `predict_fn` return
 
 | task | default metrics | `target` (the `y` in each batch) |
 |---|---|---|
-| `regression` | mse, mae, rmse, r2, pearson, spearman | continuous tensor `(N,)` or `(N, 1)` — single-target only |
-| `image_quality` | ssim, psnr, ms_ssim, lpips | reference image `(N, C, H, W)` — `ms_ssim` needs `H, W > 160` |
+| `regression` | mse, mae, rmse, r2, pearson, spearman | continuous tensor `(N,)` or `(N, 1)`: single-target only |
+| `image_quality` | ssim, psnr, ms_ssim, lpips | reference image `(N, C, H, W)`: `ms_ssim` needs `H, W > 160` |
 | `audio` | si_sdr, si_snr, stoi | reference waveform `(N, T)` |
-| `retrieval` | retrieval_map, ndcg, mrr, precision, recall | a `(relevance, indexes)` tuple — `relevance` binary 0/1 (only `ndcg` accepts graded) |
+| `retrieval` | retrieval_map, ndcg, mrr, precision, recall | a `(relevance, indexes)` tuple: `relevance` binary 0/1 (only `ndcg` accepts graded) |
 
-Notes on the contracts: `regression` is single-target — multi-output `(N, D>1)`
+Notes on the contracts: `regression` is single-target: multi-output `(N, D>1)`
 targets crash `pearson`/`spearman` (build a custom `Task` with `num_outputs=D` for
 those). `retrieval`'s `relevance` must be binary for `retrieval_map`/`mrr`/
 `precision`/`recall`; only `ndcg` handles graded judgments. `image_quality`'s
@@ -227,5 +227,5 @@ task = Task(battery=..., predict_fn=..., update_fn=my_update)
 ## See also
 
 - [Comparing methods](compare.md)
-- [Segmentation guide](segmentation.md) — `ignore_index` and dict-output models
-- [API Reference — benchmark](../reference/benchmark.md)
+- [Segmentation guide](segmentation.md): `ignore_index` and dict-output models
+- [API Reference: benchmark](../reference/benchmark.md)

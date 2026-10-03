@@ -1,15 +1,15 @@
 # Studies
 
 !!! note "Requires the `eval` extra"
-    `Study` builds on `compare`, mushin's optional evaluation layer —
+    `Study` builds on `compare`, mushin's optional evaluation layer:
     `pip install "mushin-py[eval]"`. See [Installation](../install.md#optional-extras).
 
 `Study` combines a multi-seed training sweep with `compare` into a single call:
 define your training functions once, specify seeds and evaluation data, and get
-back a `BenchmarkResult` — no intermediate bookkeeping, no manual checkpoint
+back a `BenchmarkResult`: no intermediate bookkeeping, no manual checkpoint
 management.
 
-> **Prefer to follow along?** [Notebook 03 — Studies](../notebooks/03_study.ipynb)
+> **Prefer to follow along?** [Notebook 03: Studies](../notebooks/03_study.ipynb)
 > runs a full `Study` (train + compare) end to end with outputs and a plot.
 
 ## Full motion: train + compare
@@ -41,8 +41,8 @@ and stores the resulting paths.
 | `load_fn` | Callable that loads a checkpoint path into a `torch.nn.Module`. |
 | `seeds` | List of integer seeds to train each method on. |
 | `data` | Re-iterable data loader for evaluation. |
-| `num_classes` | Number of classes — required for the `classification`/`segmentation` batteries, ignored for the others. |
-| `task` | Any registered task (default `"classification"`): `classification`, `segmentation`, `detection`, `regression`, `retrieval`, `image_quality`, `audio`, or a custom `Task` — see `list_tasks()`. |
+| `num_classes` | Number of classes: required for the `classification`/`segmentation` batteries, ignored for the others. |
+| `task` | Any registered task (default `"classification"`): `classification`, `segmentation`, `detection`, `regression`, `retrieval`, `image_quality`, `audio`, or a custom `Task`: see `list_tasks()`. |
 | `test` | Statistical test: `"welch"`, `"wilcoxon"`, `"mannwhitney"`, etc. |
 | `alpha` | Significance threshold (default `0.05`). |
 | `ignore_index` | For segmentation: label to exclude (e.g. void class). |
@@ -59,7 +59,7 @@ After `study.run()`, the checkpoint paths are stored at `study.checkpoints`
 A `Study` runs a real training sweep, so long runs can die partway. The same
 resilience the workflows have applies here: with `on_error="nan"` a failed
 training run is recorded rather than crashing the whole study, and
-`Study.run()` then raises `IncompleteSweepError` — you fix the cause and re-run
+`Study.run()` then raises `IncompleteSweepError`; you fix the cause and re-run
 with `resume=True` (same `working_dir`) to train only what's missing, then it
 proceeds to `compare`. Statistics never run on an incomplete study. See the
 [Resilient & resumable sweeps guide](resilience.md) for the full loop.
@@ -105,12 +105,12 @@ but accepts a pre-built `checkpoints` dict instead of `methods` and `seeds`.
     - **train_fn must return a path:** If it returns `None`, `Study` raises
       a `ValueError`. Always return the saved checkpoint path.
     - **Re-iterable data:** `data` must be a `DataLoader`, not a one-shot
-      iterator — it is evaluated once per model.
+      iterator; it is evaluated once per model.
     - **working_dir and Hydra:** `Study` runs a Hydra sweep internally; if
       Hydra's working-directory change behavior conflicts with your setup,
       pass an explicit `working_dir`.
 
 ## See also
 
-- [Comparing methods guide](compare.md) — details on statistical tests and results
-- [API Reference — study](../reference/study.md)
+- [Comparing methods guide](compare.md): details on statistical tests and results
+- [API Reference: study](../reference/study.md)

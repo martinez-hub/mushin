@@ -1,8 +1,8 @@
 # Sharded training under Hydra (FSDP)
 
 `HydraDDP` is **data-parallel**: it replicates the whole model on each GPU. When a
-model does **not** fit on one GPU you need **sharding** — splitting parameters,
-gradients, and optimizer state across GPUs — which is Lightning's `FSDPStrategy`.
+model does **not** fit on one GPU you need **sharding**: splitting parameters,
+gradients, and optimizer state across GPUs, which is Lightning's `FSDPStrategy`.
 `HydraFSDP` is the sharded counterpart of `HydraDDP`: it makes FSDP work correctly
 under Hydra `--multirun`.
 
@@ -12,7 +12,7 @@ Lightning's `FSDPStrategy` (like `DDPStrategy`) launches ranks by **re-executing
 the script with `sys.argv`**. Inside a Hydra sweep that argv is the *sweep*
 command, so child ranks re-run the wrong job. `HydraFSDP` instead re-execs each
 rank against the job's saved `config.yaml` (via `mushin.lightning._pl_main`),
-exactly as `HydraDDP` does for DDP — so a `--multirun` sweep runs each job
+exactly as `HydraDDP` does for DDP, so a `--multirun` sweep runs each job
 correctly.
 
 ## When to shard vs DDP
@@ -49,13 +49,13 @@ not run in CI).
 
 `HydraDDP`/`HydraFSDP` wait 1 second between spawning each child rank (it
 avoids dataloader startup contention). For short jobs in large sweeps that
-per-cell tax adds up — set `MUSHIN_DDP_LAUNCH_DELAY=0` (any float works) to
+per-cell tax adds up; set `MUSHIN_DDP_LAUNCH_DELAY=0` (any float works) to
 tune or disable it.
 
 ## DeepSpeed
 
 DeepSpeed ZeRO is the same idea; you would wrap `DeepSpeedStrategy` the same way.
-mushin does not ship a `HydraDeepSpeed` class or the `deepspeed` dependency —
+mushin does not ship a `HydraDeepSpeed` class or the `deepspeed` dependency;
 configure `DeepSpeedStrategy` directly if you need it.
 
 ## mushin is unchanged

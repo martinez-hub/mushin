@@ -1,7 +1,7 @@
 # Multi-node training (SLURM / Elastic)
 
 `HydraDDP` runs single-node multi-GPU out of the box. For **multi-node**, delegate
-process launching to a cluster scheduler — Hydra's
+process launching to a cluster scheduler; Hydra's
 [`hydra-submitit-launcher`](https://hydra.cc/docs/plugins/submitit_launcher/) +
 Lightning's auto-detected `SLURMEnvironment`. Under an external launcher,
 `HydraDDP` steps aside and Lightning uses the scheduler-launched ranks directly.
@@ -36,7 +36,7 @@ slurm = submitit_slurm_config(
 ```
 
 Hand the dict straight to `run()` (install the plugin first:
-`pip install hydra-submitit-launcher`) — no hand-rolled `hydra.launcher.*`
+`pip install hydra-submitit-launcher`): no hand-rolled `hydra.launcher.*`
 overrides:
 
 ```python
@@ -87,14 +87,14 @@ filesystem; `load_experiment` reads it back as usual.
 When SLURM preempts (or times out) a cell's job, the sweep driver observes a
 failed job: under the default `on_error="raise"` the sweep aborts with that
 error; under `on_error="nan"` it records the failure and finishes the rest.
-Either way, recovery is one command — re-run the same sweep with
+Either way, recovery is one command: re-run the same sweep with
 `resume=True` (same `working_dir`): completed cells are reused from their
 sidecars, and only the preempted/missing cells re-run. Inside a long cell, use
 the [`mushin_resume` checkpoint contract](resilience.md) so the re-run
 continues from `last.ckpt` instead of epoch 0.
 
 To have SLURM requeue preempted jobs automatically, pass the scheduler knobs
-through `submitit_slurm_config(**extra)` — e.g.
+through `submitit_slurm_config(**extra)`, e.g.
 `signal_delay_s=120` (submitit's grace signal before the kill, time to write a
 checkpoint) and `additional_parameters={"requeue": True}`.
 
@@ -102,10 +102,10 @@ Two multi-rank cautions:
 
 - `max_total_seconds` is **disabled** for cells that run under a multi-rank
   launch (each rank would keep its own deadline; a rank that stops while its
-  siblings train would hang DDP at rendezvous — a warning is emitted). Bound
+  siblings train would hang DDP at rendezvous: a warning is emitted). Bound
   multi-rank jobs with the scheduler's own `timeout_min` instead.
 - Every rank of a cell runs the task function, so per-cell files
-  (status/metrics/provenance sidecars) are written once per rank — writes are
+  (status/metrics/provenance sidecars) are written once per rank; writes are
   atomic and carry the same values, so this is benign; `MetricsCallback`'s
   `.pt` files are rank-0-only by design.
 
