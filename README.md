@@ -28,7 +28,7 @@
 Decorate an experiment, sweep over parameters, and get the results back as a
 labeled `xarray.Dataset`, not rows in a dashboard you have to export.
 
-- **Boilerplate-free:** one decorator, no subclassing or callbacks; results come
+- **Boilerplate-free:** one decorator, no subclassing, no callbacks. Results come
   back as a labeled dataset you can slice and plot.
 - **Reproducible:** every run captures its config + provenance, sweeps resume
   durably after a hard kill or cluster preemption, and auto-tuning pins a
@@ -146,7 +146,7 @@ mushin follows SemVer with pre-1.0 semantics: **a minor bump (0.8 → 0.9) may
 contain breaking changes**, always listed with migration notes in the
 [changelog](CHANGELOG.md); patch releases never break. The public API is the
 top-level `mushin` namespace plus the documented `mushin.benchmark` /
-`mushin.llm` symbols; underscore modules are internal. The project's scope is
+`mushin.llm` symbols. Underscore modules are internal. The project's scope is
 deliberately narrow: **boilerplate-free, reproducible sweep → dataset**, with
 an optional evaluation layer behind the `eval` extra. It complements, and
 does not replace, experiment trackers like W&B or TensorBoard (see the

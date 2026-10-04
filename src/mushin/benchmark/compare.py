@@ -43,7 +43,8 @@ def compare(
     task : str or Task
         A registered task name (``"classification"``, ``"segmentation"``,
         ``"detection"``, ``"regression"``, ``"retrieval"``, ``"image_quality"``,
-        ``"audio"``, or a custom one; see ``list_tasks()``) or a ``Task`` object.
+        ``"audio"``, or a custom one, listed by ``list_tasks()``) or a ``Task``
+        object.
     num_classes : int or None
         Required (when ``metrics`` is not provided) only for tasks whose battery
         needs it (``"classification"`` and ``"segmentation"``), and ignored for the

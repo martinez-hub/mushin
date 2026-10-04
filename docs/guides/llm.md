@@ -2,7 +2,7 @@
 
 !!! note "Requires the `eval` extra"
     LLM evaluation (`compare_llms`, `llm_judge`) is part of mushin's optional
-    evaluation layer; install it with `pip install "mushin-py[eval]"`. See
+    evaluation layer, installed with `pip install "mushin-py[eval]"`. See
     [Installation](../install.md#optional-extras).
 
 The "vibes eval" problem: it's common to eyeball a handful of outputs and
@@ -36,7 +36,7 @@ The variance **across seeds** is what the significance test operates on.
 
 A deterministic system (same output for every seed) produces zero
 within-system variance. mushin reports this as **not** significant rather than
-producing a false positive, exactly the same behavior as the torch path.
+producing a false positive. That is exactly the same behavior as the torch path.
 
 !!! danger "Seeds alone answer the *smaller* question"
     Seed variance is decoding/judge noise. It says nothing about the **eval set**,
@@ -230,8 +230,8 @@ an Inspect **epoch** is a mushin **run**, so `--epochs 5` gives both dimensions.
     `eval.task` differs.
 
 [`examples/inspect_ai_compare.py`](https://github.com/martinez-hub/mushin/blob/main/examples/inspect_ai_compare.py)
-carries the adapter (~70 lines to copy; mushin takes no Inspect AI dependency,
-so it does not ship as an import). It also converts Inspect's `"C"`/`"I"`
+carries the adapter, about 70 lines to copy. mushin takes no Inspect AI
+dependency, so the adapter does not ship as an import. It also converts Inspect's `"C"`/`"I"`
 verdicts. If your questions are grouped (several per passage), pass the group ids as
 `clusters=` (see [Grouped items](#grouped-items-need-clusters)). It is positional
 against the item axis, which is the **sorted question-id order** that

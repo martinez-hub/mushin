@@ -44,7 +44,7 @@ Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 A few notes:
 
 - **pytorch-lightning ≥ 2.4** is required on all platforms.
-- **Apple Silicon (M-series)**: fully supported; the CI suite runs on Apple
+- **Apple Silicon (M-series)**: fully supported. The CI suite runs on Apple
   Silicon on every pull request. The sweep engine has no device code, and
   training on the M-series GPU goes through Lightning's MPS accelerator: build
   your `Trainer` with `accelerator="mps"` (or `"auto"`, which selects MPS)

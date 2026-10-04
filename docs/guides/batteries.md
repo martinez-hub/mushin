@@ -350,7 +350,7 @@ result.summary()  # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + s
 --8 < --"examples/batteries.py:detection"
 ```
 
-**Output** (from running the toy: the full 16-metric battery):
+**Output** from running the toy, showing the full 16-metric battery:
 
 ```text
 method     metric      mean    ci_low   ci_high significant_vs_ref

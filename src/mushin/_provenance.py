@@ -72,8 +72,8 @@ def _versions() -> dict:
 def _apple_chip() -> str | None:
     """The Apple Silicon chip name (e.g. 'Apple M5'), or None off-macOS / on
     failure / on a non-Apple CPU (Intel Macs can expose MPS via a Metal GPU;
-    their x86 brand string must not be recorded as the chip). Best-effort;
-    provenance must never break a run."""
+    their x86 brand string must not be recorded as the chip). The lookup is
+    best-effort: provenance must never break a run."""
     try:
         r = subprocess.run(
             ("sysctl", "-n", "machdep.cpu.brand_string"),

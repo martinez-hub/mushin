@@ -290,7 +290,7 @@ class _SkippedRun:
 class _PriorCells:
     """What a resuming `_TaskRunner` needs from the prior sweep, and nothing
     more: the sweep root, the swept param names, and the completed
-    {combo_key: dir} map. Picklable and small; failed/pending cells and their
+    {combo_key: dir} map. It is picklable and small: failed/pending cells and their
     error strings never ship to workers."""
 
     __slots__ = ("root", "params", "completed")
