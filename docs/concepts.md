@@ -7,7 +7,7 @@ as a `task(...)` method and run it across a grid of hyperparameters. mushin uses
 Hydra under the hood to launch one job per configuration, each in its own
 directory, and assembles the returned metrics into a labeled `xarray.Dataset`.
 
-The key insight: the dataset dimensions are your swept parameters (e.g. `lr`,
+The dataset dimensions are your swept parameters (e.g. `lr`,
 `seed`), and the data variables are whatever your `task` returns (e.g.
 `accuracy`, `loss`). This gives you a structured, labeled result rather than a
 list of floats.
@@ -66,10 +66,8 @@ The evaluation layer (`compare`, the batteries, LLM eval, `Study`) is the
 optional [`eval` extra](install.md#optional-extras) —
 `pip install "mushin-py[eval]"` — so the core sweep→dataset install stays lean.
 
-So: use the generic sweep→dataset workflow with **any** framework; reach for the
-Lightning conveniences and the statistical `compare` batteries when you're
-training torch models. There is no scikit-learn *integration* — only the
-framework-neutral workflow that happily wraps it.
+There is no scikit-learn *integration* — only the framework-neutral workflow
+that happily wraps it.
 
 ## The (method × seed) dataset
 
@@ -100,9 +98,7 @@ captures the natural variance of training and uses it to answer the question: *i
 the observed difference likely to hold up on a new seed?*
 
 mushin applies a pairwise significance test (Welch, Wilcoxon, or Mann-Whitney U)
-and corrects for multiple comparisons with the Holm–Bonferroni procedure. The
-result tells you not just *which method scored higher on average*, but *whether
-that difference is statistically reliable*.
+and corrects for multiple comparisons with the Holm–Bonferroni procedure.
 
 See [Understanding the statistics](guides/statistics.md) for details on test
 selection and the Holm correction.

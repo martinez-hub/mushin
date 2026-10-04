@@ -2,8 +2,7 @@
 
 mushin's statistical comparison layer is designed to give you honest answers:
 not just *which method scored higher on average*, but *whether that difference
-is reliable* given the seed-to-seed variance of training. This page explains the
-tests, the Holm correction, and how to interpret the results.
+is reliable* given the seed-to-seed variance of training.
 
 ## The tests
 
@@ -11,7 +10,7 @@ Pass `test=` to `compare` or `Study` to select the pairwise significance test:
 
 | `test=` | Underlying scipy call | Paired? | When to use |
 |---|---|---|---|
-| `"wilcoxon"` | `scipy.stats.wilcoxon` | Yes | Default; non-normal distributions, ordinal metrics, small n |
+| `"wilcoxon"` | `scipy.stats.wilcoxon` | Yes | Default; non-normal distributions, ordinal metrics. Needs 6+ seeds to reach `alpha=0.05` — see [below](#underpowered-test-warning) |
 | `"ttest_rel"` | `scipy.stats.ttest_rel` | Yes | Paired t-test; approximately normal data, equal variance assumed |
 | `"welch"` | `scipy.stats.ttest_ind(equal_var=False)` | No | Gaussian metrics, unequal variance; good general choice |
 | `"ttest_ind"` | `scipy.stats.ttest_ind(equal_var=True)` | No | Independent t-test, equal variance assumed |
@@ -85,7 +84,9 @@ UserWarning: test='wilcoxon' cannot reach alpha=0.05 with 3 seeds
 
 **Solutions:**
 - Switch to `test="welch"` (parametric; can reach significance with 3 seeds).
-- Increase the number of seeds (5+ makes Wilcoxon viable).
+- Increase the number of seeds. A paired Wilcoxon's best-case two-sided p-value
+  is `2 ** (1 - n_seeds)`, so it first clears `alpha=0.05` at **6** seeds
+  (0.0313); 5 seeds still bottom out at 0.0625 and keep the warning.
 
 ## Interpreting the summary table
 

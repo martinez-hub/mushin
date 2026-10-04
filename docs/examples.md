@@ -16,8 +16,8 @@ uv run python examples/<name>.py
     `inspect_ai_compare`, `prompt_injection_eval`, `llm_prompt_sweep`) use
     mushin's optional evaluation layer. On a plain `pip install mushin-py` they
     raise an install hint — run them with `pip install "mushin-py[eval]"`
-    (`uv run` in this repo already includes it). `batteries.py` additionally
-    wants the `detection`/`image`/`audio` extras for those batteries.
+    (`uv run` in this repo already includes it). `batteries.py` also wants the
+    `detection`/`image`/`audio` extras for those batteries.
 
 ## Sweeps → datasets
 
@@ -73,7 +73,7 @@ python examples/inspect_ai_compare.py --demo      # two scenarios, known ground 
 python examples/inspect_ai_compare.py logs/*.eval # your own Inspect logs
 ```
 
-Needs `pip install "mushin-py[eval]"`; reading real logs additionally needs
+Needs `pip install "mushin-py[eval]"`; reading real logs also needs
 `pip install inspect-ai`.
 
 ### `prompt_injection_eval.py` — is your model actually more injection-resistant?

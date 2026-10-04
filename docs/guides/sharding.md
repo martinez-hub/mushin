@@ -61,5 +61,4 @@ configure `DeepSpeedStrategy` directly if you need it.
 ## mushin is unchanged
 
 Sharding only changes the Trainer `strategy`. `MetricsCallback`, checkpoints,
-`load_experiment`, and the `compare`/significance pipeline are identical — mushin
-compares sharded and unsharded runs the same way.
+`load_experiment`, and the `compare`/significance pipeline are identical.
