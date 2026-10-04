@@ -61,8 +61,8 @@ def _accepts_seed(m) -> bool:
 def _to_scalar(v) -> float:
     """Reduce a metric value to one float. A scalar passes through; a per-example
     sequence/tensor (e.g. `BERTScore` returns per-prediction precision/recall/f1)
-    is averaged over examples — the same reduction applied to plain-callable
-    scores — instead of raising on `float()` of a multi-element tensor."""
+    is averaged over examples (the same reduction applied to plain-callable
+    scores) instead of raising on `float()` of a multi-element tensor."""
     if hasattr(v, "detach"):  # torch tensor -> CPU numpy
         v = v.detach().cpu().numpy()
     arr = np.asarray(v, dtype=float)
@@ -77,7 +77,7 @@ def _score_one(
     The second dict carries per-item scores where they exist, for the item-level
     bootstrap. Plain callables are scored per example, so they always have them;
     torchmetrics metrics are ``update(batch)`` -> ``compute()`` and expose only an
-    aggregate, so they return ``{}`` — scoring those per example would change what
+    aggregate, so they return ``{}``; scoring those per example would change what
     the metric means (corpus BLEU is not the mean of sentence BLEU)."""
     if isinstance(m, TorchMetric):
         m.reset()
@@ -299,7 +299,7 @@ def _attach_item_bootstrap(
     The seed-based test in ``comparisons`` measures decoding/judge noise only; it
     cannot answer whether a difference would survive a different sample of eval
     items, which is usually the larger uncertainty. This adds that answer beside
-    it — deliberately in the SAME table, so a seed-significant result whose item
+    it, deliberately in the SAME table, so a seed-significant result whose item
     interval straddles 0 is impossible to miss.
 
     ``item_p`` is the per-comparison bootstrap p-value; ``item_p_corrected``
@@ -381,17 +381,17 @@ def compare_scores(
 
     ``scores`` maps a system name to either
 
-    * a 1-D sequence of per-item scores — a single run. There is no seed
+    * a 1-D sequence of per-item scores: a single run. There is no seed
       dimension, so the seed-based columns are masked (a single run says nothing
       about decoding noise) while the item-level columns are fully populated; or
-    * a 2-D ``(n_seeds, n_items)`` array — repeated runs, giving both the
+    * a 2-D ``(n_seeds, n_items)`` array, repeated runs, giving both the
       seed-based test and the item-level bootstrap.
 
     Every system must cover the *same* items in the *same order*: item ``i`` of
     one system is paired with item ``i`` of another. Call once per metric.
 
-    ``clusters`` is passed to :func:`~mushin.benchmark._stats.paired_item_bootstrap`
-    — supply it when items are grouped (several questions per passage), or the
+    ``clusters`` is passed to :func:`~mushin.benchmark._stats.paired_item_bootstrap`.
+    Supply it when items are grouped (several questions per passage), or the
     interval will be too narrow.
     """
     if not scores:

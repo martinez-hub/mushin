@@ -1,14 +1,14 @@
 # Built-in batteries
 
 !!! note "Requires the `eval` extra"
-    The batteries are part of mushin's optional evaluation layer —
+    The batteries are part of mushin's optional evaluation layer:
     `pip install "mushin-py[eval]"`. The `detection`, `image`, and `audio` battery
     extras imply `eval`. See [Installation](../install.md#optional-extras).
 
 mushin ships **seven** benchmark batteries as first-class, reusable
 [tasks](custom.md#define-a-reusable-task): `classification`, `segmentation`,
 `detection`, `regression`, `retrieval`, `image_quality`, and `audio`. Each is a
-registered `Task` — a metric battery (built on
+registered `Task`: a metric battery (built on
 [torchmetrics](https://lightning.ai/docs/torchmetrics/)), a `predict_fn` that
 extracts `(predictions, probabilities)` from a model, and the subset of metrics
 that consume probabilities. List them at runtime:
@@ -25,23 +25,23 @@ resilient [`IncompleteSweepError`](resilience.md) resume path. Pass the task nam
 as `task="<name>"`; mushin runs each model over your `data` loader (which yields
 `(x, y)` batches), calls `predict_fn(model, x)`, updates the battery's metrics
 against `y`, and returns a `BenchmarkResult` with `.summary()`, `.comparisons`,
-and `.data`. You are not limited to these seven — register your own with
+and `.data`. You are not limited to these seven; register your own with
 `register_task` (see [Custom metrics & predict_fn](custom.md)).
 
 Each section below gives an **illustrative real-model recipe** (bring your own
-weights — not run here) and a **runnable toy** that is exactly the CI-tested code
+weights, not run here) and a **runnable toy** that is exactly the CI-tested code
 from `examples/batteries.py`.
 
 !!! note "The `predict_fn` contract"
     `predict_fn(model, x)` must return a `(preds, probs)` tuple. `probs` may be
     `None` when the battery has no probability metrics. When a real model's output
     does not already match the battery's expected format, override `predict_fn` to
-    adapt it — the recipes below show exactly where.
+    adapt it: the recipes below show exactly where.
 
 ## Walkthrough: comparing two classifiers
 
 Before the per-battery reference, here is one end-to-end comparison run through
-the whole machinery — code cell, then its real output, cell by cell. It answers
+the whole machinery: code cell, then its real output, cell by cell. It answers
 the question `compare` exists for: **is method A really better than method B, or
 is the gap just noise?** All numbers below are the verbatim output of the toy in
 `examples/batteries.py` (fully seeded, so you get the same values).
@@ -50,7 +50,7 @@ is the gap just noise?** All numbers below are the verbatim output of the toy in
 
 Two classifiers over a 4-class problem, evaluated across **8 seeds**. Each seed
 memorizes the true labels then corrupts a fraction of its own predictions with a
-per-seed RNG — so accuracy genuinely varies from seed to seed (real
+per-seed RNG, so accuracy genuinely varies from seed to seed (real
 within-method variance, not a deterministic constant). `strong` corrupts ~15% of
 labels, `weak` ~40%:
 
@@ -87,7 +87,7 @@ metric. The `mean` ± the `[ci_low, ci_high]` 95% CI is the per-method effect
 size you would report; the CIs for `strong` and `weak` accuracy (`0.824–0.895`
 vs `0.564–0.631`) do not overlap.
 
-### 3. The payoff — pairwise significance
+### 3. The payoff: pairwise significance
 
 `result.comparisons` is the raw pairwise table the `*` markers come from:
 
@@ -107,13 +107,13 @@ precision   strong     weak   0.261410     6.517591 3.383477e-09 3.383477e-09   
 
 A real, non-NaN verdict: accuracy differs by `+0.262` (Welch's t-test
 `p = 4.27e-09`, Cohen's `d ≈ 6.4`), `significant = True`. `p_corrected` is the
-Holm-adjusted p-value across the six metric comparisons — still far below
+Holm-adjusted p-value across the six metric comparisons, still far below
 `alpha = 0.05`, so the result survives multiple-comparison correction.
 
 ### 4. The underlying per-seed data
 
 Every scalar above is aggregated from the `(method, seed)` grid in
-`result.data` — one accuracy (etc.) per seed, which is exactly the spread the
+`result.data`: one accuracy (etc.) per seed, which is exactly the spread the
 test consumes:
 
 ```python
@@ -140,13 +140,13 @@ Data variables:
 The summary reports what each method scores; the CIs quantify how confident that
 estimate is (they shrink as you add seeds). The significance verdict answers the
 *comparative* question: with `strong` accuracy per seed clustered near `0.86` and
-`weak` near `0.60` — and the two bands separated by far more than their
-seed-to-seed jitter — Welch's t-test returns `p = 4.27e-09`, and Holm keeps it
+`weak` near `0.60`, and the two bands separated by far more than their
+seed-to-seed jitter, Welch's t-test returns `p = 4.27e-09`, and Holm keeps it
 significant after correcting for the six simultaneous metric tests. The verdict
 is trustworthy precisely **because** each method carries real variance across
 seeds: had a method produced identical scores on every seed (a deterministic
 model that ignores the seed), `compare` would warn and refuse to treat the
-duplicated points as independent samples — the same guard the
+duplicated points as independent samples: the same guard the
 [LLM path](llm.md#seeds-and-stochasticity) uses. This is also why the seed grid
 matters for resilience: a long real sweep can lose individual `(method, seed)`
 cells to crashes, and mushin resumes from a partial grid via
@@ -157,7 +157,7 @@ cells to crashes, and mushin resumes from a partial grid via
 Multiclass classification: `accuracy`, `f1`, `precision`, `recall`, `auroc`,
 `ece` (expected calibration error). **Requires `num_classes`.** The default
 predict_fn reads `model(x)` as `(N, num_classes)` logits, softmaxes them into
-`probs`, and argmaxes into `preds` — so a standard image classifier needs no
+`probs`, and argmaxes into `preds`, so a standard image classifier needs no
 override.
 
 ### Real-model recipe
@@ -209,7 +209,7 @@ method    metric     mean   ci_low  ci_high significant_vs_ref
 The `good` models memorize the labels (perfect, zero-variance scores); the `bad`
 untrained baselines land near chance. Because `good` is deterministic across
 seeds, `compare` emits a warning and leaves `significant_vs_ref` blank rather
-than reporting a false positive — see the [walkthrough](#walkthrough-comparing-two-classifiers)
+than reporting a false positive; see the [walkthrough](#walkthrough-comparing-two-classifiers)
 for a version with real seed variance.
 
 ## Segmentation
@@ -350,7 +350,7 @@ result.summary()  # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + s
 --8 < --"examples/batteries.py:detection"
 ```
 
-**Output** (from running the toy — the full 16-metric battery):
+**Output** from running the toy, showing the full 16-metric battery:
 
 ```text
 method     metric      mean    ci_low   ci_high significant_vs_ref
@@ -397,14 +397,14 @@ variants negative.
 ## Regression
 
 Scalar regression: `mse`, `mae`, `rmse`, `r2`, `pearson`, `spearman`. **No
-`num_classes`.** This is a single-target battery — predictions and targets are
+`num_classes`.** This is a single-target battery: predictions and targets are
 continuous tensors of shape `(N,)` or `(N, 1)`. The passthrough predict_fn feeds
 `model(x)` straight to the metrics against the target (no probabilities).
 
 ### Real-model recipe
 
 An **aesthetic / image-quality scorer** (a model that regresses a scalar quality
-score per input) needs no override — its scalar output is the prediction:
+score per input) needs no override; its scalar output is the prediction:
 
 ```python
 # Bring your own weights (not run here).
@@ -463,7 +463,7 @@ binary 0/1 (only `ndcg` accepts graded relevance).
 **CLIP** image↔text retrieval is conceptually a grouped ranking: for each query
 (say, a text prompt) you score every candidate (image), then group by query id.
 Keep the model producing a flat score vector and let the battery's grouped update
-do the per-query aggregation — the exact data/grouping contract is what the
+do the per-query aggregation: the exact data/grouping contract is what the
 runnable toy below demonstrates:
 
 ```python
@@ -512,7 +512,7 @@ reversed        recall 0.000000 0.000000 0.000000
 docs to the bottom (`retrieval_map`/`mrr` → `0`). `ndcg` is identical (`0.815`)
 for both because the two queries are exact mirror images: reversing the ranking
 swaps which query scores well and which scores poorly, so the two-query average
-is unchanged — a reminder to read what each metric actually measures.
+is unchanged: a reminder to read what each metric actually measures.
 
 ## Image quality
 
@@ -529,7 +529,7 @@ pip install "mushin-py[image]"    # torchvision + lpips
 ### Real-model recipe
 
 A super-resolution / restoration model like **Real-ESRGAN** or **SwinIR** returns
-the restored image directly, so the passthrough predict_fn applies as-is — just
+the restored image directly, so the passthrough predict_fn applies as-is; just
 make `data` yield `(low_quality_input, high_quality_reference)`:
 
 ```python
@@ -579,13 +579,13 @@ enhanced waveform) to the metrics against the clean reference. Waveforms are
 pip install "mushin-py[audio]"    # pystoi
 ```
 
-(PESQ is intentionally omitted — its only released package fails to import under
+(PESQ is intentionally omitted; its only released package fails to import under
 NumPy 2; add it via a custom task on a NumPy-1.x environment if you need it.)
 
 ### Real-model recipe
 
 A source separator / speech enhancer like **Demucs** returns the enhanced
-waveform directly, so the passthrough predict_fn applies as-is — make `data`
+waveform directly, so the passthrough predict_fn applies as-is; make `data`
 yield `(noisy_input, clean_reference)`:
 
 ```python
@@ -624,8 +624,8 @@ image quality, a second method would turn this profile into a comparison.
 
 ## See also
 
-- [Comparing methods](compare.md) — the `compare` API, statistical tests, and reading the result
-- [Custom metrics & predict_fn](custom.md) — override a battery or register your own task
-- [Segmentation guide](segmentation.md) — `ignore_index` and segmentation specifics
-- [Understanding the statistics](statistics.md) — tests, Holm correction, effect size
-- [API Reference — benchmark](../reference/benchmark.md)
+- [Comparing methods](compare.md): the `compare` API, statistical tests, and reading the result
+- [Custom metrics & predict_fn](custom.md): override a battery or register your own task
+- [Segmentation guide](segmentation.md): `ignore_index` and segmentation specifics
+- [Understanding the statistics](statistics.md): tests, Holm correction, effect size
+- [API Reference: benchmark](../reference/benchmark.md)

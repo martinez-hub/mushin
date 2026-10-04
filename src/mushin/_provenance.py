@@ -71,9 +71,9 @@ def _versions() -> dict:
 
 def _apple_chip() -> str | None:
     """The Apple Silicon chip name (e.g. 'Apple M5'), or None off-macOS / on
-    failure / on a non-Apple CPU (Intel Macs can expose MPS via a Metal GPU —
-    their x86 brand string must not be recorded as the chip). Best-effort —
-    provenance must never break a run."""
+    failure / on a non-Apple CPU (Intel Macs can expose MPS via a Metal GPU;
+    their x86 brand string must not be recorded as the chip). The lookup is
+    best-effort: provenance must never break a run."""
     try:
         r = subprocess.run(
             ("sysctl", "-n", "machdep.cpu.brand_string"),
@@ -88,7 +88,7 @@ def _apple_chip() -> str | None:
 
 
 def _accelerator() -> dict:
-    """Accelerator identity — the part of GPU numerics the torch wheel version
+    """Accelerator identity: the part of GPU numerics the torch wheel version
     alone cannot reconstruct: CUDA/cuDNN + device name on NVIDIA, the MPS
     device on Apple Silicon. All-None on CPU-only builds (and if torch itself
     fails to import)."""

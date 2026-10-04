@@ -28,8 +28,8 @@ def pin_gpu_round_robin(num_gpus: int, job_index: int | None = None) -> int:
     -------
     int
         The round-robin slot ``job_index % num_gpus``. ``CUDA_VISIBLE_DEVICES``
-        is set to the physical device for that slot: the slot number itself, or —
-        when an allocation is already present — the slot-th entry of that list.
+        is set to the physical device for that slot: the slot number itself or, when an
+        allocation is already present, the slot-th entry of that list.
 
     Raises
     ------

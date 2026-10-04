@@ -155,7 +155,7 @@ def _cfg_missing_or_none(cfg, key: str) -> bool:
     """True if ``key`` (possibly a dotted path) is absent from ``cfg`` or None.
 
     Drives the Hydra ``+`` append prefix. A dotted path like ``model.width``
-    must be resolved as a config *path*, not a literal attribute — a plain
+    must be resolved as a config *path*, not a literal attribute: a plain
     ``hasattr(cfg, "model.width")`` is always False, which would wrongly
     ``+``-append onto an existing nested field and make Hydra raise.
     """
@@ -201,7 +201,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
 
 
 def _required_params(fn) -> set[str]:
-    """Named parameters of ``fn`` that have no default — the ones a run must
+    """Named parameters of ``fn`` that have no default: the ones a run must
     supply. Ignores ``*args``/``**kwargs`` and the injected ``mushin_resume``."""
     import inspect
 
@@ -275,11 +275,11 @@ class _FailedRun:
 
 
 class _SkippedRun:
-    """Sentinel returned in place of a cell that was intentionally not run — the
+    """Sentinel returned in place of a cell that was intentionally not run: the
     wall-clock budget (``max_total_seconds``) was exhausted, or the cell was not
     in a ``sample=`` subset. Like ``_FailedRun`` it lets the Hydra job complete
     normally, so ``jobs_post_process`` can NaN-fill and record the skipped cell;
-    unlike it, no exception occurred — the cell simply never ran."""
+    unlike it, no exception occurred: the cell simply never ran."""
 
     __slots__ = ("reason",)
 
@@ -290,7 +290,7 @@ class _SkippedRun:
 class _PriorCells:
     """What a resuming `_TaskRunner` needs from the prior sweep, and nothing
     more: the sweep root, the swept param names, and the completed
-    {combo_key: dir} map. Picklable and small — failed/pending cells and their
+    {combo_key: dir} map. It is picklable and small: failed/pending cells and their
     error strings never ship to workers."""
 
     __slots__ = ("root", "params", "completed")
@@ -372,8 +372,8 @@ class _TaskRunner:
     (_task_calls / _instrument_task / _fail_soft / _resume_short_circuit) into one
     object so out-of-process launchers (joblib/submitit) can pickle it. Holds only
     picklable state; imports module-level helpers inside __call__ (never captures
-    the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain exactly —
-    see the spec's Semantics Mapping."""
+    the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain
+    exactly; see the spec's Semantics Mapping."""
 
     def __init__(
         self,
@@ -416,8 +416,8 @@ class _TaskRunner:
         self._budget_rank_warned = False
 
     def _cache_key(self, config_hash) -> str | None:
-        """The content-address for this cell — a hash of its resolved-config and
-        task-source fingerprints — or None if either is unavailable (so an
+        """The content-address for this cell: a hash of its resolved-config and
+        task-source fingerprints, or None if either is unavailable (so an
         unresolvable cell is simply never cached)."""
         if not self.cache_dir or config_hash is None or self.code_hash is None:
             return None
@@ -430,7 +430,7 @@ class _TaskRunner:
     @staticmethod
     def _multi_rank_world() -> bool:
         """True when this process is one rank of an EXTERNAL multi-rank launch
-        (SLURM/submitit set SLURM_NTASKS; torchrun sets WORLD_SIZE + RANK —
+        (SLURM/submitit set SLURM_NTASKS; torchrun sets WORLD_SIZE + RANK,
         both before the process starts). Requires a per-rank marker alongside
         WORLD_SIZE so mushin's own single-node launcher (which exports
         WORLD_SIZE in rank 0 but never RANK/SLURM_PROCID) is not mistaken for
@@ -1105,7 +1105,7 @@ class BaseWorkflow:
 
         launcher_config: Mapping[str, Any] | None (default: None)
             Fields for the selected ``launcher``, applied as
-            ``hydra.launcher.<key>=<value>`` overrides — no hand-rolled
+            ``hydra.launcher.<key>=<value>`` overrides: no hand-rolled
             strings. Pair with `mushin.submitit_slurm_config`, e.g.
             ``run(launcher="submitit_slurm",
             launcher_config=submitit_slurm_config(nodes=2, gpus_per_node=4))``.
@@ -1121,7 +1121,7 @@ class BaseWorkflow:
               that Hydra version.
             - `None` selects the defaults of the installed Hydra version.
             Regardless of `version_base`, `run` sets ``hydra.job.chdir=True``
-            (unless you override it) — each job runs in its own working
+            (unless you override it); each job runs in its own working
             directory, which the workflow's metrics sidecars depend on.
 
         to_dictconfig: bool (default: False)
@@ -1159,7 +1159,8 @@ class BaseWorkflow:
             Graceful wall-clock budget: once exhausted, remaining cells are
             skipped (NaN, ``self.skipped``) and a later ``resume=True`` finishes
             them. Disabled (with a warning) for cells running under an external
-            multi-rank launch — per-rank deadlines could diverge and hang DDP.
+            multi-rank launch, because per-rank deadlines could diverge and
+            hang DDP.
 
         sample : int | None (default: None)
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast
@@ -1966,12 +1967,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             match; a changed non-swept value or an edited task body re-runs that
             cell (with a warning). The fingerprint does not cover helper
             functions the task calls, module-level constants, or the
-            environment — for a larger refactor, re-run from a fresh
+            environment. For a larger refactor, re-run from a fresh
             ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
-            ``working_dir/mushin_env.txt`` — or ``mushin_env.<n>.txt`` if a
+            ``working_dir/mushin_env.txt``, or ``mushin_env.<n>.txt`` if a
             snapshot already exists there (a resume never overwrites the
             original run's snapshot).
         dry_run : bool (default: False)
@@ -1982,7 +1983,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             any job.
         confirm_above : int | None (default: None)
             Refuse to launch a sweep with more than this many grid cells,
-            raising a ``ValueError`` instead — a guard against an accidentally
+            raising a ``ValueError`` instead: a guard against an accidentally
             huge grid. The ``MUSHIN_MAX_CELLS`` environment variable supplies a
             default ceiling when this is not set (an explicit value wins). Use
             ``dry_run=True`` to preview an over-limit sweep. ``sample=`` does
@@ -1996,10 +1997,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             cell always runs and resume cache hits do not consume it; a cell
             already running is never interrupted. Skipped cells are not
             completed, so a later ``resume=True`` with more time finishes them.
-            Measured per launcher process — best with the default sequential
+            Measured per launcher process, best with the default sequential
             launcher. Disabled (with a warning) for cells running under a
             multi-rank launch (submitit DDP/FSDP): per-rank deadlines could
-            diverge and hang the ranks at rendezvous — use the scheduler's
+            diverge and hang the ranks at rendezvous; use the scheduler's
             time limit for those jobs instead.
         sample : int | None (default: None)
             Run only a random subset of ``sample`` cells from the full grid for
@@ -2018,23 +2019,23 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             A content-addressed cache of completed cells, shared across
             ``working_dir``\\ s. A cell whose resolved config AND task source
             match a cached entry (keyed on the same fingerprints as resume)
-            reuses that result instead of recomputing — so a cell computed in one
+            reuses that result instead of recomputing, so a cell computed in one
             sweep is free in another. Newly-computed cells are stored there.
             Complements ``resume`` (which reuses within a single ``working_dir``);
             a changed config value or edited task body is a cache miss.
         notes : str | None (default: None)
-            A free-form note recorded for the sweep — in the manifest, on
+            A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for
             "why did I run this?". A resume that does not re-pass it keeps the
             original run's note.
         tags : list[str] | None (default: None)
-            Tags recorded for the sweep — in the manifest, on ``wf.tags``, and as
+            Tags recorded for the sweep, in the manifest, on ``wf.tags``, and as
             the dataset attr ``mushin_tags`` (preserved across a resume).
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
             paths (``**{"model.width": multirun([4, 8])}``) and config groups
-            are supported — see the workflows guide's "Sweep-axis support"
+            are supported; see the workflows guide's "Sweep-axis support"
             section.
         """
         if notes is not None and not isinstance(notes, str):
@@ -2559,7 +2560,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         """The sweep results as a tidy long-form :class:`pandas.DataFrame`.
 
         One row per sweep cell (times any extra metric dimensions), with the
-        sweep parameters and metrics as plain columns — the pandas view of
+        sweep parameters and metrics as plain columns: the pandas view of
         :meth:`to_xarray` (``to_xarray(...).to_dataframe().reset_index()``),
         for when you'd rather not touch xarray at all. Keyword arguments
         forward to :meth:`to_xarray`. Dataset-level ``attrs`` (provenance,
@@ -2890,7 +2891,7 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
 
         launcher_config: Mapping[str, Any] | None (default: None)
             Fields for the selected ``launcher``, applied as
-            ``hydra.launcher.<key>=<value>`` overrides — no hand-rolled
+            ``hydra.launcher.<key>=<value>`` overrides: no hand-rolled
             strings. Pair with `mushin.submitit_slurm_config`, e.g.
             ``run(launcher="submitit_slurm",
             launcher_config=submitit_slurm_config(nodes=2, gpus_per_node=4))``.

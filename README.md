@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b> —<br>
+  <b>Boilerplate-free, reproducible machine-learning experiment sweeps</b>:<br>
   a framework-agnostic sweep engine built on
   <a href="https://github.com/mit-ll-responsible-ai/hydra-zen">hydra-zen</a>,
   with first-class <a href="https://lightning.ai/">PyTorch Lightning</a> integration.
@@ -26,16 +26,16 @@
 <p align="center"><a href="https://martinez-hub.github.io/mushin/"><b>Documentation</b></a></p>
 
 Decorate an experiment, sweep over parameters, and get the results back as a
-labeled `xarray.Dataset` — not rows in a dashboard you have to export.
+labeled `xarray.Dataset`, not rows in a dashboard you have to export.
 
-- **Boilerplate-free** — one decorator, no subclassing or callbacks; results come
+- **Boilerplate-free:** one decorator, no subclassing, no callbacks. Results come
   back as a labeled dataset you can slice and plot.
-- **Reproducible** — every run captures its config + provenance, sweeps resume
+- **Reproducible:** every run captures its config + provenance, sweeps resume
   durably after a hard kill or cluster preemption, and auto-tuning pins a
   hardware-independent effective batch size.
-- **Scalable** — the *same* task runs in-process, across cores, or on a multi-node
+- **Scalable:** the *same* task runs in-process, across cores, or on a multi-node
   SLURM cluster (validated on real GPU hardware); change only the launcher.
-- **Framework-agnostic** — your task just returns a `dict`, so scikit-learn,
+- **Framework-agnostic:** your task just returns a `dict`, so scikit-learn,
   XGBoost, or any Python model works, not only PyTorch.
 
 ## Quickstart
@@ -74,7 +74,7 @@ analysis)? Drop to `experiment.workflow`, or subclass
 
 Prefer to start from a notebook? There are
 [seven runnable ones](https://martinez-hub.github.io/mushin/notebooks/01_sweep_to_dataset/),
-executed in CI so they cannot rot — sweeps → datasets,
+executed in CI so they cannot rot: sweeps → datasets,
 [compare & batteries](https://martinez-hub.github.io/mushin/notebooks/02_compare_and_batteries/),
 [studies](https://martinez-hub.github.io/mushin/notebooks/03_study/),
 [resilient sweeps](https://martinez-hub.github.io/mushin/notebooks/04_resilience/),
@@ -86,26 +86,26 @@ and [analyzing results](https://martinez-hub.github.io/mushin/notebooks/07_analy
 
 Each links to a guide with a runnable example:
 
-- **[Compare methods with statistics](https://martinez-hub.github.io/mushin/guides/compare/)** —
+- **[Compare methods with statistics](https://martinez-hub.github.io/mushin/guides/compare/)**:
   `benchmark.compare` runs a metric battery (torchmetrics) across seeds and returns
   a labeled dataset *plus* significance (scipy); `Study` runs the training sweep and
   feeds it straight in.
-- **[Compare LLM systems](https://martinez-hub.github.io/mushin/guides/llm/)** —
+- **[Compare LLM systems](https://martinez-hub.github.io/mushin/guides/llm/)**:
   the same significance spine for LLM evals, with Holm-corrected p-values and an
   optional output cache.
-- **[Built-in batteries](https://martinez-hub.github.io/mushin/guides/batteries/)** —
+- **[Built-in batteries](https://martinez-hub.github.io/mushin/guides/batteries/)**:
   classification, segmentation, detection, regression, retrieval, image-quality, audio.
-- **[Resilient & resumable sweeps](https://martinez-hub.github.io/mushin/guides/resilience/)** —
+- **[Resilient & resumable sweeps](https://martinez-hub.github.io/mushin/guides/resilience/)**:
   `on_error="nan"`, durable `resume=True` across hard kills/preemption, and per-run
   provenance.
-- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel-out-of-process-launchers)** —
+- **[Parallel & out-of-process launchers](https://martinez-hub.github.io/mushin/guides/workflows/#parallel-out-of-process-launchers)**:
   `run(..., launcher="joblib")` or submitit; stdlib-picklable dispatch.
-- **[Multi-node & sharded training](https://martinez-hub.github.io/mushin/guides/multinode/)** —
+- **[Multi-node & sharded training](https://martinez-hub.github.io/mushin/guides/multinode/)**:
   `HydraDDP` / `HydraFSDP` and `pin_gpu_round_robin` GPU packing, validated on a real
   SLURM cluster.
-- **[Auto-tuning](https://martinez-hub.github.io/mushin/guides/auto-tuning/)** —
+- **[Auto-tuning](https://martinez-hub.github.io/mushin/guides/auto-tuning/)**:
   `tune_batch_size` / `tune_learning_rate`, pinned for reproducibility.
-- **[Analyze from Claude Code (MCP)](https://martinez-hub.github.io/mushin/guides/mcp/)** —
+- **[Analyze from Claude Code (MCP)](https://martinez-hub.github.io/mushin/guides/mcp/)**:
   an optional read-only MCP server to load and inspect completed runs.
 
 ## Installation
@@ -124,15 +124,15 @@ uv add "mushin-py[eval]"        # + compare, metric batteries, LLM eval, Study
 
 (`uv pip install mushin-py` also works outside a uv project.)
 
-The PyPI distribution is **`mushin-py`**, but you `import mushin` — the same
+The PyPI distribution is **`mushin-py`**, but you `import mushin`: the same
 pattern as `scikit-learn` → `sklearn`.
 
 The core install is the sweep → dataset workflow. The **`eval`** extra adds the
 evaluation layer (`compare`, the metric batteries, LLM evaluation, `Study`) and
-its heavier dependencies (torchmetrics, scipy), keeping the core lean — using
+its heavier dependencies (torchmetrics, scipy), keeping the core lean; using
 those features without it raises a clear install hint. The other extras are
 `viz`, `netcdf`, `detection`, `image`, `audio`, and `mcp`; the three battery
-extras pull in `eval` for you. Combine them with commas — e.g.
+extras pull in `eval` for you. Combine them with commas, e.g.
 `"mushin-py[eval,viz]"`, which works verbatim with `pip install`, `uv add`, or
 `uv pip install`.
 
@@ -146,10 +146,10 @@ mushin follows SemVer with pre-1.0 semantics: **a minor bump (0.8 → 0.9) may
 contain breaking changes**, always listed with migration notes in the
 [changelog](CHANGELOG.md); patch releases never break. The public API is the
 top-level `mushin` namespace plus the documented `mushin.benchmark` /
-`mushin.llm` symbols — underscore modules are internal. The project's scope is
+`mushin.llm` symbols. Underscore modules are internal. The project's scope is
 deliberately narrow: **boilerplate-free, reproducible sweep → dataset**, with
-an optional evaluation layer behind the `eval` extra. It complements — and
-does not replace — experiment trackers like W&B or TensorBoard (see the
+an optional evaluation layer behind the `eval` extra. It complements, and
+does not replace, experiment trackers like W&B or TensorBoard (see the
 [workflows guide](https://martinez-hub.github.io/mushin/guides/workflows/) for
 using both together).
 

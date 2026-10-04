@@ -2,11 +2,11 @@
 
 A long method x seed sweep is only as reliable as its flakiest cell. One OOM, a
 corrupt data shard, or a transient cluster hiccup should not throw away the hours
-already spent on the runs that *did* succeed — and it must never let you quietly
+already spent on the runs that *did* succeed, and it must never let you quietly
 compute statistics on a half-finished grid. mushin gives you three tools for
 this: **fail-soft** runs, **resume**, and **provenance**.
 
-> **Prefer to follow along?** [Notebook 04 — Resilient sweeps](../notebooks/04_resilience.ipynb)
+> **Prefer to follow along?** [Notebook 04: Resilient sweeps](../notebooks/04_resilience.ipynb)
 > runs this whole fail-soft → resume loop end to end with live output.
 
 ## Fail-soft: `on_error="nan"`
@@ -51,7 +51,7 @@ what makes a resume possible.
 
 ## Statistics refuse an incomplete sweep
 
-You cannot compare methods on a grid that has holes in it — the missing cells are
+You cannot compare methods on a grid that has holes in it: the missing cells are
 *missing data*, not measurements. Both `compare` (`compare_methods`) and `Study`
 detect the completeness signal and refuse:
 
@@ -65,7 +65,7 @@ except IncompleteSweepError as e:
     #  with resume=True to complete the sweep before comparing."
 ```
 
-This is keyed purely on `ds.attrs["mushin_failures"]` — a plain user dataset, or
+This is keyed purely on `ds.attrs["mushin_failures"]`: a plain user dataset, or
 a metric that is legitimately `NaN` for some other reason, is unaffected. Only a
 sweep that actually recorded failures triggers the guard.
 
@@ -73,7 +73,7 @@ sweep that actually recorded failures triggers the guard.
 
 Fix the underlying cause, then re-run against the **same `working_dir`** with
 `resume=True`. mushin reads the prior manifest and short-circuits every cell that
-already `completed` (reusing its cached metrics from disk) — only the failed and
+already `completed` (reusing its cached metrics from disk); only the failed and
 missing cells actually re-execute:
 
 ```python
@@ -108,7 +108,7 @@ run(on_error="nan")  ──►  inspect wf.failures  ──►  fix the cause
 `resume=True` is durable across a **hard process kill** (OOM, SLURM preemption,
 node death), not just handled Python exceptions. Each cell records its status
 (`running` → `completed`/`failed`) from inside its own job, so a mid-sweep kill
-never loses the cells that already finished — resuming re-runs only the unfinished
+never loses the cells that already finished; resuming re-runs only the unfinished
 ones.
 
 A long-running cell can also resume its **own** training. Declare a
@@ -139,7 +139,7 @@ different cell. Tasks that don't declare `mushin_resume` are unaffected.
 
 ## Provenance
 
-Every run — fail-soft or not — writes a per-job provenance record,
+Every run (fail-soft or not) writes a per-job provenance record,
 `mushin_provenance.json`, into each job directory *before* the task executes, so
 even a failing cell leaves its lineage behind. It captures the git SHA, key
 package versions, and the resolved config:
@@ -162,7 +162,7 @@ wf.run(..., working_dir="runs/experiment", capture_env=True)
 ## Using it from `Study`
 
 `Study` threads the same options through to its training sweep, so you get
-fail-soft, resumable *training* runs with the same guarantees — an incomplete
+fail-soft, resumable *training* runs with the same guarantees: an incomplete
 training sweep raises `IncompleteSweepError` from `Study.run` rather than
 comparing partially-trained checkpoints:
 
@@ -187,6 +187,6 @@ result = study.run()
 
 ## See also
 
-- [Workflows & sweeps](workflows.md) — the multirun API
-- [Comparing methods](compare.md) — the `compare` API
-- [Studies](study.md) — the train → compare motion
+- [Workflows & sweeps](workflows.md): the multirun API
+- [Comparing methods](compare.md): the `compare` API
+- [Studies](study.md): the train → compare motion

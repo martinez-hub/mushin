@@ -43,7 +43,7 @@ def _hydra_run_dir_override(cwd) -> str:
     """The ``hydra.run.dir=`` override value for a re-launched rank: quoted for
     Hydra's override grammar (dir names may contain ``=`` etc.), with forward
     slashes because backslash is an *escape character* inside that grammar's
-    quoted strings — a raw Windows cwd would be corrupted."""
+    quoted strings: a raw Windows cwd would be corrupted."""
     from pathlib import PurePath
 
     p = cwd if isinstance(cwd, PurePath) else Path(cwd)
@@ -52,7 +52,7 @@ def _hydra_run_dir_override(cwd) -> str:
 
 def _interrank_delay() -> float:
     """Seconds to stagger between spawning child ranks (avoids dataloader
-    startup contention). Override with ``MUSHIN_DDP_LAUNCH_DELAY`` — e.g. ``0``
+    startup contention). Override with ``MUSHIN_DDP_LAUNCH_DELAY``, e.g. ``0``
     for short jobs in large sweeps, where the default 1s/rank compounds.
     Negative values clamp to 0; unparsable values fall back to the default."""
     raw = os.environ.get("MUSHIN_DDP_LAUNCH_DELAY", "1")
@@ -66,7 +66,7 @@ def _validate_external_world_size(
     num_nodes, num_processes, cluster_environment
 ) -> None:
     """Under an external launcher (SLURM/torchrun), fail fast if the number of
-    launched processes doesn't match num_nodes x devices-per-node — the #1
+    launched processes doesn't match num_nodes x devices-per-node: the #1
     multi-node footgun (a mismatch otherwise hangs at rendezvous, OOMs, or
     silently runs single-GPU). No-op for the single-node subprocess path."""
     if (
@@ -305,7 +305,7 @@ class HydraFSDP(_HydraReattachMixin, FSDPStrategy):  # type: ignore
     significance analysis are unchanged from a single-GPU run.
 
     Requires Hydra to save a ``config.yaml`` (with ``trainer`` and ``module``
-    keys) in the job's output dir — the same contract as :class:`HydraDDP`.
+    keys) in the job's output dir: the same contract as :class:`HydraDDP`.
     Configure it with hydra-zen, e.g. ``strategy=builds(HydraFSDP)`` on a
     ``builds(pl.Trainer, ...)`` config.
     """

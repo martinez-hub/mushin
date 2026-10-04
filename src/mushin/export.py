@@ -1,7 +1,7 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
 """Dependency-free exports of a sweep directory. ``mushin.export.table`` renders
-the per-cell sidecars (swept params, status, metrics) as CSV — a durable,
+the per-cell sidecars (swept params, status, metrics) as CSV: a durable,
 pandas-/spreadsheet-friendly substrate that needs neither Hydra nor xarray."""
 
 from __future__ import annotations

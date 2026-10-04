@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for your interest in contributing! This page summarizes the key steps —
-see [CONTRIBUTING.md](https://github.com/martinez-hub/mushin/blob/main/CONTRIBUTING.md)
+Thanks for your interest in contributing! This page summarizes the key steps. See
+[CONTRIBUTING.md](https://github.com/martinez-hub/mushin/blob/main/CONTRIBUTING.md)
 on GitHub for the full details.
 
 ## Dev setup
@@ -38,7 +38,7 @@ changes/<id>.<type>.md
 Where `<id>` is the GitHub issue or PR number (or a short slug for pre-issue
 work), and `<type>` is one of `added`, `changed`, `fixed`, `removed`,
 `deprecated`, or `misc`. The fragment body is a single plain-English sentence
-describing the change — except `misc`, the escape hatch for PRs with nothing
+describing the change. The exception is `misc`, the escape hatch for PRs with nothing
 user-facing, which renders without that text (see
 [`changes/README.md`](https://github.com/martinez-hub/mushin/blob/main/changes/README.md)).
 

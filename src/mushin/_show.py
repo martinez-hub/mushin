@@ -3,7 +3,7 @@
 """`mushin.show`: a dependency-free, offline view of a sweep directory.
 
 Reads each cell's status sidecar (its swept-param ``combo`` and ``status``) and
-metrics sidecar directly — pure JSON, so it works mid-sweep and needs neither
+metrics sidecar directly: pure JSON, so it works mid-sweep and needs neither
 Hydra nor xarray. Handy for watching a live sweep or eyeballing a finished one
 before committing to the full ``to_xarray`` load."""
 
@@ -50,13 +50,13 @@ def _numeric_dir_key(name: str):
 def _read_cells(root) -> list[dict]:
     """Scan a sweep ``root`` and return one dict per cell:
     ``{"combo", "status", "metrics", "dir"}`` (``dir`` is the job dir Path).
-    Reads only the per-cell JSON sidecars — no Hydra/xarray. Raises
+    Reads only the per-cell JSON sidecars: no Hydra/xarray. Raises
     ``FileNotFoundError`` if ``root`` is not a directory.
 
     When a sweep manifest exists it scopes the result to the LATEST sweep's
     grid: a dir whose combo the manifest does not list (or lists under another
     dir) is stale residue of an earlier/wider sweep in a reused ``working_dir``
-    and is excluded — unless its status sidecar is newer than the manifest,
+    and is excluded, unless its status sidecar is newer than the manifest,
     which marks a cell of a newer sweep currently in flight (the mid-sweep
     view). Without a manifest (fresh dir mid-sweep, pre-manifest sweeps) every
     cell dir is kept."""
@@ -113,7 +113,7 @@ def _read_cells(root) -> list[dict]:
 def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
     """Column name per metric; a metric colliding with a swept-param column (or
     ``status``) is disambiguated as ``"<name> (metric)"`` so both values
-    survive — e.g. a task reporting the effective ``lr`` alongside a swept
+    survive; e.g. a task reporting the effective ``lr`` alongside a swept
     ``lr``."""
     taken = set(param_cols) | {"status"}
     return {m: (f"{m} (metric)" if m in taken else m) for m in metric_cols}
@@ -123,7 +123,7 @@ def _apply_metric_filter(
     metrics: list[str] | None, metric_cols: list[str]
 ) -> list[str]:
     """Restrict/reorder metric columns to ``metrics``. Unknown names raise
-    (like ``sort=`` does) — a typo silently dropping a column is worse — and
+    (like ``sort=`` does) (a typo silently dropping a column is worse) and
     the caller's requested order is honored, with repeats deduplicated (a
     duplicate CSV header would be mangled by downstream consumers)."""
     if metrics is None:
@@ -396,8 +396,8 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     """Compare two sweep directories ``a`` and ``b``.
 
     Cells are aligned by their swept-param combination. For each shared cell the
-    delta ``b - a`` is computed for every metric that is a finite scalar in both
-    — and only when the cell is ``completed`` on BOTH sides (a failed/skipped
+    delta ``b - a`` is computed for every metric that is a finite scalar in both,
+    and only when the cell is ``completed`` on BOTH sides (a failed/skipped
     cell may carry a stale sidecar from a prior attempt; its row appears with
     empty ``deltas``). Cells present in only one sweep are reported separately,
     along with a diff of the two runs' environment provenance

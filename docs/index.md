@@ -5,23 +5,23 @@ sweep engine built on
 [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen), with
 first-class [PyTorch Lightning](https://lightning.ai/) integration.
 
-`mushin` is the evaluate-and-report layer sitting on top of hydra-zen — and,
+`mushin` is the evaluate-and-report layer sitting on top of hydra-zen and,
 for deep learning, Lightning. Define your experiment as a function, sweep over
-parameters with Hydra, and get results back as a labeled `xarray.Dataset` — not
+parameters with Hydra, and get results back as a labeled `xarray.Dataset`, not
 rows in a dashboard you have to export.
 
 !!! tip "Highlights"
-    - **`@mushin.sweep`** — the boilerplate-free core: decorate a function and
+    - **`@mushin.sweep`.** The boilerplate-free core: decorate a function and
       `experiment.run(...)` returns the labeled dataset. See the
       [quickstart](quickstart.md).
-    - **Resilient & resumable sweeps** — `on_error="nan"` fail-soft plus a durable
+    - **Resilient & resumable sweeps:** `on_error="nan"` fail-soft plus a durable
       `resume=True` that survives a hard process kill or SLURM preemption without
       recomputing finished cells. See [resilience](guides/resilience.md).
-    - **Laptop → cluster, one code path** — out-of-process launchers
+    - **Laptop → cluster, one code path:** out-of-process launchers
       (`launcher="joblib"` / submitit) and multi-GPU / multi-node training
       (`HydraDDP` / `HydraFSDP`, GPU packing), validated on real cluster hardware.
       See [multi-node training](guides/multinode.md).
-    - **Lean core, opt-in eval** — the evaluation layer (`compare`, the batteries,
+    - **Lean core, opt-in eval:** the evaluation layer (`compare`, the batteries,
       LLM eval, `Study`) is the optional
       [`eval` extra](install.md#optional-extras); a plain install is just the
       sweep → dataset core.
@@ -44,8 +44,8 @@ The result is a `BenchmarkResult` with a paper-ready
 `.summary()`, tidy `.comparisons` DataFrame, and a labeled `.data` dataset.
 
 **`Study`.**
-`Study` orchestrates the full pipeline — multi-seed training sweep via Hydra,
-then straight into `compare` — in one call. `Study.from_checkpoints` handles
+`Study` orchestrates the full pipeline (multi-seed training sweep via Hydra,
+then straight into `compare`) in one call. `Study.from_checkpoints` handles
 the eval-only case when you already have checkpoints.
 
 ## Quick example
@@ -77,12 +77,12 @@ ds["accuracy"].mean("seed")  # average over seeds, per learning rate
 
 ## Get started
 
-- [Install](install.md) — pip, extras, and the support matrix
-- [Quickstart](quickstart.md) — run the flagship sweep example end-to-end
-- [Tutorial](tutorial.md) — a longer guided pass through a real sweep
-- [Core concepts](concepts.md) — the mental model behind workflows and datasets
-- [Example notebooks](notebooks/01_sweep_to_dataset.ipynb) — seven runnable
+- [Install](install.md): pip, extras, and the support matrix
+- [Quickstart](quickstart.md): run the flagship sweep example end-to-end
+- [Tutorial](tutorial.md): a longer guided pass through a real sweep
+- [Core concepts](concepts.md): the mental model behind workflows and datasets
+- [Example notebooks](notebooks/01_sweep_to_dataset.ipynb): seven runnable
   notebooks, executed in CI: sweeps → datasets, compare & batteries, studies,
   resilient sweeps, LLM eval, scikit-learn, and analyzing results
-- [Guides](guides/workflows.md) — workflows, compare, Study, segmentation, MCP
-- [API Reference](reference/benchmark.md) — full auto-generated docs
+- [Guides](guides/workflows.md): workflows, compare, Study, segmentation, MCP
+- [API Reference](reference/benchmark.md): full auto-generated docs

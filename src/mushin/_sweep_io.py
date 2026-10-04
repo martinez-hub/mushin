@@ -54,7 +54,7 @@ def _json_normalize(v: Any) -> Any:
     marker so the file is valid JSON (``read_metrics_sidecar`` restores them
     to NaN / signed Inf), and stringifies any other type rather than letting an
     otherwise-successful task's sidecar write crash the sweep. A genuine
-    ``None`` metric value also encodes as ``null``, so it reads back as NaN —
+    ``None`` metric value also encodes as ``null``, so it reads back as NaN,
     the one remaining lossy case.
     """
     import math
