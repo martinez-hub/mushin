@@ -136,9 +136,9 @@ extras pull in `eval` for you. Combine them with commas, e.g.
 `"mushin-py[eval,viz]"`, which works verbatim with `pip install`, `uv add`, or
 `uv pip install`.
 
-Supported Python: **3.10 – 3.14**. See the
-[install guide](https://martinez-hub.github.io/mushin/install/) for the full
-extras table and the platform/torch/NumPy support matrix.
+Supported Python: **3.11 – 3.14** (3.15 is waiting on two upstream fixes).
+See the [install guide](https://martinez-hub.github.io/mushin/install/) for the
+full extras table and the platform/torch/NumPy support matrix.
 
 ## Versioning & scope
 

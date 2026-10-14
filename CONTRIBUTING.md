@@ -47,7 +47,7 @@ pre-commit run --all-files
 
 PyTorch's behavior changes across versions (e.g. `torch.load` defaults). If your
 change touches model/metric loading or anything torch/numpy-version sensitive,
-please verify against a recent torch — the CI matrix (Python 3.9–3.14) is the
+please verify against a recent torch — the CI matrix (Python 3.11–3.14) is the
 source of truth. Contributors on Intel macOS cannot install torch > 2.2; a Linux
 container or CI is the reliable way to test newer torch there.
 
