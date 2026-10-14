@@ -35,18 +35,19 @@ dependencies = [
     # we pin the floor to pair with the torch >= 2.4 floor below (Lightning 2.4 is
     # contemporaneous with torch 2.4). Verified by the min-version CI job.
     "pytorch-lightning >= 2.4.0",
-    # hydra-zen floor is 0.10: `mushin.study` imports `hydra_zen.multirun`, which
-    # 0.9 doesn't export. Verified by the min-version CI job.
-    "hydra-zen >= 0.10.0",
-    # No ceiling. hydra-core 1.3.7 rejects the `hydra._internal` sweeper target
-    # that hydra-zen's `launch` names directly, which breaks every multirun; we
-    # mark that one target trusted around our launch call instead of capping
-    # (see `_trusted_sweeper_target` in mushin/workflows.py). Capping would
-    # withhold 1.3.7's security fix and, as a hard upper bound on a library,
-    # would propagate into every downstream resolution. That fix is
-    # GHSA-mwj6-rfh8-7qf4 (high; vulnerable `>= 1.3.4, < 1.3.7`, patched in
-    # 1.3.7) — a repository advisory, so it does not resolve through OSV or the
-    # global GitHub advisory DB; read it at
+    # hydra-zen floor is 0.17: hydra-core >= 1.3.6 refuses to instantiate the
+    # `hydra._internal` sweeper target that earlier hydra-zen releases name
+    # directly, which breaks every multirun. 0.17.0 builds the sweeper through
+    # Hydra's plugin registry instead (hydra-zen#885), so this floor is what
+    # makes sweeps work on a current hydra-core. Verified by the min-version
+    # CI job. (0.10 was the older floor: `mushin.study` imports
+    # `hydra_zen.multirun`, which 0.9 doesn't export.)
+    "hydra-zen >= 0.17.0",
+    # No ceiling on hydra-core. A cap would withhold 1.3.7's security fix
+    # (GHSA-mwj6-rfh8-7qf4, high; vulnerable `>= 1.3.4, < 1.3.7`) and, as a hard
+    # upper bound on a library, would propagate into every downstream
+    # resolution. It is a repository advisory, so it does not resolve through
+    # OSV or the global GitHub advisory DB; read it at
     # https://github.com/hydra-ecosystem/hydra/security/advisories/GHSA-mwj6-rfh8-7qf4
     "hydra-core >= 1.3.0",
     # torch floors are split by platform. Non-Intel uses NumPy 2 (below), which

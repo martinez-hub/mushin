@@ -348,46 +348,37 @@ exercised by the CPU-only examples or CI. See the
 [lightning reference](../reference/lightning.md) for the fully declarative
 `builds(Trainer, module)` form.
 
-## Known upstream issue: `zen_partial` + `zen_wrappers` on hydra-core 1.3.6+
+## Fixed upstream: `zen_partial` + `zen_wrappers` on hydra-core 1.3.6+
 
-If you build your configs with **both** hydra-zen options at once:
+Building a config with **both** hydra-zen options at once:
 
 ```python
 builds(my_target, zen_partial=True, zen_wrappers=my_wrapper)  # both set
 ```
 
-then on `hydra-core >= 1.3.6` instantiating that config raises:
+used to raise `InstantiationException: Callable targets cannot return partial
+subclasses ...` on `hydra-core >= 1.3.6`, which hardened `instantiate` so a
+callable target may no longer return a subclass of `functools.partial`.
+hydra-zen returned one exactly when those two options were combined.
 
-```
-InstantiationException: Callable targets cannot return partial subclasses ...
-```
+**Resolved in hydra-zen 0.17.0**, which mushin requires, so a supported install
+cannot hit it. Nothing in mushin uses `zen_wrappers` either way. If you see that
+error, check whether something else in your environment pins hydra-zen below
+0.17.
 
-**Why.** hydra-core 1.3.6 hardened `instantiate` so a callable target may no
-longer return a subclass of `functools.partial`. hydra-zen returns one only when
-those two options are combined; either alone is fine.
-
-**Not a mushin bug, and mushin is unaffected**: nothing in mushin uses
-`zen_wrappers`. But the error names neither Hydra nor hydra-zen, so it is easy to
-mistake for a problem in your task function.
-
-**The fix is to change the config, not the dependency**: drop one of the two
-options; apply the wrapper to the target yourself and keep `zen_partial=True`,
-or keep the wrapper and bind arguments another way.
-
-!!! warning "Do not try to pin around this"
+!!! warning "Do not pin around hardening"
     An earlier version of this page suggested `hydra-core != 1.3.6`. That advice
-    was wrong and has been removed. The rejection is **deliberate security
-    hardening that carries forward**: it still applies on 1.3.7, so excluding one
-    version does not avoid it, and every version you would pin back to carries a
-    high-severity advisory that the newer release fixes (1.3.6 fixes
-    GHSA-rqx7-p7vv-w7hr and GHSA-c3wx-c55w-pxjq; 1.3.7 fixes
-    GHSA-mwj6-rfh8-7qf4). Version exclusions cannot undo intentional hardening;
-    only a code change can.
+    was wrong. The rejection was **deliberate security hardening that carries
+    forward**, so excluding one version did not avoid it, and every version you
+    would pin back to carries a high-severity advisory the newer release fixes
+    (1.3.6 fixes GHSA-rqx7-p7vv-w7hr and GHSA-c3wx-c55w-pxjq; 1.3.7 fixes
+    GHSA-mwj6-rfh8-7qf4). A version exclusion cannot undo intentional
+    hardening; only a code change can, which is what hydra-zen 0.17.0 is.
 
 !!! note "Not to be confused with `zen()`"
     `zen(fn)`, the callable wrapper mushin itself uses to let a function take a
-    config, is a different feature and is **not** affected. Only the
-    `builds(..., zen_wrappers=...)` argument is.
+    config, is a different feature and was never affected. Only the
+    `builds(..., zen_wrappers=...)` argument was.
 
 ## See also
 
