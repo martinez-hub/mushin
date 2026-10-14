@@ -24,10 +24,14 @@ test-py: ## Run tests on a specific Python version, e.g. `make test-py PYTHON=3.
 	uv run --extra eval --python $(PYTHON) pytest tests/ --hypothesis-profile $(HYPOTHESIS_PROFILE) -p no:cacheprovider
 
 test-lowest: ## Run the suite against the LOWEST declared dep versions (x86_64 Linux via Docker; mirrors the min-versions CI job)
-	docker run --rm --platform linux/amd64 -v "$(PWD)":/app -w /app \
-		-e UV_PROJECT_ENVIRONMENT=/opt/venv -e UV_LINK_MODE=copy \
-		ghcr.io/astral-sh/uv:python3.10-bookworm-slim \
-		bash -c "uv sync --resolution lowest-direct --extra eval && uv run pytest tests/ --hypothesis-profile fast"
+	docker run --rm --platform linux/amd64 -v "$(PWD)":/src:ro -e UV_LINK_MODE=copy \
+		ghcr.io/astral-sh/uv:python3.11-bookworm-slim \
+		bash -c "apt-get update -qq && apt-get install -y -qq git >/dev/null \
+			&& mkdir /app && tar -C /src --exclude=./.venv --exclude=./.git -cf - . | tar -C /app --no-same-owner -xf - \
+			&& cd /app && git init -q && git add -A && git -c user.name=test-lowest -c user.email=test-lowest@localhost commit -qm snapshot \
+			&& uv sync --resolution lowest-direct --extra eval \
+			&& uv pip install 'setuptools<81' \
+			&& uv run --no-sync pytest tests/ --hypothesis-profile fast -p no:cacheprovider"
 
 lint: ## Lint with ruff
 	uv run ruff check .
