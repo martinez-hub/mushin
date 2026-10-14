@@ -1,0 +1,1 @@
+Python 3.10 is no longer supported: it reached end-of-life on 2026-10-01, and mushin now requires Python >= 3.11. On Intel macOS, where torch stops at 2.2.x, that leaves 3.11 as the only supported Python. Python 3.15 is not supported yet; the install guide explains what it is waiting on.
