@@ -1,0 +1,66 @@
+name: Python 3.15 preview
+
+# Does mushin's code work on Python 3.15? This is NOT a supported-version leg
+# (3.15 is not advertised yet) and NOT part of ci.yml's required `ci-ok`. It
+# is expected to fail until upstream catches up, and a standing red in the
+# required CI would bury real failures.
+#
+# Blockers as of 2026-10-14:
+#   - hydra-zen 0.17.0 does not import on 3.15 (Python 3.15 removed
+#     dataclasses._MISSING_TYPE). Fixed by hydra-zen#903, to ship as 0.17.1.
+#   - PyPI has no cp315 torch. PyTorch's own index does, and this workflow
+#     installs from it, but its macOS/Windows cp315 wheels crash
+#     (pytorch#200779). Fixed in torch 2.15.
+#
+# This answers "does the code work", not "is it installable from PyPI with
+# the committed lock". That is the promotion question, with its own
+# checklist: docs/superpowers/specs/2026-10-14-python-311-315-design.md, D4.
+# Promotion moves 3.15 into ci.yml's matrix and deletes this file.
+
+on:
+  workflow_dispatch:
+  # workflow_dispatch only works once this file is on the default branch. A
+  # PR that adds or edits the file runs it, so changes to it are exercised
+  # before merge.
+  pull_request:
+    paths:
+      - ".github/workflows/python-315-preview.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-315-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every leg is expected to fail for now; one failing must not cancel the
+      # others, or we learn nothing about them.
+      fail-fast: false
+      matrix:
+        # The platforms the 3.14 legs cover. Intel-mac is absent: it caps at
+        # torch 2.2.x, which has no cp315 wheels.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Create a Python 3.15 virtual environment
+        run: uv venv --python 3.15
+      - name: Install torch and torchvision from the PyTorch CPU index
+        # The only cp315 torch builds; PyPI's torch stops at cp314.
+        run: uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Install mushin with the battery extras and the dev group
+        # Resolved fresh, not from uv.lock: the lock pins PyPI torch and scipy
+        # 1.17.1, neither of which has cp315 wheels. The torch installed above
+        # satisfies mushin's requirement, so it is kept.
+        run: uv pip install -e ".[eval,detection,image,audio]" --group dev
+      - name: Show resolved environment
+        run: uv pip list
+      - name: Run tests
+        # --no-sync: run in the venv built above; never re-resolve uv.lock.
+        run: uv run --no-sync pytest tests/ --hypothesis-profile fast -p no:cacheprovider
