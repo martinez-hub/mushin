@@ -4,13 +4,14 @@
 
 Every ``mushin.sweep().run()`` is a Hydra multirun, and a multirun only happens
 if hydra-zen can build a sweeper from the installed hydra-core. That pairing has
-broken before: hydra-core 1.3.6 began refusing to instantiate the
+broken before: hydra-core 1.3.7 began refusing to instantiate the
 ``hydra._internal`` sweeper target that hydra-zen named directly, which took out
 every sweep on a fresh install. hydra-zen 0.17.0 builds the sweeper through
 Hydra's plugin registry instead, and ``pyproject.toml`` floors hydra-zen there.
 
-This file keeps one end-to-end sweep, so the next break of that kind fails a
-test named for the cause instead of scattering failures across the suite. The
+Sweeper construction happens in the one ``launch`` call every sweep goes
+through, so a break of that kind fails most of the suite at once. This file
+exists so that one of those failures is named for the cause: read it first. The
 ``latest-deps`` CI job, which resolves new releases of both packages, is where
 it is expected to fire first.
 """
