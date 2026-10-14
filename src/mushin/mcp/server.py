@@ -463,7 +463,7 @@ def _server_root(root: str | Path | None) -> Path:
 
 
 def create_server(root: str | Path | None = None):
-    """Build the MCP stdio server. Importing ``mcp`` requires Python >= 3.10."""
+    """Build the MCP stdio server. Needs the optional ``mcp`` extra."""
     from mcp.server.mcpserver import MCPServer
 
     rootp = _server_root(root)
