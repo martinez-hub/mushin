@@ -38,8 +38,8 @@ Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 
 | Platform | Python | torch | NumPy |
 |---|---|---|---|
-| Linux / Windows / non-Intel macOS | 3.10 – 3.14 | ≥ 2.4 | ≥ 2 |
-| Intel macOS (x86_64) | 3.10 – 3.11 | 2.2.x | 1.x |
+| Linux / Windows / non-Intel macOS | 3.11 – 3.14 | ≥ 2.4 | ≥ 2 |
+| Intel macOS (x86_64) | 3.11 | 2.2.x | 1.x |
 
 A few notes:
 
@@ -57,6 +57,16 @@ A few notes:
   x86_64 architecture. `mushin` supports this platform at torch 2.2.x and
   NumPy 1.x, but Python 3.12+ is not available there because NumPy 2 is
   required for Python 3.12 wheels and is ABI-incompatible with torch 2.2.x.
-- **Python 3.9** is not supported (it reached end-of-life in October 2025);
-  `mushin` requires Python ≥ 3.10.
+- **Python 3.10** is not supported: it reached end-of-life on 2026-10-01,
+  and `mushin` requires Python ≥ 3.11. On Intel macOS that leaves 3.11 as
+  the only supported version.
+- **Python 3.15** is not supported yet. Two upstream fixes are pending:
+  hydra-zen 0.17.0 fails to import on 3.15, which the upcoming 0.17.1 fixes
+  ([hydra-zen#903](https://github.com/mit-ll-responsible-ai/hydra-zen/pull/903)).
+  PyTorch has not published 3.15 wheels to PyPI, and the 3.15 builds on
+  PyTorch's own index crash on macOS and Windows; the fix ships in torch 2.15
+  ([pytorch#200779](https://github.com/pytorch/pytorch/issues/200779)).
+  With hydra-zen's fix and torch from PyTorch's index, mushin's test suite
+  already passes on Linux 3.15. Support will be announced in the changelog
+  once it is tested in CI.
 - These floors are enforced by the `min-versions` CI job on every pull request.

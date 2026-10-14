@@ -13,16 +13,6 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     ignore:
-      # netCDF4's floor is deliberately permissive. netcdf4 >= 1.7.4 requires
-      # numpy >= 2.3, which requires Python >= 3.11 — so raising the floor makes
-      # the (Python 3.10, ARM64, win32) resolution split unsatisfiable and
-      # `uv lock` fails outright. Keeping `>= 1.7.0` lets uv split the lock
-      # instead: 1.7.3 on that platform, 1.7.4 everywhere else. Dependabot has
-      # no way to know that and retried the bump weekly, failing every time.
-      # Revisit when requires-python moves past 3.10.
-      - dependency-name: "netCDF4"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
-
       # torch / numpy / torchvision are declared TWICE in one requirement list,
       # split by mutually exclusive markers with different pins — the Intel-Mac
       # boundary (darwin + x86_64 caps torch <2.3, numpy <2, torchvision <0.18;
@@ -30,8 +20,9 @@ updates:
       # updater cannot rewrite a marker-split declaration: it looks for a single
       # declaration string and aborts with "Declaration not found for torch!"
       # (RequirementReplacer#original_dependency_declaration_string). So these
-      # have never actually produced update PRs — the failure was masked by the
-      # netCDF4 error above until that was silenced.
+      # have never actually produced update PRs — the failure was masked by a
+      # separate netCDF4 lock failure until that was silenced (that ignore is
+      # gone: requiring Python >= 3.11 made netCDF4's bumps resolvable).
       #
       # Ignoring them does not cost coverage we still had: the same file-updater
       # bug would block a security update's write for these packages too, and

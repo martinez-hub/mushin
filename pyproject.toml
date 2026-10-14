@@ -9,7 +9,7 @@ name = "mushin-py"
 version = "0.14.2"
 description = "Boilerplate-free, reproducible machine-learning experiment sweeps: a framework-agnostic sweep engine built on hydra-zen, with first-class PyTorch Lightning integration. Carved out of MIT-LL's responsible-ai-toolbox."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "Josue Martinez-Martinez" },
@@ -19,7 +19,6 @@ maintainers = [
 ]
 keywords = ["machine learning", "reproducibility", "pytorch-lightning", "hydra", "hydra-zen"]
 classifiers = [
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -27,6 +26,12 @@ classifiers = [
     # required to pass rather than continue-on-error. Intel-mac is excluded from
     # that matrix: it caps at torch 2.2.2, which has no 3.14 wheels.
     "Programming Language :: Python :: 3.14",
+    # 3.15 is NOT classified yet: hydra-zen 0.17.0 cannot import on it, and
+    # PyPI has no cp315 torch (PyTorch's own index has cp315 builds, but the
+    # macOS/Windows ones crash, pytorch#200779). The non-required
+    # .github/workflows/python-315-preview.yml tracks it; classify 3.15 when
+    # it joins ci.yml's required matrix (checklist in
+    # docs/superpowers/specs/2026-10-14-python-311-315-design.md, D4).
     "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -70,7 +75,6 @@ dependencies = [
     # xarray 2024.6.0 is the first NumPy-2-compatible release (older xarray uses
     # `np.unicode_`, removed in NumPy 2). Verified by the min-version CI job.
     "xarray >= 2024.6.0",
-    "typing-extensions >= 4.4",
     # pandas is required transitively by xarray (a core dep) and is also used by
     # the eval layer, so it stays in base — gating it would be cosmetic since
     # xarray installs it regardless. `torchmetrics` and `scipy`, by contrast, are
@@ -82,10 +86,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# matplotlib 3.9 is the first release compatible with NumPy 2 (the non-Intel
-# floor) that also ships Python 3.10 wheels; lower floors either fail to build on
-# 3.10 (3.3) or are NumPy-2 ABI-incompatible. Still supports NumPy 1.x for the
-# Intel-mac branch. Verified by the min-version CI job.
+# matplotlib >= 3.9 works with NumPy 2 (the non-Intel floor) and still supports
+# NumPy 1.x for the Intel-mac branch. Releases up to 3.8.3 do not work with
+# NumPy 2: 3.7.3-3.8.3 cap numpy<2, and older wheels fail its ABI ("numpy.core.
+# multiarray failed to import"). Verified by the min-version CI job.
 viz = ["matplotlib >= 3.9"]
 netcdf = ["netCDF4 >= 1.7.0"]
 mcp = ["mcp >= 2, < 3"]
@@ -217,7 +221,7 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]

@@ -169,7 +169,7 @@ def test_describe_outside_root_raises(tmp_path):
 
 
 def test_create_server_registers_tools():
-    pytest.importorskip("mcp")  # mcp requires Python >= 3.10
+    pytest.importorskip("mcp")  # the optional `mcp` extra
     from mushin.mcp.server import create_server
 
     server = create_server(root=None)

@@ -8,6 +8,7 @@ from inspect import getattr_static
 from pathlib import Path
 from typing import (
     Any,
+    Self,
     TypeAlias,
     TypeGuard,
     TypeVar,
@@ -18,7 +19,6 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._launch import _NotSet
-from typing_extensions import Self
 
 from ._validate import value_check
 

@@ -8,7 +8,7 @@ import json
 import platform
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -142,7 +142,7 @@ def capture(config: Any = None, base: dict | None = None) -> dict:
     if base is None:
         base = capture_base()
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         **base,
         "config": _to_plain(config) if config is not None else None,
     }
