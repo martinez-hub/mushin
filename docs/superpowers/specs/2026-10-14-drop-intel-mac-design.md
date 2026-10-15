@@ -227,8 +227,10 @@ And hand-editing the lock is a step nobody could reproduce from the repo.
 unresolvable by uv >= 0.12.14. uv also checks `environments` markers for wheel
 coverage, as it does `required-environments`, and since 0.12.14 (uv #21672)
 it checks each resolver fork separately. The lock has forks where torch has no
-wheel at all: Emscripten, and Windows ARM64 on Python 3.14. So every torch
-version was rejected, and any re-resolve failed, whether a plain
+wheel at all: Emscripten and Windows ARM64. PyPI has no torch wheels for
+either platform, for any Python (PyTorch's own index has win_arm64 builds for
+3.11–3.13, but the lock resolves from PyPI); uv's errors named the Python 3.14
+forks only because it reports the first failing fork. So every torch version was rejected, and any re-resolve failed, whether a plain
 `uv lock --upgrade` or a one-package `uv lock --upgrade-package`. This was
 verified with uv 0.12.5 (passes), 0.12.13 (passes), 0.12.14 (fails) and 0.13.1
 (fails). The nightly `latest-deps` job caught it. It would also have broken

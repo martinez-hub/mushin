@@ -25,9 +25,10 @@ classifiers = [
     # 3.14 is classified now that its CI legs (linux/windows/macos-arm64) are
     # required to pass rather than continue-on-error.
     "Programming Language :: Python :: 3.14",
-    # 3.15 is NOT classified yet: hydra-zen 0.17.0 cannot import on it, and
-    # PyPI has no cp315 torch (PyTorch's own index has cp315 builds, but the
-    # macOS/Windows ones crash, pytorch#200779). The non-required
+    # 3.15 is NOT classified yet: PyPI has no cp315 torch (PyTorch's own index
+    # has cp315 builds, but the macOS/Windows ones crash, pytorch#200779), and
+    # hydra-zen 0.17.0 cannot import on it, so promotion also raises the
+    # hydra-zen floor to 0.17.1, which fixes that. The non-required
     # .github/workflows/python-315-preview.yml tracks it; classify 3.15 when
     # it joins ci.yml's required matrix (checklist in
     # docs/superpowers/specs/2026-10-14-python-311-315-design.md, D4).
@@ -65,8 +66,9 @@ dependencies = [
     # that). Intel macOS (x86_64) is not supported: PyTorch publishes no x86_64
     # macOS wheels after 2.2. Do not encode that as `[tool.uv] environments`:
     # uv applies the same per-fork wheel check to `environments` as to
-    # `required-environments`, so any fork with no torch wheel (Emscripten,
-    # Windows ARM64 on 3.14) makes the lock unresolvable. The min-version CI
+    # `required-environments`, so any fork with no torch wheel (Emscripten and
+    # Windows ARM64, for which PyPI has no torch wheels) makes the lock
+    # unresolvable. The min-version CI
     # job verifies the numpy floor. It resolves torch 2.4.1, not 2.4.0, because
     # the lock resolves every extra together and torchvision 0.19.0 caps numpy<2.
     "torch >= 2.4.0",
