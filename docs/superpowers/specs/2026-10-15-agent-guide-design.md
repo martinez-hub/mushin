@@ -1,11 +1,13 @@
 # Design: a usage guide for AI coding agents
 
 **Date:** 2026-10-15
-**Status:** Draft, before spec review. Decisions were made without asking the
-user, at their request; each records its rationale and the alternatives it
-rejected.
+**Status:** Revised after spec review (12 confirmed findings, all
+incorporated; three refuted findings still contributed guide content). The
+user asked for design questions to be decided rather than asked, so each
+decision records its rationale and the alternatives it rejected.
 **Sequencing:** lands after the docs snippet-include fix (#249). D4 relies on
-that PR's include guard, so this branch is rebased onto it before the PR.
+that PR's include guard and its CI docs-job step, so this branch is rebased
+onto it before the PR.
 
 ## Problem
 
@@ -14,31 +16,29 @@ Cursor and the like) to set up their experiments. mushin is a niche library
 that agents know little about from training. Nothing in the repo is written for
 them:
 
-- There is no agent-oriented page, no `AGENTS.md`, no `llms.txt`, and the docs
-  build emits nothing machine-readable beyond HTML.
-- `import mushin; help(mushin)` shows no module docstring, and there is no
-  `python -m mushin`. An agent that installed the package has no
+- There is no agent-oriented page, no `llms.txt` or other agent-oriented index
+  (the docs build emits only HTML, the search index, the sitemap and
+  `objects.inv`), and no `AGENTS.md`.
+- `help(mushin)` gives an agent nothing useful:
+  - On a full install it shows the copyright header comment as the
+    description.
+  - On a core install (`pip install mushin-py`, the README's first install
+    line) it fails. It prints only the eval-extra install hint, and
+    `python -m pydoc mushin` exits 1. Cause: `__dir__` lists the lazy eval
+    names, pydoc `getattr`s each one, the lazy import raises `ImportError`,
+    and `inspect.getmembers` catches only `AttributeError`.
+- There is no `python -m mushin`. An agent that installed the package has no
   version-matched entry point.
 - What an agent needs is spread across the quickstart, concepts, workflows,
   exploration-to-paper, resilience and statistics pages. No page says which
   API to use for which job, shows one runnable end-to-end template, lists the
   on-disk output layout, or says what to check before reporting results.
-- Pitfalls that produce wrong results or wasted compute are not collected in
-  one place. Examples verified on 2026-10-15:
-  - `train.run(lr=[0.1, 0.2])` raises: swept values must be wrapped in
-    `mushin.multirun([...])`. The error says so, but only after the agent
-    guessed wrong.
-  - `mushin.best(root, "acc")` returns the single best *cell*, which is one
-    lucky seed, not the best configuration averaged over seeds.
-  - `mushin.show(root)` prints its table and also returns it, so
-    `print(mushin.show(root))` prints it twice.
-  - `run()`'s docstring documents `dry_run`, `confirm_above`,
-    `max_total_seconds`, `on_error`, `resume`, `sample` and `cache_dir`, but
-    not `working_dir` or `launcher`.
+- Pitfalls that produce wrong results or wasted compute are not collected
+  anywhere (each verified on 2026-10-15; see Facts).
 - The docs' example includes were broken from 2026-07-27 to 2026-10-15 (ruff
-  0.16 respaced them; fixed separately). An agent reading the Tutorial in that
-  window saw a directive instead of code. Agent-facing code must be tested, not
-  just rendered.
+  0.16 respaced them; fixed in #249). An agent reading the Tutorial in that
+  window saw a directive instead of code. Agent-facing code must be executed by
+  tests, not just rendered.
 
 ## Goal
 
@@ -46,59 +46,122 @@ An agent that has installed mushin, or can fetch its docs, can set up a
 correct sweep, run it safely, analyze it, and report it, without reading the
 source. Success criteria:
 
-1. One guide, reachable offline from the installed package and online from the
-   docs site, `llms.txt`, the README and `help(mushin)`.
-2. The guide's Python code runs as written. CI executes it, so API drift fails
-   a test instead of misleading agents.
-3. The guide matches the installed version, because it ships inside the
-   package.
+1. **One guide, reachable everywhere.** It ships in the installed package
+   (`python -m mushin guide`), offline. It is also reachable from
+   `help(mushin)` on both core and full installs, the README (which is also
+   the PyPI description), a docs page, and the site's `llms.txt`.
+2. **Tested code.** The guide's Python runs as written, and the `run()`
+   keywords it uses exist. CI checks both, so API drift fails a test instead
+   of misleading agents.
+3. **The installed version.** The packaged copy matches the installed
+   version. The web copies track `main`.
 
 ## Non-goals
 
-- Changing mushin's behavior. The `best()` and `show()` quirks are documented,
-  not changed. Changing them is a separate decision.
+- Changing mushin's sweep or analysis behavior. `best()` being per-cell,
+  `show()` printing and returning, `compare_methods`' naming requirements, the
+  underpowered warning ignoring Holm correction, and the call-form pickling bug
+  (Facts) are documented, not changed. Each is a follow-up. The one behavior
+  change is D3's `__dir__` fix, which only affects introspection on a core
+  install.
 - MCP changes. The server stays analysis-only, and the guide points to it.
-- Packaging the guide as a Claude Code skill or other vendor-specific format.
-- An `AGENTS.md` for agents that *contribute* to mushin. This guide is for
-  agents *using* mushin in someone else's project.
-- Filling the API reference gaps (exports with no reference page). The guide
-  tells agents to read docstrings with `help()`, which always matches the
-  installed version.
+- Vendor-specific packaging (a Claude Code skill, MCP prompts).
+- An `AGENTS.md` for agents that *contribute* to mushin.
+- API reference pages for the exports that have none. The guide tells agents
+  to use `help(obj)`, which matches the installed version.
 
 ## Facts established (2026-10-15, mushin 0.15.1)
 
+- **Install:** torch and pytorch-lightning are core dependencies. The `eval`
+  extra adds torchmetrics and scipy. A task need not use torch.
 - **Sweep output layout:** each sweep writes `multirun/<date>/<time>/` under
-  the launch directory unless `working_dir=` is given. It holds
+  the launch directory unless `working_dir=` is given. That directory holds
   `multirun.yaml`, `mushin_sweep_manifest.json` and one directory per cell
-  (`0/`, `1/`, ...). Each cell directory holds `mushin_metrics.json`,
-  `mushin_cell_status.json`, `mushin_provenance.json`, `mushin_workflow.log`
-  and `.hydra/`. `sweep.workflow.working_dir` is the sweep root.
+  (`0/`, `1/`, ...). Each cell directory holds:
+  - `mushin_cell_status.json`, `mushin_provenance.json`,
+    `mushin_workflow.log` and `.hydra/`
+  - `mushin_metrics.json` if the cell completed
+  - `mushin_error.txt` (the traceback) instead, if it failed under
+    `on_error="nan"`
+
+  `sweep.workflow.working_dir` is the sweep root.
 - **`dry_run=True`** prints the cell count and every swept axis and returns
   `{"num_cells", "axes", "fixed", "working_dir"}` without launching a job.
-- **Statistics without torch:** a sweep over `method` and `seed` returns a
-  `(method, seed)` dataset. `mushin.benchmark.compare_methods(ds)` returns the
-  pairwise table (Wilcoxon by default, Holm-corrected). Verified with 2
-  methods × 6 seeds. It needs the `eval` extra (scipy).
-- **Reloading:** `MultiRunMetricsWorkflow().load_from_dir(path, metrics_filename)`
-  reloads a finished sweep. `mushin.show`, `mushin.best` and `mushin.diff`
-  read a sweep root directly.
+- **Swept values:** a bare list raises
+  `TypeError: ... wrap them: lr=mushin.multirun([...])`.
+- **`@mushin.sweep` replaces the function with a `Sweep` handle.** The handle
+  has no `__call__`, so decorating the scientist's own training function in
+  place breaks their other call sites.
+  - The call form, `mushin.sweep(fn)` bound to a different name, runs with
+    the default local launcher. Its task does not pickle, though, so
+    out-of-process launchers fail: the qualname points at
+    `<module>.<fn>.__mushin_task__`.
+  - Hence: a new module-level function, decorated, that calls the
+    scientist's code.
+- **Statistics without the torch eval layer:** a sweep over `method` and
+  `seed` returns a `(method, seed)` dataset.
+  - `mushin.benchmark.compare_methods(ds)` returns the pairwise table
+    (Wilcoxon by default, Holm-corrected).
+  - It reads the dims named exactly `method` and `seed`. Other names raise
+    `KeyError: 'seed'`, and an extra swept dim raises an opaque `TypeError`.
+  - It raises `IncompleteSweepError` on failed or skipped cells unless
+    `allow_incomplete=True`.
+  - `mean_diff` is `method_a - method_b`, in coordinate order.
+  - It needs scipy (the `eval` extra).
+- **Seeds and Holm correction:** Wilcoxon's best possible two-sided p with `n`
+  seeds is `2 ** (1 - n)`. Holm multiplies the smallest of `m` p-values by
+  `m`, so with `m` pairwise comparisons, significance at alpha needs
+  `m * 2 ** (1 - n) <= alpha`.
+  - 2 methods (1 pair) need 6 seeds.
+  - 3 methods (3 pairs) need 7: with 6 seeds, perfectly separated data gives
+    `p_corrected = 0.094`.
+  - 4 methods (6 pairs) need 8.
+
+  `warn_if_underpowered` checks only the uncorrected floor.
+- **`resume=True`** re-runs incomplete cells, and completed cells whose
+  resolved config or task source changed. It does not detect edits to helper
+  functions, module constants or the environment. Those cells are silently
+  reused. `cache_dir=` has the same blind spot.
+- **Reloading:**
+  - `MultiRunMetricsWorkflow().load_from_dir(root, "mushin_metrics.json")`
+    then `.to_xarray()` reloads a finished sweep. Passing `None` as the
+    filename silently gives an empty dataset.
+  - `mushin.show`, `mushin.best` and `mushin.diff` read a sweep root
+    directly. `show()` prints its table and also returns it. `best()` returns
+    the single best cell (one seed), not the best configuration averaged over
+    seeds.
+- **`run()`'s docstring** documents `dry_run`, `confirm_above`,
+  `max_total_seconds`, `on_error`, `resume`, `sample` and `cache_dir`, but not
+  `working_dir` or `launcher`.
+- **The docs site** is rebuilt from `main` on every push (`docs.yml`), not per
+  release.
+- **CI:**
+  - The `test` job runs only when code paths change.
+  - The `docs` job runs on every PR, and since #249 it runs
+    `tests/test_docs_snippets.py`. Its environment includes the dev group
+    (which pulls scipy through scikit-learn), but not the eval extra.
+  - `core-only` installs `.` non-editable with no extras.
+  - `batteries-clean-install` builds the wheel and installs it in a clean
+    venv.
 - **Packaging:** `[tool.setuptools.package-data]` ships only `py.typed` today.
-  The `batteries-clean-install` CI job builds the wheel and installs it into a
-  clean venv.
-- **`mkdocs-llmstxt` 0.5.1** (maintained by the mkdocstrings author) generates
-  `/llms.txt` and `/llms-full.txt` from selected pages. It requires Python >=
-  3.11, which the docs build already uses.
+- **`mkdocs-llmstxt` 0.5.1** would cap `markdown-it-py < 4`, downgrading it
+  from 4.2.0 to 3.0.0 across the shared `uv.lock`.
+- **ruff** formats Python code blocks in Markdown, but `ruff check` does not
+  lint `.md` files.
+- **Windows pipes:** Python on Windows writes a piped stdout in the ANSI code
+  page (cp1252), so printing a non-cp1252 character such as `→` raises
+  `UnicodeEncodeError`.
 
 ## Approaches considered
 
 1. **Docs-site page plus `llms.txt` only.** Least work, but agents without web
-   access can't reach it, and the site describes the latest release, not the
-   installed one.
-2. **A guide shipped in the package, surfaced everywhere (recommended).** One
-   Markdown file inside `mushin/`, printed by `python -m mushin guide`,
-   included verbatim in a docs page, listed first in `llms.txt`, and pointed
-   to by the README and the module docstring. CI executes its code blocks and
-   checks the built wheel contains it.
+   access can't reach it, and the site tracks `main`, not the installed
+   release.
+2. **A guide shipped in the package, surfaced everywhere (recommended).**
+   - One Markdown file inside `mushin/`, printed by `python -m mushin guide`.
+   - Included verbatim in a docs page, linked first from `llms.txt`, and
+     pointed to by the README and `help(mushin)`.
+   - CI executes its code and checks the built wheel contains it.
 3. **Approach 2 plus agent integrations** (a skill package, MCP prompts or
    resources, setup tools in the MCP server). More reach for specific agents,
    but more surface to maintain, and vendor formats are still moving. It can be
@@ -113,188 +176,269 @@ source. Success criteria:
 **Why:**
 - An agent with no network still gets it.
 - It matches the installed version.
-- A file in the package is discoverable by an agent browsing
-  `site-packages/mushin/`.
+- An agent browsing `site-packages/mushin/` finds it.
 
 **Name:** not `AGENTS.md`. Tools such as Codex treat an `AGENTS.md` in a
 directory as instructions for working on that directory's code, so an agent
 editing mushin's own `src/mushin/` would take user-facing guidance as
 contributor instructions.
 
+**ASCII only.** The text is ASCII (D7 enforces it), so every consumer can
+print it, including a Windows pipe in cp1252.
+
 ### D2. `python -m mushin guide` prints it
 
-Add `src/mushin/__main__.py` with an `argparse` CLI:
-- `python -m mushin guide` prints the guide to stdout, preceded by one line,
-  `<!-- mushin X.Y.Z -->`, with the installed version from
-  `importlib.metadata.version("mushin-py")`. An HTML comment keeps the output
-  valid Markdown and invisible when rendered.
-- `python -m mushin guide --path` prints the file's path, for agents that
-  read files with their own tools.
+Add `src/mushin/__main__.py`, an `argparse` CLI:
+- `python -m mushin guide` writes one line, `<!-- mushin X.Y.Z -->` (the
+  installed version, from `importlib.metadata.version("mushin-py")`),
+  followed by the guide. The HTML comment keeps the output valid Markdown and
+  invisible when rendered.
+- `python -m mushin guide --path` prints the file's absolute path, for agents
+  that read files with their own tools.
 - `python -m mushin` with no command prints help and exits 0.
 
-**Why `python -m` and not a console script:** it works in any environment
-where mushin is importable, including notebooks and `uv run`, and needs no
-`[project.scripts]` entry. It is also what an agent tries first.
+**Why `python -m` and not a console script:**
+- It works wherever mushin is importable, including notebooks and `uv run`.
+- It needs no `[project.scripts]` entry.
+- It is what an agent tries first.
 
 **Rejected:** a `mushin.guide()` function. It is less discoverable than the
-CLI, and the module docstring covers interactive discovery (D3).
+CLI, and D3 covers interactive discovery.
 
-### D3. A module docstring for `help(mushin)`
+### D3. `help(mushin)` works and points to the guide
 
-Add a short module docstring to `src/mushin/__init__.py`. It gives a
-one-paragraph description, the three entry points (`@mushin.sweep`,
-`MultiRunMetricsWorkflow`, `Study` / `compare`), and the line "AI coding
-agents: run `python -m mushin guide` for a usage guide matching this
-version".
+- **A module docstring** in `src/mushin/__init__.py`:
+  - one paragraph on what mushin does
+  - the main entry points (`@mushin.sweep`, `MultiRunMetricsWorkflow`,
+    `mushin.benchmark.compare_methods`, `Study` / `compare`)
+  - the line "AI coding agents: run `python -m mushin guide` for a usage
+    guide matching this version"
+
+  The copyright comment stays a comment.
+- **`__dir__` omits the lazy eval-layer names when the eval extra is not
+  installed**, i.e. when `importlib.util.find_spec("scipy") is None`. This
+  matches the check `mushin.benchmark` makes. `help()` and pydoc then render
+  on a core install. Attribute access is unchanged: `mushin.compare` still
+  raises the install hint.
+
+**Rejected:** making the lazy failure raise a class that is both `ImportError`
+and `AttributeError`. `from mushin import compare` would then swallow the
+install hint, because CPython replaces an `AttributeError` raised during
+`from ... import` with its own "cannot import name" error.
 
 ### D4. A docs page that includes the guide verbatim
 
-`docs/agents.md` ("For AI agents"), in the top-level nav after Quickstart:
-- A short intro for the human: how to point an agent at the guide, with a
-  copy-paste block for the project's `AGENTS.md` / `CLAUDE.md`, plus the MCP
-  server for analysis.
-- Then the guide, included with a one-line snippet include outside any code
-  fence (`--8<-- "src/mushin/agent_guide.md"`), the same form as
-  `docs/changelog.md`. The docs' include guard allows this form outside
-  fences.
+`docs/agents.md` ("For AI agents"), in the top-level nav right after
+Quickstart. It has two parts:
+- **A short intro for the human:**
+  - how to point an agent at the guide, with a copy-paste block for the
+    project's `AGENTS.md` / `CLAUDE.md` telling the agent to run
+    `python -m mushin guide` first
+  - the MCP server, for analysis
+  - a note that the web copy tracks `main`, while `python -m mushin guide`
+    prints the installed version's copy
+- **Then the guide,** included with a one-line snippet include outside any
+  fence: `--8<-- "src/mushin/agent_guide.md"`. That is the form
+  `docs/changelog.md` uses, and #249's guard allows it there.
 
 **Links inside the guide** are absolute docs-site URLs
-(`https://martinez-hub.github.io/mushin/...`), so they work in the terminal,
-in the package file and on the site. A test checks that each one maps to an
-existing docs page (D7).
+(`https://martinez-hub.github.io/mushin/...`), so they work in a terminal, in
+the package file and on the site. D7 checks that each one maps to a page.
 
-### D5. `llms.txt` via mkdocs-llmstxt
+### D5. A hand-written `docs/llms.txt`
 
-Add `mkdocs-llmstxt` to the `docs` dependency group and configure it:
-- The "Start here" section lists the agents page first, then Quickstart and
-  Core concepts.
-- A Guides section follows.
-- Generate `llms-full.txt` too.
+A static `docs/llms.txt`, which MkDocs copies to the site root, in the
+llmstxt.org format:
+- **The H1 and summary.**
+- **"Start here":** the guide as raw Markdown first
+  (`https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md`),
+  then the agents, Quickstart and Core concepts pages.
+- **"Guides":** links to the topic guides.
 
-**Fallback:** if the plugin cannot pass `mkdocs build --strict` alongside
-mkdocs-jupyter and mkdocstrings, ship a hand-written `docs/llms.txt` index (no
-plugin; MkDocs copies it to the site root) and drop `llms-full.txt`. The plan
-verifies this first.
+**Why not mkdocs-llmstxt:** it would downgrade `markdown-it-py` across the
+shared lock (Facts) for one generated file. A static index needs no
+dependency, and raw Markdown is better input for agents than converted HTML.
+`llms-full.txt` is dropped.
+
+D7 checks that every link in `llms.txt` resolves.
 
 ### D6. README pointer
 
 A short "Using mushin with an AI agent" section right after the README
 Quickstart. It covers `python -m mushin guide`, the docs page, `llms.txt`,
-and the copy-paste project-instructions block. The README is also the PyPI
-description, which is the first page an agent fetches.
+and the copy-paste block. The README is also the PyPI description, which is
+the first page an agent fetches.
 
 ### D7. Tests keep the guide honest
 
 A new test file, `tests/test_agent_guide.py`:
-1. **The guide ships:** `importlib.resources.files("mushin") / "agent_guide.md"`
-   is a file.
-2. **Its code runs:** execute every ```python block of the guide in order, in
-   one namespace, inside a temporary working directory. The guide therefore
-   uses only runnable blocks for code. Shell commands go in ```bash blocks and
-   illustrative output in ```text blocks, neither of which is executed. The
-   test needs the `eval` extra (it skips without scipy), and the CI `test` job
-   has it.
-3. **Its links resolve:** every `https://martinez-hub.github.io/mushin/<path>`
-   URL in the guide maps to `docs/<path>.md` or `docs/<path>/index.md`
-   (anchors stripped).
-4. **The CLI works:** `main(["guide"])` prints the version line and then the
-   guide, `main(["guide", "--path"])` prints an existing path, and `main([])`
-   exits 0.
-5. **Its numbers are pinned:** the seed floor the guide states for the
-   Wilcoxon test (6 at alpha 0.05) is checked against
-   `mushin.benchmark._stats.warn_if_underpowered`, the way
-   `tests/test_docs_claims.py` checks the statistics guide.
 
-In CI, the `batteries-clean-install` job (built wheel, clean venv) also runs
-`python -m mushin guide --path` and checks the file is non-empty. That proves
-the wheel carries it, which an editable install cannot.
+1. **It ships.** `importlib.resources.files("mushin") / "agent_guide.md"` is a
+   file, and its text is ASCII.
+2. **Its code runs.** The test concatenates the guide's ```python blocks, in
+   order, into `tmp_path/guide_example.py` and runs
+   `python guide_example.py` in a subprocess with `cwd=tmp_path`.
+   - It runs as a real script, as an agent would run it, so `inspect.getsource`
+     works for mushin's fingerprints and Hydra's global state stays out of the
+     test process.
+   - Code goes only in ```python blocks; shell commands go in ```bash blocks
+     and output in ```text blocks, neither of which is executed.
+   - The test skips without scipy.
+3. **Its `run()` keywords exist.** The test AST-parses the blocks. Every
+   keyword in a `.run(...)` call that is not a parameter of a task defined in
+   the guide must be in `inspect.signature(MultiRunMetricsWorkflow.run)` (or
+   the `Sweep.run` signature). A renamed safety keyword therefore fails, even
+   though `run()` accepts arbitrary task overrides.
+4. **Its links resolve.**
+   - Every `https://martinez-hub.github.io/mushin/<path>` URL in the guide
+     and in `docs/llms.txt` maps to `docs/<path>.md` or
+     `docs/<path>/index.md` (anchors stripped).
+   - The raw-GitHub link in `llms.txt` names a file that exists in the repo.
+5. **The CLI works.**
+   - `main(["guide"])` prints the version line, then the guide.
+   - `main(["guide", "--path"])` prints an existing path.
+   - `main([])` exits 0.
+   - A subprocess run of `python -m mushin guide` with
+     `PYTHONIOENCODING=cp1252` exits 0.
+6. **Its numbers are pinned.** The seed floors the guide states (6 seeds for 2
+   methods, 7 for 3, 8 for 4) are checked against `compare_methods` on
+   perfectly separated synthetic data: significant at the stated floor, not
+   significant one seed below it.
+
+**In CI:**
+- The `docs` job also runs `tests/test_agent_guide.py`, next to the snippet
+  guard, so a docs-only PR that breaks a link or the guide's code fails.
+- `core-only` (non-editable, no extras) checks
+  `"python -m mushin guide" in pydoc.render_doc(mushin)` and runs
+  `python -m mushin guide --path`.
+- `batteries-clean-install` (built wheel, clean venv) runs
+  `python -m mushin guide --path` and checks the file is non-empty. That
+  proves the wheel carries it, which an editable install cannot.
 
 ### D8. Guide content
 
-Compact: about 250 to 350 lines, because a long guide gets skimmed. In order:
+Compact: 250 to 400 lines. Prose stays short and the template carries the
+detail. In order:
 
 1. **What mushin is.** Sweep a Python function over a grid of parameters and
    seeds, and get a labeled `xarray.Dataset` / `pandas.DataFrame` back, with
-   provenance and paired statistics. Framework-agnostic sweeps; torch and
-   Lightning for the eval layer.
-2. **Install.** The extras that matter (`eval`, `viz`, `netcdf`, the batteries,
-   `mcp`) in a small table.
+   provenance and paired statistics. The task can use any framework. torch and
+   Lightning are installed with mushin and power the optional eval layer.
+2. **Install.** The extras that matter (`eval`, `viz`, `netcdf`, the
+   batteries, `mcp`) in a small table.
 3. **Choosing an entry point.** A decision table:
-   - a function over a grid: `@mushin.sweep`
-   - custom collection or Lightning: `MultiRunMetricsWorkflow`
-   - (method × seed) significance: `mushin.benchmark.compare_methods`
-   - torch models on a battery: `mushin.compare`
-   - train then compare: `Study`
-   - LLMs: `mushin.llm`
-   - analyzing finished runs: `show` / `best` / `diff` / MCP
-   - parallel or cluster runs: launchers
-4. **The template (runnable, tested).** Define a task that returns a dict of
-   metrics. Preview with `dry_run=True`. Run with `method` and `seed` axes and
-   a `working_dir`. Read the results as a dataset and a DataFrame. Run
-   `compare_methods`. Show where the outputs went.
+
+   | Job | Entry point |
+   |---|---|
+   | A function over a grid | `@mushin.sweep` |
+   | Custom collection or Lightning | `MultiRunMetricsWorkflow` |
+   | (method × seed) significance | `mushin.benchmark.compare_methods` |
+   | torch models on a battery | `mushin.compare` |
+   | Train, then compare | `Study` |
+   | LLMs | `mushin.llm` |
+   | Analyzing finished runs | `show` / `best` / `diff` / MCP |
+   | Parallel or packed GPU runs | `launcher="joblib"`, `pin_gpu_round_robin` |
+   | Cluster runs | the multinode guide |
+
+4. **The template (runnable, tested), as one experiment script:**
+   - A new module-level `@mushin.sweep` task that calls the scientist's code
+     (stubbed in the guide) and returns a dict of floats. Never decorate the
+     scientist's function in place.
+   - `dry_run=True`, with an assertion on `num_cells`.
+   - A run with a fixed `working_dir` and `method` and `seed` axes, plus one
+     extra swept axis that is selected away before the statistics.
+   - Read the results as a dataset and a DataFrame.
+   - `compare_methods`, with the sign of `mean_diff` explained.
+   - Where the outputs went.
 5. **Rules that prevent wrong results or wasted compute:**
    - `multirun([...])` for swept values; `hydra_list([...])` for a list-valued
      argument.
-   - Return a dict of numbers. The values are JSON-coerced into
+   - Return a dict of numbers. Values are JSON-coerced into
      `mushin_metrics.json`.
    - Each cell runs in its own directory: use `mushin.original_cwd()` for
      input paths.
    - `dry_run=True` before anything expensive, plus `confirm_above` /
      `MUSHIN_MAX_CELLS` and `max_total_seconds`.
-   - `on_error="nan"` keeps sweeping, and its failures are listed.
-     `resume=True` with the same `working_dir` re-runs only incomplete cells.
+   - `on_error="nan"` keeps sweeping and lists the failures, and
+     `compare_methods` then needs `allow_incomplete=True` or a complete grid.
      `sample=` explores a subset.
-   - Enough seeds for the test: Wilcoxon cannot reach alpha 0.05 below 6 seeds
-     (pinned by D7 item 5).
+   - `resume=True` with the same `working_dir` re-runs incomplete cells and
+     cells whose config or task body changed. After editing a helper, a
+     constant or the environment, use a fresh `working_dir` (and don't rely on
+     `cache_dir`).
+   - `compare_methods` needs dims named exactly `method` and `seed`: rename or
+     select others first.
+   - Seeds: `m * 2 ** (1 - n) <= alpha` with `m` comparisons, so 6 seeds for 2
+     methods, 7 for 3 and 8 for 4 at alpha 0.05. These are floors, not power.
    - Commit code before final runs: provenance records the git SHA and whether
      the tree was dirty.
-   - `best()` is per-cell. Average over seeds to pick a configuration.
+   - `best()` is per-cell: average over seeds to pick a configuration.
      `show()` prints and returns.
-6. **Where results go and how to reload them.** The layout, `load_from_dir`,
+6. **Running long sweeps from an agent.** Agent shell commands time out, so:
+   - put the sweep in a script with a fixed `working_dir`
+   - start it in the background with output redirected to a log
+   - poll with `python -c "import mushin; mushin.show('<root>')"`
+   - if a cell is still `running` but the process is gone, it was killed:
+     relaunch the same script with `resume=True`
+7. **Where results go and how to reload them.** The layout (including
+   `mushin_error.txt`), `load_from_dir(root, "mushin_metrics.json")`,
    `show` / `best` / `diff`, and the MCP server.
-7. **Before reporting to the scientist, a checklist:**
+8. **Before reporting to the scientist, a checklist:**
    - no failed or skipped cells, or they are reported
-   - the seed count suits the test
-   - corrected p-values and effect sizes, not raw means
+   - enough seeds for the number of comparisons
+   - corrected p-values and effect sizes with the sign stated, not raw means
    - a clean provenance
    - the sweep root path, so the run can be found again
-8. **Going further.** Links to the specific guides (LLM eval, batteries,
-   Study, launchers, multi-node, statistics), and `help(obj)` for exact
-   signatures.
+9. **Going further.** Links to the specific guides (LLM eval, batteries,
+   Study, launchers and GPU packing, multi-node, resilience, statistics), and
+   `help(obj)` for exact signatures.
 
-Each claim in sections 4 to 6 is verified when the guide is written, and the
-code is exercised by the D7 test.
+Each claim in sections 4 to 7 is checked against Facts when the guide is
+written. The D7 tests exercise the code, the keywords and the numbers.
 
 ## Verification
 
-- `tests/test_agent_guide.py` passes locally, with `--hypothesis-profile fast`.
-  Breaking an API the guide uses (for example renaming a `run()` keyword in a
-  scratch copy) makes it fail.
-- `mkdocs build --strict` passes. The built `agents/index.html` contains the
-  guide's code, and `llms.txt` and `llms-full.txt` exist at the site root,
-  with the agents page listed first.
-- `uv build --wheel` and an install into a clean venv give
+- **`tests/test_agent_guide.py`** passes locally. Mutating the API in a scratch
+  copy makes it fail: renaming the `dry_run` keyword of `run()` fails item 3,
+  and changing `compare_methods`' default test fails item 2 or 6.
+- **The docs build:** `mkdocs build --strict` passes. The built
+  `agents/index.html` contains the guide's code, and `llms.txt` is at the site
+  root.
+- **The wheel:** `uv build --wheel` installed into a clean venv gives
   `python -m mushin guide --path` an existing file.
-- `help(mushin)` shows the module docstring.
-- ruff (format and check, including the guide's Markdown code blocks),
-  codespell, the docs include guard, and the full test suite.
+- **A core install:** a non-editable core install (no extras) renders
+  `pydoc.render_doc(mushin)` with the guide pointer.
+- **The usual gates:**
+  - `ruff format --check` (which covers Markdown code blocks)
+  - `ruff check` (Python files; the guide's code is covered by D7 item 2
+    instead)
+  - codespell
+  - #249's include guard
+  - the full test suite
+- **A changelog fragment:** `changes/<PR>.added.md`.
 
 ## Risks
 
-- **The guide drifts from the API.** Mitigated by executing its code (D7) and
+- **The guide drifts from the API.** Mitigated by D7 items 2, 3 and 6, and by
   keeping prose claims few and checkable.
-- **A docs plugin breaks the strict build.** The plan checks it first, and D5
-  has a fallback.
-- **Absolute links point at the latest docs, not the installed version.** This
-  is acceptable: the package carries the version-matched guide itself, and the
-  links lead to deeper reading.
+- **The web copies (docs page, `llms.txt`, absolute links) track `main`, not
+  the installed release.** This is acceptable: the package carries the
+  version-matched guide, and the docs page says so.
+- **The `__dir__` change.** `dir(mushin)` on a core install no longer lists
+  the eval names. Nothing in the repo relies on `dir(mushin)` listing them,
+  and the plan's grep checks this.
 - **Import cost of `python -m mushin`.** It imports the package (about 1 s),
   which is acceptable for an occasional command.
 
 ## Follow-ups (not in this change)
 
 - API reference pages for the exports that have none.
-- Possible behavior changes surfaced while writing the guide (`best()`
-  averaging over seeds, `show()` printing), each its own decision.
-- Agent-specific packaging (a skill, MCP prompts) on top of the guide.
 - Docstring entries for `run()`'s `working_dir` and `launcher`.
+- Behavior questions surfaced here, each its own decision:
+  - `best()` averaging over seeds
+  - `show()` printing
+  - `compare_methods` accepting other dim names or reducing extra dims
+  - `warn_if_underpowered` accounting for Holm correction
+  - the `mushin.sweep(fn)` call form not pickling
+  - `resume` / `cache_dir` not detecting helper or constant edits
+- Agent-specific packaging (a skill, MCP prompts) on top of the guide.
