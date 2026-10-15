@@ -1104,16 +1104,16 @@ wheels = [
 
 [[package]]
 name = "hydra-zen"
-version = "0.17.0"
+version = "0.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "hydra-core" },
     { name = "omegaconf" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a5/fc/8b51424bf786ab855e715da5d62ffff7f21a3e30368263dc3c4c98ec89ef/hydra_zen-0.17.0.tar.gz", hash = "sha256:b0019f466d6a4aeb714d37fe72f10a8b1cc413a5c0067eaa1c60f301ea3f0430", size = 1575919, upload-time = "2026-10-12T19:54:42.201Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/20/ec68e5016302fcb3e84f892089c131afaece08d0776f689b57bc65ee8a34/hydra_zen-0.17.1.tar.gz", hash = "sha256:128b326c68253c119ba51a8776025a626c8d59f6fc633c99e497717e2ab738e7", size = 1576336, upload-time = "2026-10-15T02:10:07.017Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/ac/9c212b1bd645341def17d96ec4b71070ebda3a4c7c395f9ba7488c64953f/hydra_zen-0.17.0-py3-none-any.whl", hash = "sha256:cf4031818c2257ac410fc85dae02c983c3fd38a5a7c22a596113fd9a6838a306", size = 114780, upload-time = "2026-10-12T19:54:40.555Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/fb/1c6eda12fc8ffbfdc51d07c521a60cef24e5734d479c4c11e4d1ed93eced/hydra_zen-0.17.1-py3-none-any.whl", hash = "sha256:2036bad83fc0c049283a937e7796074100120699ea5070c8bb4c0c241b333643", size = 114888, upload-time = "2026-10-15T02:10:04.95Z" },
 ]
 
 [[package]]
