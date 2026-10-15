@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.15.1] - 2026-10-15
+
+No changes to mushin's code since 0.15.0. This release fixes the source tree's uv configuration, which uv 0.12.14 and later could not re-resolve (#243).
+
+### Misc
+
+- #242, #243, #245, #247
+
+
 ## [0.15.0] - 2026-10-14
 
 ### Changed
@@ -622,7 +631,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/martinez-hub/mushin/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/martinez-hub/mushin/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/martinez-hub/mushin/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/martinez-hub/mushin/compare/v0.14.0...v0.14.1
