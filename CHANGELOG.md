@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.15.0] - 2026-10-14
+
+### Changed
+
+- Sweeps now require hydra-zen 0.17.0 or newer, which builds Hydra sweepers through the plugin registry. mushin no longer needs its workaround for hydra-core refusing the `hydra._internal` sweeper target, and that code is gone. hydra-core must now be 1.3.7 or newer: on 1.3.6, hydra-zen 0.17.0 fails to instantiate any config that carries a callable, and 1.3.7 also fixes the hydra-core security advisory GHSA-mwj6-rfh8-7qf4. (#235)
+
+### Fixed
+
+- The statistics guide said 5 seeds make a Wilcoxon test viable; the floor is 6 (its best-case two-sided p-value is `2 ** (1 - n_seeds)`), so the documented remedy for the underpowered-test warning produced the same warning. The guide no longer recommends the default Wilcoxon test for small seed counts either, and the LLM guide's seed-count advice no longer states a fixed threshold as if power were independent of effect size. (#228)
+
+### Removed
+
+- Python 3.10 is no longer supported: it reached end-of-life on 2026-10-01, and mushin now requires Python >= 3.11. Python 3.15 is not supported yet; the install guide explains what it is waiting on. (#236)
+- Intel macOS (x86_64) is no longer supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2, which held mushin there to torch 2.2.x and NumPy 1.x. mushin 0.14.x, which supports Intel Macs on Python 3.10 and 3.11, is the last series that runs there (`python3.11 -m pip install "mushin-py<0.15"`). Apple Silicon Macs remain fully supported and tested. (#239)
+
+### Misc
+
+- #221, #229, #240
+
+
 ## [0.14.2] - 2026-09-23
 
 ### Added
@@ -602,7 +622,11 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/martinez-hub/mushin/compare/v0.14.2...v0.15.0
+[0.14.2]: https://github.com/martinez-hub/mushin/compare/v0.14.1...v0.14.2
+[0.14.1]: https://github.com/martinez-hub/mushin/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/martinez-hub/mushin/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/martinez-hub/mushin/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/martinez-hub/mushin/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/martinez-hub/mushin/compare/v0.11.0...v0.11.1
