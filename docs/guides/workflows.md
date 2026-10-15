@@ -46,7 +46,9 @@ The following example sweeps learning rates and seeds on a synthetic 2-class
 dataset:
 
 ```python
---8 < --"examples/sweep_to_dataset.py:workflow"
+--8<--
+examples/sweep_to_dataset.py:workflow
+--8<--
 ```
 
 The dict returned from `task` becomes the data variables in the output dataset.
@@ -269,7 +271,9 @@ pip install hydra-joblib-launcher     # local multiprocessing (loky backend)
 ```
 
 ```python
---8 < --"examples/parallel_sweep.py:parallel"
+--8<--
+examples/parallel_sweep.py:parallel
+--8<--
 ```
 
 Run it end to end with

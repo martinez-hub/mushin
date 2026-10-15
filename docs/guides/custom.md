@@ -74,7 +74,9 @@ torchvision segmentation models return a dict `{"out": logits, ...}`. Here is
 the adapter from the segmentation example:
 
 ```python
---8 < --"examples/segmentation_demo.py:dict_predict"
+--8<--
+examples/segmentation_demo.py:dict_predict
+--8<--
 ```
 
 Pass it to `compare`:

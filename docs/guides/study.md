@@ -20,7 +20,9 @@ checkpoints to disk and comparing the loaded models:
 ### Defining train functions
 
 ```python
---8 < --"examples/study_mnist.py:train_fn"
+--8<--
+examples/study_mnist.py:train_fn
+--8<--
 ```
 
 Each `train_fn(seed: int) -> str` trains a model for the given seed, saves it,
@@ -30,7 +32,9 @@ and stores the resulting paths.
 ### Running the study
 
 ```python
---8 < --"examples/study_mnist.py:run"
+--8<--
+examples/study_mnist.py:run
+--8<--
 ```
 
 `Study` parameters:

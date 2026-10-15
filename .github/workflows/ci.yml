@@ -275,6 +275,11 @@ jobs:
           enable-cache: true
       - name: Build docs (strict)
         run: uv run --group docs mkdocs build --strict
+      # The strict build cannot see an include that ruff has respaced (it no
+      # longer looks like an include), and the test matrix is skipped on a
+      # docs-only PR, so run the include guard here, where every PR gets it.
+      - name: Check the docs' snippet includes
+        run: uv run --group docs pytest tests/test_docs_snippets.py -p no:cacheprovider
 
   core-only:
     # Guards the eval-extra split: a core install (NO extras) must import, run a
