@@ -38,8 +38,7 @@ Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 
 | Platform | Python | torch | NumPy |
 |---|---|---|---|
-| Linux / Windows / non-Intel macOS | 3.11 – 3.14 | ≥ 2.4 | ≥ 2 |
-| Intel macOS (x86_64) | 3.11 | 2.2.x | 1.x |
+| Linux / Windows / macOS (Apple Silicon) | 3.11 – 3.14 | ≥ 2.4 | ≥ 2 |
 
 A few notes:
 
@@ -53,13 +52,13 @@ A few notes:
   (`HydraDDP`/`HydraFSDP`, `pin_gpu_round_robin`, `submitit_slurm_config`) are
   simply not applicable on a single-chip Mac; `launcher="joblib"` still
   parallelizes sweep *cells* across CPU cores as usual.
-- **Intel macOS**: Apple has not shipped PyTorch wheels past 2.2.x for the
-  x86_64 architecture. `mushin` supports this platform at torch 2.2.x and
-  NumPy 1.x, but Python 3.12+ is not available there because NumPy 2 is
-  required for Python 3.12 wheels and is ABI-incompatible with torch 2.2.x.
+- **Intel macOS (x86_64)** is not supported: PyTorch publishes no x86_64 macOS
+  wheels after torch 2.2, and `mushin` requires torch ≥ 2.4 and NumPy 2. The
+  last release series that supports Intel Macs is 0.14.x, which was tested
+  there on Python 3.10 and 3.11 (torch 2.2 has no wheels for Python 3.13+):
+  `python3.11 -m pip install "mushin-py<0.15"`.
 - **Python 3.10** is not supported: it reached end-of-life on 2026-10-01,
-  and `mushin` requires Python ≥ 3.11. On Intel macOS that leaves 3.11 as
-  the only supported version.
+  and `mushin` requires Python ≥ 3.11.
 - **Python 3.15** is not supported yet. Two upstream fixes are pending:
   hydra-zen 0.17.0 fails to import on 3.15, which the upcoming 0.17.1 fixes
   ([hydra-zen#903](https://github.com/mit-ll-responsible-ai/hydra-zen/pull/903)).
