@@ -84,15 +84,14 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
         experimental: [false]
         include:
-          # macOS: researchers' most common dev platform, and the platform-split
-          # dependency branches in pyproject.toml (Intel-mac torch<2.3/numpy<2 vs
-          # arm64 NumPy-2) are exercised nowhere else. One arm64 leg on the newest
-          # supported Python, one x86_64 leg on the oldest (3.11).
+          # macOS (Apple Silicon): researchers' most common dev platform, and its
+          # arm64 wheels are exercised nowhere else. Legs on the oldest (3.11)
+          # and a recent (3.13) Python, plus 3.14 below. Intel macOS is not
+          # supported (no x86_64 macOS torch wheels after 2.2).
+          - { os: macos-latest, python-version: "3.11", experimental: false }
           - { os: macos-latest, python-version: "3.13", experimental: false }
-          - { os: macos-15-intel, python-version: "3.11", experimental: false }
           # 3.14 is a supported, advertised version: these legs block like any
-          # other. Intel-mac is deliberately absent — it caps at torch 2.2.2,
-          # which has no 3.14 wheels.
+          # other.
           # 3.15 is not here yet: it is blocked upstream and tracked by the
           # non-required python-315-preview.yml workflow.
           - { os: ubuntu-latest, python-version: "3.14", experimental: false }
