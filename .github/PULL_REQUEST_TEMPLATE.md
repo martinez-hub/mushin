@@ -15,7 +15,7 @@
 - [ ] I added or updated tests for my change
 - [ ] I updated docs / docstrings where relevant
 - [ ] For torch/numpy-version-sensitive changes, I verified against a recent
-      torch (CI matrix or a Linux container), not only Intel-macOS
+      torch (CI matrix or a Linux container), not only my local environment
 
 ## Notes for reviewers
 

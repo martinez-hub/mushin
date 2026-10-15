@@ -193,7 +193,7 @@ compare(methods=..., data=regression_loader, task="regression")
 
 **Optional extras.** `image_quality` needs `pip install mushin-py[image]`
 (torchvision + lpips) and `audio` needs `pip install mushin-py[audio]`
-(just pystoi; PESQ is excluded &mdash; its only release is NumPy-2-incompatible). These batteries are all-or-nothing: they raise a clear error if
+(just pystoi; PESQ is excluded &mdash; `pesq` ships only as source and needs a C compiler). These batteries are all-or-nothing: they raise a clear error if
 the extra is missing. For just the core metrics (e.g. SSIM alone), pass an
 explicit `metrics={...}` or build a custom `Task`. Distribution-level metrics
 (FID, KID, Inception Score) are not supported by the streaming `compare` loop.

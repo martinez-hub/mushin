@@ -12,32 +12,21 @@ updates:
       python-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # torch, torchvision and numpy used to be ignored here: Intel macOS needed
+    # its own marker-split pins for them, which Dependabot cannot rewrite. That
+    # split is gone, so they update normally, with two limits worth knowing:
+    #   - Dependabot tracks only the LOWEST version uv.lock holds for a package
+    #     and resolves at the lowest supported Python (3.11). So it never moves
+    #     the 3.12+ entry of a package locked twice (numpy today), nor scipy
+    #     past 1.17 (1.18 needs Python 3.12): those need a manual
+    #     `uv lock --upgrade-package <name>`. If it does propose a bump for such
+    #     a package, its `uv lock --upgrade-package <name>==<ver>` collapses
+    #     every entry to that one version, so check the uv.lock diff.
+    #   - Runtime floors in pyproject.toml stay put only while
+    #     [project].description matches the PyPI summary of the latest
+    #     release; when they differ, Dependabot raises floors (#154). Check the
+    #     pyproject.toml diff on Dependabot PRs after editing the description.
     ignore:
-      # torch / numpy / torchvision are declared TWICE in one requirement list,
-      # split by mutually exclusive markers with different pins — the Intel-Mac
-      # boundary (darwin + x86_64 caps torch <2.3, numpy <2, torchvision <0.18;
-      # every other platform gets current versions). Dependabot's Python file
-      # updater cannot rewrite a marker-split declaration: it looks for a single
-      # declaration string and aborts with "Declaration not found for torch!"
-      # (RequirementReplacer#original_dependency_declaration_string). So these
-      # have never actually produced update PRs — the failure was masked by a
-      # separate netCDF4 lock failure until that was silenced (that ignore is
-      # gone: requiring Python >= 3.11 made netCDF4's bumps resolvable).
-      #
-      # Ignoring them does not cost coverage we still had: the same file-updater
-      # bug would block a security update's write for these packages too, and
-      # per GitHub's docs `ignore` governs version updates rather than security
-      # advisories. What it does buy is a GREEN updater run, so the next genuine
-      # failure is visible instead of buried under a standing red.
-      #
-      # TRADE-OFF, stated plainly: torch and numpy now need periodic MANUAL
-      # review. Revisit if the marker split goes away (dropping Intel-Mac
-      # support would do it) or if Dependabot learns to handle split
-      # declarations.
-      - dependency-name: "torch"
-      - dependency-name: "numpy"
-      - dependency-name: "torchvision"
-
       # setuptools lives in [build-system] requires, which the uv ecosystem
       # updater does not edit at all — same "Declaration not found" failure,
       # different root cause. The pin is a build-time floor, not a runtime

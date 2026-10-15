@@ -41,8 +41,7 @@ jobs:
       # others, or we learn nothing about them.
       fail-fast: false
       matrix:
-        # The platforms the 3.14 legs cover. Intel-mac is absent: it caps at
-        # torch 2.2.x, which has no cp315 wheels.
+        # The platforms the 3.14 legs cover.
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7

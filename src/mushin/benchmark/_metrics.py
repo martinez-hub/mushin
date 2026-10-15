@@ -233,10 +233,10 @@ def audio_battery(
     interface but unused. Waveforms are ``(N, T)``; STOI assumes a 16 kHz sample
     rate (override via a custom Task for other rates).
 
-    PESQ is intentionally omitted: the only released ``pesq`` package (0.0.4) fails
-    to import under NumPy 2 (the supported non-Intel platform) and has no fixed
-    release, so it cannot be shipped reliably. Add it via a custom Task on a
-    NumPy-1.x environment if needed."""
+    PESQ is intentionally omitted: every ``pesq`` release (the latest is 0.0.4,
+    2022) is source-only and needs a C compiler to install, so it cannot be
+    bundled reliably. With a compiler it builds and runs under NumPy 2; add it
+    via a custom Task if needed."""
     try:
         from torchmetrics.audio import (
             ScaleInvariantSignalDistortionRatio,
