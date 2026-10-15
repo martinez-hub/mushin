@@ -63,7 +63,10 @@ dependencies = [
     # ABI-incompatible with torch built against NumPy 1.x, and PyTorch first
     # ships NumPy-2-compatible wheels in 2.4.0 ("Numpy is not available" below
     # that). Intel macOS (x86_64) is not supported: PyTorch publishes no x86_64
-    # macOS wheels after 2.2 (see [tool.uv] environments). The min-version CI
+    # macOS wheels after 2.2. Do not encode that as `[tool.uv] environments`:
+    # uv applies the same per-fork wheel check to `environments` as to
+    # `required-environments`, so any fork with no torch wheel (Emscripten,
+    # Windows ARM64 on 3.14) makes the lock unresolvable. The min-version CI
     # job verifies the numpy floor. It resolves torch 2.4.1, not 2.4.0, because
     # the lock resolves every extra together and torchvision 0.19.0 caps numpy<2.
     "torch >= 2.4.0",
@@ -195,14 +198,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 # PEP 561: ship the py.typed marker so type checkers see our annotations.
 mushin = ["py.typed"]
-
-[tool.uv]
-# The platforms uv.lock resolves for. Intel macOS (darwin + x86_64) is
-# excluded: PyTorch publishes no x86_64 macOS wheels after 2.2, and mushin
-# requires torch >= 2.4. Without this, `uv sync` there fails on a missing torch
-# wheel; with it, uv states that the platform is unsupported. pip and the
-# published package metadata ignore this table.
-environments = ["sys_platform != 'darwin' or platform_machine != 'x86_64'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

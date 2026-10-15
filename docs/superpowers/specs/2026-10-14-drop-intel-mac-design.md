@@ -223,6 +223,21 @@ under `[tool.uv]`, with a comment.
 the lock, but it records no boundary, so Intel users get the less clear error.
 And hand-editing the lock is a step nobody could reproduce from the repo.
 
+**Update 2026-10-15 (D2 reverted in #243):** `environments` made the lock
+unresolvable by uv >= 0.12.14. uv also checks `environments` markers for wheel
+coverage, as it does `required-environments`, and since 0.12.14 (uv #21672)
+it checks each resolver fork separately. The lock has forks where torch has no
+wheel at all: Emscripten, and Windows ARM64 on Python 3.14. So every torch
+version was rejected, and any re-resolve failed, whether a plain
+`uv lock --upgrade` or a one-package `uv lock --upgrade-package`. This was
+verified with uv 0.12.5 (passes), 0.12.13 (passes), 0.12.14 (fails) and 0.13.1
+(fails). The nightly `latest-deps` job caught it. It would also have broken
+any Dependabot lock update run with uv >= 0.12.14. The local uv used for this spec's verification
+was 0.12.5, older than CI's, which is why the check above missed it. Removing
+the table changes no locked version. On an Intel Mac, `uv sync` again fails up
+front with the "no wheel for the current platform" error described in the
+first bullet list above.
+
 ### D3. CI: replace the Intel leg with Apple Silicon on the oldest Python
 
 Replace `{ os: macos-15-intel, python-version: "3.11" }` with
