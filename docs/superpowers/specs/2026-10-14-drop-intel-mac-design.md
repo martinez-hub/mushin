@@ -258,7 +258,7 @@ blocks security updates for numpy.
     Silicon) | 3.11 – 3.14 | ≥ 2.4 | ≥ 2".
   - **The Intel macOS note:** Intel is unsupported because PyTorch ships no
     x86_64 macOS wheels after 2.2. mushin 0.14.x is the last series that
-    supports it, **tested there on Python 3.10 and 3.11**:
+    supports it, **supported there on Python 3.10 and 3.11** (its CI tested Intel on 3.10):
     `python3.11 -m pip install "mushin-py<0.15"`. torch 2.2 has no wheels for
     Python 3.13+.
   - **The 3.10 note** loses its Intel sentence.

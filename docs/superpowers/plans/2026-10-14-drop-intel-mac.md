@@ -413,9 +413,9 @@ fact and decision this plan relies on.
   ```markdown
   - **Intel macOS (x86_64)** is not supported: PyTorch publishes no x86_64 macOS
     wheels after torch 2.2, and `mushin` requires torch ≥ 2.4 and NumPy 2. The
-    last release series that supports Intel Macs is 0.14.x, which was tested
-    there on Python 3.10 and 3.11 (torch 2.2 has no wheels for Python 3.13+):
-    `python3.11 -m pip install "mushin-py<0.15"`.
+    last release series that supports Intel Macs is 0.14.x, which supports them
+    on Python 3.10 and 3.11 (newer Pythons are unsupported there, and torch 2.2
+    has no wheels for Python 3.13+): `python3.11 -m pip install "mushin-py<0.15"`.
   ```
 
 - [ ] **Step 3: The install.md 3.10 note.** Replace
@@ -464,7 +464,7 @@ fact and decision this plan relies on.
 - [ ] **Step 2: The new fragment.** Write `changes/+drop-intel-mac.removed.md`:
 
   ```markdown
-  Intel macOS (x86_64) is no longer supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2, which held mushin there to torch 2.2.x and NumPy 1.x. mushin 0.14.x, tested on Intel Macs with Python 3.10 and 3.11, is the last series that runs there (`python3.11 -m pip install "mushin-py<0.15"`). Apple Silicon Macs remain fully supported and tested.
+  Intel macOS (x86_64) is no longer supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2, which held mushin there to torch 2.2.x and NumPy 1.x. mushin 0.14.x, which supports Intel Macs on Python 3.10 and 3.11, is the last series that runs there (`python3.11 -m pip install "mushin-py<0.15"`). Apple Silicon Macs remain fully supported and tested.
   ```
 
 - [ ] **Step 3: Preview.**
