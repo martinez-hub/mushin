@@ -39,8 +39,9 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
    must equal the `pyproject` version, prefixed `v`). Write the release notes
    to a file first, from the new `CHANGELOG.md` section:
    ```bash
-   git switch main && git pull --ff-only   # HEAD is now the release merge commit
-   git tag vX.Y.Z
+   git fetch origin
+   sha=$(gh pr view <release-PR-number> --json mergeCommit --jq .mergeCommit.oid)
+   git tag vX.Y.Z "$sha"   # the release merge commit, even if main has moved on
    git push origin vX.Y.Z
    gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
    ```

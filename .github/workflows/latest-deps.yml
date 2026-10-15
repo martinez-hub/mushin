@@ -106,7 +106,12 @@ jobs:
           existing=$(gh issue list --state open --label latest-deps \
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing on latest dependencies, at $stage: $RUN_URL"
+            # Repeat the cause: the open issue's body describes the stage that
+            # first failed, which may not be this run's.
+            gh issue comment "$existing" --body "$(printf '%s\n' \
+              "Still failing on latest dependencies, at $stage: $RUN_URL" \
+              "" \
+              "$cause")"
           else
             gh issue create --title "Failure against latest dependencies" \
               --label latest-deps \
