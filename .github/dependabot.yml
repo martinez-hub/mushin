@@ -33,6 +33,19 @@ updates:
       # dependency, and it is exercised on every sdist build in CI.
       - dependency-name: "setuptools"
 
+      # omegaconf 2.4 is incompatible with the hydra-core we support:
+      # hydra-core 1.3.7 requires `omegaconf<2.4`. To satisfy a pinned
+      # `omegaconf==2.4.0`, the lock update silently moves hydra-core to the
+      # 1.4.0rc1 PRE-RELEASE (#238 did exactly this, unannounced in its title).
+      # hydra-core 1.4 changes how Hydra decides what it may instantiate, which
+      # mushin's sweeps depend on through hydra-zen, so it has to arrive as its
+      # own reviewed change, not as a side effect of an omegaconf bump.
+      # hydra-core 1.4 itself requires omegaconf >= 2.4, so remove this entry
+      # when hydra-core 1.4.0 final is out, and move both together once mushin
+      # passes on them.
+      - dependency-name: "omegaconf"
+        versions: [">=2.4"]
+
   # GitHub Actions used in CI
   - package-ecosystem: "github-actions"
     directory: "/"
