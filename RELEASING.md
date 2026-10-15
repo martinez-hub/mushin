@@ -26,16 +26,31 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 4. Update the `[Unreleased]`/version link-reference footer at the bottom of
    `CHANGELOG.md`.
 5. Commit on a branch and open a PR. Because this PR rewrites `CHANGELOG.md`
-   directly, apply the **`changelog-exempt`** label so the changelog gate allows
-   it (normal PRs must use `changes/` fragments instead). Merge once CI is green.
-6. Tag and publish a GitHub Release `vX.Y.Z` on the merge commit (the tag must
-   equal the `pyproject` version, prefixed `v`):
+   directly, it needs the **`changelog-exempt`** label so the changelog gate
+   allows it (normal PRs must use `changes/` fragments instead). Apply the label
+   when you create the PR:
    ```bash
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   gh release create vX.Y.Z --title vX.Y.Z --notes-from-tag
+   gh pr create --label changelog-exempt ...
    ```
-   Publishing the release triggers `publish.yml`.
+   The gate reads the labels from the event that started the run, and
+   re-running a job replays that event, so a label added later is never seen.
+   If you forget, close and reopen the PR. Merge once CI is green.
+6. Tag the release merge commit and publish a GitHub Release `vX.Y.Z` (the tag
+   must equal the `pyproject` version, prefixed `v`). Write the release notes
+   to a file first, from the new `CHANGELOG.md` section:
+   ```bash
+   git fetch origin
+   sha=$(gh pr view <release-PR-number> --json mergeCommit --jq .mergeCommit.oid)
+   git tag vX.Y.Z "$sha"   # the release merge commit, even if main has moved on
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
+   ```
+   Don't use `--notes-from-tag`. A plain `git tag` is lightweight, so the notes
+   would be the tagged commit's message, `release: X.Y.Z (#N)`.
+   Publishing the release triggers `publish.yml`. Don't merge anything else
+   into `main` until the release commit's CI run finishes: CI cancels
+   in-progress runs on the same branch, which would leave the tagged commit
+   with a cancelled run.
 
 ## Trusted Publishing setup (one-time, already configured)
 

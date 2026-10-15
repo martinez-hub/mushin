@@ -43,9 +43,11 @@ jobs:
       # the declared constraints allow, discarding the pins in uv.lock. The
       # lockfile is NOT committed — this job only reports.
       - name: Re-resolve every dependency to its latest allowed version
+        id: lock
         run: uv lock --upgrade
 
       - name: Show what that resolved to
+        id: sync
         run: |
           uv sync --extra eval --extra viz --extra netcdf
           uv pip list
@@ -62,6 +64,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run tests
+        id: tests
         # --no-sync so this cannot quietly re-resolve back to the committed lock,
         # the same guard `min-versions` uses in the opposite direction.
         run: uv run --no-sync pytest tests/ -p no:cacheprovider
@@ -74,28 +77,55 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LOCK: ${{ steps.lock.outcome }}
+          SYNC: ${{ steps.sync.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
         run: |
           # Create the label on first use, so this step needs no manual repo
           # setup. --force makes it idempotent: it updates the label if it
           # already exists instead of failing.
           gh label create latest-deps --force --color B60205 \
             --description "A failure against the latest allowed dependency versions"
+          # Say which step failed. Only a test failure points at an upstream
+          # release that breaks mushin. A failed re-resolve leaves no version
+          # diff, and its cause can be uv itself (setup-uv installs the latest)
+          # or this repo's own uv config, as in #244.
+          if [ "$LOCK" = failure ]; then
+            stage="re-resolving (\`uv lock --upgrade\`)"
+            cause="Nothing was resolved, so there is no version diff. Read the resolver error in the run log. The cause may be a dependency release, a new uv release (setup-uv installs the latest uv), or this repository's uv configuration."
+          elif [ "$SYNC" = failure ]; then
+            stage="installing the resolved versions (\`uv sync\`)"
+            cause="Read the install error in the run log. A new release may have no wheel for this platform, or its source distribution may fail to build."
+          elif [ "$TESTS" = failure ]; then
+            stage="the tests"
+            cause="**A released upstream version likely breaks mushin.** Anyone installing today may hit it, since our constraints permit that version. The step summary lists which versions differ from \`uv.lock\`."
+          else
+            stage="another step"
+            cause="Read the run log."
+          fi
           existing=$(gh issue list --state open --label latest-deps \
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing on latest dependencies: $RUN_URL"
+            # Repeat the cause: the open issue's body describes the stage that
+            # first failed, which may not be this run's.
+            gh issue comment "$existing" --body "$(printf '%s\n' \
+              "Still failing on latest dependencies, at $stage: $RUN_URL" \
+              "" \
+              "$cause")"
           else
-            gh issue create --title "Test failure against latest dependencies" \
+            gh issue create --title "Failure against latest dependencies" \
               --label latest-deps \
               --body "$(printf '%s\n' \
-                "The scheduled \`Latest dependencies\` run failed." \
+                "The scheduled \`Latest dependencies\` run failed at $stage." \
                 "" \
-                "This job re-resolves every dependency to the newest version our constraints allow, ignoring \`uv.lock\`. A failure here means **a released upstream version breaks mushin** — anyone installing today may hit it, since the constraints permit that version." \
+                "This job re-resolves every dependency to the newest version our constraints allow, ignoring \`uv.lock\`, then runs the tests." \
                 "" \
-                "Run (the step summary lists which versions differ from the lock): $RUN_URL" \
+                "$cause" \
+                "" \
+                "Run: $RUN_URL" \
                 "" \
                 "Triage:" \
-                "1. Read the version diff in the step summary to find the culprit." \
+                "1. Find the culprit: the error in the run log, or, for a test failure, the version diff in the step summary." \
                 "2. If the upstream change is intended, adapt mushin." \
                 "3. If it is an upstream regression, pin *that version* out (\`!= x.y.z\`) rather than adding a blanket ceiling, and link the upstream issue." \
                 "" \

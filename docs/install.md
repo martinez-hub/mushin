@@ -59,13 +59,16 @@ A few notes:
   has no wheels for Python 3.13+): `python3.11 -m pip install "mushin-py<0.15"`.
 - **Python 3.10** is not supported: it reached end-of-life on 2026-10-01,
   and `mushin` requires Python ≥ 3.11.
-- **Python 3.15** is not supported yet. Two upstream fixes are pending:
-  hydra-zen 0.17.0 fails to import on 3.15, which the upcoming 0.17.1 fixes
-  ([hydra-zen#903](https://github.com/mit-ll-responsible-ai/hydra-zen/pull/903)).
-  PyTorch has not published 3.15 wheels to PyPI, and the 3.15 builds on
-  PyTorch's own index crash on macOS and Windows; the fix ships in torch 2.15
+- **Python 3.15** is not supported yet. It is waiting on PyTorch, which has
+  not published 3.15 wheels to PyPI. The 3.15 builds on PyTorch's own index
+  crash on macOS and Windows: tensor operations outside the main thread can
+  segfault, and on macOS the process can also segfault at exit after a
+  backward pass, even single-threaded. The fix ships in torch 2.15
   ([pytorch#200779](https://github.com/pytorch/pytorch/issues/200779)).
-  With hydra-zen's fix and torch from PyTorch's index, mushin's test suite
-  already passes on Linux 3.15. Support will be announced in the changelog
-  once it is tested in CI.
+  hydra-zen's 3.15 import failure is fixed in hydra-zen 0.17.1
+  ([hydra-zen#903](https://github.com/mit-ll-responsible-ai/hydra-zen/pull/903)).
+  With hydra-zen 0.17.1 and torch from PyTorch's index, mushin's test suite
+  passes on Linux and Windows 3.15 (its Windows tests do not hit that crash).
+  Support will be announced in the changelog once 3.15 installs from PyPI and
+  is tested in the required CI.
 - These floors are enforced by the `min-versions` CI job on every pull request.
