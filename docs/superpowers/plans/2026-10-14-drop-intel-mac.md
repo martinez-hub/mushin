@@ -47,15 +47,16 @@ fact and decision this plan relies on.
 - [ ] **Step 2: torch and numpy.** Replace the block from
   `    # torch floors are split by platform.` through
   `    "numpy >= 2 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",`
-  (ten lines) with
+  (eleven lines, pyproject.toml:63-73) with
 
   ```toml
       # torch floor is 2.4: mushin requires NumPy 2 (below), which is
       # ABI-incompatible with torch built against NumPy 1.x, and PyTorch first
       # ships NumPy-2-compatible wheels in 2.4.0 ("Numpy is not available" below
       # that). Intel macOS (x86_64) is not supported: PyTorch publishes no x86_64
-      # macOS wheels after 2.2 (see [tool.uv] environments). Both floors are
-      # verified by the min-version CI job.
+      # macOS wheels after 2.2 (see [tool.uv] environments). The min-version CI
+      # job verifies the numpy floor. It resolves torch 2.4.1, not 2.4.0, because
+      # the lock resolves every extra together and torchvision 0.19.0 caps numpy<2.
       "torch >= 2.4.0",
       "numpy >= 2",
   ```
@@ -146,9 +147,10 @@ fact and decision this plan relies on.
   ```
   with
   ```toml
-  # raises a clear error if used without it). PESQ is intentionally excluded: the
-  # only `pesq` release (0.0.4, 2022) is source-only and needs a C compiler to
-  # install. With one it builds and runs under NumPy 2; add it via a custom Task.
+  # raises a clear error if used without it). PESQ is intentionally excluded:
+  # every `pesq` release (the latest is 0.0.4, 2022) is source-only and needs a C
+  # compiler to install. With one it builds and runs under NumPy 2; add it via a
+  # custom Task.
   ```
 
 - [ ] **Step 10: The scikit-learn note.** Replace
@@ -164,7 +166,10 @@ fact and decision this plan relies on.
   ```
 
 - [ ] **Step 11: Add `[tool.uv]`.** Insert this immediately before the line
-  `[tool.setuptools.packages.find]`, keeping a blank line before it:
+  `[tool.pytest.ini_options]`, keeping a blank line before it. It must **not**
+  go above `[tool.setuptools.packages.find]`: `ci.yml`'s `min-versions` comment
+  points at "the note above [tool.setuptools.packages.find]", meaning the
+  pycocotools note, and nothing may come between them.
 
   ```toml
   [tool.uv]
@@ -180,8 +185,9 @@ fact and decision this plan relies on.
 - [ ] **Step 12: Confirm no marker split remains.**
 
   Run: `grep -nE "platform_machine|x86_64|Intel|non-Intel|platform-split" pyproject.toml`
-  Expected: only the Step 2 comment ("Intel macOS (x86_64) is not
-  supported ...") and the Step 11 `[tool.uv]` comment and `environments` line.
+  Expected: the Step 2 comment ("Intel macOS (x86_64) is not supported ...",
+  two lines), the Step 11 `[tool.uv]` comment and `environments` line, and the
+  false positive `"Topic :: Scientific/Engineering :: Artificial Intelligence"`.
 
 - [ ] **Step 13: Lock, then diff by package.**
 
@@ -224,7 +230,8 @@ fact and decision this plan relies on.
 
 ### Task 2: Correct the PESQ advice
 
-**Files:** `src/mushin/benchmark/_metrics.py:236-239`, `docs/guides/batteries.md:582-583`
+**Files:** `src/mushin/benchmark/_metrics.py:236-239`, `docs/guides/batteries.md:582-583`,
+`docs/guides/custom.md:196`, `.github/workflows/ci.yml:109-110`
 
 - [ ] **Step 1: The docstring.** In `_metrics.py`, replace
 
@@ -236,10 +243,10 @@ fact and decision this plan relies on.
   ```
   with
   ```python
-      PESQ is intentionally omitted: the only ``pesq`` release (0.0.4, 2022) is
-      source-only and needs a C compiler to install, so it cannot be bundled
-      reliably. With a compiler it builds and runs under NumPy 2; add it via a
-      custom Task if needed."""
+      PESQ is intentionally omitted: every ``pesq`` release (the latest is 0.0.4,
+      2022) is source-only and needs a C compiler to install, so it cannot be
+      bundled reliably. With a compiler it builds and runs under NumPy 2; add it
+      via a custom Task if needed."""
   ```
 
 - [ ] **Step 2: The guide.** In `batteries.md`, replace
@@ -250,19 +257,32 @@ fact and decision this plan relies on.
   ```
   with
   ```markdown
-  (PESQ is intentionally omitted: the only `pesq` release is source-only and needs
-  a C compiler to install. With one, `pip install pesq` works under NumPy 2, and
+  (PESQ is intentionally omitted: every `pesq` release is source-only and needs a
+  C compiler to install. With one, `pip install pesq` works under NumPy 2, and
   you can add PESQ through a custom task.)
   ```
 
-- [ ] **Step 3: Check nothing asserts the old text.**
+- [ ] **Step 3: The custom-metrics guide.** In `docs/guides/custom.md`, replace
+  `(just pystoi; PESQ is excluded &mdash; its only release is NumPy-2-incompatible).`
+  with
+  `(just pystoi; PESQ is excluded &mdash; `pesq` ships only as source and needs a C compiler).`
 
-  Run: `git grep -n "NumPy-1.x\|non-Intel" -- src tests docs/guides`
-  Expected: no output.
+- [ ] **Step 4: The `ci.yml` battery comment.** pesq is in no extra, so remove
+  it from the comment. Replace
+  `        # C-extension deps (pycocotools, pesq, pystoi) are win32-gated, so on`
+  with
+  `        # C-extension deps (pycocotools, pystoi) are win32-gated, so on`.
 
-- [ ] **Step 4: Commit.**
+- [ ] **Step 5: Review every remaining PESQ mention.**
+
+  Run: `git grep -n -i "pesq" -- . ':!uv.lock' ':!CHANGELOG.md' ':!docs/superpowers'`
+  Expected: only the four corrected sites (`pyproject.toml` audio note,
+  `_metrics.py`, `batteries.md`, `custom.md`). None of them says pesq fails
+  under NumPy 2 or suggests a NumPy-1.x environment.
+
+- [ ] **Step 6: Commit.**
   ```bash
-  git add src/mushin/benchmark/_metrics.py docs/guides/batteries.md
+  git add src/mushin/benchmark/_metrics.py docs/guides/batteries.md docs/guides/custom.md .github/workflows/ci.yml
   git commit -m "docs: PESQ is omitted because it is source-only, not because of NumPy 2"
   ```
 
@@ -316,7 +336,9 @@ fact and decision this plan relies on.
   Expected:
   - The include list is
     `[('macos-latest','3.11'), ('macos-latest','3.13'), ('macos-latest','3.14'), ('ubuntu-latest','3.14'), ('windows-latest','3.14')]`.
-  - The grep prints only the new ci.yml comment line "Intel macOS is not ...".
+  - The grep prints only the two lines of the new `ci.yml` macOS comment:
+    "... Intel macOS is not" and "supported (no x86_64 macOS torch wheels after
+    2.2).".
 
 - [ ] **Step 4: Commit.**
   ```bash
@@ -337,11 +359,13 @@ fact and decision this plan relies on.
       # torch, torchvision and numpy used to be ignored here: Intel macOS needed
       # its own marker-split pins for them, which Dependabot cannot rewrite. That
       # split is gone, so they update normally, with two limits worth knowing:
-      #   - Dependabot never bumps a package that uv.lock holds at more than one
-      #     version, and it resolves at the lowest supported Python (3.11). So
-      #     numpy (locked once for 3.11 and once for 3.12+) and scipy (1.18+
-      #     needs Python 3.12) still need a manual
-      #     `uv lock --upgrade-package <name>`.
+      #   - Dependabot tracks only the LOWEST version uv.lock holds for a package
+      #     and resolves at the lowest supported Python (3.11). So it never moves
+      #     the 3.12+ entry of a package locked twice (numpy today), nor scipy
+      #     past 1.17 (1.18 needs Python 3.12): those need a manual
+      #     `uv lock --upgrade-package <name>`. If it does propose a bump for such
+      #     a package, its `uv lock --upgrade-package <name>==<ver>` collapses
+      #     every entry to that one version, so check the uv.lock diff.
       #   - Runtime floors in pyproject.toml stay put only while
       #     [project].description matches the PyPI summary of the latest
       #     release; when they differ, Dependabot raises floors (#154). Check the
@@ -389,8 +413,8 @@ fact and decision this plan relies on.
   ```markdown
   - **Intel macOS (x86_64)** is not supported: PyTorch publishes no x86_64 macOS
     wheels after torch 2.2, and `mushin` requires torch ≥ 2.4 and NumPy 2. The
-    last release series that supports Intel Macs is 0.14.x, on Python 3.10 or
-    3.11 (torch 2.2 has no wheels for Python 3.13+):
+    last release series that supports Intel Macs is 0.14.x, which was tested
+    there on Python 3.10 and 3.11 (torch 2.2 has no wheels for Python 3.13+):
     `python3.11 -m pip install "mushin-py<0.15"`.
   ```
 
@@ -440,7 +464,7 @@ fact and decision this plan relies on.
 - [ ] **Step 2: The new fragment.** Write `changes/+drop-intel-mac.removed.md`:
 
   ```markdown
-  Intel macOS (x86_64) is no longer supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2, which held mushin there to torch 2.2.x and NumPy 1.x. mushin 0.14.x is the last series that runs on Intel Macs, on Python 3.10 or 3.11 (`python3.11 -m pip install "mushin-py<0.15"`). Apple Silicon Macs remain fully supported and tested.
+  Intel macOS (x86_64) is no longer supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2, which held mushin there to torch 2.2.x and NumPy 1.x. mushin 0.14.x, tested on Intel Macs with Python 3.10 and 3.11, is the last series that runs there (`python3.11 -m pip install "mushin-py<0.15"`). Apple Silicon Macs remain fully supported and tested.
   ```
 
 - [ ] **Step 3: Preview.**
@@ -510,12 +534,17 @@ fact and decision this plan relies on.
   Run: `git grep -nIiE "intel|x86_64|platform-split|split by platform|marker.split|non-Intel|numpy-1|numpy 1\.x" -- . ':!uv.lock' ':!CHANGELOG.md' ':!docs/superpowers' ':!*.ipynb'`
   Expected, and nothing else:
   - `Makefile:26` (x86_64 Linux);
+  - the new history comment in `.github/dependabot.yml` ("Intel macOS needed
+    its own marker-split pins");
+  - `pyproject.toml`'s "Artificial Intelligence" classifier, plus the new torch
+    comment's "NumPy 1.x" reason;
   - the new "Intel macOS is not supported / unsupported" statements in
     `pyproject.toml`, `ci.yml`, `docs/install.md` and the fragment;
   - the `_provenance.py` Intel-CPU MPS lines and their tests
     (`tests/test_provenance.py`);
   - `mcp/server.py:61` (numpy 1.x unpickling);
-  - `batteries.md`/`_metrics.py` "intelligibility" false positives.
+  - the "Intelligibility"/"intelligibility" false positives in `batteries.md`,
+    `_metrics.py` and `tests/test_benchmark/test_audio.py`.
 
 ### Task 9: PR, Codex, merge
 

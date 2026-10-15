@@ -1,8 +1,8 @@
 # Design: drop Intel macOS (x86_64) support
 
 **Date:** 2026-10-14
-**Status:** Revised after adversarial review (13 findings, all accepted).
-Next: the implementation plan.
+**Status:** Revised after spec review (13 findings) and plan review (8), all
+accepted. Plan: [`2026-10-14-drop-intel-mac.md`](../plans/2026-10-14-drop-intel-mac.md).
 **Related:** [drop Python 3.10, prepare 3.15](2026-10-14-python-311-315-design.md)
 (#236). That change left Intel macOS with exactly one supported Python, 3.11.
 
@@ -118,7 +118,8 @@ string `platform_machine == 'x86_64' and sys_platform == 'darwin'`.
 ### PESQ, re-tested because the old claim was wrong
 
 - **The current code and docs claim more than is true.** They say pesq 0.0.4
-  "fails to import under NumPy 2". It is a 2022, sdist-only release.
+  "fails to import under NumPy 2". pesq has four releases (0.0.1–0.0.4,
+  2019–2022), all sdist-only.
 - **With a C compiler, it works under NumPy 2.**
   - On `python:3.11-bookworm`, which has gcc, `pip install "numpy>=2" pesq==0.0.4`
     builds against numpy 2.4.6, and `pesq.pesq(16000, ref, deg, "wb")` returns
@@ -158,6 +159,9 @@ Other files:
   - the Intel macOS note;
   - "On Intel macOS that leaves 3.11 as the only supported version".
 - **`changes/236.removed.md`** (unreleased): the same Intel sentence.
+- **Other false PESQ statements:** `docs/guides/custom.md:196` ("its only
+  release is NumPy-2-incompatible"). `.github/workflows/ci.yml:110` also lists
+  pesq among the extras' C-extension deps, but pesq is in no extra.
 - **PESQ advice that names a "NumPy-1.x environment":**
   `src/mushin/benchmark/_metrics.py:236-239` and
   `docs/guides/batteries.md:582-583`. Once NumPy 2 is required everywhere, such
@@ -177,7 +181,10 @@ Other files:
   `torchvision >= 0.19` in `detection` and `image`, all without markers.
 - **The floors themselves do not move.** They were already the non-Intel
   floors.
-  - `min-versions` validates the torch and numpy floors.
+  - `min-versions` validates the numpy floor. It resolves torch **2.4.1**, not
+    2.4.0: the lock resolves every extra together, and torchvision 0.19.0 caps
+    numpy<2. So the torch 2.4.0 floor itself is not tested, and no comment may
+    claim it is.
   - **The torchvision floor is not floor-tested.** `min-versions` installs
     only `--extra eval`, so no comment may claim that job verifies it.
 - **Every inventoried `pyproject.toml` comment is rewritten:**
@@ -196,6 +203,10 @@ Other files:
 Add
 `environments = ["sys_platform != 'darwin' or platform_machine != 'x86_64'"]`
 under `[tool.uv]`, with a comment.
+
+**Placement:** before `[tool.pytest.ini_options]`. It must not go above
+`[tool.setuptools.packages.find]`, because `ci.yml` points to "the note above
+[tool.setuptools.packages.find]", meaning the pycocotools note.
 
 **Why:**
 - **Clearer failure.** It turns uv's up-front "no wheel for torch" error,
@@ -229,8 +240,10 @@ Delete the three entries and their comment, as that comment asks. Keep the
 The new, short comment states what is true after this change:
 - torch and torchvision get normal grouped updates;
 - numpy (locked at two versions, 3.11 / 3.12+) and scipy still need manual
-  `uv lock --upgrade-package <name>`, because Dependabot never bumps a package
-  locked at several versions, and it resolves at Python 3.11;
+  `uv lock --upgrade-package <name>`. Dependabot tracks only a package's
+  *lowest* locked version and resolves at Python 3.11. If it ever proposes a
+  bump for such a package, its `uv lock --upgrade-package name==X` collapses
+  every entry to X, so the lock diff needs checking;
 - Dependabot keeps runtime floors only while `[project] description` matches
   the PyPI summary. When the two drift, it raises floors (#154), so check the
   `pyproject.toml` diff on Dependabot PRs after changing the description.
@@ -245,7 +258,7 @@ blocks security updates for numpy.
     Silicon) | 3.11 – 3.14 | ≥ 2.4 | ≥ 2".
   - **The Intel macOS note:** Intel is unsupported because PyTorch ships no
     x86_64 macOS wheels after 2.2. mushin 0.14.x is the last series that
-    supports it, **on Python 3.10 or 3.11**:
+    supports it, **tested there on Python 3.10 and 3.11**:
     `python3.11 -m pip install "mushin-py<0.15"`. torch 2.2 has no wheels for
     Python 3.13+.
   - **The 3.10 note** loses its Intel sentence.
@@ -256,11 +269,12 @@ blocks security updates for numpy.
 - **`CONTRIBUTING.md`:** drop the Intel-macOS contributor sentence.
 - **PR template:** "not only Intel-macOS" becomes "not only your local
   environment".
-- **PESQ** (`_metrics.py`, `batteries.md` and the `pyproject.toml` audio note):
-  replace the false "fails under NumPy 2 / use a NumPy-1.x environment" claims
-  with the tested facts:
-  - the only `pesq` release (0.0.4, 2022) ships only as source and needs a C
-    compiler to install, so it is not bundled in `audio`;
+- **The `ci.yml` battery comment:** drop pesq from its C-extension list.
+- **PESQ** (`_metrics.py`, `batteries.md`, `custom.md` and the
+  `pyproject.toml` audio note): replace the false "fails under NumPy 2 / use a
+  NumPy-1.x environment" claims with the tested facts:
+  - every `pesq` release (latest 0.0.4, 2022) ships only as source and needs a
+    C compiler to install, so it is not bundled in `audio`;
   - with a compiler, it builds and runs under NumPy 2;
   - users can `pip install pesq` and add it through a custom Task.
 - **`python-315-preview.yml`:** drop the Intel sentence.
