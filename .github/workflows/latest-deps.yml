@@ -24,7 +24,7 @@ on:
 
 permissions:
   contents: read
-  issues: write          # to file/update the failure report; see `report` below
+  issues: write          # to create its label and file/update the failure report (last step)
 
 concurrency:
   group: latest-deps
@@ -75,6 +75,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Create the label on first use, so this step needs no manual repo
+          # setup. --force makes it idempotent: it updates the label if it
+          # already exists instead of failing.
+          gh label create latest-deps --force --color B60205 \
+            --description "A failure against the latest allowed dependency versions"
           existing=$(gh issue list --state open --label latest-deps \
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
