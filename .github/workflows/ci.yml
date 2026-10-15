@@ -107,7 +107,7 @@ jobs:
           enable-cache: true
       - name: Sync environment (Python ${{ matrix.python-version }})
         # --extra detection/image/audio exercise the optional batteries. Their
-        # C-extension deps (pycocotools, pesq, pystoi) are win32-gated, so on
+        # C-extension deps (pycocotools, pystoi) are win32-gated, so on
         # Windows those metrics are absent and the corresponding tests skip via
         # importorskip; SSIM/PSNR/MS-SSIM/SI-SDR core paths still run.
         run: uv sync --extra eval --extra detection --extra image --extra audio --python ${{ matrix.python-version }}

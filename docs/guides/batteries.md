@@ -579,8 +579,9 @@ enhanced waveform) to the metrics against the clean reference. Waveforms are
 pip install "mushin-py[audio]"    # pystoi
 ```
 
-(PESQ is intentionally omitted; its only released package fails to import under
-NumPy 2; add it via a custom task on a NumPy-1.x environment if you need it.)
+(PESQ is intentionally omitted: every `pesq` release is source-only and needs a
+C compiler to install. With one, `pip install pesq` works under NumPy 2, and
+you can add PESQ through a custom task.)
 
 ### Real-model recipe
 
