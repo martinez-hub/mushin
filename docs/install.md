@@ -54,9 +54,9 @@ A few notes:
   parallelizes sweep *cells* across CPU cores as usual.
 - **Intel macOS (x86_64)** is not supported: PyTorch publishes no x86_64 macOS
   wheels after torch 2.2, and `mushin` requires torch ≥ 2.4 and NumPy 2. The
-  last release series that supports Intel Macs is 0.14.x, which was tested
-  there on Python 3.10 and 3.11 (torch 2.2 has no wheels for Python 3.13+):
-  `python3.11 -m pip install "mushin-py<0.15"`.
+  last release series that supports Intel Macs is 0.14.x, which supports them
+  on Python 3.10 and 3.11 (newer Pythons are unsupported there, and torch 2.2
+  has no wheels for Python 3.13+): `python3.11 -m pip install "mushin-py<0.15"`.
 - **Python 3.10** is not supported: it reached end-of-life on 2026-10-01,
   and `mushin` requires Python ≥ 3.11.
 - **Python 3.15** is not supported yet. Two upstream fixes are pending:
