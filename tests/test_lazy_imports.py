@@ -36,9 +36,11 @@ def test_import_mushin_does_not_load_pytorch_lightning():
 
 
 def test_import_mushin_does_not_load_eval_dependencies():
-    # torchmetrics and scipy come from the `eval` extra, so a core install does
-    # not have them: an eager import of either anywhere on the `import mushin`
-    # path turns the core install's first line into a ModuleNotFoundError.
+    # scipy comes only from the `eval` extra, so a core install does not have
+    # it: an eager import anywhere on the `import mushin` path turns the core
+    # install's first line into a ModuleNotFoundError. torchmetrics does reach a
+    # core install (pytorch-lightning depends on it), so for it this guards
+    # import time, like the Lightning check above.
     out = _fresh_import_probe(
         "import sys, mushin;"
         "print('torchmetrics' in sys.modules, 'scipy' in sys.modules)"

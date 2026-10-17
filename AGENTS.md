@@ -81,7 +81,9 @@ local pass therefore does not cover them, and you should not claim it does.
   `src/mushin/__init__.py`; never import it eagerly.
 - **The core works with no extras.** Only `benchmark/` and `llm/` may import
   `torchmetrics`/`scipy` at module level, because `import mushin` loads them
-  lazily. `study/` is imported eagerly (`from .study import Study`), so it
+  lazily. scipy is absent from a core install, so a stray eager import breaks
+  it; torchmetrics arrives anyway through `pytorch-lightning`, so a stray
+  import of it costs import time instead. `study/` is imported eagerly (`from .study import Study`), so it
   imports `mushin.benchmark` inside functions or under `TYPE_CHECKING`, as
   `study/_study.py` and `study/_load.py` do. Touching an `eval` name without
   the extra must raise an `ImportError` that names `mushin-py[eval]`; the

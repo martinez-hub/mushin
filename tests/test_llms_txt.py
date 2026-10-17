@@ -122,19 +122,9 @@ def test_llms_txt_follows_the_spec_header():
     assert next(line for line in lines[1:] if line.strip()).startswith("> ")
 
 
-def test_llms_txt_links_use_the_configured_site_url():
-    """Every docs link uses mkdocs.yml's `site_url`, so moving the site to a new
-    host cannot leave llms.txt pointing at the old one."""
-    links = re.findall(r"\]\((https?://[^)]*)\)", _llms_txt())
-    docs_links = [link for link in links if "github.io/mushin" in link]
-    assert docs_links, "llms.txt has no links to the docs site"
-    assert all(link.startswith(_site()) for link in docs_links), (
-        f"links not under site_url {_site()}: "
-        f"{[link for link in docs_links if not link.startswith(_site())]}"
-    )
-
-
 def test_every_nav_page_is_listed_in_llms_txt():
+    """Nav URLs are built from mkdocs.yml's `site_url`, so this also fails when
+    the site moves to a new host and llms.txt still links to the old one."""
     missing = _nav_urls() - set(_llms_txt_urls())
     assert not missing, (
         f"pages in mkdocs.yml's nav but not in docs/llms.txt: {sorted(missing)}"
