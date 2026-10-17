@@ -35,6 +35,17 @@ def test_import_mushin_does_not_load_pytorch_lightning():
     assert out == "False False"
 
 
+def test_import_mushin_does_not_load_eval_dependencies():
+    # torchmetrics and scipy come from the `eval` extra, so a core install does
+    # not have them: an eager import of either anywhere on the `import mushin`
+    # path turns the core install's first line into a ModuleNotFoundError.
+    out = _fresh_import_probe(
+        "import sys, mushin;"
+        "print('torchmetrics' in sys.modules, 'scipy' in sys.modules)"
+    )
+    assert out == "False False"
+
+
 def test_lightning_names_resolve_lazily():
     out = _fresh_import_probe(
         "import sys, mushin;"

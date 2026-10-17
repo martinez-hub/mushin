@@ -59,7 +59,7 @@ local pass therefore does not cover them, and you should not claim it does.
 | `src/mushin/_tuning.py`, `_packing.py` | Auto-tuning and GPU packing. |
 | `src/mushin/benchmark/` | `compare`, the task registry, the batteries, the statistics (`eval` extra). |
 | `src/mushin/llm/` | `compare_llms`, `compare_scores`, `llm_judge` (`eval` extra). |
-| `src/mushin/study/` | `Study`: a training sweep routed into `compare` (`eval` extra). |
+| `src/mushin/study/` | `Study`: a training sweep routed into `compare`. Its features need the `eval` extra, but `import mushin` loads it. |
 | `src/mushin/lightning/` | `HydraDDP`, `HydraFSDP`, `MetricsCallback`, cluster helpers. |
 | `src/mushin/mcp/` | The read-only `mushin-mcp` server (`mcp` extra). |
 | `tests/` | pytest + hypothesis. `tests/plugins/hydra_plugins/` holds a test sweeper plugin. |
@@ -73,21 +73,29 @@ local pass therefore does not cover them, and you should not claim it does.
 
 ## Invariants that CI enforces
 
-- **`import mushin` stays light.** A bare import must not load
-  `pytorch_lightning`, `mushin.benchmark`, `mushin.llm`, `torchmetrics`, or
-  `scipy`. Expose a name from a heavy subpackage by adding it to the
-  `_LAZY_BENCHMARK` / `_LAZY_LIGHTNING` tables, the `TYPE_CHECKING` block, and
-  `__all__` in `src/mushin/__init__.py`; never import it eagerly. Pinned by
-  `tests/test_lazy_imports.py` and the `core-only` CI job.
-- **The core works with no extras.** Code under `benchmark/`, `llm/` and
-  `study/` may use `torchmetrics`/`scipy`; nothing else may. Touching an `eval`
-  name without the extra must raise an `ImportError` that names
-  `mushin-py[eval]`.
-- **Dependency floors are justified and tested.** Every floor in
-  `pyproject.toml` carries a comment saying why it is that version, and the
-  `min-versions` job runs the suite at the floors (`make test-lowest`
-  reproduces it in Docker). Add a comment with any new floor, and do not add
-  upper bounds on library dependencies.
+- **`import mushin` stays light.** A bare import must not load `torch`,
+  `pytorch_lightning`, `torchmetrics`, `scipy`, `mushin.benchmark` or
+  `mushin.llm` (`tests/test_lazy_imports.py` checks each one). Expose a name
+  from a heavy subpackage by adding it to the `_LAZY_BENCHMARK` /
+  `_LAZY_LIGHTNING` tables, the `TYPE_CHECKING` block, and `__all__` in
+  `src/mushin/__init__.py`; never import it eagerly.
+- **The core works with no extras.** Only `benchmark/` and `llm/` may import
+  `torchmetrics`/`scipy` at module level, because `import mushin` loads them
+  lazily. `study/` is imported eagerly (`from .study import Study`), so it
+  imports `mushin.benchmark` inside functions or under `TYPE_CHECKING`, as
+  `study/_study.py` and `study/_load.py` do. Touching an `eval` name without
+  the extra must raise an `ImportError` that names `mushin-py[eval]`; the
+  `core-only` CI job installs no extras and checks that.
+- **Dependency floors are justified and tested.** Most floors in
+  `pyproject.toml` carry a comment saying why they are that version
+  (`omegaconf`, `netCDF4` and `mcp` do not yet); add one with any new floor.
+  The `min-versions` job runs the suite with the core, the `eval` extra and the
+  dev group at their floors (`make test-lowest` reproduces it in Docker). It
+  does not install the `detection`, `image` or `audio` extras, so those floors
+  are not floor-tested. Avoid upper bounds: a
+  ceiling on a library propagates into every downstream resolution. The one
+  existing cap, `mcp >= 2, < 3`, has no recorded rationale; ask the maintainer
+  before removing it or copying the pattern.
 - **`uv.lock` is generated.** Change dependencies in `pyproject.toml`, then run
   `uv lock` (or `uv sync`). Never edit the lockfile by hand.
 - **Python 3.11 is the floor** (`target-version = "py311"`); 3.11 to 3.14 are
@@ -96,8 +104,11 @@ local pass therefore does not cover them, and you should not claim it does.
   checks that thresholds quoted in `docs/guides/statistics.md` match the code.
   If you change one side, change the other; do not just edit the test.
 - **`docs/llms.txt` lists every nav page.** Adding, renaming or removing a page
-  in `mkdocs.yml`'s `nav` means editing `docs/llms.txt` too;
-  `tests/test_llms_txt.py` fails otherwise.
+  in `mkdocs.yml`'s `nav` means editing `docs/llms.txt` too.
+  `tests/test_llms_txt.py` fails otherwise; it also checks that the install
+  name, Python range and extras listed there match `pyproject.toml`, and runs
+  its code example. CI runs it, and `tests/test_docs_claims.py`, in the `docs`
+  job on every PR, since the `test` job skips docs-only PRs.
 - **Notebooks declare their own installs.** Each notebook shows a
   `%pip install ...` line, and `scripts/check_notebook_prereqs.py` runs it in a
   venv holding exactly that, so the line must cover every import. Outputs are
@@ -136,16 +147,22 @@ local pass therefore does not cover them, and you should not claim it does.
 - **Python inside Markdown is formatted too.** `ruff format --check .` covers
   code blocks in `.md` files and cells in `.ipynb` files, so a doc snippet can
   fail CI.
-- **Tests** that run a sweep write output directories: use `tmp_path` or the
-  `cleandir` fixture. A test that stores a ConfigStore group marks itself
-  `@pytest.mark.config_group("name")` so the group is removed afterwards. The
-  benchmark task registry is restored after every test automatically.
+- **Tests** that run a sweep write a `multirun/` directory into the current
+  directory unless told otherwise. Pass `working_dir=tmp_path` to `run(...)`,
+  as the existing tests do, or request the `cleandir` fixture, which changes
+  into a temporary directory. Requesting `tmp_path` alone isolates nothing.
+- A test that stores a ConfigStore group must both mark itself
+  `@pytest.mark.config_group("name")` and request the `restore_config_group`
+  fixture; the fixture is not autouse, so the marker alone does nothing (see
+  `tests/test_workflows.py`). The benchmark task registry, by contrast, is
+  restored after every test automatically.
 
 ## Before you push
 
 1. `make check` passes.
 2. Docs touched (including `mkdocs.yml` or `docs/llms.txt`): `make docs-build`
-   passes.
+   passes, and so does
+   `uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py`.
 3. Notebooks or code they exercise touched: the nbmake command above passes.
 4. A fragment exists in `changes/`.
 

@@ -53,6 +53,23 @@ Added `ignore_index` support to `compare` for segmentation tasks.
 The CI `changelog` job will fail if a PR omits a fragment (unless the PR has
 the `changelog-exempt` label, reserved for release PRs).
 
+## Adding a docs page
+
+A new page goes in `mkdocs.yml`'s `nav` **and** in `docs/llms.txt`, the
+[index for LLMs and coding agents](llms.txt) that the site serves at `/llms.txt`.
+CI fails if the two disagree. Check locally with:
+
+```bash
+make docs-build
+uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py
+```
+
+## Coding agents
+
+Coding agents working on mushin should read
+[AGENTS.md](https://github.com/martinez-hub/mushin/blob/main/AGENTS.md): the
+same rules as this page, plus the invariants CI enforces.
+
 ## Releases
 
 See [RELEASING.md](https://github.com/martinez-hub/mushin/blob/main/RELEASING.md)
