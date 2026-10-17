@@ -83,6 +83,24 @@ and adds only a terse `- #42` under a "Misc" section. See
 - Public functions should keep their NumPy-style docstrings.
 - Add or update tests for any behavior change.
 
+### Adding a docs page
+
+A new page goes in `mkdocs.yml`'s `nav` **and** in
+[`docs/llms.txt`](docs/llms.txt), the index LLMs and coding agents read instead
+of crawling the site. `tests/test_llms_txt.py` fails if the two disagree, and
+CI runs it on every PR, docs-only ones included. Check locally with:
+
+```bash
+make docs-build
+uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py
+```
+
+## Coding agents
+
+If you work with a coding agent, point it at [AGENTS.md](AGENTS.md) (Claude Code
+reads it through [CLAUDE.md](CLAUDE.md)). It covers the same rules as this file
+plus the invariants CI enforces.
+
 ## Reporting bugs / requesting features
 
 Use the issue templates (bug report / feature request). For **security

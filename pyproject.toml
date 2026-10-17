@@ -175,6 +175,11 @@ dev = [
     # scikit-learn is ABI-incompatible with NumPy 2. The
     # min-versions CI job (dev group at lowest-direct, NumPy-2) verifies this.
     "scikit-learn >= 1.4.2",
+    # tests/test_llms_txt.py parses mkdocs.yml. PyYAML already arrives through
+    # omegaconf, but a test that imports it should not depend on that. Floor is
+    # 6.0, the first release with CPython 3.11 wheels; every 5.x release would
+    # have to build from source on the oldest supported Python.
+    "pyyaml >= 6.0",
     # Example-notebook toolchain (docs/notebooks/). jupytext converts the
     # percent-format .py sources into .ipynb and executes them; nbstripout keeps
     # outputs but strips nondeterministic metadata; nbmake (a pytest plugin)

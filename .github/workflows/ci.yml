@@ -71,7 +71,9 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
       - name: Spell check
-        run: uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
+        # The scope lives in the Makefile's `spell` target, so CI and `make
+        # spell` cannot drift apart.
+        run: make spell
 
   test:
     needs: changes
@@ -273,6 +275,13 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      # Some docs content is pinned by tests: llms.txt must list every nav page
+      # and state facts that match pyproject.toml, and the numbers quoted in the
+      # statistics guide must match the code. The `test` job skips docs-only
+      # PRs, which are the ones most likely to break these, so they run here on
+      # every PR as well. --extra eval: test_docs_claims imports the stats code.
+      - name: Docs-pinning tests
+        run: uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py -p no:cacheprovider
       - name: Build docs (strict)
         run: uv run --group docs mkdocs build --strict
 
