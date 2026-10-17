@@ -83,6 +83,14 @@ and adds only a terse `- #42` under a "Misc" section. See
 - Public functions should keep their NumPy-style docstrings.
 - Add or update tests for any behavior change.
 
+## Coding agents
+
+If you work with a coding agent, point it at [AGENTS.md](AGENTS.md) (Claude Code
+reads it through [CLAUDE.md](CLAUDE.md)). It covers the same rules as this file
+plus the invariants CI enforces. The docs site's index for LLMs,
+[`docs/llms.txt`](docs/llms.txt), must list every page in the `mkdocs.yml` nav;
+`tests/test_llms_txt.py` checks this, so add a line there when you add a page.
+
 ## Reporting bugs / requesting features
 
 Use the issue templates (bug report / feature request). For **security
