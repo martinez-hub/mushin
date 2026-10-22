@@ -1568,6 +1568,316 @@ def test_load_from_dir_nan_fills_sampled_out_cells(tmp_path):
     assert len(present) == 2 and len(vals) == 4
 
 
+def test_load_from_dir_restores_the_failure_record(tmp_path):
+    """A reloaded fail-soft sweep must carry the `mushin_failures` attr the
+    dataset from `.run()` had. Without it `compare_methods` cannot tell that the
+    NaN cells are missing results, and compares the sweep as if it were complete."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            if a == 2 and b == 1:
+                raise RuntimeError("boom")
+            return dict(m=float(a) * 10 + b)
+
+    wf = W()
+    with pytest.warns(UserWarning, match="failed"):
+        wf.run(
+            a=multirun([1, 2, 3]),
+            b=multirun([0, 1]),
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+        )
+    ran = wf.to_xarray()
+
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert loader.failures == wf.failures
+    assert loader.skipped == []
+    assert loader.to_xarray().attrs["mushin_failures"] == ran.attrs["mushin_failures"]
+
+
+def test_load_from_dir_restores_the_skip_record(tmp_path):
+    """Likewise for `mushin_skipped`: a sampled-out cell is a missing result."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a) * 10)
+
+    wf = W()
+    with pytest.warns(UserWarning, match="skipped"):
+        wf.run(a=multirun([1, 2, 3, 4]), working_dir=str(tmp_path / "s"), sample=2)
+    ran = wf.to_xarray()
+
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert loader.skipped == wf.skipped
+    assert loader.failures == []
+    attrs = loader.to_xarray().attrs
+    assert attrs["mushin_skipped"] == ran.attrs["mushin_skipped"]
+    assert "mushin_failures" not in attrs
+
+
+def test_load_from_dir_of_a_complete_sweep_adds_no_record(tmp_path):
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    W().run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert loader.failures == [] and loader.skipped == []
+    assert loader.is_complete is True
+    attrs = loader.to_xarray().attrs
+    assert "mushin_failures" not in attrs and "mushin_skipped" not in attrs
+
+
+def test_a_sweep_loaded_without_metrics_knows_it_is_incomplete(tmp_path):
+    """`MultiRunMetricsWorkflow(working_dir=...)` and `load_from_dir(d, None)`
+    load no metrics; the cells' statuses alone still give the record."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return dict(m=float(a))
+
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="failed"):
+        W().run(a=multirun([1, 2, 3]), working_dir=str(wd), on_error="nan")
+
+    for loader in (W(working_dir=wd), W().load_from_dir(wd, None)):
+        assert [f["combo"] for f in loader.failures] == ["a=2"]
+        assert loader.skipped == [] and loader.is_complete is False
+
+
+def test_load_from_dir_record_of_a_sweep_from_before_status_sidecars(tmp_path):
+    """Such a sweep has only the end-of-run manifest: its failed cell must stay
+    a failure, and a completed cell whose metrics file holds `{}` a result."""
+    import json
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return {} if a == 3 else dict(m=float(a))
+
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="failed"):
+        W().run(a=multirun([1, 2, 3]), working_dir=str(wd), on_error="nan")
+    for status_file in wd.glob("*/mushin_cell_status.json"):
+        status_file.unlink()
+    (wd / "2" / "mushin_metrics.json").write_text(json.dumps({}))
+
+    loader = W().load_from_dir(wd, None)
+    assert [f["combo"] for f in loader.failures] == ["a=2"]
+    assert loader.skipped == [] and loader.is_complete is False
+
+    # Loaded with metrics: the `{}` file is a result too.
+    wd2 = tmp_path / "s2"
+    W().run(a=multirun([1, 3]), working_dir=str(wd2))
+    for status_file in wd2.glob("*/mushin_cell_status.json"):
+        status_file.unlink()
+    loader = W().load_from_dir(wd2, "mushin_metrics.json")
+    assert loader.failures == [] and loader.skipped == []
+    assert loader.is_complete is True
+
+
+def test_load_from_dir_record_ignores_an_earlier_sweep_of_the_dir(tmp_path):
+    """Job dirs an earlier, wider sweep left in a reused working_dir are not
+    cells of the latest sweep: their 'failed' status must not mark the latest
+    (complete) sweep incomplete. Nor may a dir over other axes crash the load."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(method, seed=0):
+            if method == "c":
+                raise RuntimeError("boom")
+            return dict(m=float(seed))
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="failed"):
+        W().run(method=multirun(["a", "b", "c"]), working_dir=wd, on_error="nan")
+    # The latest sweep: fewer cells, and a new axis, in the same dir. Dir 2
+    # (method=c, failed, no seed in its config) is left from the first sweep.
+    W().run(method=multirun(["a"]), seed=multirun([0, 1]), working_dir=wd)
+
+    loader = W().load_from_dir(wd, "mushin_metrics.json")
+    assert loader.failures == [] and loader.skipped == []
+    assert loader.is_complete is True
+    ds = loader.to_xarray()
+    assert "mushin_failures" not in ds.attrs
+    assert ds["m"].values.tolist() == [[0.0, 1.0]]
+
+
+def test_load_from_dir_records_cells_that_never_finished(tmp_path):
+    """A sweep killed between cells leaves no job dir (and no manifest) for the
+    cells it never started; one killed mid-cell leaves a 'running' status. Both
+    are cells without a result, recorded as not run, not silently NaN-filled."""
+    import json
+    import shutil
+
+    from mushin import multirun
+    from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2, 3, 4]), working_dir=str(wd))
+    # Simulate the kill: no end-of-run manifest, cell 3 never started, and
+    # cell 2 was interrupted after it marked itself running.
+    (wd / MANIFEST_FILE).unlink()
+    shutil.rmtree(wd / "3")
+    status_file = wd / "2" / "mushin_cell_status.json"
+    status = json.loads(status_file.read_text())
+    status_file.write_text(json.dumps({**status, "status": "running"}))
+    (wd / "2" / METRICS_FILE).unlink()
+
+    loader = W().load_from_dir(wd, "mushin_metrics.json")
+    assert loader.failures == []
+    assert [s["combo"] for s in loader.skipped] == ["a=3", "a=4"]
+    assert loader.skipped[1]["working_dir"] is None
+    assert loader.is_complete is False
+    ds = loader.to_xarray()
+    assert json.loads(ds.attrs["mushin_skipped"]) == ["a=3", "a=4"]
+    vals = ds["m"].values.tolist()
+    assert vals[:2] == [1.0, 2.0] and vals[2] != vals[2] and vals[3] != vals[3]
+
+
+def test_load_from_dir_record_of_a_complete_sweep_over_inf(tmp_path):
+    """Cells keyed by a non-finite swept value must match the grid's keys, or a
+    complete sweep would be reported incomplete."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(clip, seed):
+            return dict(m=float(seed))
+
+    W().run(
+        clip=multirun([1.0, float("inf")]),
+        seed=multirun([0, 1]),
+        working_dir=str(tmp_path / "s"),
+    )
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert loader.failures == [] and loader.skipped == []
+    assert loader.is_complete is True
+
+
+def test_load_from_dir_record_and_data_agree_after_a_second_load(tmp_path):
+    """Reloading metrics must refresh the data along with the record: a cell
+    recorded as not run must not keep the value an earlier load cached."""
+    import json
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    wd = tmp_path / "s"
+    W().run(a=multirun([1, 2, 3]), working_dir=str(wd))
+    loader = W().load_from_dir(wd, "mushin_metrics.json")
+    assert loader.to_xarray()["m"].values.tolist() == [1.0, 2.0, 3.0]
+
+    status_file = wd / "1" / "mushin_cell_status.json"  # a=2 is re-running
+    status_file.write_text(
+        json.dumps({**json.loads(status_file.read_text()), "status": "running"})
+    )
+    vals = loader.to_xarray(metrics_filename="mushin_metrics.json")["m"].values
+    assert [s["combo"] for s in loader.skipped] == ["a=2"]
+    assert vals[0] == 1.0 and vals[1] != vals[1] and vals[2] == 3.0
+
+
+def test_load_from_dir_counts_a_completed_cell_with_no_metrics_as_done(tmp_path):
+    """As `.run()` does: a task that returned no metrics still completed."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return {} if a == 2 else dict(m=float(a))
+
+    wf = W()
+    wf.run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    assert wf.is_complete is True
+    loader = W().load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert loader.skipped == [] and loader.is_complete is True
+
+
+def test_load_from_dir_failure_text_is_not_from_an_older_attempt(tmp_path):
+    """The manifest is written at the end of a run, so a resume killed before
+    it leaves the previous attempt's error text in place: use it only when the
+    manifest is newer than the cell's status."""
+    import os
+    import time
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("first attempt")
+            return dict(m=float(a))
+
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="failed"):
+        W().run(a=multirun([1, 2]), working_dir=str(wd), on_error="nan")
+    loader = W().load_from_dir(wd, "mushin_metrics.json")
+    assert "first attempt" in loader.failures[0]["exception"]
+
+    later = time.time() + 60  # the cell failed again after the manifest was saved
+    os.utime(wd / "1" / "mushin_cell_status.json", (later, later))
+    loader = W().load_from_dir(wd, "mushin_metrics.json")
+    assert [f["combo"] for f in loader.failures] == ["a=2"]
+    assert loader.failures[0]["exception"] is None
+
+
+def test_load_from_dir_record_paths_are_absolute(tmp_path, monkeypatch):
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return dict(m=float(a))
+
+    monkeypatch.chdir(tmp_path)
+    wf = W()
+    with pytest.warns(UserWarning, match="failed"):
+        wf.run(a=multirun([1, 2]), working_dir="s", on_error="nan")
+    loader = W().load_from_dir("s", "mushin_metrics.json")
+    assert loader.failures == wf.failures
+    assert Path(loader.failures[0]["working_dir"]).is_absolute()
+
+
 def test_parse_overrides_expands_range_and_rejects_interval():
     """Hydra range(...) sweeps form a grid and are expanded; continuous
     interval(...) (Bayesian-sweeper syntax) cannot and must raise a clear

@@ -103,6 +103,61 @@ def test_fail_soft_resume_compare_end_to_end(tmp_path):
     assert result is not None
 
 
+def test_compare_methods_refuses_a_reloaded_incomplete_sweep(tmp_path):
+    """The refusal must survive a reload from disk, which is how a sweep run in
+    the background gets analyzed. A reload used to lose the failure record, so
+    compare_methods compared the NaN-holed grid as if it were complete: Holm then
+    corrected over fewer pairs and could call a pair significant that the
+    complete-grid analysis does not."""
+
+    class Sweep(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(method, seed):
+            if method == "c" and seed == 0:
+                raise RuntimeError("boom")
+            return {"score": {"a": 0.0, "b": 1.0, "c": 2.0}[method] + 0.1 * seed}
+
+    working_dir = str(tmp_path / "sweep")
+    with pytest.warns(UserWarning, match="fail"):
+        Sweep().run(
+            working_dir=working_dir,
+            on_error="nan",
+            method=multirun(["a", "b", "c"]),
+            seed=multirun(list(range(6))),
+        )
+
+    reloaded = MultiRunMetricsWorkflow().load_from_dir(working_dir, METRICS_FILE)
+    with pytest.raises(IncompleteSweepError):
+        compare_methods(reloaded.to_xarray())
+
+
+def test_compare_methods_refuses_a_reloaded_sweep_killed_between_cells(tmp_path):
+    """A sweep killed before its last cell started has no job dir for it and no
+    end-of-run manifest. Reloaded, it must still count as incomplete: comparing
+    it would correct over fewer pairs than the sweep has (one NaN cell drops the
+    a-c and b-c pairs from the Holm family)."""
+    import shutil
+
+    class Sweep(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(method, seed):
+            return {"score": {"a": 0.0, "b": 1.0, "c": 2.0}[method] + 0.1 * seed}
+
+    working_dir = tmp_path / "sweep"
+    Sweep().run(
+        working_dir=str(working_dir),
+        method=multirun(["a", "b", "c"]),
+        seed=multirun(list(range(6))),
+    )
+    (working_dir / MANIFEST_FILE).unlink()
+    shutil.rmtree(working_dir / "17")  # method=c, seed=5: never started
+
+    reloaded = MultiRunMetricsWorkflow().load_from_dir(working_dir, METRICS_FILE)
+    assert [s["combo"] for s in reloaded.skipped] == ["method=c,seed=5"]
+    with pytest.raises(IncompleteSweepError, match="not run"):
+        compare_methods(reloaded.to_xarray())
+
+
 def test_resume_after_hard_kill_skips_completed_cells(tmp_path):
     # A sweep is SIGKILLed after some cells finish (no manifest write happens).
     # Resume must skip the finished cells using the durable per-cell sidecars.

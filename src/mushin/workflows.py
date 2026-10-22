@@ -40,6 +40,15 @@ T1 = TypeVar("T1")
 _VERSION_BASE_DEFAULT = "1.3"
 
 
+def _mtime(path: Path) -> float:
+    """``path``'s modification time, or infinity if it cannot be read (so it
+    never counts as older than anything)."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
 def _sort_x_by_k(x: T, k: Iterable[Any]) -> T:
     k = tuple(k)
     assert len(x) == len(k)
@@ -1718,9 +1727,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self._working_dir = working_dir
         # Per-cell failure records ({"combo", "exception", "working_dir"}) and the
         # on-disk sweep manifest, populated by `jobs_post_process` under fail-soft.
+        # For a sweep loaded from disk, `load_metrics` rebuilds `failures` and
+        # `skipped`; there `exception` is None when no manifest describes the
+        # attempt (the traceback is in the cell's mushin_error.txt).
         self.failures: list[dict[str, Any]] = []
-        # Cells skipped because the max_total_seconds budget was exhausted
-        # ({"combo", "working_dir"}); populated by `jobs_post_process`.
+        # Cells that were not run ({"combo", "working_dir"}): sampled out, or
+        # skipped by an exhausted max_total_seconds budget. A loaded sweep also
+        # lists cells that never finished; `working_dir` is None for one that
+        # never started.
         self.skipped: list[dict[str, Any]] = []
         self._manifest: Any = None
 
@@ -1729,11 +1743,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
     @property
     def is_complete(self) -> bool:
-        """Whether every requested grid cell completed. ``True`` when no manifest
-        exists yet (e.g. a workflow loaded from disk that never swept)."""
+        """Whether every requested grid cell completed. For a workflow loaded
+        from disk, whether its record (``failures``, ``skipped``) is empty: the
+        record is rebuilt on each load, from the cells' statuses and, once
+        metrics are loaded, their metrics. ``True`` for a workflow that has
+        neither swept nor loaded."""
         if self._manifest is not None:
             return self._manifest.is_complete()
-        return True
+        return not (self.failures or self.skipped)
 
     @property
     def notes(self) -> str | None:
@@ -2388,11 +2405,15 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         if metrics_filename is not None:
             self.load_metrics(metrics_filename)
+        elif not self.jobs:
+            # No metrics to load, so record the cells without a result from
+            # their statuses, so `is_complete` holds before any `to_xarray`.
+            self._record_cells_without_result(None)
 
         # Surface any sweep-level lineage (notes/tags) recorded in the manifest,
-        # so a loaded sweep reports the same wf.notes/wf.tags it ran with. Read
-        # only these fields (not the full manifest) to keep is_complete's
-        # documented "loaded workflow -> True" behavior unchanged.
+        # so a loaded sweep reports the same wf.notes/wf.tags it ran with. The
+        # manifest itself is not attached: `is_complete` reads the cell record
+        # `load_metrics` rebuilds.
         try:
             from ._sweep_io import Manifest
 
@@ -2403,6 +2424,107 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             pass
 
         return self
+
+    def _grid_keys(self) -> list[str]:
+        """The key of every cell of the sweep's grid, in grid order, as
+        `to_xarray` looks each cell up."""
+        import itertools
+
+        from ._sweep_io import combo_key
+
+        swept = self._swept_param_names()
+        overrides = self.multirun_task_overrides
+        values = [self._sanitize_coordinate_for_xarray(overrides[n]) for n in swept]
+        return [
+            combo_key(dict(zip(swept, combo, strict=True)))
+            for combo in itertools.product(*values)
+        ]
+
+    def _record_cells_without_result(self, job_metrics: list[Any] | None) -> None:
+        """Rebuild `failures` and `skipped` for a sweep loaded from disk.
+
+        `.run()` records them as it collects each job, and `to_xarray` turns them
+        into the `mushin_failures` / `mushin_skipped` attrs that
+        `compare_methods` checks. A loaded workflow has no jobs, so derive them
+        from the data `to_xarray` assembles: a cell of the sweep's grid that no
+        job dir completed or gives metrics has no result. It failed if its job
+        dir's status says so; otherwise it was not run (skipped, still running,
+        or never started, as in a sweep killed between cells).
+
+        A loaded metrics file is a result, even an empty one. With
+        ``job_metrics=None`` (loaded without metrics) only the statuses are read.
+        A job dir without a status sidecar (from before sidecars) takes its
+        status from the sweep manifest when the manifest lists that dir, and
+        otherwise counts as completed, as `load_metrics` would load it.
+        """
+        from ._resume import STATUS_FILE, read_cell_status
+        from ._sweep_io import MANIFEST_FILE, Manifest, combo_key
+
+        try:
+            manifest_cells = Manifest.load_or_new(self.working_dir, []).cells
+            manifest_mtime = (self.working_dir / MANIFEST_FILE).stat().st_mtime
+        except Exception:  # noqa: BLE001 - the manifest is best-effort here
+            manifest_cells, manifest_mtime = {}, 0.0
+
+        with_result: set[str] = set()
+        dirs: dict[str, Path] = {}
+        failed: set[str] = set()
+        if job_metrics is None:
+            job_metrics = [None] * len(self.cfgs)
+            no_sidecar_counts = True
+        else:
+            no_sidecar_counts = False
+        for i, (dir_, cfg, metrics) in enumerate(
+            zip(self.multirun_working_dirs, self.cfgs, job_metrics, strict=True)
+        ):
+            try:
+                key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
+            except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
+                continue  # other axes; its grid cell then counts as without result
+            sidecar = read_cell_status(dir_)
+            status = (sidecar or {}).get("status")
+            if sidecar is None:  # a sweep from before sidecars: ask the manifest
+                entry = manifest_cells.get(key, {})
+                if entry.get("dir") == dir_.name:
+                    status = entry.get("status")
+                elif no_sidecar_counts:
+                    status = "completed"
+            # A loaded metrics file (even `{}`) is a result, as `.run()` counts it.
+            if metrics is not None or status == "completed":
+                with_result.add(key)
+                continue
+            dirs[key] = dir_
+            if status == "failed":
+                failed.add(key)
+
+        try:
+            grid = self._grid_keys()
+        except Exception:  # noqa: BLE001 - a grid mushin cannot enumerate: record
+            grid = [*dirs]  # only the cells whose job dirs it found
+        self.failures, self.skipped = [], []
+        for key in grid:
+            if key in with_result:
+                continue
+            dir_ = dirs.get(key)
+            wdir = None if dir_ is None else str(dir_.absolute())
+            if key in failed:
+                # The manifest's error text, if it describes this attempt: it
+                # lists this dir, and was written after the cell's status (a
+                # resume killed before its own manifest leaves the old one).
+                entry = manifest_cells.get(key, {})
+                current = (
+                    entry.get("dir") == dir_.name
+                    and _mtime(dir_ / STATUS_FILE) <= manifest_mtime
+                )
+                self.failures.append(
+                    {
+                        "combo": key,
+                        "exception": entry.get("error") if current else None,
+                        "working_dir": wdir,
+                    }
+                )
+            else:
+                self.skipped.append({"combo": key, "working_dir": wdir})
 
     def load_metrics(
         self, metrics_filename: str | Sequence[str]
@@ -2465,9 +2587,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # exhausted `max_total_seconds` budget) deliberately has no valid
             # metrics: NaN-fill it exactly like the in-process path — never load
             # a stale sidecar a prior attempt left behind, and never raise for
-            # its (expected) missing files.
+            # its (expected) missing files. A cell still 'running' or 'pending'
+            # (a sweep reloaded mid-run, or killed mid-cell) has no result yet
+            # either; `_record_cells_without_result` records it as not run.
             status = (read_cell_status(dir_) or {}).get("status")
-            if status in ("failed", "skipped"):
+            if status in ("failed", "skipped", "running", "pending"):
                 job_metrics.append(None)
                 continue
             _metrics = {}
@@ -2487,6 +2611,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # absent — the column-aligned `self.metrics` cannot express holes.
         self._job_metrics_by_index = job_metrics
         self.metrics = self._process_metrics(job_metrics)
+        if not self.jobs:
+            # A loaded workflow: rebuild the record of cells without a result,
+            # and drop data cached from an earlier load so `to_xarray` rebuilds
+            # it from these metrics and the two agree.
+            self._metrics_by_combo = {}
+            self._record_cells_without_result(job_metrics)
 
         return self.metrics
 

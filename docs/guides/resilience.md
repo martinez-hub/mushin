@@ -69,6 +69,16 @@ This is keyed purely on `ds.attrs["mushin_failures"]`: a plain user dataset, or
 a metric that is legitimately `NaN` for some other reason, is unaffected. Only a
 sweep that actually recorded failures triggers the guard.
 
+A sweep reloaded from disk carries the same signal.
+`MultiRunMetricsWorkflow().load_from_dir(working_dir, "mushin_metrics.json")`
+records every cell of the sweep's grid that has no metrics: as failed if its
+status says so, otherwise as skipped (not run), which covers a cell still
+`running` and one a killed sweep never started. Its `to_xarray()` then has the
+same attrs, `is_complete` is `False`, and `compare_methods` refuses it too.
+Give each sweep its own `working_dir` (resuming it is fine): job dirs that an
+earlier sweep left in a reused one can stand in for cells the new sweep has not
+run yet.
+
 ## Resume: fill only the failed cells
 
 Fix the underlying cause, then re-run against the **same `working_dir`** with
