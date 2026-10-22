@@ -2451,12 +2451,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         dir's status says so; otherwise it was not run (skipped, still running,
         or never started, as in a sweep killed between cells).
 
-        With ``job_metrics=None`` (loaded without metrics) only the statuses are
-        read, and a job dir without one (from before status sidecars) counts as
-        completed, as `load_metrics` would load it.
+        A loaded metrics file is a result, even an empty one. With
+        ``job_metrics=None`` (loaded without metrics) only the statuses are read.
+        A job dir without a status sidecar (from before sidecars) takes its
+        status from the sweep manifest when the manifest lists that dir, and
+        otherwise counts as completed, as `load_metrics` would load it.
         """
         from ._resume import STATUS_FILE, read_cell_status
         from ._sweep_io import MANIFEST_FILE, Manifest, combo_key
+
+        try:
+            manifest_cells = Manifest.load_or_new(self.working_dir, []).cells
+            manifest_mtime = (self.working_dir / MANIFEST_FILE).stat().st_mtime
+        except Exception:  # noqa: BLE001 - the manifest is best-effort here
+            manifest_cells, manifest_mtime = {}, 0.0
 
         with_result: set[str] = set()
         dirs: dict[str, Path] = {}
@@ -2475,19 +2483,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 continue  # other axes; its grid cell then counts as without result
             sidecar = read_cell_status(dir_)
             status = (sidecar or {}).get("status")
-            done = status == "completed" or (no_sidecar_counts and sidecar is None)
-            if metrics or done:  # as `.run()` counts a cell
+            if sidecar is None:  # a sweep from before sidecars: ask the manifest
+                entry = manifest_cells.get(key, {})
+                if entry.get("dir") == dir_.name:
+                    status = entry.get("status")
+                elif no_sidecar_counts:
+                    status = "completed"
+            # A loaded metrics file (even `{}`) is a result, as `.run()` counts it.
+            if metrics is not None or status == "completed":
                 with_result.add(key)
                 continue
             dirs[key] = dir_
             if status == "failed":
                 failed.add(key)
 
-        try:
-            manifest_cells = Manifest.load_or_new(self.working_dir, []).cells
-            manifest_mtime = (self.working_dir / MANIFEST_FILE).stat().st_mtime
-        except Exception:  # noqa: BLE001 - the error text is best-effort
-            manifest_cells, manifest_mtime = {}, 0.0
         try:
             grid = self._grid_keys()
         except Exception:  # noqa: BLE001 - a grid mushin cannot enumerate: record

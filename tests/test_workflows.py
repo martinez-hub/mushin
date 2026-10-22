@@ -1660,6 +1660,42 @@ def test_a_sweep_loaded_without_metrics_knows_it_is_incomplete(tmp_path):
         assert loader.skipped == [] and loader.is_complete is False
 
 
+def test_load_from_dir_record_of_a_sweep_from_before_status_sidecars(tmp_path):
+    """Such a sweep has only the end-of-run manifest: its failed cell must stay
+    a failure, and a completed cell whose metrics file holds `{}` a result."""
+    import json
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return {} if a == 3 else dict(m=float(a))
+
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="failed"):
+        W().run(a=multirun([1, 2, 3]), working_dir=str(wd), on_error="nan")
+    for status_file in wd.glob("*/mushin_cell_status.json"):
+        status_file.unlink()
+    (wd / "2" / "mushin_metrics.json").write_text(json.dumps({}))
+
+    loader = W().load_from_dir(wd, None)
+    assert [f["combo"] for f in loader.failures] == ["a=2"]
+    assert loader.skipped == [] and loader.is_complete is False
+
+    # Loaded with metrics: the `{}` file is a result too.
+    wd2 = tmp_path / "s2"
+    W().run(a=multirun([1, 3]), working_dir=str(wd2))
+    for status_file in wd2.glob("*/mushin_cell_status.json"):
+        status_file.unlink()
+    loader = W().load_from_dir(wd2, "mushin_metrics.json")
+    assert loader.failures == [] and loader.skipped == []
+    assert loader.is_complete is True
+
+
 def test_load_from_dir_record_ignores_an_earlier_sweep_of_the_dir(tmp_path):
     """Job dirs an earlier, wider sweep left in a reused working_dir are not
     cells of the latest sweep: their 'failed' status must not mark the latest
