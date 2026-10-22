@@ -9,6 +9,7 @@ Facts to get right when writing code that uses mushin:
 - Supported Python: 3.11 to 3.14.
 - The public API is the top-level `mushin` namespace plus the documented `mushin.benchmark` and `mushin.llm` symbols. Modules whose names start with an underscore are internal.
 - A task returns a `dict` of metrics; each key becomes a data variable. Each `mushin.multirun([...])` argument becomes a dimension of the dataset. Use `mushin.hydra_list([...])` to pass a list as one value instead of sweeping it.
+- `pip install mushin-py` also installs torch (>= 2.4) and pytorch-lightning, even for a task that never imports them. Intel macOS is not supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2.
 - The sweep layer is framework-agnostic (scikit-learn, XGBoost, plain NumPy). `HydraDDP`, `MetricsCallback`, auto-tuning, `compare` and the batteries assume PyTorch / Lightning.
 
 ```python
@@ -21,7 +22,9 @@ def experiment(lr, seed):
     return dict(accuracy=accuracy)
 
 
-ds = experiment.run(lr=mushin.multirun([0.01, 0.1, 1.0]), seed=mushin.multirun([0, 1, 2]))
+ds = experiment.run(
+    lr=mushin.multirun([0.01, 0.1, 1.0]), seed=mushin.multirun([0, 1, 2])
+)
 ds["accuracy"].mean("seed")  # dims (lr, seed); average over seeds
 experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 ```
@@ -71,7 +74,7 @@ experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 - [Studies](https://martinez-hub.github.io/mushin/notebooks/03_study/): notebook
 - [Resilient sweeps](https://martinez-hub.github.io/mushin/notebooks/04_resilience/): notebook
 - [LLM evaluation](https://martinez-hub.github.io/mushin/notebooks/05_llm_eval/): notebook
-- [scikit-learn (framework-agnostic)](https://martinez-hub.github.io/mushin/notebooks/06_sklearn_framework_agnostic/): notebook, no torch anywhere
+- [scikit-learn (framework-agnostic)](https://martinez-hub.github.io/mushin/notebooks/06_sklearn_framework_agnostic/): notebook, a task that uses no torch
 - [Analyzing your results](https://martinez-hub.github.io/mushin/notebooks/07_analyzing_results/): notebook
 - [LLM examples end to end](https://martinez-hub.github.io/mushin/notebooks/08_llm_examples/): notebook
 

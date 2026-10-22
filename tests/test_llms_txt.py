@@ -13,11 +13,13 @@ too, because the `test` job skips the docs-only PRs most likely to break it.
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from collections import Counter
 from functools import cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
@@ -27,12 +29,31 @@ LLMS_TXT = ROOT / "docs" / "llms.txt"
 
 
 class _MkdocsLoader(yaml.SafeLoader):
-    """A safe loader that reads mkdocs' custom tags (`!ENV`, `!relative`,
-    `!!python/name:...`) as None instead of raising, since only `site_url` and
-    `nav` are needed here and mkdocs itself accepts those tags."""
+    """A safe loader that accepts mkdocs' custom tags instead of raising.
+    `!ENV` resolves as mkdocs resolves it (the first variable that is set, else
+    the default), so an environment-driven `site_url` still yields a URL. Any
+    other tag (`!relative`, `!!python/name:...`) loads as its plain value: only
+    `site_url` and `nav` are read here."""
 
 
-_MkdocsLoader.add_multi_constructor("", lambda loader, suffix, node: None)
+def _construct_tagged(loader, tag, node):
+    if isinstance(node, yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node, deep=True)
+    else:
+        value = loader.construct_mapping(node, deep=True)
+    if tag != "!ENV":
+        return value
+    *names, default = value if isinstance(value, list) else [value, None]
+    return next((os.environ[n] for n in names if n in os.environ), default)
+
+
+_MkdocsLoader.add_multi_constructor("", _construct_tagged)
+
+# Hosts llms.txt may link to besides the docs site itself. A link to any other
+# host, or to the site's host outside the site, is a typo or a stale address.
+EXTERNAL_HOSTS = {"github.com"}
 
 
 @cache
@@ -82,8 +103,15 @@ def _nav_urls() -> set[str]:
     return {_site_url(page) for page in _nav_pages(_mkdocs()["nav"])}
 
 
+def _llms_txt_links() -> list[str]:
+    return re.findall(r"\]\(([^)\s]+)\)", _llms_txt())
+
+
 def _llms_txt_urls() -> list[str]:
-    return re.findall(r"\]\((" + re.escape(_site()) + r"[^)]*)\)", _llms_txt())
+    """The docs-site links in llms.txt, without their #anchors."""
+    return [
+        url.split("#", 1)[0] for url in _llms_txt_links() if url.startswith(_site())
+    ]
 
 
 @pytest.mark.parametrize(
@@ -105,14 +133,38 @@ def test_external_nav_links_are_not_pages():
     assert _nav_pages(nav) == ["index.md"]
 
 
-def test_mkdocs_custom_tags_do_not_break_the_loader():
-    config = yaml.load(
+def test_mkdocs_custom_tags_do_not_break_the_loader(monkeypatch):
+    text = (
         "site_url: !ENV [SITE_URL, 'https://example.org/']\n"
         "emoji_index: !!python/name:material.extensions.emoji.twemoji\n"
-        "nav:\n  - Home: index.md\n",
-        _MkdocsLoader,
+        "nav:\n  - Home: index.md\n  - Install: !relative install.md\n"
     )
-    assert config["nav"] == [{"Home": "index.md"}]
+    monkeypatch.delenv("SITE_URL", raising=False)
+    config = yaml.load(text, _MkdocsLoader)
+    assert config["site_url"] == "https://example.org/"
+    assert config["nav"] == [{"Home": "index.md"}, {"Install": "install.md"}]
+    monkeypatch.setenv("SITE_URL", "https://docs.example.org/")
+    assert yaml.load(text, _MkdocsLoader)["site_url"] == "https://docs.example.org/"
+
+
+def test_every_llms_txt_link_is_on_the_site_or_a_known_host():
+    """Links outside the docs site are not checked against the nav, so a typo in
+    the site prefix (`/mushn/`), `http://`, or an old host would slip through."""
+    site = urlsplit(_site())
+    bad = [
+        url
+        for url in _llms_txt_links()
+        if not url.startswith(_site())
+        and (
+            urlsplit(url).scheme != "https"
+            or urlsplit(url).netloc == site.netloc
+            or urlsplit(url).netloc not in EXTERNAL_HOSTS
+        )
+    ]
+    assert not bad, (
+        f"docs/llms.txt links outside the site {_site()} to unexpected places: "
+        f"{bad} (fix the link, or add its host to EXTERNAL_HOSTS)"
+    )
 
 
 def test_llms_txt_follows_the_spec_header():
@@ -169,12 +221,12 @@ def test_llms_txt_lists_every_extra():
 
 
 def test_llms_txt_example_runs(cleandir):
-    """The example is the code an agent is most likely to copy; it must run and
-    produce what the comments next to it say."""
-    match = re.search(r"```python\n(.*?)```", _llms_txt(), re.DOTALL)
-    assert match, "llms.txt has no python example"
+    """The examples are the code an agent is most likely to copy; every python
+    block must run, in order, and produce what the comments next to it say."""
+    blocks = re.findall(r"```python\n(.*?)```", _llms_txt(), re.DOTALL)
+    assert blocks, "llms.txt has no python example"
     namespace: dict = {}
-    exec(compile(match.group(1), str(LLMS_TXT), "exec"), namespace)
+    exec(compile("\n".join(blocks), str(LLMS_TXT), "exec"), namespace)
     ds = namespace["ds"]
     assert dict(ds.sizes) == {"lr": 3, "seed": 3}
     assert namespace["experiment"].workflow.to_dataframe().shape == (9, 3)

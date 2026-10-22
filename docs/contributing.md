@@ -56,7 +56,7 @@ the `changelog-exempt` label, reserved for release PRs).
 ## Adding a docs page
 
 A new page goes in `mkdocs.yml`'s `nav` **and** in `docs/llms.txt`, the
-[index for LLMs and coding agents](llms.txt) that the site serves at `/llms.txt`.
+[index for LLMs and coding agents](llms.txt) that the site serves at its root.
 CI fails if the two disagree. Check locally with:
 
 ```bash

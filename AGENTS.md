@@ -67,7 +67,7 @@ local pass therefore does not cover them, and you should not claim it does.
 | `docs/` | The mkdocs-material site. `docs/reference/` renders docstrings via mkdocstrings (`:::`). |
 | `docs/notebooks/` | Example notebooks with committed outputs; CI re-executes them. |
 | `docs/superpowers/` | Internal design specs and plans. Excluded from the site; never link to it from published docs. |
-| `docs/llms.txt` | The LLM-facing index of the docs site, served at `/llms.txt`. |
+| `docs/llms.txt` | The LLM-facing index of the docs site, served at <https://martinez-hub.github.io/mushin/llms.txt>. |
 | `changes/` | Towncrier news fragments (see below). |
 | `paper/` | The paper source (LaTeX); built by `.github/workflows/paper-pdf.yml`. |
 
@@ -90,16 +90,18 @@ local pass therefore does not cover them, and you should not claim it does.
   `core-only` CI job installs no extras and checks that.
 - **Dependency floors are justified and tested.** Most floors in
   `pyproject.toml` carry a comment saying why they are that version
-  (`omegaconf`, `netCDF4` and `mcp` do not yet); add one with any new floor.
-  The `min-versions` job runs the suite with the core, the `eval` extra and the
-  dev group at their floors (`make test-lowest` reproduces it in Docker). It
-  does not install the `detection`, `image` or `audio` extras, so those floors
-  are not floor-tested. Avoid upper bounds: a
-  ceiling on a library propagates into every downstream resolution. The one
-  existing cap, `mcp >= 2, < 3`, has no recorded rationale; ask the maintainer
-  before removing it or copying the pattern.
-- **`uv.lock` is generated.** Change dependencies in `pyproject.toml`, then run
-  `uv lock` (or `uv sync`). Never edit the lockfile by hand.
+  (`omegaconf`, `torchmetrics`, `netCDF4`, `lpips`, `pystoi` and `mcp` do not
+  yet); add one with any new floor. The `min-versions` job runs the suite with
+  the core, the `eval` extra and the dev group at their floors
+  (`make test-lowest` reproduces it in Docker). It does not install the
+  `detection`, `image` or `audio` extras, so those floors are not floor-tested.
+  Avoid upper bounds: a ceiling on a library propagates into every downstream
+  resolution. Three caps exist. `mcp >= 2, < 3` dates from the move to the 2.x
+  SDK, which removed the 1.x module the server was built on (0.12.0 in
+  `CHANGELOG.md`, #163); the cap guards against the next major doing the same,
+  though no comment says so. The docs group's `mkdocs-material < 10` and
+  `mkdocstrings[python] < 2` constrain only the docs build. Ask the maintainer
+  before adding or removing a cap.
 - **Python 3.11 is the floor** (`target-version = "py311"`); 3.11 to 3.14 are
   the supported, CI-required versions.
 - **Documented numbers can be pinned by tests.** `tests/test_docs_claims.py`
@@ -130,6 +132,13 @@ local pass therefore does not cover them, and you should not claim it does.
 - **Commit messages** use conventional prefixes, as in `git log`: `feat:`,
   `fix:`, `docs:`, `test:`, `ci:`, `build:`, `build(deps):`, `chore:`,
   `release:`. The subject says what changed; the body says why.
+- **No AI attribution.** Commits, PR bodies, code and docs carry no
+  `Co-Authored-By:` trailers, "Generated with" footers or session links for AI
+  tools.
+- **`uv.lock` is generated.** Change dependencies in `pyproject.toml`, then run
+  `uv lock` (or `uv sync`) and commit both. Never edit the lockfile by hand. CI
+  does not check that the lock is current: its `uv sync` re-resolves a stale
+  lock without failing.
 - **Public API** is the top-level `mushin` namespace plus the documented
   `mushin.benchmark` and `mushin.llm` symbols. Underscore modules are internal.
   The project is pre-1.0: a breaking change goes in a minor release with
