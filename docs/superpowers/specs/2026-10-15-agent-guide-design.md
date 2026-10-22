@@ -605,6 +605,12 @@ returned, and `compare_methods` raises `IncompleteSweepError` on it.
   job dirs can stand in for cells the new sweep has not run; the guide
   recommends one `working_dir` per sweep), and reusing one workflow object
   across sweeps.
+- **Tests** (in #254): the record equals `.run()`'s for a failed and a
+  sampled-out cell; a complete sweep, including one over `inf`, gets none; a
+  sweep killed between cells or mid-cell, and one loaded without metrics, are
+  recorded as incomplete; a narrower later sweep in the same dir is neither
+  misreported nor crashes; and `compare_methods` refuses a reloaded sweep with
+  a failed cell, or killed before its last cell.
 - **Review history:** three `/code-review` passes. The second caught two
   regressions in a first design that guessed which job dirs belong to the
   sweep. The design above derives completeness from the data instead.
