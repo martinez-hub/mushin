@@ -13,7 +13,7 @@ its rationale and the alternatives it rejected.
 - **#249** (merged 2026-10-22, after a review that fixed its facts and
   tests), which added a contributor `AGENTS.md`, a `CLAUDE.md` that imports
   it, and `docs/llms.txt` with tests. D5 extends that `llms.txt`.
-- **#254, D9's bug fix**, its own PR, first: a reloaded sweep reports its
+- **#254, D9's bug fix** (merged 2026-10-22): a reloaded sweep reports its
   cells without a result.
 
 ## Problem
@@ -23,7 +23,7 @@ Cursor and the like) to set up their experiments. mushin is a niche library
 that agents know little about from training. Nothing in the repo is written for
 them:
 
-- There is no agent-oriented page. #249 (open) adds `docs/llms.txt`, an index
+- There is no agent-oriented page. #249 added `docs/llms.txt`, an index
   of the docs pages with a short block of install and API facts and a minimal
   sweep, and a root `AGENTS.md` for agents that contribute to mushin. Neither
   tells an agent how to set up, run, check and report a scientist's
@@ -370,14 +370,6 @@ to Y.", "Other extras: ...", the first ```python block).
 Nothing else in #249's file changes. Its facts block and example stay the
 short version, and the guide is the long one.
 
-**If #249 is closed unmerged,** this change adds a hand-written
-`docs/llms.txt` itself. It would have the H1 and summary, a "Start here"
-section (the raw guide, then the For AI agents, Quickstart and Core concepts
-pages) and a "Guides" section. It also ports #249's nav helpers and its
-`llms.txt` tests (every nav page listed once, no site link outside the nav)
-into `tests/_docs_site.py` and `tests/test_llms_txt.py`, so D7 item 4 has them
-either way.
-
 **Why not mkdocs-llmstxt:** it would downgrade `markdown-it-py` across the
 shared lock (Facts) for one generated file. #249 reached the same choice.
 
@@ -460,8 +452,7 @@ A new test file, `tests/test_agent_guide.py`:
 **In CI:**
 - The `docs` job also runs `tests/test_agent_guide.py`, so a docs-only PR that
   breaks a link or the guide's code fails. It needs scipy and torchmetrics, so
-  it goes in the step #249 adds with `--extra eval` (if #249 is closed
-  unmerged, this change adds a step like it).
+  it goes in the step #249 added with `--extra eval`.
 - `core-only` (non-editable, no extras) checks
   `"python -m mushin guide" in pydoc.render_doc(mushin)` and runs
   `python -m mushin guide --path`.
