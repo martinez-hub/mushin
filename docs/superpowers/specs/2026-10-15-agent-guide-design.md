@@ -185,9 +185,12 @@ source. Success criteria:
 - **Released versions:** no release has `mushin.__main__`, so
   `python -m mushin` fails on 0.15.1 (`No module named mushin.__main__`). The
   docs site and `llms.txt` deploy from `main` on merge, before the release.
-- **PyPI:** the bare name `mushin` is unregistered on PyPI (404 on
-  2026-10-22). An agent told to run `python -m mushin` in an environment
-  without mushin may try `pip install mushin`, a name anyone could register.
+- **PyPI:** the bare name `mushin` is registered but empty: a project with no
+  releases, owned by rsokl, one of the original mushin authors (checked
+  2026-10-22; the JSON API answers 404 for a project with no releases, but the
+  simple index lists it). An agent told to run `python -m mushin` in an
+  environment without mushin may try `pip install mushin`, which finds
+  nothing to install.
 - **The docs site** is rebuilt from `main` on every push (`docs.yml`), not per
   release.
 - **CI:**
@@ -684,9 +687,9 @@ results for tasks that return NaN on purpose. It is a follow-up decision.
   and `llms.txt` say to run `python -m mushin guide` as soon as this merges,
   and on 0.15.1 it fails. Mitigated by the fallback each of them gives (D2).
 - **The install name.** An agent that cannot import mushin may reach for
-  `pip install mushin`, which is unregistered and could be claimed by anyone.
-  Mitigated by stating `mushin-py` wherever the command appears (D2). A
-  placeholder registration is a maintainer follow-up.
+  `pip install mushin`, which installs nothing: the name is held, with no
+  releases, by an original mushin author. Mitigated by stating `mushin-py`
+  wherever the command appears (D2).
 
 ## Follow-ups (not in this change)
 
@@ -701,6 +704,6 @@ results for tasks that return NaN on purpose. It is a follow-up decision.
   - `max_total_seconds` under joblib: warn, or enforce across workers
   - console output that survives a non-UTF-8 console (`diff`'s `Δ` is also
     a column name of its returned table, so renaming it is an API change)
-- Maintainer action: register `mushin` on PyPI as a placeholder that points
-  to `mushin-py`.
+- Maintainer action: ask the owner of `mushin` on PyPI whether the name can
+  point to `mushin-py`, for example as a package that only depends on it.
 - Agent-specific packaging (a skill, MCP prompts) on top of the guide.
