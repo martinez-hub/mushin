@@ -42,8 +42,10 @@ format: ## Auto-format with ruff
 format-check: ## Check formatting without modifying files
 	uv run ruff format --check .
 
+# The spell-check scope. CI runs this target; the codespell hook in
+# .pre-commit-config.yaml repeats the scope as a path regex, so change both.
 spell: ## Spell-check with codespell
-	uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md pyproject.toml changes
+	uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md AGENTS.md CLAUDE.md docs/llms.txt pyproject.toml changes
 
 check: lint format-check spell test ## Run all checks (what CI runs)
 
