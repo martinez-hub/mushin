@@ -284,6 +284,12 @@ jobs:
         run: uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py -p no:cacheprovider
       - name: Build docs (strict)
         run: uv run --group docs mkdocs build --strict
+      # The strict build cannot see an include that ruff has respaced (it no
+      # longer looks like an include). The guard needs the docs group, which
+      # only this job installs, so it runs here, on every PR. It uses no
+      # fixtures, and --noconftest keeps conftest.py from importing torch.
+      - name: Check the docs' snippet includes
+        run: uv run --group docs pytest tests/test_docs_snippets.py -p no:cacheprovider --noconftest
 
   core-only:
     # Guards the eval-extra split: a core install (NO extras) must import, run a

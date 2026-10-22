@@ -14,7 +14,9 @@ mushin workflows are subclasses of `MultiRunMetricsWorkflow`. You implement a
 swept parameters:
 
 ```python
---8 < --"examples/sweep_to_dataset.py:workflow"
+--8<--
+examples/sweep_to_dataset.py:workflow
+--8<--
 ```
 
 The `multirun(...)` wrapper tells Hydra to create one job per value. Here the
@@ -43,7 +45,9 @@ Once you have trained models (one list per method, one model per seed), pass
 them to `compare`:
 
 ```python
---8 < --"examples/compare_classifiers.py:run"
+--8<--
+examples/compare_classifiers.py:run
+--8<--
 ```
 
 `compare` evaluates every model on `data`, assembles an `(method × seed)`

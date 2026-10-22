@@ -20,7 +20,9 @@ models works here; you just bring the systems, data, and metric.
 ## Quickstart
 
 ```python
---8 < --"examples/compare_llms_demo.py:run"
+--8<--
+examples/compare_llms_demo.py:run
+--8<--
 ```
 
 `systems` maps a name to a callable `system(inputs, seed) -> outputs`. The

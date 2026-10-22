@@ -55,7 +55,9 @@ within-method variance, not a deterministic constant). `strong` corrupts ~15% of
 labels, `weak` ~40%:
 
 ```python
---8 < --"examples/batteries.py:walkthrough"
+--8<--
+examples/batteries.py:walkthrough
+--8<--
 ```
 
 ### 2. Run the comparison and read the summary
@@ -185,7 +187,9 @@ result.summary()  # accuracy / f1 / precision / recall / auroc / ece + significa
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:classification"
+--8<--
+examples/batteries.py:classification
+--8<--
 ```
 
 **Output** (from running the toy):
@@ -265,7 +269,9 @@ result.summary()  # miou / dice / pixel_acc / precision / recall + significance
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:segmentation"
+--8<--
+examples/batteries.py:segmentation
+--8<--
 ```
 
 **Output** (from running the toy):
@@ -347,7 +353,9 @@ result.summary()  # map / map_50 / map_75 / mar_* / iou / giou / ciou / diou + s
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:detection"
+--8<--
+examples/batteries.py:detection
+--8<--
 ```
 
 **Output** from running the toy, showing the full 16-metric battery:
@@ -424,7 +432,9 @@ result.summary()  # mse / mae / rmse / r2 / pearson / spearman + significance
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:regression"
+--8<--
+examples/batteries.py:regression
+--8<--
 ```
 
 **Output** (from running the toy):
@@ -488,7 +498,9 @@ result.summary()  # retrieval_map / ndcg / mrr / precision / recall + significan
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:retrieval"
+--8<--
+examples/batteries.py:retrieval
+--8<--
 ```
 
 **Output** (from running the toy):
@@ -550,7 +562,9 @@ result.summary()  # ssim / psnr / ms_ssim / lpips + significance
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:image_quality"
+--8<--
+examples/batteries.py:image_quality
+--8<--
 ```
 
 **Output** (from running the toy):
@@ -607,7 +621,9 @@ result.summary()  # si_sdr / si_snr / stoi + significance
 ### Runnable toy
 
 ```python
---8 < --"examples/batteries.py:audio"
+--8<--
+examples/batteries.py:audio
+--8<--
 ```
 
 **Output** (from running the toy):

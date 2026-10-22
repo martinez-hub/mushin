@@ -20,7 +20,9 @@ The following example trains a small CNN and MLP across seeds on MNIST and
 compares them:
 
 ```python
---8 < --"examples/compare_classifiers.py:run"
+--8<--
+examples/compare_classifiers.py:run
+--8<--
 ```
 
 `methods` maps a name to a list of trained models: one per seed. All seeds
