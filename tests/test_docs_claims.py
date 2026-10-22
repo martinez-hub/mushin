@@ -18,8 +18,11 @@ import re
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pytest
+import xarray as xr
 
+from mushin.benchmark import compare_methods
 from mushin.benchmark._stats import warn_if_underpowered
 
 STATISTICS_GUIDE = (
@@ -162,3 +165,44 @@ def test_guides_do_not_call_a_parametric_test_underpowered():
                 f"docs/guides/{guide} implies {named} cannot reach alpha at "
                 f"small n, but their floor is 2 seeds: {flat[:170]}"
             )
+
+
+AGENT_GUIDE = (
+    Path(__file__).resolve().parent.parent / "src" / "mushin" / "agent_guide.md"
+)
+
+
+def _holm_floor(n_methods: int, alpha: float = ALPHA) -> int:
+    """Seeds at which compare_methods first calls every pair significant on data
+    that separates the methods perfectly. Each method's scores vary across seeds
+    (a method constant across seeds gets NaN), and each pair's differences are
+    distinct and nonzero (tied differences make the Wilcoxon p approximate)."""
+    for n in range(2, 32):
+        scores = np.array([(np.arange(n) + 1.0) * (i + 1) for i in range(n_methods)])
+        ds = xr.Dataset(
+            {"score": (("method", "seed"), scores)},
+            coords={
+                "method": [f"m{i}" for i in range(n_methods)],
+                "seed": np.arange(n),
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the underpowered warning, below the floor
+            if compare_methods(ds, alpha=alpha)["significant"].all():
+                return n
+    raise AssertionError(f"{n_methods} methods never clear alpha={alpha}")
+
+
+@pytest.mark.parametrize("n_methods, floor", [(2, 6), (3, 7), (4, 8)])
+def test_holm_seed_floor(n_methods: int, floor: int):
+    """With m pairs, Holm needs m * 2 ** (1 - n) < alpha."""
+    assert _holm_floor(n_methods) == floor
+
+
+def test_agent_guide_quotes_the_holm_seed_floors():
+    text = AGENT_GUIDE.read_text(encoding="utf-8")
+    match = re.search(
+        r"at least (\d+) seeds for 2\s+methods, (\d+) for 3 and (\d+) for 4", text
+    )
+    assert match, "could not find the seed floors in the agent guide"
+    assert tuple(map(int, match.groups())) == tuple(_holm_floor(k) for k in (2, 3, 4))
