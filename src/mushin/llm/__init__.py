@@ -1,9 +1,14 @@
 """Reproducible, statistically-rigorous evaluation of LLM systems."""
 
 # Part of the optional evaluation layer — surface a clear install hint instead of
-# a raw torchmetrics ImportError when the `eval` extra is missing.
+# a raw scipy/torchmetrics ImportError when the `eval` extra is missing.
+import importlib as _importlib
+
+from .._extras import EVAL_MODULES as _EVAL_MODULES
+
 try:
-    import torchmetrics as _torchmetrics  # noqa: F401
+    for _module in _EVAL_MODULES:
+        _importlib.import_module(_module)
 except ImportError as _exc:  # pragma: no cover - exercised by the core-only CI job
     raise ImportError(
         "mushin's LLM evaluation features require the optional 'eval' extra:\n\n"

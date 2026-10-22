@@ -110,3 +110,30 @@ def test_import_mushin_does_not_load_torch():
     # load at import time.
     out = _fresh_import_probe("import sys, mushin; print('torch' in sys.modules)")
     assert out == "False"
+
+
+def test_eval_available_reflects_the_eval_modules(monkeypatch):
+    import importlib.util
+
+    from mushin import _extras
+
+    assert _extras.EVAL_MODULES == ("scipy", "torchmetrics")
+    assert _extras.eval_available() is True  # the dev environment has the extra
+
+    real_find_spec = importlib.util.find_spec
+
+    def without_scipy(name, *args, **kwargs):
+        return None if name == "scipy" else real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", without_scipy)
+    assert _extras.eval_available() is False
+
+
+def test_eval_available_does_not_import_the_eval_modules():
+    """`import mushin` calls eval_available, so it must not import scipy or
+    torchmetrics (and with it torch)."""
+    code = (
+        "import sys; from mushin._extras import eval_available; eval_available(); "
+        "print('torchmetrics' in sys.modules, 'scipy' in sys.modules)"
+    )
+    assert _fresh_import_probe(code) == "False False"
