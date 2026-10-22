@@ -2,9 +2,9 @@
 
 **Date:** 2026-10-15
 **Status:** Revised after review pass 1 (12 confirmed findings). Revised on
-2026-10-22 for #253 and #249 (below), then after review pass 2, which combined
-an adversarial review, `/code-review` and `/security-review`. Each pass-2
-finding used here was reproduced or checked against the code. The user asked
+2026-10-22 for #253 and #249 (below), then after review pass 2 (an adversarial
+review, `/code-review` and `/security-review`) and pass 3 (`/code-review`).
+Each finding used here was reproduced or checked against the code. The user asked
 for design questions to be decided rather than asked, so each decision records
 its rationale and the alternatives it rejected.
 **Sequencing:** this branch is rebased onto the following before its own PR:
@@ -88,8 +88,9 @@ source. Success criteria:
   the launch directory unless `working_dir=` is given. That directory holds
   `multirun.yaml`, `mushin_sweep_manifest.json` and one directory per cell
   (`0/`, `1/`, ...). Each cell directory holds:
-  - `mushin_cell_status.json`, `mushin_provenance.json`,
-    `mushin_workflow.log` and `.hydra/`
+  - `mushin_cell_status.json`, `mushin_workflow.log` and `.hydra/`
+  - `mushin_provenance.json`, unless the cell was skipped (`sample=` or an
+    exhausted budget): a skipped cell returns before provenance is written
   - `mushin_metrics.json` if the cell completed
   - `mushin_error.txt` (the traceback) instead, if it failed under
     `on_error="nan"`
@@ -119,7 +120,8 @@ source. Success criteria:
     so integer method ids raise
     `KeyError: "not all values found in index 'method'"`.
   - A method whose metric is identical across seeds gets a NaN `p_corrected`
-    and `significant=False`, with no warning.
+    and `significant=False`, with a `UserWarning` that it "produced identical
+    scores across all N seeds".
   - It raises `IncompleteSweepError` on failed or skipped cells unless
     `allow_incomplete=True`, but only on the dataset `.run()` returns (or a
     netCDF round-trip of it). `load_from_dir(...).to_xarray()` drops the
@@ -129,7 +131,10 @@ source. Success criteria:
     family. In a 3-method sweep with one failed cell, the reloaded dataset
     reported a pair as significant (`p_corrected = 0.031`) that the dataset
     `.run()` returned does not reach with `allow_incomplete=True` (`0.094`).
-    D9 fixes this.
+    A reload also misses cells that never finished: a cell still `running`,
+    or one a killed sweep never started, which has no job dir. `mushin.show`
+    lists only dirs with a status file, so it cannot show a never-started
+    cell either. D9 fixes the reload.
   - `mean_diff` is `method_a - method_b`, in coordinate order.
   - It needs scipy (the `eval` extra).
 - **Seeds and Holm correction:** Wilcoxon's best possible two-sided p with `n`
@@ -255,7 +260,9 @@ print it, including a Windows pipe in cp1252.
 
 Add `src/mushin/__main__.py`, an `argparse` CLI:
 - `python -m mushin guide` writes one line, `<!-- mushin X.Y.Z -->` (the
-  installed version, from `importlib.metadata.version("mushin-py")`),
+  installed version, from `importlib.metadata.version("mushin-py")`, or
+  `unknown` when mushin is importable but not installed, e.g. with
+  `PYTHONPATH=src` in a clone),
   followed by the guide. The HTML comment keeps the output valid Markdown and
   invisible when rendered.
 - `python -m mushin guide --path` prints the file's absolute path, for agents
@@ -287,21 +294,27 @@ is not this project (Facts).
     guide matching this version"
 
   The copyright comment stays a comment.
-- **`__dir__` lists only names `help()` can render:**
-  - It omits the lazy eval-layer names, and the lazy `llm` submodule, when
-    the eval extra is missing. On a core install `mushin.llm` raises the same
+- **`__all__` and `__dir__` list only names that resolve:**
+  - When the eval extra is missing, both omit the lazy eval-layer names and
+    the lazy `llm` submodule. On a core install `mushin.llm` raises the same
     install-hint `ImportError` (it imports `mushin.benchmark`), so dropping
-    only the benchmark names still leaves pydoc failing.
-  - "Missing" means `importlib.util.find_spec` returns None for `scipy` or
-    for `torchmetrics`, the two modules `mushin.benchmark`'s guard imports.
-    `find_spec` does not import them. That matters because IPython's tab
-    completion calls `dir()`, and importing torchmetrics would import torch.
-    A scipy that is installed but fails to import still breaks `help()`, and
-    that case is out of scope.
-  - It always omits the deprecated top-level names (`_DEPRECATED`). They are
-    not in `__all__`, but `__dir__` lists them today, so `help(mushin)`
-    documents `BaseWorkflow` and `RobustnessCurve` as classes and emits a
-    `DeprecationWarning` per render. They stay accessible.
+    only the benchmark names still leaves pydoc failing. Filtering `__all__`
+    as well also fixes `from mushin import *` and
+    `inspect.getmembers(mushin)`, which raise on a core install today.
+  - "Missing" means `importlib.util.find_spec` returns None for one of the
+    modules `mushin.benchmark`'s guard imports. Those modules are listed once,
+    `_EVAL_MODULES = ("scipy", "torchmetrics")`, and both the guard (which
+    imports them) and this check use the list, so they cannot drift.
+    `find_spec` does not import: IPython's tab completion calls `dir()`, and
+    importing torchmetrics would import torch. torchmetrics always arrives
+    with pytorch-lightning, so in practice scipy decides. A scipy that is
+    installed but fails to import still breaks `help()`; that case is out of
+    scope.
+  - `__dir__` always omits the deprecated top-level names (`_DEPRECATED`).
+    They are not in `__all__`, so pydoc does not document them, but
+    `__dir__` lists them and `help(mushin)` touches each one: 8
+    `DeprecationWarning`s per render, and an error under `-W error`. They
+    stay accessible.
 
   `help()` and pydoc then render on a core install. Attribute access is
   unchanged: `mushin.compare` still raises the install hint.
@@ -359,8 +372,11 @@ short version, and the guide is the long one.
 
 **If #249 is closed unmerged,** this change adds a hand-written
 `docs/llms.txt` itself. It would have the H1 and summary, a "Start here"
-section (the raw guide, then the For AI agents, Quickstart and Core concepts pages)
-and a "Guides" section. D7 item 4 would then check its docs-site links too.
+section (the raw guide, then the For AI agents, Quickstart and Core concepts
+pages) and a "Guides" section. It also ports #249's nav helpers and its
+`llms.txt` tests (every nav page listed once, no site link outside the nav)
+into `tests/_docs_site.py` and `tests/test_llms_txt.py`, so D7 item 4 has them
+either way.
 
 **Why not mkdocs-llmstxt:** it would downgrade `markdown-it-py` across the
 shared lock (Facts) for one generated file. #249 reached the same choice.
@@ -382,12 +398,17 @@ A new test file, `tests/test_agent_guide.py`:
    file, and its text is ASCII.
 2. **Its code runs.** The test concatenates the guide's ```python blocks, in
    order, into `tmp_path/guide_example.py` and runs
-   `python guide_example.py` in a subprocess with `cwd=tmp_path`.
+   it with `sys.executable` in a subprocess with `cwd=tmp_path`.
    - It runs as a real script, as an agent would run it, so `inspect.getsource`
      works for mushin's fingerprints and Hydra's global state stays out of the
      test process.
-   - Code goes only in ```python blocks; shell commands go in ```bash blocks
-     and output in ```text blocks, neither of which is executed.
+   - Every ```python block runs, in order, as one script. Shell commands go
+     in ```bash blocks and output in ```text blocks, which are not executed.
+     Any other Python fence tag (`py`, `python3`, `pycon`) fails the test, so
+     no example can dodge it. An example of an error is written to run: it
+     catches the error (`except TypeError as e: print(e)`).
+   - The template's `working_dir` is relative (under `runs/`, D8), so each
+     test run writes into its own temporary directory.
    - The subprocess runs with `PYTHONUTF8=1`, as the guide tells agents to
      run mushin on Windows (D8), so a block may call `mushin.diff`.
    - The test skips without scipy.
@@ -399,7 +420,11 @@ A new test file, `tests/test_agent_guide.py`:
    `BaseWorkflow.run`, which `run()` forwards to. A renamed safety keyword
    therefore fails, even though `run()` accepts arbitrary task overrides.
    `Sweep.run` is not consulted: its signature is `(self, **kwargs)`, so it
-   would accept anything.
+   would accept anything. Bindings include the call form
+   (`swept = mushin.sweep(fn)`). Keywords passed as `**name` are checked when
+   the guide binds `name` to a dict literal or a `dict(...)` call; any other
+   `**` unpacking in a mushin `run()` call fails the test, so no keyword can
+   hide from it.
 4. **Its links resolve.**
    - Every docs-site URL in the guide must be the URL of a page in
      `mkdocs.yml`'s nav, computed the way #249's `tests/test_llms_txt.py`
@@ -411,8 +436,10 @@ A new test file, `tests/test_agent_guide.py`:
    - The guide must contain at least one docs-site URL. If `site_url`
      changes, every old link stops matching it, so a guide with no matching
      link fails instead of passing vacuously.
-   - The raw-GitHub link in `llms.txt` names a file that exists in the repo.
-     #249's tests already cover the site links in `llms.txt`.
+   - Every raw-GitHub URL in the guide, `docs/for-agents.md`, the README and
+     `llms.txt` names a file that exists in the repo: it is the only fallback
+     D2 gives agents on older versions. #249's tests already cover the site
+     links in `llms.txt`.
 5. **The CLI works.**
    - `main(["guide"])` prints the version line, then the guide.
    - `main(["guide", "--path"])` prints an existing path.
@@ -476,9 +503,11 @@ detail. In order:
      (stubbed in the guide) and returns a dict of floats. Never decorate the
      scientist's function in place.
    - `dry_run=True`, with an assertion on `num_cells`.
-   - A run with a fixed `working_dir` outside the repository (or in a
-     gitignored directory), string-valued `method` and `seed` axes, and one
-     extra swept axis that is selected away before the statistics.
+   - A run with a fixed, relative `working_dir` under `runs/`, which the guide
+     tells the agent to add to the project's `.gitignore` (an ignored
+     directory does not mark provenance dirty); string-valued `method` and
+     `seed` axes; and one extra swept axis that is selected away before the
+     statistics.
    - Read the results as a dataset and a DataFrame.
    - `compare_methods` on the dataset `.run()` returned, in the same script,
      with the sign of `mean_diff` explained.
@@ -502,13 +531,14 @@ detail. In order:
      environment, use a fresh `working_dir` (and don't rely on `cache_dir`).
    - `compare_methods` needs dims named exactly `method` and `seed`, and
      string `method` values: rename, select or convert first. A method whose
-     metric is the same for every seed gives NaN, not a result: check for it.
+     metric is the same for every seed gives NaN, not a result: heed the
+     warning `compare_methods` prints.
    - Seeds: `m * 2 ** (1 - n) < alpha` with `m` comparisons, so 6 seeds for 2
      methods, 7 for 3 and 8 for 4 at alpha 0.05. These are floors, not power.
    - Commit code before final runs, and start them with `git status
      --porcelain` empty. Provenance records the git SHA and whether the tree
      was dirty, and untracked files count, so keep the sweep output and logs
-     outside the repository or in `.gitignore`.
+     in the gitignored `runs/` (or outside the repository).
    - On Windows, run mushin with `PYTHONUTF8=1` (or `python -X utf8`):
      `diff` and the dry-run preview print characters a piped console's code
      page may lack.
@@ -516,9 +546,9 @@ detail. In order:
      `show()` prints and returns.
 6. **Running long sweeps from an agent.** Agent shell commands time out, so:
    - put the sweep, and its `compare_methods` call, in a script with a fixed
-     `working_dir` outside the repository
-   - start it in the background with output redirected to a log, also
-     outside the repository
+     `working_dir` under the gitignored `runs/`
+   - start it in the background with output redirected to a log, also under
+     `runs/`
    - poll with `python -c "import mushin; mushin.show('<root>')"`
    - prefer the default launcher for a sweep the agent runs in the
      background. If the main process died with cells still `running`, check
@@ -528,11 +558,14 @@ detail. In order:
 7. **Where results go and how to reload them.** The layout (including
    `mushin_error.txt`), `load_from_dir(root, "mushin_metrics.json")`,
    `show` / `best` / `diff`, and the MCP server. Before comparing a reloaded
-   sweep, check `mushin.show(root)` for any cell that is not `completed`.
-   With D9 the comparison raises on such a sweep, but the web copy of this
-   guide also reaches older versions, where it does not.
+   sweep, check that `mushin.show(root)` lists a `completed` row for every
+   cell of the grid (the count `dry_run` reported): it cannot list a cell a
+   killed sweep never started. With D9 the comparison itself refuses an
+   incomplete reload, but the web copy of this guide also reaches older
+   versions, where it does not.
 8. **Before reporting to the scientist, a checklist:**
-   - no failed or skipped cells in `mushin.show(root)`, or they are reported
+   - every cell of the grid `completed` in `mushin.show(root)`, or the
+     missing ones reported
    - enough seeds for the number of comparisons
    - corrected p-values and effect sizes with the sign stated, not raw means
    - a clean provenance (`dirty: false`)
@@ -544,30 +577,50 @@ detail. In order:
 Each claim in sections 3 to 7 is checked against Facts when the guide is
 written. The D7 tests exercise the code, the keywords and the numbers.
 
-### D9. A reloaded sweep keeps its record of failed cells (its own PR, first)
+### D9. A reloaded sweep reports its cells without a result (its own PR, first)
 
-`load_from_dir` rebuilds `failures` and `skipped` from the sweep, so
-`to_xarray()` sets `mushin_failures` and `mushin_skipped` on a reloaded sweep
-exactly as on the dataset `.run()` returned. `compare_methods` then raises
-`IncompleteSweepError` on it.
+`load_from_dir` walks the sweep's grid and records every cell that has no
+result, as `.run()` does. `to_xarray()` then sets `mushin_failures` and
+`mushin_skipped` on a reloaded sweep exactly as on the dataset `.run()`
+returned, and `compare_methods` raises `IncompleteSweepError` on it.
 
-- **Source:** the attrs hold only each cell's combo key. The sweep manifest
-  (`mushin_sweep_manifest.json`) already records every cell's status
-  (`failed`, `skipped`) by combo, and each cell's `mushin_cell_status.json`
-  repeats it, so no new file is written.
-- **Tests** (in `tests/test_workflows.py`, next to the existing NaN-fill
-  tests):
-  - a sweep with one failed cell (`on_error="nan"`) and one budget-skipped
-    cell, reloaded: its attrs equal the attrs of the dataset `.run()`
-    returned;
-  - `compare_methods` on the reloaded dataset raises `IncompleteSweepError`;
-  - the 3-method case from Facts no longer reports a significant pair.
+- **The grid** comes from the sweep's overrides (`multirun.yaml`), keyed as
+  `to_xarray` keys a loaded sweep. A cell's status comes from its
+  `mushin_cell_status.json`. The end-of-run manifest is missing after a kill
+  or an `on_error="raise"` crash, so it is not the source.
+- **The record:**
+  - `failed` cells go in `failures`, with the manifest's error text when the
+    manifest lists this dir, else the last line of the cell's
+    `mushin_error.txt`.
+  - `skipped` cells (sampled out, out of budget) go in `skipped`, and so do
+    cells that never finished: still `running` or `pending`, or with no job
+    dir at all. compare_methods' message already says "not run/skipped".
+  - Job dirs left by an earlier sweep of a reused `working_dir` are ignored,
+    by the rule `mushin.show` uses (the manifest's combo-to-dir map, with an
+    exception for a status newer than the manifest). The rule moves into a
+    shared `is_stale_cell` helper. A dir whose config lacks a swept axis is
+    such residue too, not a crash.
+- **Around it:**
+  - `load_metrics` NaN-fills a `running` or `pending` cell instead of
+    loading a stale sidecar or raising for missing files.
+  - `is_complete` on a loaded workflow reflects the record, instead of
+    always being `True`.
+  - `load_from_dir` resets the metrics, jobs and manifest a reused workflow
+    object kept from an earlier `.run()`.
+  - Paths in the record are absolute, like `.run()`'s.
+- **Tests:** the record equals `.run()`'s for a failed and for a sampled-out
+  cell; a complete sweep gets none; a reused `working_dir` with a narrower
+  grid over other axes neither reports the old cells nor crashes; a sweep
+  killed between cells and one killed mid-cell are recorded as not run; a
+  reused workflow object returns the loaded sweep; paths are absolute; and
+  `compare_methods` refuses a reloaded sweep with a failed cell, and one
+  killed before its last cell.
 - **A changelog fragment:** `changes/<PR>.fixed.md`.
 
 **Why first, and separate:** it is a wrong-results bug in the released 0.15.1,
 independent of the guide. A separate PR gives it its own "Fixed" entry and
-lets it ship in a patch release. The guide (D8 item 7) then needs only one
-rule, which also covers older versions.
+lets it ship in a patch release. The guide (D8 item 7) then needs one rule,
+which also covers older versions.
 
 **Rejected for now:** having `compare_methods` treat any NaN cell as
 incomplete. That would also catch a task that returns NaN, but it changes
@@ -622,8 +675,7 @@ results for tasks that return NaN on purpose. It is a follow-up decision.
   - `best()` averaging over seeds
   - `show()` printing
   - `compare_methods` accepting other dim names, non-string method values,
-    or reducing extra dims; warning on a method with zero variance; treating
-    NaN cells as incomplete (D9)
+    or reducing extra dims; treating NaN cells as incomplete (D9)
   - `warn_if_underpowered` accounting for Holm correction
   - `resume` / `cache_dir` not detecting helper or constant edits
   - `max_total_seconds` under joblib: warn, or enforce across workers
