@@ -2,12 +2,18 @@
 
 **Date:** 2026-10-15
 **Status:** Revised after spec review (12 confirmed findings, all
-incorporated; three refuted findings still contributed guide content). The
+incorporated; three refuted findings still contributed guide content). Revised
+again on 2026-10-22: the snippet fix is #253, and #249 (opened from another
+session) already adds `docs/llms.txt`, so D5 now extends that file. The
 user asked for design questions to be decided rather than asked, so each
 decision records its rationale and the alternatives it rejected.
-**Sequencing:** lands after the docs snippet-include fix (#249). D4 relies on
-that PR's include guard and its CI docs-job step, so this branch is rebased
-onto it before the PR.
+**Sequencing:** lands after two open PRs, and this branch is rebased onto
+both before its own PR:
+- **#253**, the docs snippet-include fix. D4 relies on its include guard and
+  its CI docs-job step.
+- **#249**, which adds a contributor `AGENTS.md`, a `CLAUDE.md` that imports
+  it, and `docs/llms.txt` with tests. D5 extends that `llms.txt`. If #249 is
+  closed unmerged, D5 falls back to adding the file itself (see D5).
 
 ## Problem
 
@@ -16,9 +22,11 @@ Cursor and the like) to set up their experiments. mushin is a niche library
 that agents know little about from training. Nothing in the repo is written for
 them:
 
-- There is no agent-oriented page, no `llms.txt` or other agent-oriented index
-  (the docs build emits only HTML, the search index, the sitemap and
-  `objects.inv`), and no `AGENTS.md`.
+- There is no agent-oriented page. #249 (open) adds `docs/llms.txt`, an index
+  of the docs pages with a short block of install and API facts and a minimal
+  sweep, and a root `AGENTS.md` for agents that contribute to mushin. Neither
+  tells an agent how to set up, run, check and report a scientist's
+  experiment.
 - `help(mushin)` gives an agent nothing useful:
   - On a full install it shows the copyright header comment as the
     description.
@@ -35,8 +43,8 @@ them:
   on-disk output layout, or says what to check before reporting results.
 - Pitfalls that produce wrong results or wasted compute are not collected
   anywhere (each verified on 2026-10-15; see Facts).
-- The docs' example includes were broken from 2026-07-27 to 2026-10-15 (ruff
-  0.16 respaced them; fixed in #249). An agent reading the Tutorial in that
+- The docs' example includes have been broken since 2026-07-27 (ruff 0.16
+  respaced them; #253 fixes them). An agent reading the Tutorial in that
   window saw a directive instead of code. Agent-facing code must be executed by
   tests, not just rendered.
 
@@ -66,7 +74,7 @@ source. Success criteria:
   install.
 - MCP changes. The server stays analysis-only, and the guide points to it.
 - Vendor-specific packaging (a Claude Code skill, MCP prompts).
-- An `AGENTS.md` for agents that *contribute* to mushin.
+- An `AGENTS.md` for agents that *contribute* to mushin (#249 adds one).
 - API reference pages for the exports that have none. The guide tells agents
   to use `help(obj)`, which matches the installed version.
 
@@ -137,13 +145,19 @@ source. Success criteria:
   release.
 - **CI:**
   - The `test` job runs only when code paths change.
-  - The `docs` job runs on every PR, and since #249 it runs
-    `tests/test_docs_snippets.py`. Its environment includes the dev group
+  - The `docs` job runs on every PR. #253 adds `tests/test_docs_snippets.py`
+    to it, and #249 adds `tests/test_llms_txt.py` and
+    `tests/test_docs_claims.py`. Its environment includes the dev group
     (which pulls scipy through scikit-learn), but not the eval extra.
   - `core-only` installs `.` non-editable with no extras.
   - `batteries-clean-install` builds the wheel and installs it in a clean
     venv.
 - **Packaging:** `[tool.setuptools.package-data]` ships only `py.typed` today.
+- **#249's `tests/test_llms_txt.py`** requires `llms.txt` to list every nav
+  page exactly once, and to link to no docs-site URL outside the nav. It
+  recognizes site links by the `site_url` in `mkdocs.yml` and ignores links
+  to other hosts. It also pins the install name, Python range and extras
+  list to `pyproject.toml`, and runs the first ```python block.
 - **`mkdocs-llmstxt` 0.5.1** would cap `markdown-it-py < 4`, downgrading it
   from 4.2.0 to 3.0.0 across the shared `uv.lock`.
 - **ruff** formats Python code blocks in Markdown, but `ruff check` does not
@@ -239,28 +253,38 @@ Quickstart. It has two parts:
     prints the installed version's copy
 - **Then the guide,** included with a one-line snippet include outside any
   fence: `--8<-- "src/mushin/agent_guide.md"`. That is the form
-  `docs/changelog.md` uses, and #249's guard allows it there.
+  `docs/changelog.md` uses. #253's guard allows it there and checks that the
+  file exists.
 
 **Links inside the guide** are absolute docs-site URLs
 (`https://martinez-hub.github.io/mushin/...`), so they work in a terminal, in
 the package file and on the site. D7 checks that each one maps to a page.
 
-### D5. A hand-written `docs/llms.txt`
+### D5. Point #249's `docs/llms.txt` at the guide
 
-A static `docs/llms.txt`, which MkDocs copies to the site root, in the
-llmstxt.org format:
-- **The H1 and summary.**
-- **"Start here":** the guide as raw Markdown first
-  (`https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md`),
-  then the agents, Quickstart and Core concepts pages.
-- **"Guides":** links to the topic guides.
+#249's hand-written `docs/llms.txt` (llmstxt.org format, copied to the site
+root) is the agents' index. This change adds two things to it:
+- **A line ending its opening facts list:** "To set up, run and report an
+  experiment, read the agent guide first: `python -m mushin guide` prints the
+  installed version's copy, and the latest is at" the raw Markdown URL
+  (`https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md`).
+  Raw Markdown is better input for an agent than the rendered page.
+- **An entry for the new `docs/agents.md` page** in its "Docs" list, right
+  after Quickstart, matching the nav. #249's test requires it, since the page
+  is in the nav.
+
+Nothing else in #249's file changes. Its facts block and example stay the
+short version, and the guide is the long one.
+
+**If #249 is closed unmerged,** this change adds a hand-written
+`docs/llms.txt` itself. It would have the H1 and summary, a "Start here"
+section (the raw guide, then the agents, Quickstart and Core concepts pages)
+and a "Guides" section. D7 item 4 would then check its docs-site links too.
 
 **Why not mkdocs-llmstxt:** it would downgrade `markdown-it-py` across the
-shared lock (Facts) for one generated file. A static index needs no
-dependency, and raw Markdown is better input for agents than converted HTML.
-`llms-full.txt` is dropped.
+shared lock (Facts) for one generated file. #249 reached the same choice.
 
-D7 checks that every link in `llms.txt` resolves.
+D7 checks that the raw-GitHub link names a file that exists.
 
 ### D6. README pointer
 
@@ -290,9 +314,11 @@ A new test file, `tests/test_agent_guide.py`:
    the `Sweep.run` signature). A renamed safety keyword therefore fails, even
    though `run()` accepts arbitrary task overrides.
 4. **Its links resolve.**
-   - Every `https://martinez-hub.github.io/mushin/<path>` URL in the guide
-     and in `docs/llms.txt` maps to `docs/<path>.md` or
-     `docs/<path>/index.md` (anchors stripped).
+   - Every docs-site URL in the guide maps to `docs/<path>.md` or
+     `docs/<path>/index.md` (anchors stripped). Site URLs are recognized by
+     the `site_url` in `mkdocs.yml`, as #249's test does, so moving the site
+     to a new host does not make the check pass vacuously. #249's tests
+     already cover the site links in `llms.txt`.
    - The raw-GitHub link in `llms.txt` names a file that exists in the repo.
 5. **The CLI works.**
    - `main(["guide"])` prints the version line, then the guide.
@@ -413,7 +439,7 @@ written. The D7 tests exercise the code, the keywords and the numbers.
   - `ruff check` (Python files; the guide's code is covered by D7 item 2
     instead)
   - codespell
-  - #249's include guard
+  - #253's include guard and #249's `tests/test_llms_txt.py`
   - the full test suite
 - **A changelog fragment:** `changes/<PR>.added.md`.
 
