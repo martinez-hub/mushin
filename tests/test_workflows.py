@@ -1638,6 +1638,28 @@ def test_load_from_dir_of_a_complete_sweep_adds_no_record(tmp_path):
     assert "mushin_failures" not in attrs and "mushin_skipped" not in attrs
 
 
+def test_a_sweep_loaded_without_metrics_knows_it_is_incomplete(tmp_path):
+    """`MultiRunMetricsWorkflow(working_dir=...)` and `load_from_dir(d, None)`
+    load no metrics; the cells' statuses alone still give the record."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return dict(m=float(a))
+
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="failed"):
+        W().run(a=multirun([1, 2, 3]), working_dir=str(wd), on_error="nan")
+
+    for loader in (W(working_dir=wd), W().load_from_dir(wd, None)):
+        assert [f["combo"] for f in loader.failures] == ["a=2"]
+        assert loader.skipped == [] and loader.is_complete is False
+
+
 def test_load_from_dir_record_ignores_an_earlier_sweep_of_the_dir(tmp_path):
     """Job dirs an earlier, wider sweep left in a reused working_dir are not
     cells of the latest sweep: their 'failed' status must not mark the latest

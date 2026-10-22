@@ -1744,10 +1744,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     @property
     def is_complete(self) -> bool:
         """Whether every requested grid cell completed. For a workflow loaded
-        from disk, whether its record (``failures``, ``skipped``) is empty; the
-        record is rebuilt when metrics are loaded (``load_from_dir`` with a
-        metrics filename, or ``to_xarray(metrics_filename=...)``). ``True`` for
-        a workflow that has neither swept nor loaded metrics."""
+        from disk, whether its record (``failures``, ``skipped``) is empty: the
+        record is rebuilt on each load, from the cells' statuses and, once
+        metrics are loaded, their metrics. ``True`` for a workflow that has
+        neither swept nor loaded."""
         if self._manifest is not None:
             return self._manifest.is_complete()
         return not (self.failures or self.skipped)
@@ -2405,6 +2405,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         if metrics_filename is not None:
             self.load_metrics(metrics_filename)
+        elif not self.jobs:
+            # No metrics to load, so record the cells without a result from
+            # their statuses, so `is_complete` holds before any `to_xarray`.
+            self._record_cells_without_result(None)
 
         # Surface any sweep-level lineage (notes/tags) recorded in the manifest,
         # so a loaded sweep reports the same wf.notes/wf.tags it ran with. The
@@ -2436,16 +2440,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             for combo in itertools.product(*values)
         ]
 
-    def _record_cells_without_result(self, job_metrics: list[Any]) -> None:
+    def _record_cells_without_result(self, job_metrics: list[Any] | None) -> None:
         """Rebuild `failures` and `skipped` for a sweep loaded from disk.
 
         `.run()` records them as it collects each job, and `to_xarray` turns them
         into the `mushin_failures` / `mushin_skipped` attrs that
         `compare_methods` checks. A loaded workflow has no jobs, so derive them
         from the data `to_xarray` assembles: a cell of the sweep's grid that no
-        job dir gives metrics has no result. It failed if its job dir's status
-        says so; otherwise it was not run (skipped, still running, or never
-        started, as in a sweep killed between cells).
+        job dir completed or gives metrics has no result. It failed if its job
+        dir's status says so; otherwise it was not run (skipped, still running,
+        or never started, as in a sweep killed between cells).
+
+        With ``job_metrics=None`` (loaded without metrics) only the statuses are
+        read, and a job dir without one (from before status sidecars) counts as
+        completed, as `load_metrics` would load it.
         """
         from ._resume import STATUS_FILE, read_cell_status
         from ._sweep_io import MANIFEST_FILE, Manifest, combo_key
@@ -2453,6 +2461,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         with_result: set[str] = set()
         dirs: dict[str, Path] = {}
         failed: set[str] = set()
+        if job_metrics is None:
+            job_metrics = [None] * len(self.cfgs)
+            no_sidecar_counts = True
+        else:
+            no_sidecar_counts = False
         for i, (dir_, cfg, metrics) in enumerate(
             zip(self.multirun_working_dirs, self.cfgs, job_metrics, strict=True)
         ):
@@ -2460,8 +2473,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
-            status = (read_cell_status(dir_) or {}).get("status")
-            if metrics or status == "completed":  # as `.run()` counts a cell
+            sidecar = read_cell_status(dir_)
+            status = (sidecar or {}).get("status")
+            done = status == "completed" or (no_sidecar_counts and sidecar is None)
+            if metrics or done:  # as `.run()` counts a cell
                 with_result.add(key)
                 continue
             dirs[key] = dir_
