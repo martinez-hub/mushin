@@ -55,6 +55,7 @@ jobs:
               - 'pyproject.toml'
               - 'scripts/check_notebook_prereqs.py'
               - 'src/mushin/**/__init__.py'
+              - 'src/mushin/_extras.py'
               - '.github/workflows/ci.yml'
 
   lint:
@@ -166,6 +167,8 @@ jobs:
           uv pip install --python /tmp/clean-batteries/bin/python \
             "$(ls dist/*.whl)[detection,image,audio]"
           /tmp/clean-batteries/bin/python examples/batteries.py
+      - name: The built wheel ships the agent guide
+        run: test -s "$(/tmp/clean-batteries/bin/python -m mushin guide --path)"
 
   notebooks:
     needs: changes
@@ -284,13 +287,15 @@ jobs:
       - name: Check the docs' snippet includes
         run: uv run --group docs pytest tests/test_docs_snippets.py -p no:cacheprovider --noconftest
       # Some docs content is pinned by tests: llms.txt must list every nav page
-      # and state facts that match pyproject.toml, and the numbers quoted in the
-      # statistics guide must match the code. The `test` job skips docs-only
+      # and state facts that match pyproject.toml, the numbers quoted in the
+      # statistics guide must match the code, and the agent guide's code must
+      # run and its keywords and links resolve. The `test` job skips docs-only
       # PRs, which are the ones most likely to break these, so they run here on
       # every PR as well, after the strict build so a failure here does not hide
       # a build error. --extra eval: test_docs_claims imports the stats code.
+      # --group docs: the agent guide's render test needs the Markdown extensions.
       - name: Docs-pinning tests
-        run: uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py -p no:cacheprovider
+        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py -p no:cacheprovider
 
   core-only:
     # Guards the eval-extra split: a core install (NO extras) must import, run a
@@ -329,8 +334,20 @@ jobs:
                   raise SystemExit(f"expected ImportError accessing mushin.{name}")
               except ImportError as e:
                   assert "mushin-py[eval]" in str(e), f"unhelpful error for {name}: {e}"
+
+          # 4. help(mushin) renders on a core install and points to the agent
+          #    guide; star-import and getmembers work without the eval extra.
+          import inspect
+          import pydoc
+
+          assert "python -m mushin guide" in pydoc.render_doc(mushin)
+          assert "compare" not in mushin.__all__
+          inspect.getmembers(mushin)
+          exec("from mushin import *", {})
           print("core-only smoke test passed")
           PY
+      - name: The core install ships the agent guide
+        run: test -s "$(/tmp/core/bin/python -m mushin guide --path)"
 
   # Single required status check. Passes when no needed job failed or was
   # cancelled — skipped jobs (e.g. the test matrix on a docs-only PR) are fine.

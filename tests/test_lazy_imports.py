@@ -110,3 +110,76 @@ def test_import_mushin_does_not_load_torch():
     # load at import time.
     out = _fresh_import_probe("import sys, mushin; print('torch' in sys.modules)")
     assert out == "False"
+
+
+def test_eval_available_reflects_the_eval_modules(monkeypatch):
+    import importlib.util
+
+    from mushin import _extras
+
+    assert _extras.EVAL_MODULES == ("scipy", "torchmetrics")
+    assert _extras.eval_available() is True  # the dev environment has the extra
+
+    real_find_spec = importlib.util.find_spec
+
+    def without_scipy(name, *args, **kwargs):
+        return None if name == "scipy" else real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", without_scipy)
+    assert _extras.eval_available() is False
+
+
+def test_eval_available_does_not_import_the_eval_modules():
+    """`import mushin` calls eval_available, so it must not import scipy or
+    torchmetrics (and with it torch)."""
+    code = (
+        "import sys; from mushin._extras import eval_available; eval_available(); "
+        "print('torchmetrics' in sys.modules, 'scipy' in sys.modules)"
+    )
+    assert _fresh_import_probe(code) == "False False"
+
+
+def test_module_docstring_points_agents_to_the_guide():
+    import mushin
+
+    assert mushin.__doc__ and "python -m mushin guide" in mushin.__doc__
+
+
+def test_dir_lists_no_deprecated_aliases():
+    """help(mushin) touches every name dir() lists; a deprecated alias then
+    warns on every render (and raises under -W error)."""
+    import warnings
+
+    import mushin
+
+    assert "BaseWorkflow" not in dir(mushin)
+    assert "RobustnessCurve" not in dir(mushin)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mushin.BaseWorkflow  # still importable  # noqa: B018
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
+def test_all_lists_the_eval_names_when_the_extra_is_installed():
+    import mushin
+
+    assert {"compare", "llm", "classification_battery"} <= set(mushin.__all__)
+    assert sorted(mushin.__all__) == dir(mushin)
+
+
+def test_require_eval_raises_the_install_hint(monkeypatch):
+    import importlib
+
+    from mushin import _extras
+
+    real_import = importlib.import_module
+
+    def without_scipy(name, *args, **kwargs):
+        if name == "scipy":
+            raise ModuleNotFoundError("No module named 'scipy'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", without_scipy)
+    with pytest.raises(ImportError, match="the install hint") as info:
+        _extras.require_eval("the install hint")
+    assert isinstance(info.value.__cause__, ModuleNotFoundError)

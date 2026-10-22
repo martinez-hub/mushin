@@ -63,6 +63,7 @@ nav:
   - Home: index.md
   - Install: install.md
   - Quickstart: quickstart.md
+  - For AI agents: for-agents.md
   - Tutorial: tutorial.md
   - Core concepts: concepts.md
   - Guides:

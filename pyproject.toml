@@ -204,8 +204,9 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-# PEP 561: ship the py.typed marker so type checkers see our annotations.
-mushin = ["py.typed"]
+# PEP 561: ship the py.typed marker so type checkers see our annotations, and
+# the agent guide that `python -m mushin guide` prints.
+mushin = ["py.typed", "agent_guide.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
