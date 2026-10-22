@@ -1,19 +1,20 @@
 # Design: a usage guide for AI coding agents
 
 **Date:** 2026-10-15
-**Status:** Revised after spec review (12 confirmed findings, all
-incorporated; three refuted findings still contributed guide content). Revised
-again on 2026-10-22: the snippet fix is #253, and #249 (opened from another
-session) already adds `docs/llms.txt`, so D5 now extends that file. The
-user asked for design questions to be decided rather than asked, so each
-decision records its rationale and the alternatives it rejected.
-**Sequencing:** lands after two open PRs, and this branch is rebased onto
-both before its own PR:
-- **#253**, the docs snippet-include fix. D4 relies on its include guard and
-  its CI docs-job step.
-- **#249**, which adds a contributor `AGENTS.md`, a `CLAUDE.md` that imports
-  it, and `docs/llms.txt` with tests. D5 extends that `llms.txt`. If #249 is
-  closed unmerged, D5 falls back to adding the file itself (see D5).
+**Status:** Revised after review pass 1 (12 confirmed findings). Revised on
+2026-10-22 for #253 and #249 (below), then after review pass 2, which combined
+an adversarial review, `/code-review` and `/security-review`. Each pass-2
+finding used here was reproduced or checked against the code. The user asked
+for design questions to be decided rather than asked, so each decision records
+its rationale and the alternatives it rejected.
+**Sequencing:** this branch is rebased onto the following before its own PR:
+- **#253** (merged), the docs snippet-include fix. D4 relies on its include
+  guard and its CI docs-job step.
+- **#249** (open), which adds a contributor `AGENTS.md`, a `CLAUDE.md` that
+  imports it, and `docs/llms.txt` with tests. D5 extends that `llms.txt`. If
+  #249 is closed unmerged, D5 falls back to adding the file itself (see D5).
+- **D9's bug fix**, its own PR, first: a reloaded sweep keeps its record of
+  failed cells.
 
 ## Problem
 
@@ -43,9 +44,9 @@ them:
   on-disk output layout, or says what to check before reporting results.
 - Pitfalls that produce wrong results or wasted compute are not collected
   anywhere (each verified on 2026-10-15; see Facts).
-- The docs' example includes have been broken since 2026-07-27 (ruff 0.16
-  respaced them; #253 fixes them). An agent reading the Tutorial in that
-  window saw a directive instead of code. Agent-facing code must be executed by
+- The docs' example includes were broken from 2026-07-27 to 2026-10-22
+  (ruff 0.16 respaced them; #253 fixed them). An agent reading the Tutorial
+  in that window saw a directive instead of code. Agent-facing code must be executed by
   tests, not just rendered.
 
 ## Goal
@@ -67,18 +68,19 @@ source. Success criteria:
 ## Non-goals
 
 - Changing mushin's sweep or analysis behavior. `best()` being per-cell,
-  `show()` printing and returning, `compare_methods`' naming requirements, the
-  underpowered warning ignoring Holm correction, and the call-form pickling bug
-  (Facts) are documented, not changed. Each is a follow-up. The one behavior
-  change is D3's `__dir__` fix, which only affects introspection on a core
-  install.
+  `show()` printing and returning, `compare_methods`' requirements, the
+  underpowered warning ignoring Holm correction, `max_total_seconds` under
+  joblib, and the non-ASCII console output (Facts) are documented, not
+  changed. Each is a follow-up. The behavior changes are D3's `__dir__` fix,
+  which only affects introspection, and D9's reload fix, which lands first as
+  its own PR because it fixes wrong results.
 - MCP changes. The server stays analysis-only, and the guide points to it.
 - Vendor-specific packaging (a Claude Code skill, MCP prompts).
 - An `AGENTS.md` for agents that *contribute* to mushin (#249 adds one).
 - API reference pages for the exports that have none. The guide tells agents
   to use `help(obj)`, which matches the installed version.
 
-## Facts established (2026-10-15, mushin 0.15.1)
+## Facts established (2026-10-15, mushin 0.15.1; extended and re-verified 2026-10-22)
 
 - **Install:** torch and pytorch-lightning are core dependencies. The `eval`
   extra adds torchmetrics and scipy. A task need not use torch.
@@ -100,26 +102,40 @@ source. Success criteria:
 - **`@mushin.sweep` replaces the function with a `Sweep` handle.** The handle
   has no `__call__`, so decorating the scientist's own training function in
   place breaks their other call sites.
-  - The call form, `mushin.sweep(fn)` bound to a different name, runs with
-    the default local launcher. Its task does not pickle, though, so
-    out-of-process launchers fail: the qualname points at
-    `<module>.<fn>.__mushin_task__`.
-  - Hence: a new module-level function, decorated, that calls the
-    scientist's code.
+  - The call form, `swept = mushin.sweep(fn)`, leaves `fn` callable. It also
+    runs under `launcher="joblib"` (re-verified 2026-10-22): stdlib `pickle`
+    cannot pickle its task, but joblib's loky backend uses cloudpickle.
+  - The template still uses a new module-level function, decorated, that
+    calls the scientist's code: it adapts their signature and return value
+    to a dict of numbers without editing their module.
 - **Statistics without the torch eval layer:** a sweep over `method` and
   `seed` returns a `(method, seed)` dataset.
   - `mushin.benchmark.compare_methods(ds)` returns the pairwise table
     (Wilcoxon by default, Holm-corrected).
-  - It reads the dims named exactly `method` and `seed`. Other names raise
-    `KeyError: 'seed'`, and an extra swept dim raises an opaque `TypeError`.
+  - It reads the dims named exactly `method` and `seed`. Another name raises
+    a `KeyError` (`No variable named 'method'`), and an extra swept dim
+    raises an opaque `TypeError`.
+  - The `method` values must be strings: it looks each one up as `str(m)`,
+    so integer method ids raise
+    `KeyError: "not all values found in index 'method'"`.
+  - A method whose metric is identical across seeds gets a NaN `p_corrected`
+    and `significant=False`, with no warning.
   - It raises `IncompleteSweepError` on failed or skipped cells unless
-    `allow_incomplete=True`.
+    `allow_incomplete=True`, but only on the dataset `.run()` returns (or a
+    netCDF round-trip of it). `load_from_dir(...).to_xarray()` drops the
+    `mushin_failures` / `mushin_skipped` attrs the check reads, so a reloaded
+    sweep with failed cells is compared as if complete, without a warning.
+    Holm then corrects over fewer p-values, because NaN rows leave the
+    family. In a 3-method sweep with one failed cell, the reloaded dataset
+    reported a pair as significant (`p_corrected = 0.031`) that the dataset
+    `.run()` returned does not reach with `allow_incomplete=True` (`0.094`).
+    D9 fixes this.
   - `mean_diff` is `method_a - method_b`, in coordinate order.
   - It needs scipy (the `eval` extra).
 - **Seeds and Holm correction:** Wilcoxon's best possible two-sided p with `n`
   seeds is `2 ** (1 - n)`. Holm multiplies the smallest of `m` p-values by
   `m`, so with `m` pairwise comparisons, significance at alpha needs
-  `m * 2 ** (1 - n) <= alpha`.
+  `m * 2 ** (1 - n) < alpha` (`significant` is `p_corrected < alpha`).
   - 2 methods (1 pair) need 6 seeds.
   - 3 methods (3 pairs) need 7: with 6 seeds, perfectly separated data gives
     `p_corrected = 0.094`.
@@ -129,26 +145,55 @@ source. Success criteria:
 - **`resume=True`** re-runs incomplete cells, and completed cells whose
   resolved config or task source changed. It does not detect edits to helper
   functions, module constants or the environment. Those cells are silently
-  reused. `cache_dir=` has the same blind spot.
+  reused. `cache_dir=` has the same blind spot. The template's task is a
+  wrapper, so the scientist's own code counts as a helper: editing it is not
+  detected either.
+- **`max_total_seconds`** applies to the default sequential launcher only.
+  Under `launcher="joblib"` each cell reaches its worker with a fresh deadline,
+  so the budget never fires and nothing warns. With 12 two-second cells and a
+  3 s budget, all 12 ran.
+- **joblib** is a Hydra plugin (`pip install hydra-joblib-launcher`), not a
+  mushin extra.
+  - Its loky workers are reused once the cells outnumber `n_jobs`, so
+    `pin_gpu_round_robin` raises in every later cell. `docs/guides/packing.md`
+    says each job needs a fresh process and recommends Ray for packing.
+  - Killing the main process does not stop the loky workers. They finish
+    their cells and start ones already dispatched. Re-verified 2026-10-22:
+    after a `kill -9` at 7 s (4 s cells, `n_jobs=2`), a cell started at about
+    8 s and completed, and the workers were still alive afterwards. A cell
+    `mushin.show` lists as `running` may therefore still be computing.
 - **Reloading:**
   - `MultiRunMetricsWorkflow().load_from_dir(root, "mushin_metrics.json")`
     then `.to_xarray()` reloads a finished sweep. Passing `None` as the
     filename silently gives an empty dataset.
   - `mushin.show`, `mushin.best` and `mushin.diff` read a sweep root
-    directly. `show()` prints its table and also returns it. `best()` returns
-    the single best cell (one seed), not the best configuration averaged over
-    seeds.
-- **`run()`'s docstring** documents `dry_run`, `confirm_above`,
-  `max_total_seconds`, `on_error`, `resume`, `sample` and `cache_dir`, but not
-  `working_dir` or `launcher`.
+    directly. `show()` prints its table and also returns it, and it lists
+    each cell's status, failed cells included. `best()` returns the single
+    best cell (one seed), not the best configuration averaged over seeds.
+- **`help()` covers the launcher parameters:** `MultiRunMetricsWorkflow.run`'s
+  docstring defers to `BaseWorkflow.run`, which documents `working_dir` and
+  `launcher`.
+- **Provenance** records the git SHA and whether the tree was dirty, where
+  dirty means `git status --porcelain` printed anything in the launch
+  directory. Untracked files count, so a log redirected into the repo, or an
+  earlier sweep's output directory, marks every later run dirty.
+- **Released versions:** no release has `mushin.__main__`, so
+  `python -m mushin` fails on 0.15.1 (`No module named mushin.__main__`). The
+  docs site and `llms.txt` deploy from `main` on merge, before the release.
+- **PyPI:** the bare name `mushin` is unregistered on PyPI (404 on
+  2026-10-22). An agent told to run `python -m mushin` in an environment
+  without mushin may try `pip install mushin`, a name anyone could register.
 - **The docs site** is rebuilt from `main` on every push (`docs.yml`), not per
   release.
 - **CI:**
   - The `test` job runs only when code paths change.
-  - The `docs` job runs on every PR. #253 adds `tests/test_docs_snippets.py`
-    to it, and #249 adds `tests/test_llms_txt.py` and
-    `tests/test_docs_claims.py`. Its environment includes the dev group
-    (which pulls scipy through scikit-learn), but not the eval extra.
+  - The `docs` job runs on every PR. #253 added `tests/test_docs_snippets.py`
+    to it (with `--noconftest`). #249 adds `tests/test_llms_txt.py` and the
+    existing `tests/test_docs_claims.py`, in a step run with `--extra eval`.
+    `test_docs_claims.py` (from #228) already pins the uncorrected Wilcoxon
+    floor through its `_seed_floor` helper. The job's base environment
+    includes the dev group (which pulls scipy through scikit-learn), but not
+    the eval extra.
   - `core-only` installs `.` non-editable with no extras.
   - `batteries-clean-install` builds the wheel and installs it in a clean
     venv.
@@ -163,8 +208,12 @@ source. Success criteria:
 - **ruff** formats Python code blocks in Markdown, but `ruff check` does not
   lint `.md` files.
 - **Windows pipes:** Python on Windows writes a piped stdout in the ANSI code
-  page (cp1252), so printing a non-cp1252 character such as `→` raises
-  `UnicodeEncodeError`.
+  page (cp1252 on Western locales, cp932 or cp949 on Japanese or Korean
+  ones), so printing a character outside it raises `UnicodeEncodeError`.
+  mushin itself prints such characters: `mushin.diff()` prints `Δ<metric>`
+  headers (also the column names of the table it returns), which cp1252
+  lacks, and `dry_run=True` prints an em dash, which cp932 and cp949 lack.
+  UTF-8 mode (`PYTHONUTF8=1`, or `python -X utf8`) avoids both.
 
 ## Approaches considered
 
@@ -195,7 +244,9 @@ source. Success criteria:
 **Name:** not `AGENTS.md`. Tools such as Codex treat an `AGENTS.md` in a
 directory as instructions for working on that directory's code, so an agent
 editing mushin's own `src/mushin/` would take user-facing guidance as
-contributor instructions.
+contributor instructions. For the same reason no user-facing file is named
+`agents.md` either: on a case-insensitive filesystem (the macOS and Windows
+defaults) a lookup for `AGENTS.md` opens it (see D4).
 
 **ASCII only.** The text is ASCII (D7 enforces it), so every consumer can
 print it, including a Windows pipe in cp1252.
@@ -219,6 +270,13 @@ Add `src/mushin/__main__.py`, an `argparse` CLI:
 **Rejected:** a `mushin.guide()` function. It is less discoverable than the
 CLI, and D3 covers interactive discovery.
 
+**From 0.16.0.** The command ships in the release that contains this change,
+0.16.0 (a minor bump, for a new feature). Every place that tells an agent to
+run it (D4, D5, D6) also says what to do on an older mushin: read the raw guide
+at `https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md`.
+It also gives the install name, `mushin-py`, because the bare `mushin` on PyPI
+is not this project (Facts).
+
 ### D3. `help(mushin)` works and points to the guide
 
 - **A module docstring** in `src/mushin/__init__.py`:
@@ -229,11 +287,24 @@ CLI, and D3 covers interactive discovery.
     guide matching this version"
 
   The copyright comment stays a comment.
-- **`__dir__` omits the lazy eval-layer names when the eval extra is not
-  installed**, i.e. when `importlib.util.find_spec("scipy") is None`. This
-  matches the check `mushin.benchmark` makes. `help()` and pydoc then render
-  on a core install. Attribute access is unchanged: `mushin.compare` still
-  raises the install hint.
+- **`__dir__` lists only names `help()` can render:**
+  - It omits the lazy eval-layer names, and the lazy `llm` submodule, when
+    the eval extra is missing. On a core install `mushin.llm` raises the same
+    install-hint `ImportError` (it imports `mushin.benchmark`), so dropping
+    only the benchmark names still leaves pydoc failing.
+  - "Missing" means `importlib.util.find_spec` returns None for `scipy` or
+    for `torchmetrics`, the two modules `mushin.benchmark`'s guard imports.
+    `find_spec` does not import them. That matters because IPython's tab
+    completion calls `dir()`, and importing torchmetrics would import torch.
+    A scipy that is installed but fails to import still breaks `help()`, and
+    that case is out of scope.
+  - It always omits the deprecated top-level names (`_DEPRECATED`). They are
+    not in `__all__`, but `__dir__` lists them today, so `help(mushin)`
+    documents `BaseWorkflow` and `RobustnessCurve` as classes and emits a
+    `DeprecationWarning` per render. They stay accessible.
+
+  `help()` and pydoc then render on a core install. Attribute access is
+  unchanged: `mushin.compare` still raises the install hint.
 
 **Rejected:** making the lazy failure raise a class that is both `ImportError`
 and `AttributeError`. `from mushin import compare` would then swallow the
@@ -242,12 +313,17 @@ install hint, because CPython replaces an `AttributeError` raised during
 
 ### D4. A docs page that includes the guide verbatim
 
-`docs/agents.md` ("For AI agents"), in the top-level nav right after
-Quickstart. It has two parts:
+`docs/for-agents.md` ("For AI agents", served at `/for-agents/`), in the
+top-level nav right after Quickstart. Not `docs/agents.md`: on a
+case-insensitive filesystem, a coding agent looking for `docs/AGENTS.md` (the
+nearest-file convention) would open it and take the scientist-facing
+copy-paste block as contributor instructions. It has two parts:
 - **A short intro for the human:**
   - how to point an agent at the guide, with a copy-paste block for the
-    project's `AGENTS.md` / `CLAUDE.md` telling the agent to run
-    `python -m mushin guide` first
+    project's `AGENTS.md` / `CLAUDE.md`. The block says to install with
+    `pip install mushin-py` (the PyPI package named `mushin` is not this
+    project), to run `python -m mushin guide` first, and to read the raw
+    guide URL instead on mushin older than 0.16 (D2)
   - the MCP server, for analysis
   - a note that the web copy tracks `main`, while `python -m mushin guide`
     prints the installed version's copy
@@ -265,20 +341,25 @@ the package file and on the site. D7 checks that each one maps to a page.
 #249's hand-written `docs/llms.txt` (llmstxt.org format, copied to the site
 root) is the agents' index. This change adds two things to it:
 - **A line ending its opening facts list:** "To set up, run and report an
-  experiment, read the agent guide first: `python -m mushin guide` prints the
-  installed version's copy, and the latest is at" the raw Markdown URL
+  experiment, read the agent guide first: on mushin 0.16 or later,
+  `python -m mushin guide` prints the installed version's copy; the latest
+  is at" the raw Markdown URL
   (`https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md`).
-  Raw Markdown is better input for an agent than the rendered page.
-- **An entry for the new `docs/agents.md` page** in its "Docs" list, right
-  after Quickstart, matching the nav. #249's test requires it, since the page
-  is in the nav.
+  Raw Markdown is better input for an agent than the rendered page. The
+  file's first fact already gives the install name, `pip install mushin-py`.
+- **An entry for the new `docs/for-agents.md` page** in its "Docs" list,
+  right after Quickstart, matching the nav. #249's test requires it, since
+  the page is in the nav.
+
+Neither addition touches the lines #249's tests parse ("Supported Python: X
+to Y.", "Other extras: ...", the first ```python block).
 
 Nothing else in #249's file changes. Its facts block and example stay the
 short version, and the guide is the long one.
 
 **If #249 is closed unmerged,** this change adds a hand-written
 `docs/llms.txt` itself. It would have the H1 and summary, a "Start here"
-section (the raw guide, then the agents, Quickstart and Core concepts pages)
+section (the raw guide, then the For AI agents, Quickstart and Core concepts pages)
 and a "Guides" section. D7 item 4 would then check its docs-site links too.
 
 **Why not mkdocs-llmstxt:** it would downgrade `markdown-it-py` across the
@@ -289,8 +370,8 @@ D7 checks that the raw-GitHub link names a file that exists.
 ### D6. README pointer
 
 A short "Using mushin with an AI agent" section right after the README
-Quickstart. It covers `python -m mushin guide`, the docs page, `llms.txt`,
-and the copy-paste block. The README is also the PyPI description, which is
+Quickstart. It covers `python -m mushin guide` (0.16 or later, with the raw
+URL for older versions), the docs page, `llms.txt`, and the copy-paste block. The README is also the PyPI description, which is
 the first page an agent fetches.
 
 ### D7. Tests keep the guide honest
@@ -307,33 +388,53 @@ A new test file, `tests/test_agent_guide.py`:
      test process.
    - Code goes only in ```python blocks; shell commands go in ```bash blocks
      and output in ```text blocks, neither of which is executed.
+   - The subprocess runs with `PYTHONUTF8=1`, as the guide tells agents to
+     run mushin on Windows (D8), so a block may call `mushin.diff`.
    - The test skips without scipy.
-3. **Its `run()` keywords exist.** The test AST-parses the blocks. Every
-   keyword in a `.run(...)` call that is not a parameter of a task defined in
-   the guide must be in `inspect.signature(MultiRunMetricsWorkflow.run)` (or
-   the `Sweep.run` signature). A renamed safety keyword therefore fails, even
-   though `run()` accepts arbitrary task overrides.
+3. **Its `run()` keywords exist.** The test AST-parses the blocks and checks
+   only mushin's `run()` calls: `.run(...)` on a name the guide binds to a
+   `@mushin.sweep` function or to a `MultiRunMetricsWorkflow`. Calls such as
+   `subprocess.run` are left alone. Each keyword must be a parameter of that
+   task, or a named parameter of `MultiRunMetricsWorkflow.run` or
+   `BaseWorkflow.run`, which `run()` forwards to. A renamed safety keyword
+   therefore fails, even though `run()` accepts arbitrary task overrides.
+   `Sweep.run` is not consulted: its signature is `(self, **kwargs)`, so it
+   would accept anything.
 4. **Its links resolve.**
-   - Every docs-site URL in the guide maps to `docs/<path>.md` or
-     `docs/<path>/index.md` (anchors stripped). Site URLs are recognized by
-     the `site_url` in `mkdocs.yml`, as #249's test does, so moving the site
-     to a new host does not make the check pass vacuously. #249's tests
-     already cover the site links in `llms.txt`.
+   - Every docs-site URL in the guide must be the URL of a page in
+     `mkdocs.yml`'s nav, computed the way #249's `tests/test_llms_txt.py`
+     computes it (`_nav_pages` and `_site_url`, which handle notebooks,
+     `index.md` and URL nav entries). Only nav pages count, so a link into
+     the excluded `docs/superpowers/` fails even though the file exists.
+     Those helpers move into a shared `tests/_docs_site.py` that both tests
+     import. Anchors are stripped.
+   - The guide must contain at least one docs-site URL. If `site_url`
+     changes, every old link stops matching it, so a guide with no matching
+     link fails instead of passing vacuously.
    - The raw-GitHub link in `llms.txt` names a file that exists in the repo.
+     #249's tests already cover the site links in `llms.txt`.
 5. **The CLI works.**
    - `main(["guide"])` prints the version line, then the guide.
    - `main(["guide", "--path"])` prints an existing path.
    - `main([])` exits 0.
    - A subprocess run of `python -m mushin guide` with
      `PYTHONIOENCODING=cp1252` exits 0.
-6. **Its numbers are pinned.** The seed floors the guide states (6 seeds for 2
-   methods, 7 for 3, 8 for 4) are checked against `compare_methods` on
-   perfectly separated synthetic data: significant at the stated floor, not
+6. **Its numbers are pinned,** in the existing `tests/test_docs_claims.py`
+   rather than a second file, next to its uncorrected Wilcoxon floor. The
+   seed floors the guide states (6 seeds for 2 methods, 7 for 3, 8 for 4) are
+   checked against `compare_methods`: significant at the stated floor, not
    significant one seed below it.
+   - The synthetic data must vary across seeds within each method, e.g.
+     method `i` scores `arange(n) + 10 * i`. A metric constant within a
+     method gives a NaN p-value (Facts), so the naive fixture of 1.0 for one
+     method and 0.0 for the other would fail at every seed count.
+   - The test also checks that the guide's text states those three numbers.
 
 **In CI:**
-- The `docs` job also runs `tests/test_agent_guide.py`, next to the snippet
-  guard, so a docs-only PR that breaks a link or the guide's code fails.
+- The `docs` job also runs `tests/test_agent_guide.py`, so a docs-only PR that
+  breaks a link or the guide's code fails. It needs scipy and torchmetrics, so
+  it goes in the step #249 adds with `--extra eval` (if #249 is closed
+  unmerged, this change adds a step like it).
 - `core-only` (non-editable, no extras) checks
   `"python -m mushin guide" in pydoc.render_doc(mushin)` and runs
   `python -m mushin guide --path`.
@@ -350,20 +451,24 @@ detail. In order:
    seeds, and get a labeled `xarray.Dataset` / `pandas.DataFrame` back, with
    provenance and paired statistics. The task can use any framework. torch and
    Lightning are installed with mushin and power the optional eval layer.
-2. **Install.** The extras that matter (`eval`, `viz`, `netcdf`, the
-   batteries, `mcp`) in a small table.
+2. **Install.** `pip install mushin-py` (the PyPI package `mushin` is not
+   this project). The extras that matter (`eval`, `viz`, `netcdf`, the
+   batteries, `mcp`) in a small table, plus the launcher plugins, which are
+   Hydra packages rather than extras (`hydra-joblib-launcher`,
+   `hydra-ray-launcher`).
 3. **Choosing an entry point.** A decision table:
 
    | Job | Entry point |
    |---|---|
    | A function over a grid | `@mushin.sweep` |
    | Custom collection or Lightning | `MultiRunMetricsWorkflow` |
-   | (method × seed) significance | `mushin.benchmark.compare_methods` |
+   | (method x seed) significance | `mushin.benchmark.compare_methods` |
    | torch models on a battery | `mushin.compare` |
    | Train, then compare | `Study` |
    | LLMs | `mushin.llm` |
    | Analyzing finished runs | `show` / `best` / `diff` / MCP |
-   | Parallel or packed GPU runs | `launcher="joblib"`, `pin_gpu_round_robin` |
+   | Cells in parallel on one machine | `launcher="joblib"` (a Hydra plugin) |
+   | Several runs per GPU | the GPU packing guide (Ray; `pin_gpu_round_robin` needs a fresh process per job) |
    | Cluster runs | the multinode guide |
 
 4. **The template (runnable, tested), as one experiment script:**
@@ -371,10 +476,12 @@ detail. In order:
      (stubbed in the guide) and returns a dict of floats. Never decorate the
      scientist's function in place.
    - `dry_run=True`, with an assertion on `num_cells`.
-   - A run with a fixed `working_dir` and `method` and `seed` axes, plus one
+   - A run with a fixed `working_dir` outside the repository (or in a
+     gitignored directory), string-valued `method` and `seed` axes, and one
      extra swept axis that is selected away before the statistics.
    - Read the results as a dataset and a DataFrame.
-   - `compare_methods`, with the sign of `mean_diff` explained.
+   - `compare_methods` on the dataset `.run()` returned, in the same script,
+     with the sign of `mean_diff` explained.
    - Where the outputs went.
 5. **Rules that prevent wrong results or wasted compute:**
    - `multirun([...])` for swept values; `hydra_list([...])` for a list-valued
@@ -384,43 +491,87 @@ detail. In order:
    - Each cell runs in its own directory: use `mushin.original_cwd()` for
      input paths.
    - `dry_run=True` before anything expensive, plus `confirm_above` /
-     `MUSHIN_MAX_CELLS` and `max_total_seconds`.
+     `MUSHIN_MAX_CELLS` and `max_total_seconds`. The time budget works only
+     with the default launcher; under joblib, bound the run some other way.
    - `on_error="nan"` keeps sweeping and lists the failures, and
      `compare_methods` then needs `allow_incomplete=True` or a complete grid.
      `sample=` explores a subset.
    - `resume=True` with the same `working_dir` re-runs incomplete cells and
-     cells whose config or task body changed. After editing a helper, a
-     constant or the environment, use a fresh `working_dir` (and don't rely on
-     `cache_dir`).
-   - `compare_methods` needs dims named exactly `method` and `seed`: rename or
-     select others first.
-   - Seeds: `m * 2 ** (1 - n) <= alpha` with `m` comparisons, so 6 seeds for 2
+     cells whose config or task function changed. The task is a wrapper, so
+     after editing the scientist's code, a helper, a constant or the
+     environment, use a fresh `working_dir` (and don't rely on `cache_dir`).
+   - `compare_methods` needs dims named exactly `method` and `seed`, and
+     string `method` values: rename, select or convert first. A method whose
+     metric is the same for every seed gives NaN, not a result: check for it.
+   - Seeds: `m * 2 ** (1 - n) < alpha` with `m` comparisons, so 6 seeds for 2
      methods, 7 for 3 and 8 for 4 at alpha 0.05. These are floors, not power.
-   - Commit code before final runs: provenance records the git SHA and whether
-     the tree was dirty.
+   - Commit code before final runs, and start them with `git status
+     --porcelain` empty. Provenance records the git SHA and whether the tree
+     was dirty, and untracked files count, so keep the sweep output and logs
+     outside the repository or in `.gitignore`.
+   - On Windows, run mushin with `PYTHONUTF8=1` (or `python -X utf8`):
+     `diff` and the dry-run preview print characters a piped console's code
+     page may lack.
    - `best()` is per-cell: average over seeds to pick a configuration.
      `show()` prints and returns.
 6. **Running long sweeps from an agent.** Agent shell commands time out, so:
-   - put the sweep in a script with a fixed `working_dir`
-   - start it in the background with output redirected to a log
+   - put the sweep, and its `compare_methods` call, in a script with a fixed
+     `working_dir` outside the repository
+   - start it in the background with output redirected to a log, also
+     outside the repository
    - poll with `python -c "import mushin; mushin.show('<root>')"`
-   - if a cell is still `running` but the process is gone, it was killed:
-     relaunch the same script with `resume=True`
+   - prefer the default launcher for a sweep the agent runs in the
+     background. If the main process died with cells still `running`, check
+     that nothing from that run is still alive before relaunching the same
+     script with `resume=True`: under joblib, worker processes outlive the
+     main one and keep computing cells.
 7. **Where results go and how to reload them.** The layout (including
    `mushin_error.txt`), `load_from_dir(root, "mushin_metrics.json")`,
-   `show` / `best` / `diff`, and the MCP server.
+   `show` / `best` / `diff`, and the MCP server. Before comparing a reloaded
+   sweep, check `mushin.show(root)` for any cell that is not `completed`.
+   With D9 the comparison raises on such a sweep, but the web copy of this
+   guide also reaches older versions, where it does not.
 8. **Before reporting to the scientist, a checklist:**
-   - no failed or skipped cells, or they are reported
+   - no failed or skipped cells in `mushin.show(root)`, or they are reported
    - enough seeds for the number of comparisons
    - corrected p-values and effect sizes with the sign stated, not raw means
-   - a clean provenance
+   - a clean provenance (`dirty: false`)
    - the sweep root path, so the run can be found again
 9. **Going further.** Links to the specific guides (LLM eval, batteries,
    Study, launchers and GPU packing, multi-node, resilience, statistics), and
    `help(obj)` for exact signatures.
 
-Each claim in sections 4 to 7 is checked against Facts when the guide is
+Each claim in sections 3 to 7 is checked against Facts when the guide is
 written. The D7 tests exercise the code, the keywords and the numbers.
+
+### D9. A reloaded sweep keeps its record of failed cells (its own PR, first)
+
+`load_from_dir` rebuilds `failures` and `skipped` from the sweep, so
+`to_xarray()` sets `mushin_failures` and `mushin_skipped` on a reloaded sweep
+exactly as on the dataset `.run()` returned. `compare_methods` then raises
+`IncompleteSweepError` on it.
+
+- **Source:** the attrs hold only each cell's combo key. The sweep manifest
+  (`mushin_sweep_manifest.json`) already records every cell's status
+  (`failed`, `skipped`) by combo, and each cell's `mushin_cell_status.json`
+  repeats it, so no new file is written.
+- **Tests** (in `tests/test_workflows.py`, next to the existing NaN-fill
+  tests):
+  - a sweep with one failed cell (`on_error="nan"`) and one budget-skipped
+    cell, reloaded: its attrs equal the attrs of the dataset `.run()`
+    returned;
+  - `compare_methods` on the reloaded dataset raises `IncompleteSweepError`;
+  - the 3-method case from Facts no longer reports a significant pair.
+- **A changelog fragment:** `changes/<PR>.fixed.md`.
+
+**Why first, and separate:** it is a wrong-results bug in the released 0.15.1,
+independent of the guide. A separate PR gives it its own "Fixed" entry and
+lets it ship in a patch release. The guide (D8 item 7) then needs only one
+rule, which also covers older versions.
+
+**Rejected for now:** having `compare_methods` treat any NaN cell as
+incomplete. That would also catch a task that returns NaN, but it changes
+results for tasks that return NaN on purpose. It is a follow-up decision.
 
 ## Verification
 
@@ -428,8 +579,9 @@ written. The D7 tests exercise the code, the keywords and the numbers.
   copy makes it fail: renaming the `dry_run` keyword of `run()` fails item 3,
   and changing `compare_methods`' default test fails item 2 or 6.
 - **The docs build:** `mkdocs build --strict` passes. The built
-  `agents/index.html` contains the guide's code, and `llms.txt` is at the site
-  root.
+  `for-agents/index.html` contains the guide's code, and `llms.txt` is at the
+  site root.
+- **D9:** its tests pass, and they fail on main before the fix.
 - **The wheel:** `uv build --wheel` installed into a clean venv gives
   `python -m mushin guide --path` an existing file.
 - **A core install:** a non-editable core install (no extras) renders
@@ -455,16 +607,28 @@ written. The D7 tests exercise the code, the keywords and the numbers.
   and the plan's grep checks this.
 - **Import cost of `python -m mushin`.** It imports the package (about 1 s),
   which is acceptable for an occasional command.
+- **The command reaches the web before it reaches a release.** The docs page
+  and `llms.txt` say to run `python -m mushin guide` as soon as this merges,
+  and on 0.15.1 it fails. Mitigated by the fallback each of them gives (D2).
+- **The install name.** An agent that cannot import mushin may reach for
+  `pip install mushin`, which is unregistered and could be claimed by anyone.
+  Mitigated by stating `mushin-py` wherever the command appears (D2). A
+  placeholder registration is a maintainer follow-up.
 
 ## Follow-ups (not in this change)
 
 - API reference pages for the exports that have none.
-- Docstring entries for `run()`'s `working_dir` and `launcher`.
 - Behavior questions surfaced here, each its own decision:
   - `best()` averaging over seeds
   - `show()` printing
-  - `compare_methods` accepting other dim names or reducing extra dims
+  - `compare_methods` accepting other dim names, non-string method values,
+    or reducing extra dims; warning on a method with zero variance; treating
+    NaN cells as incomplete (D9)
   - `warn_if_underpowered` accounting for Holm correction
-  - the `mushin.sweep(fn)` call form not pickling
   - `resume` / `cache_dir` not detecting helper or constant edits
+  - `max_total_seconds` under joblib: warn, or enforce across workers
+  - console output that survives a non-UTF-8 console (`diff`'s `Δ` is also
+    a column name of its returned table, so renaming it is an API change)
+- Maintainer action: register `mushin` on PyPI as a placeholder that points
+  to `mushin-py`.
 - Agent-specific packaging (a skill, MCP prompts) on top of the guide.
