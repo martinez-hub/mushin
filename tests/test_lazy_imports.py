@@ -137,3 +137,31 @@ def test_eval_available_does_not_import_the_eval_modules():
         "print('torchmetrics' in sys.modules, 'scipy' in sys.modules)"
     )
     assert _fresh_import_probe(code) == "False False"
+
+
+def test_module_docstring_points_agents_to_the_guide():
+    import mushin
+
+    assert mushin.__doc__ and "python -m mushin guide" in mushin.__doc__
+
+
+def test_dir_lists_no_deprecated_aliases():
+    """help(mushin) touches every name dir() lists; a deprecated alias then
+    warns on every render (and raises under -W error)."""
+    import warnings
+
+    import mushin
+
+    assert "BaseWorkflow" not in dir(mushin)
+    assert "RobustnessCurve" not in dir(mushin)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mushin.BaseWorkflow  # still importable  # noqa: B018
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
+def test_all_lists_the_eval_names_when_the_extra_is_installed():
+    import mushin
+
+    assert {"compare", "llm", "classification_battery"} <= set(mushin.__all__)
+    assert sorted(mushin.__all__) == dir(mushin)

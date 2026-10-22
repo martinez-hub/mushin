@@ -1,10 +1,31 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
+"""mushin: boilerplate-free, reproducible machine-learning experiment sweeps.
+
+Sweep a Python function over a grid of parameters and seeds, and get the
+results back as a labeled ``xarray.Dataset``, with per-run provenance and paired
+statistics across seeds.
+
+Main entry points:
+
+- ``@mushin.sweep``: decorate a function, then ``.run(...)`` it over a grid
+  built with ``mushin.multirun([...])``.
+- ``mushin.MultiRunMetricsWorkflow``: the class API, for custom result
+  collection or Lightning training.
+- ``mushin.benchmark.compare_methods``: paired, corrected comparisons of methods
+  across seeds (needs the ``eval`` extra).
+- ``mushin.Study`` and ``mushin.compare``: train-then-compare, and metric
+  batteries for torch models (need the ``eval`` extra).
+
+AI coding agents: run ``python -m mushin guide`` for a usage guide matching this
+version.
+"""
 
 import importlib
 from typing import TYPE_CHECKING
 
+from ._extras import eval_available as _eval_available
 from ._packing import pin_gpu_round_robin
 from ._resume import ResumeContext
 from ._show import best, diff, show
@@ -118,7 +139,10 @@ def __getattr__(name: str):
 
 
 def __dir__():
-    return sorted(set(__all__) | set(_DEPRECATED))
+    # Only names that resolve: `__all__` (filtered below on a core install). The
+    # deprecated aliases stay importable but are not listed, since help(mushin)
+    # touches every listed name and each alias warns on access.
+    return sorted(__all__)
 
 
 __all__ = [
@@ -158,3 +182,11 @@ __all__ = [
     "retrieval_battery",
     "image_quality_battery",
 ]
+
+# On a core install (no `eval` extra) the evaluation-layer names raise on
+# access, which breaks help(mushin), pydoc, `from mushin import *` and
+# inspect.getmembers. Advertise them only when they resolve; accessing one still
+# raises the install hint.
+_EVAL_NAMES = _LAZY_BENCHMARK | {"llm"}
+if not _eval_available():
+    __all__ = [name for name in __all__ if name not in _EVAL_NAMES]
