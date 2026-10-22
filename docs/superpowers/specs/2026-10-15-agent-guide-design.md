@@ -205,8 +205,10 @@ source. Success criteria:
 - **Packaging:** `[tool.setuptools.package-data]` ships only `py.typed` today.
 - **#249's `tests/test_llms_txt.py`** requires `llms.txt` to list every nav
   page exactly once, and to link to no docs-site URL outside the nav. It
-  recognizes site links by the `site_url` in `mkdocs.yml` and ignores links
-  to other hosts. It also pins the install name, Python range and extras
+  recognizes site links by the `site_url` in `mkdocs.yml`, and every other
+  link must be https and on a host in its `EXTERNAL_HOSTS` (since the #249
+  review: `github.com`), so D5's raw-GitHub link adds
+  `raw.githubusercontent.com` there. It also pins the install name, Python range and extras
   list to `pyproject.toml`, and runs the first ```python block.
 - **`mkdocs-llmstxt` 0.5.1** would cap `markdown-it-py < 4`, downgrading it
   from 4.2.0 to 3.0.0 across the shared `uv.lock`.
@@ -340,10 +342,16 @@ copy-paste block as contributor instructions. It has two parts:
   - the MCP server, for analysis
   - a note that the web copy tracks `main`, while `python -m mushin guide`
     prints the installed version's copy
-- **Then the guide,** included with a one-line snippet include outside any
-  fence: `--8<-- "src/mushin/agent_guide.md"`. That is the form
-  `docs/changelog.md` uses. #253's guard allows it there and checks that the
-  file exists.
+- **Then the guide,** after a horizontal rule, included with a one-line
+  snippet include outside any fence, from line 3, below the guide's own title:
+  `--8<-- "src/mushin/agent_guide.md:3"`. #253's guard allows that form there
+  and checks that the file exists, and a test pins that the guide's first line
+  is its title and the second is blank. The guide's sections then become the
+  page's own.
+- **The guide renders on the site:** the docs site's Python-Markdown needs
+  4-space indents for blocks inside list items, so the guide keeps code fences
+  out of lists, and uses plain bullets rather than `- [ ]` (no tasklist
+  extension). D7 checks this.
 
 **Links inside the guide** are absolute docs-site URLs
 (`https://martinez-hub.github.io/mushin/...`), so they work in a terminal, in
@@ -394,10 +402,11 @@ A new test file, `tests/test_agent_guide.py`:
    - It runs as a real script, as an agent would run it, so `inspect.getsource`
      works for mushin's fingerprints and Hydra's global state stays out of the
      test process.
-   - Every ```python block runs, in order, as one script. Shell commands go
-     in ```bash blocks and output in ```text blocks, which are not executed.
-     Any other Python fence tag (`py`, `python3`, `pycon`) fails the test, so
-     no example can dodge it. An example of an error is written to run: it
+   - Every ```python block that starts a line runs, in order, as one script.
+     Shell commands go in ```bash blocks and output in ```text blocks, which
+     are not executed. Any other Python fence (indented, `~~~`, `Python`,
+     `py`, `python3`, `pycon`, or with attributes) fails the test, so no
+     example can dodge it. An example of an error is written to run: it
      catches the error (`except TypeError as e: print(e)`).
    - The template's `working_dir` is relative (under `runs/`, D8), so each
      test run writes into its own temporary directory.
@@ -428,10 +437,12 @@ A new test file, `tests/test_agent_guide.py`:
    - The guide must contain at least one docs-site URL. If `site_url`
      changes, every old link stops matching it, so a guide with no matching
      link fails instead of passing vacuously.
-   - Every raw-GitHub URL in the guide, `docs/for-agents.md`, the README and
-     `llms.txt` names a file that exists in the repo: it is the only fallback
-     D2 gives agents on older versions. #249's tests already cover the site
-     links in `llms.txt`.
+   - `docs/for-agents.md`, the README and `llms.txt` each carry the
+     raw-GitHub URL, and every such URL (the guide's too) names a file that
+     exists in the repo: it is the only fallback D2 gives agents on older
+     versions. #249's tests already cover the site links in `llms.txt`.
+   - Rendered with the docs site's Markdown extensions, the guide has no
+     paragraph of literal list markers and no literal `[ ]`.
 5. **The CLI works.**
    - `main(["guide"])` prints the version line, then the guide.
    - `main(["guide", "--path"])` prints an existing path.
@@ -451,8 +462,11 @@ A new test file, `tests/test_agent_guide.py`:
 
 **In CI:**
 - The `docs` job also runs `tests/test_agent_guide.py`, so a docs-only PR that
-  breaks a link or the guide's code fails. It needs scipy and torchmetrics, so
-  it goes in the step #249 added with `--extra eval`.
+  breaks a link or the guide's code fails. It needs scipy and torchmetrics,
+  and the render check needs the docs group, so it goes in the step #249
+  added, run with `--extra eval --group docs`.
+- The `changes` job's `notebook_prereqs` filter also watches
+  `src/mushin/_extras.py`, the new home of the eval guard's module list.
 - `core-only` (non-editable, no extras) checks
   `"python -m mushin guide" in pydoc.render_doc(mushin)` and runs
   `python -m mushin guide --path`.
@@ -521,7 +535,9 @@ detail. In order:
      after editing the scientist's code, a helper, a constant or the
      environment, use a fresh `working_dir` (and don't rely on `cache_dir`).
    - `compare_methods` needs dims named exactly `method` and `seed`, and
-     string `method` values: rename, select or convert first. A method whose
+     string `method` values: rename, select or convert first. Average with
+     `keep_attrs=True`: at the xarray floor (2024.6.0) a plain reduction drops
+     the record of failed cells that `compare_methods` checks. A method whose
      metric is the same for every seed gives NaN, not a result: heed the
      warning `compare_methods` prints.
    - Seeds: `m * 2 ** (1 - n) < alpha` with `m` comparisons, so 6 seeds for 2
@@ -555,8 +571,10 @@ detail. In order:
    incomplete reload, but the web copy of this guide also reaches older
    versions, where it does not.
 8. **Before reporting to the scientist, a checklist:**
-   - every cell of the grid `completed` in `mushin.show(root)`, or the
-     missing ones reported
+   - every cell of the grid `completed` in `mushin.show(root)` (as many rows
+     as the dry run's `num_cells`), or the missing ones reported.
+     `wf.is_complete` is named only as the equivalent from the release that
+     ships the guide: in 0.15.1 it is always true for a reloaded sweep.
    - enough seeds for the number of comparisons
    - corrected p-values and effect sizes with the sign stated, not raw means
    - a clean provenance (`dirty: false`)

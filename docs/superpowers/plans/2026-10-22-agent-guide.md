@@ -86,8 +86,8 @@ def test_eval_available_reflects_the_eval_modules(monkeypatch):
 
 
 def test_eval_available_does_not_import_the_eval_modules():
-    """dir(mushin) calls eval_available, and IPython's tab completion calls
-    dir(): it must not import scipy or torchmetrics (and so torch)."""
+    """`import mushin` calls eval_available, so it must not import scipy or
+    torchmetrics (and with it torch)."""
     code = (
         "import sys; from mushin._extras import eval_available; eval_available(); "
         "print('torchmetrics' in sys.modules, 'scipy' in sys.modules)"
@@ -100,7 +100,7 @@ def test_eval_available_does_not_import_the_eval_modules():
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_lazy_imports.py -k eval_available -q -p no:cacheprovider`
-Expected: FAIL, `ModuleNotFoundError: No module named 'mushin._extras'`.
+Expected: FAIL, 2 tests: `ImportError: cannot import name '_extras' from 'mushin'`, and a `CalledProcessError` from the probe subprocess.
 
 - [ ] **Step 3: Create `src/mushin/_extras.py`**
 
@@ -122,8 +122,8 @@ EVAL_MODULES = ("scipy", "torchmetrics")
 def eval_available() -> bool:
     """Whether the `eval` extra's modules are installed, without importing them.
 
-    `dir(mushin)` calls this, and IPython's tab completion calls `dir()`, so it
-    must stay cheap: importing torchmetrics would import torch.
+    `import mushin` calls this to decide what `__all__` and `dir(mushin)` list,
+    so it must stay cheap: importing torchmetrics would import torch.
     """
     try:
         return all(importlib.util.find_spec(name) is not None for name in EVAL_MODULES)
@@ -244,7 +244,7 @@ version.
 
 - [ ] **Step 4: Filter `__all__` and `__dir__`**
 
-Add `from ._extras import eval_available` to the eager imports at the top (it imports nothing heavy). Replace
+Add `from ._extras import eval_available as _eval_available` to the eager imports at the top. It imports nothing heavy, and the alias keeps it off the public namespace. Replace
 
 ```python
 def __dir__():
@@ -269,7 +269,7 @@ and directly after the `__all__ = [...]` literal add:
 # inspect.getmembers. Advertise them only when they resolve; accessing one still
 # raises the install hint.
 _EVAL_NAMES = _LAZY_BENCHMARK | {"llm"}
-if not eval_available():
+if not _eval_available():
     __all__ = [name for name in __all__ if name not in _EVAL_NAMES]
 ```
 
@@ -278,7 +278,12 @@ if not eval_available():
 Run: `uv run pytest tests/test_lazy_imports.py -q -p no:cacheprovider && uv run ruff check src/mushin/__init__.py`
 Expected: PASS, and ruff clean. If ruff flags the `__all__` reassignment, add the rule's `noqa` code to that line.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Check that nothing relies on the old listing**
+
+Run: `grep -rn -e 'dir(mushin)' -e '__dir__' -e 'getmembers(mushin' -e 'from mushin import \*' src tests examples docs --include='*.py' --include='*.md' --include='*.ipynb'`
+Expected: only lines this plan adds (the new tests, comments and docstrings). If anything else lists on `dir(mushin)` containing a deprecated or eval name, adapt it.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/mushin/__init__.py tests/test_lazy_imports.py
@@ -309,7 +314,6 @@ job skips the docs-only PRs most likely to break it.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 from importlib import resources
@@ -362,7 +366,7 @@ def test_the_guide_prints_on_a_cp1252_pipe():
 Run: `uv run pytest tests/test_agent_guide.py -q -p no:cacheprovider`
 Expected: FAIL (`FileNotFoundError` for the guide; no `mushin.__main__`).
 
-- [ ] **Step 3: Create `src/mushin/agent_guide.md`** with exactly this content (it was run and checked while writing this plan: ASCII, 261 lines, its three python blocks run in order as one script, ruff-formatted, codespell-clean):
+- [ ] **Step 3: Create `src/mushin/agent_guide.md`** with exactly this content (it was run and checked while writing this plan: ASCII, 271 lines, its three python blocks run in order as one script, ruff-formatted, codespell-clean, and it renders as intended with the docs site's Markdown extensions):
 
 ````markdown
 # Using mushin: a guide for AI coding agents
@@ -394,6 +398,7 @@ package named `mushin` is not this project.
 | `pip install "mushin-py[mcp]"` | `mushin-mcp`, a read-only MCP server over finished runs |
 | `pip install "mushin-py[detection]"` (or `image`, `audio`) | more metric batteries |
 | `pip install hydra-joblib-launcher` | `launcher="joblib"`, to run cells in parallel (a Hydra plugin, not an extra) |
+| `pip install hydra-ray-launcher` | the Ray launcher, to pack several jobs onto each GPU (a Hydra plugin, not an extra) |
 
 Python 3.11 to 3.14 is supported. Intel macOS is not.
 
@@ -409,7 +414,7 @@ Python 3.11 to 3.14 is supported. Intel macOS is not.
 | Compare LLM systems | `mushin.llm` |
 | Inspect finished runs | `mushin.show`, `mushin.best`, `mushin.diff`, or the MCP server |
 | Run cells in parallel on one machine | `launcher="joblib"` |
-| Run several jobs on each GPU | the GPU packing guide (see Going further) |
+| Run several jobs on each GPU | Ray; see the GPU packing guide (Going further). `pin_gpu_round_robin` needs a fresh process per job, which joblib stops giving once cells outnumber `n_jobs` |
 | Run on a cluster | the multi-node guide (see Going further) |
 
 ## A template experiment
@@ -418,7 +423,8 @@ Write the experiment as one script in the scientist's project. Leave their code
 where it is: the sweep task is a new module-level function that calls it and
 returns a dict of numbers. Do not put `@mushin.sweep` on their function. It
 replaces the function with a sweep handle, which cannot be called, so their
-other call sites break.
+other call sites break. The template's statistics need the `eval` extra:
+`pip install "mushin-py[eval]"`.
 
 ```python
 import random
@@ -479,7 +485,7 @@ What it does:
 
 ## Rules that prevent wrong results and wasted compute
 
-- **Sweep a value with `mushin.multirun([...])`.** A bare list raises:
+Sweep a value with `mushin.multirun([...])`. A bare list raises:
 
 ```python
 try:
@@ -488,7 +494,9 @@ except TypeError as e:
     print(e)  # ... wrap them: `method=mushin.multirun(['baseline', 'new'])` ...
 ```
 
-  To pass a list as one value instead, use `mushin.hydra_list([...])`.
+To pass a list as one value instead, use `mushin.hydra_list([...])`. The other
+rules:
+
 - **Return a dict of numbers.** The values are converted to JSON into each
   cell's `mushin_metrics.json`.
 - **Each cell runs in its own directory**, so a relative path in the task
@@ -515,8 +523,10 @@ except TypeError as e:
   or an installed package. After such an edit, use a new `working_dir`.
   `cache_dir=` has the same blind spot.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string
-  `method` values. Select or average away other dims first (`ds.sel(lr=0.01)`,
-  `ds.mean("lr")`), and rename yours if needed
+  `method` values. Select or average away other dims first: `ds.sel(lr=0.01)`,
+  or `ds.mean("lr", keep_attrs=True)`. A plain `mean` drops the dataset's
+  record of failed cells, which `compare_methods` checks, so it would compare
+  an incomplete sweep without a word. Rename yours if needed
   (`ds.rename({"model": "method"})`). A method whose score is the same for
   every seed gets NaN for its pairs, with a warning.
 - **Seeds.** With `k` methods there are `m = k * (k - 1) / 2` pairs, and with
@@ -537,30 +547,30 @@ except TypeError as e:
 
 ## Running long sweeps from an agent
 
-An agent's shell commands time out, and a sweep can take hours. So:
+An agent's shell commands time out, and a sweep can take hours. Put the sweep
+in a script, like the template, with a fixed `working_dir` under the gitignored
+`runs/`, and start it in the background, with its log under `runs/` too:
 
-1. Put the sweep in a script, like the template, with a fixed `working_dir`
-   under the gitignored `runs/`.
-2. Start it in the background, with its log under `runs/` too:
+```bash
+mkdir -p runs
+nohup python experiment.py > runs/compare-v1.log 2>&1 &
+```
 
-   ```bash
-   mkdir -p runs
-   nohup python experiment.py > runs/compare-v1.log 2>&1 &
-   ```
+Then poll it:
 
-3. Poll it:
+```bash
+python -c "import mushin; mushin.show('runs/compare-v1')"
+```
 
-   ```bash
-   python -c "import mushin; mushin.show('runs/compare-v1')"
-   ```
+`show` prints one row per cell that has started, with its status (`running`,
+`completed`, `failed` or `skipped`) and metrics. A cell that has not started
+has no row yet, so compare the row count with the dry run's `num_cells`.
 
-   `show` prints one row per cell that has started, with its status
-   (`running`, `completed`, `failed` or `skipped`) and metrics.
-4. Use the default launcher for a sweep you run this way. If the process died
-   with cells still `running`, check that nothing from that run is still alive
-   before you relaunch the same script with `resume=True`: with
-   `launcher="joblib"`, the worker processes outlive the main one and keep
-   computing cells.
+Use the default launcher for a sweep you run this way. If the process died
+with cells still `running`, check that nothing from that run is still alive
+before you relaunch the same script with `resume=True`: with
+`launcher="joblib"`, the worker processes outlive the main one and keep
+computing cells.
 
 ## Where results go, and how to reload them
 
@@ -575,24 +585,25 @@ runs/compare-v1/
     mushin_cell_status.json    completed, failed, skipped or running
     mushin_metrics.json        the dict the task returned (completed cells)
     mushin_error.txt           the traceback (failed cells, on_error="nan")
-    mushin_provenance.json     git commit, package versions, hardware
+    mushin_provenance.json     git commit, package versions, hardware (cells that ran)
     mushin_workflow.log, .hydra/
 ```
 
-Reload a finished sweep in a new process:
+Reload a finished sweep, for example in a new process:
 
 ```python
 from mushin.workflows import MultiRunMetricsWorkflow
 
-wf = MultiRunMetricsWorkflow().load_from_dir(RUN_DIR, "mushin_metrics.json")
+wf = MultiRunMetricsWorkflow().load_from_dir("runs/compare-v1", "mushin_metrics.json")
 assert wf.is_complete, wf.failures + wf.skipped  # every cell has a result
 ds = wf.to_xarray()  # the same (method, lr, seed) dataset as above
 ```
 
 A reloaded sweep with failed, skipped or unfinished cells is not complete, and
 `compare_methods` refuses it. In mushin 0.15.1 and earlier, a reload lost that
-record: there, check that `mushin.show(root)` lists a `completed` row for every
-cell of the grid before comparing.
+record, and `is_complete` was always true for a reloaded sweep. There, check
+that `mushin.show(root)` lists a `completed` row for every cell of the grid
+before comparing.
 
 `mushin.show(root)`, `mushin.best(root, metric)` and `mushin.diff(root_a,
 root_b)` read a sweep directory directly; `show` prints its table and also
@@ -601,14 +612,17 @@ returns it. To let an MCP client such as Claude Code inspect the runs, install
 
 ## Before reporting to the scientist
 
-- [ ] Every cell of the grid completed: `wf.is_complete` is true, or
-  `mushin.show(root)` lists one `completed` row per cell (the `num_cells` of
-  the dry run). If not, report the failed or missing cells.
-- [ ] There are enough seeds for the number of methods compared (see Rules).
-- [ ] The report gives corrected p-values (`p_corrected`) and effect sizes
+Check each of these:
+
+- Every cell of the grid completed: `mushin.show(root)` lists one `completed`
+  row per cell, as many as the dry run's `num_cells`. (From the mushin that
+  ships this guide, `wf.is_complete` on a reloaded sweep says the same.) If
+  not, report the failed or missing cells.
+- There are enough seeds for the number of methods compared (see Rules).
+- The report gives corrected p-values (`p_corrected`) and effect sizes
   (`mean_diff`, `effect_size`), with the direction stated, not raw means alone.
-- [ ] The provenance is clean: `"dirty": false` in `mushin_provenance.json`.
-- [ ] The report names the sweep's directory, so the run can be found and
+- The provenance is clean: `"dirty": false` in `mushin_provenance.json`.
+- The report names the sweep's directory, so the run can be found and
   reloaded.
 
 ## Going further
@@ -752,7 +766,21 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ```
 
-followed by the moved definitions, in their current order.
+followed by the moved definitions, in their current order, and then two
+Markdown helpers both tests use:
+
+```python
+def markdown_links(text: str) -> list[str]:
+    """The targets of the Markdown links `[text](target)` in `text`."""
+    return re.findall(r"\]\(([^)\s]+)\)", text)
+
+
+def python_blocks(text: str) -> list[str]:
+    """The bodies of the ```python fences that start a line, in order."""
+    return re.findall(r"^```python\n(.*?)^```$", text, re.DOTALL | re.MULTILINE)
+```
+
+Add `import re` to its imports.
 
 - [ ] **Step 2: Import them back in `tests/test_llms_txt.py`**
 
@@ -762,7 +790,6 @@ Delete the moved definitions there and add, with the other imports:
 from _docs_site import (
     ROOT,
     _MkdocsLoader,
-    _mkdocs,
     _nav_pages,
     _nav_urls,
     _site,
@@ -770,7 +797,7 @@ from _docs_site import (
 )
 ```
 
-Remove any import that ruff then reports unused (`os`, probably). Keep `EXTERNAL_HOSTS`, `_pyproject`, `_llms_txt`, `_llms_txt_links` and `_llms_txt_urls` in `test_llms_txt.py`.
+Remove the now-unused `os` and `pathlib.Path` imports. (`_mkdocs` is used only by the moved helpers, so it is not imported back.) Then use the shared Markdown helpers: import `markdown_links` and `python_blocks` from `_docs_site` too, make `_llms_txt_links()` return `markdown_links(_llms_txt())`, and in `test_llms_txt_example_runs` replace the `re.findall(r"```python\n(.*?)```", ...)` call with `python_blocks(_llms_txt())`. Keep `EXTERNAL_HOSTS`, `_pyproject`, `_llms_txt`, `_llms_txt_links` and `_llms_txt_urls` in `test_llms_txt.py`.
 
 - [ ] **Step 3: Run the tests**
 
@@ -791,23 +818,37 @@ git commit -m "test: share the mkdocs nav helpers in tests/_docs_site.py"
 **Files:**
 - Modify: `tests/test_agent_guide.py`
 
-- [ ] **Step 1: Add the tests** (append to `tests/test_agent_guide.py`; add `import ast`, `import inspect` and `import pytest` to its imports, and `from _docs_site import ROOT, _nav_urls, _site`)
+- [ ] **Step 1: Add the tests** (append to `tests/test_agent_guide.py`; add `import ast`, `import inspect`, `import re` and `import pytest` to its imports, and `from _docs_site import ROOT, _nav_urls, _site, markdown_links, python_blocks`)
 
 ```python
 RAW_PREFIX = "https://raw.githubusercontent.com/martinez-hub/mushin/main/"
 # The files that point agents on mushin < 0.16 at the raw guide.
-RAW_LINK_FILES = ["docs/for-agents.md", "README.md", "docs/llms.txt"]
-LINK = re.compile(r"\]\(([^)\s]+)\)")
+RAW_LINK_FILES = [
+    "src/mushin/agent_guide.md",
+    "docs/for-agents.md",
+    "README.md",
+    "docs/llms.txt",
+]
 
 
 def _python_blocks() -> list[str]:
-    return re.findall(r"^```python\n(.*?)^```$", _text(), re.DOTALL | re.MULTILINE)
+    return python_blocks(_text())
 
 
 def test_every_python_example_is_tagged_python():
-    """Only ```python blocks run below; another Python tag would dodge that."""
-    other = re.findall(r"^\s*```(py|python3|pycon)\b", _text(), re.MULTILINE)
-    assert not other, other
+    """Only fences tagged exactly ```python at the start of a line run below.
+    Any other Python fence (indented, `~~~`, `Python`, `python3`, `pycon`, or
+    with attributes) would show code that never runs, so it fails here."""
+    fences = re.findall(
+        r"^([ \t]*)(`{3,}|~{3,})([ \t]*)(\S*)(.*)$", _text(), re.MULTILINE
+    )
+    bad = [
+        "".join(fence)
+        for fence in fences
+        if re.match(r"[{.]*(py|python3?|pycon|ipython)\b", fence[3], re.IGNORECASE)
+        and fence != ("", "```", "", "python", "")
+    ]
+    assert not bad, bad
 
 
 def test_the_guide_code_runs(tmp_path):
@@ -861,6 +902,29 @@ def test_the_guide_run_keywords_exist():
     `Sweep.run` is `(self, **kwargs)`, so its signature proves nothing."""
     tree = ast.parse("\n".join(_python_blocks()))
     functions = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    # The class API: MultiRunMetricsWorkflow or a subclass, with the parameters
+    # of the subclass's `task` method.
+    classes: dict[str, set[str]] = {"MultiRunMetricsWorkflow": set()}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(
+            ast.unparse(base).endswith("MultiRunMetricsWorkflow") for base in node.bases
+        ):
+            task = next(
+                (
+                    n
+                    for n in node.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "task"
+                ),
+                None,
+            )
+            classes[node.name] = _parameters(task) if task else set()
+
+    def workflow_task(node: ast.expr) -> set[str] | None:
+        """The task's parameters if `node` instantiates a workflow class."""
+        if not isinstance(node, ast.Call):
+            return None
+        return classes.get(ast.unparse(node.func).rsplit(".", 1)[-1])
+
     handles: dict[str, set[str]] = {}  # name -> its task's parameters
     dicts: dict[str, list[str]] = {}  # name bound to a dict literal or dict(...)
     for node in ast.walk(tree):
@@ -879,15 +943,19 @@ def test_the_guide_run_keywords_exist():
             first = value.args[0] if value.args else None
             fn = functions.get(first.id) if isinstance(first, ast.Name) else None
             handles[target] = _parameters(fn) if fn else set()
+        elif workflow_task(value) is not None:
+            handles[target] = workflow_task(value)
         elif (
             isinstance(value, ast.Call)
             and isinstance(value.func, ast.Name)
             and value.func.id == "dict"
             and not value.args
+            and all(k.arg for k in value.keywords)  # no dict(**other)
         ):
-            dicts[target] = [k.arg for k in value.keywords if k.arg]
+            dicts[target] = [k.arg for k in value.keywords]
         elif isinstance(value, ast.Dict) and all(
-            isinstance(k, ast.Constant) and isinstance(k.value, str) for k in value.keys
+            isinstance(k, ast.Constant) and isinstance(k.value, str)
+            for k in value.keys  # a `{**other}` key is None, so it is not bound
         ):
             dicts[target] = [k.value for k in value.keys]
 
@@ -898,9 +966,21 @@ def test_the_guide_run_keywords_exist():
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "run"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in handles
         ):
+            continue
+        owner = node.func.value
+        if (
+            isinstance(owner, ast.Attribute)
+            and owner.attr == "workflow"
+            and isinstance(owner.value, ast.Name)
+            and owner.value.id in handles
+        ):
+            owner = owner.value  # experiment.workflow.run(...) is the same run
+        if isinstance(owner, ast.Name) and owner.id in handles:
+            task_params = handles[owner.id]
+        elif workflow_task(owner) is not None:  # e.g. MyWorkflow().run(...)
+            task_params = workflow_task(owner)
+        else:
             continue  # not a mushin run(), e.g. subprocess.run
         checked += 1
         keywords: list[str] = []
@@ -910,10 +990,10 @@ def test_the_guide_run_keywords_exist():
             elif isinstance(kw.value, ast.Name) and kw.value.id in dicts:
                 keywords += dicts[kw.value.id]
             else:
-                bad.append(f"line {node.lineno}: `**{ast.unparse(kw.value)}`")
-        allowed = allowed_run | handles[node.func.value.id]
+                bad.append(f"example line {node.lineno}: `**{ast.unparse(kw.value)}`")
+        allowed = allowed_run | task_params
         bad += [
-            f"line {node.lineno}: `{k}=` is not a run() parameter"
+            f"example line {node.lineno}: `{k}=` is not a run() parameter"
             for k in keywords
             if k not in allowed
         ]
@@ -922,7 +1002,7 @@ def test_the_guide_run_keywords_exist():
 
 
 def test_the_guide_links_are_nav_pages():
-    links = [url.split("#", 1)[0] for url in LINK.findall(_text())]
+    links = [url.split("#", 1)[0] for url in markdown_links(_text())]
     site_links = [url for url in links if url.startswith(_site())]
     # If site_url moves, every old link stops matching it: fail, not pass.
     assert site_links, f"the guide has no link into the docs site {_site()}"
@@ -933,24 +1013,42 @@ def test_the_guide_links_are_nav_pages():
 
 
 def test_raw_guide_links_name_a_file_in_the_repo():
-    """The raw-GitHub URL is the only fallback D2 gives agents on mushin < 0.16."""
-    found = []
+    """The raw-GitHub URL is the only fallback D2 gives agents on mushin < 0.16,
+    so each file that tells agents to run the command must carry it."""
     for rel in RAW_LINK_FILES:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        for url in re.findall(re.escape(RAW_PREFIX) + r"[^\s)>`\"']+", text):
-            found.append(url)
+        urls = re.findall(re.escape(RAW_PREFIX) + r"[^\s)>`\"']+", text)
+        if rel != "src/mushin/agent_guide.md":  # the guide is the target
+            assert urls, f"{rel} does not link the raw guide"
+        for url in urls:
             assert (ROOT / url.removeprefix(RAW_PREFIX)).is_file(), f"{rel}: {url}"
-    assert found, f"none of {RAW_LINK_FILES} links the raw guide"
+
+
+def test_the_guide_renders_as_lists_on_the_docs_site():
+    """The docs site renders with Python-Markdown, which needs 4-space indents
+    for blocks inside a list item. A fence inside a bullet, or a list item it
+    does not continue, turns the rest of the list into one paragraph of literal
+    `- ` text; a `- [ ]` checklist shows literal brackets (no tasklist
+    extension)."""
+    markdown = pytest.importorskip("markdown")
+    pytest.importorskip("pymdownx")
+    html = markdown.markdown(
+        _text(), extensions=["tables", "admonition", "pymdownx.superfences"]
+    )
+    paragraphs = re.findall(r"<p>(.*?)</p>", html, re.DOTALL)
+    broken = [p for p in paragraphs if re.search(r"(^|\n)\s*(- |\d+\. )", p)]
+    assert not broken, broken
+    assert "[ ]" not in html
 ```
 
 - [ ] **Step 2: Run them**
 
 Run: `uv run pytest tests/test_agent_guide.py -q -p no:cacheprovider`
-Expected: every test passes except `test_raw_guide_links_name_a_file_in_the_repo`, which fails with "none of [...] links the raw guide" until Task 7 adds the links.
+Expected: every test passes (the render test needs the docs group: run with `uv run --group docs ...`; without it the test is skipped) except `test_raw_guide_links_name_a_file_in_the_repo`, which fails with `FileNotFoundError` for `docs/for-agents.md` until Task 7 creates it and adds the links.
 
 - [ ] **Step 3: Mutation check** (do not commit the mutation)
 
-Temporarily change `dry_run=True` to `dryrun=True` in the guide's template and run `uv run pytest tests/test_agent_guide.py -k keywords -q -p no:cacheprovider`. Expected: FAIL naming `dryrun=`. Then also change a guide link to `https://martinez-hub.github.io/mushin/guides/nope/` and run `-k links`: expected FAIL. Revert both with `git checkout src/mushin/agent_guide.md`.
+Temporarily change `dry_run=True` to `dryrun=True` in the guide's template and run `uv run pytest tests/test_agent_guide.py -k keywords -q -p no:cacheprovider`. Expected: FAIL naming `dryrun=`. Then also change a guide link to `https://martinez-hub.github.io/mushin/guides/nope/` and run `-k nav_pages`: expected FAIL with `the guide links to pages not in mkdocs.yml's nav: ['https://martinez-hub.github.io/mushin/guides/nope/']`. (The keyword failure's line number counts lines of the concatenated examples, not of the guide; the message says so.) Revert both with `git checkout src/mushin/agent_guide.md`.
 
 - [ ] **Step 4: Commit**
 
@@ -1047,10 +1145,10 @@ reporting. This page shows the guide from the main branch; from mushin 0.16,
 Add this to your project's `AGENTS.md` or `CLAUDE.md`:
 
 ```text
-This project uses mushin. Install it with `pip install mushin-py` (the PyPI
-package named `mushin` is a different project). Before writing or changing an
-experiment, run `python -m mushin guide` and follow it. On mushin older than
-0.16, read
+This project uses mushin. Install it with `pip install "mushin-py[eval]"`
+(the `eval` extra adds the statistics; not `pip install mushin`, a PyPI name
+that is not this project). Before writing or changing an experiment, run
+`python -m mushin guide` and follow it. On mushin older than 0.16, read
 https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md
 instead.
 ```
@@ -1059,12 +1157,12 @@ To let an agent inspect finished runs, see
 [Analyzing from Claude Code](guides/mcp.md): `mushin-mcp` is a read-only MCP
 server over a directory of runs.
 
-## The guide
+---
 
 --8<-- "src/mushin/agent_guide.md:3"
 ````
 
-The include starts at line 3, below the guide's own title (Task 3's test pins that line 1 is the title and line 2 is blank). The line has no fence around it, which #253's guard allows.
+The rule separates the intro from the guide, whose sections follow as the page's own. The include starts at line 3, below the guide's own title (Task 3's test pins that line 1 is the title and line 2 is blank). The line has no fence around it, which #253's guard allows.
 
 - [ ] **Step 2: Add the page to the nav** in `mkdocs.yml`, right after Quickstart:
 
@@ -1096,8 +1194,9 @@ In `tests/test_llms_txt.py`, change `EXTERNAL_HOSTS = {"github.com"}` to `EXTERN
 
 mushin ships a guide for AI coding agents that set up experiments: which API to
 use, a tested template, the pitfalls that give wrong results, and what to check
-before reporting. From mushin 0.16, `python -m mushin guide` prints the copy
-for the installed version. The
+before reporting. From mushin 0.16 (install it with `pip install mushin-py`,
+not `mushin`), `python -m mushin guide` prints the copy for the installed
+version. The
 [For AI agents](https://martinez-hub.github.io/mushin/for-agents/) page has a
 block to paste into your project's `AGENTS.md` or `CLAUDE.md`, and
 [`llms.txt`](https://martinez-hub.github.io/mushin/llms.txt) indexes the docs.
@@ -1123,7 +1222,15 @@ Add an invariant after the `docs/llms.txt` one:
   the guide describes, change the guide.
 ```
 
-In "Using mushin from an agent", change the first sentence to:
+In the `docs/llms.txt` invariant, add `tests/test_agent_guide.py` to the files CI runs in the docs job. Make "Before you push" item 2 read:
+
+```markdown
+2. Docs or `src/mushin/agent_guide.md` touched (including `mkdocs.yml` or
+   `docs/llms.txt`): `make docs-build` passes, and so does
+   `uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py`.
+```
+
+In "Using mushin from an agent", change the first sentence to the following, and rewrap the paragraph:
 
 ```markdown
 If you are writing code that *uses* mushin rather than changing it, run
@@ -1135,13 +1242,13 @@ If you are writing code that *uses* mushin rather than changing it, run
 
 Run:
 ```bash
-uv run pytest tests/test_agent_guide.py tests/test_llms_txt.py tests/test_docs_snippets.py -q -p no:cacheprovider
+uv run --group docs pytest tests/test_agent_guide.py tests/test_llms_txt.py tests/test_docs_snippets.py -q -p no:cacheprovider
 rm -rf /Volumes/ExtremeSSD/scratch/site && uv run --group docs mkdocs build --strict -d /Volumes/ExtremeSSD/scratch/site
-grep -c "compare_methods(ds.sel(lr=0.01))" /Volumes/ExtremeSSD/scratch/site/for-agents/index.html
+sed 's/<[^>]*>//g' /Volumes/ExtremeSSD/scratch/site/for-agents/index.html | grep -c "compare_methods(ds.sel(lr=0.01))"
 ls /Volumes/ExtremeSSD/scratch/site/llms.txt
 uv run codespell src tests examples README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md AGENTS.md CLAUDE.md docs/llms.txt pyproject.toml changes
 ```
-Expected: all tests pass (now including `test_raw_guide_links_name_a_file_in_the_repo`); the build succeeds; the grep prints at least `1`; `llms.txt` exists; codespell is silent.
+Expected: all tests pass (now including `test_raw_guide_links_name_a_file_in_the_repo`); the build succeeds; the grep prints at least `1` (the `sed` strips the syntax highlighter's tags); `llms.txt` exists; codespell is silent.
 
 - [ ] **Step 7: Commit**
 
@@ -1161,8 +1268,10 @@ git commit -m "docs: a For AI agents page, and pointers from llms.txt, the READM
 
 ```yaml
       - name: Docs-pinning tests
-        run: uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py -p no:cacheprovider
+        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py -p no:cacheprovider
 ```
+
+(`--group docs` gives the render test its Markdown extensions.)
 
 and add "the agent guide's code must run and its keywords and links resolve" to the comment above it.
 
@@ -1194,12 +1303,19 @@ and after that step add one that checks the installed (non-editable) package shi
         run: test -s "$(/tmp/clean-batteries/bin/python -m mushin guide --path)"
 ```
 
-- [ ] **Step 4: Check the workflow parses**
+- [ ] **Step 4: Rerun the notebook-prereqs check when the eval guard changes.** In the `changes` job's paths filter, the `notebook_prereqs` list watches `src/mushin/**/__init__.py` because the module-to-extra guards live there. Add the new home of the module list next to it:
+
+```yaml
+              - 'src/mushin/**/__init__.py'
+              - 'src/mushin/_extras.py'
+```
+
+- [ ] **Step 5: Check the workflow parses**
 
 Run: `uv run python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))" && echo ok`
 Expected: `ok`. The real check is the PR's CI run.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
