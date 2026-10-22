@@ -31,6 +31,7 @@ from _docs_site import (
     _site_url,
     markdown_links,
     python_blocks,
+    stray_python_fences,
 )
 
 LLMS_TXT = ROOT / "docs" / "llms.txt"
@@ -177,3 +178,10 @@ def test_llms_txt_example_runs(cleandir):
     ds = namespace["ds"]
     assert dict(ds.sizes) == {"lr": 3, "seed": 3}
     assert namespace["experiment"].workflow.to_dataframe().shape == (9, 3)
+
+
+def test_every_llms_txt_python_example_runs():
+    """`test_llms_txt_example_runs` runs only fences tagged exactly ```python at
+    the start of a line; any other Python fence would ship untested."""
+    stray = stray_python_fences(_llms_txt())
+    assert not stray, stray

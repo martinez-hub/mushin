@@ -2,7 +2,9 @@
 
 This guide is for a coding agent setting up an experiment for a scientist or
 engineer. The copy that `python -m mushin guide` prints matches the installed
-mushin. For exact signatures, use `help(obj)`.
+mushin, whose version is its first line. A copy read from the web describes the
+newest mushin; most of it applies from 0.10 on. For exact signatures, use
+`help(obj)`.
 
 ## What mushin is
 
@@ -104,8 +106,9 @@ What it does:
 - Each `mushin.multirun([...])` argument becomes a dimension of `ds`, here
   `(method, lr, seed)`. A plain value, such as `lr=0.01`, is fixed for every
   cell.
-- `experiment.workflow` is the sweep's `MultiRunMetricsWorkflow`: its
-  `failures`, `skipped`, `working_dir` and `to_dataframe()`.
+- `experiment.workflow` is the `MultiRunMetricsWorkflow` of the latest `run()`
+  call, a dry run included: read its `failures`, `skipped`, `working_dir` and
+  `to_dataframe()` right after the run you care about.
 - `compare_methods` runs a paired test (Wilcoxon by default) for each pair of
   methods across seeds, and corrects the p-values for the number of pairs
   (Holm). Its table has `mean_diff` and `effect_size`, the raw and corrected
@@ -150,23 +153,48 @@ rules:
   are incomplete or whose config or task function changed. It does not see an
   edit to anything the task calls: the scientist's code, a helper, a constant
   or an installed package. After such an edit, use a new `working_dir`.
-  `cache_dir=` has the same blind spot.
+  `cache_dir=` has the same blind spot. Hydra still lists every cell when a
+  resume launches; the completed ones return their saved metrics without
+  running.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string
-  `method` values. Select or average away other dims first: `ds.sel(lr=0.01)`,
-  or `ds.mean("lr", keep_attrs=True)`. A plain `mean` drops the dataset's
-  record of failed cells, which `compare_methods` checks, so it would compare
-  an incomplete sweep without a word. Rename yours if needed
-  (`ds.rename({"model": "method"})`). A method whose score is the same for
+  `method` values. Select or average away other dims on the Dataset first:
+  `ds.sel(lr=0.01)`, or `ds.mean("lr", keep_attrs=True)` (older xarray drops
+  attrs in a reduction unless asked). The record of failed cells lives in
+  `ds.attrs`, and `compare_methods` checks it there: `ds["score"]`, and
+  anything built from it, has lost it, so an incomplete sweep would be
+  compared without a word. Check `wf.is_complete` before comparing. Rename
+  yours if needed (`ds.rename({"model": "method"})`). To pick one method, use
+  `ds.sel({"method": "new"})`: `ds.sel(method="new")` does not select, since
+  `method` is also a keyword of `sel`. A method whose score is the same for
   every seed gets NaN for its pairs, with a warning.
 - **Seeds.** With `k` methods there are `m = k * (k - 1) / 2` pairs, and with
   Wilcoxon a pair can only be significant at 0.05 if
   `m * 2 ** (1 - n) < 0.05` for `n` seeds. So use at least 6 seeds for 2
   methods, 7 for 3 and 8 for 4. These are floors, not enough power: a real but
   small difference needs more seeds.
+- **Make each seed an independent repeat.** The statistics treat seeds as
+  independent. If each seed only re-splits one small dataset into train and
+  validation, the runs share most of their data and the p-values come out too
+  small. Prefer a fixed held-out test set, with the seed varying only the
+  model's own randomness (initialization, data order, subsampling). Otherwise
+  say so in the report: `compare_methods` has no correction for overlapping
+  splits.
+- **Choose on some seeds, test on others.** Pick settings (a learning rate, a
+  regularization strength) on exploration seeds, then run the comparison on
+  fresh seeds: choosing and testing on the same seeds overstates the winner.
+  If a knob means something different for each method, sweep a level
+  (`level=mushin.multirun(["low", "high"])`) and map it to each method's value
+  inside the task. Then select each method at its own level on the Dataset,
+  for example `ds.sel(level=xr.DataArray(["high", "low"], dims="method"))`
+  (in the order of `ds["method"]`), which keeps the record of failed cells.
 - **Commit before the final runs.** Each cell's `mushin_provenance.json`
   records the git commit and whether the tree was dirty, and untracked files
-  count. Add `runs/` and any logs to `.gitignore`, commit, and check that
-  `git status --porcelain` prints nothing before the final run.
+  count. Add `runs/`, `__pycache__/` and any logs to `.gitignore`, commit,
+  and check that `git status --porcelain` prints nothing before the final run.
+- **Record the environment of the final run** with `capture_env=True`: it
+  writes the full package list to `mushin_env.txt` in the sweep directory.
+  Each cell's provenance lists only mushin's own stack (torch, numpy,
+  Lightning, Hydra), not, for example, scikit-learn.
 - **`best()` is per cell.** `mushin.best(root, "score")` returns the single
   best cell, which is one seed. To pick a configuration, average over seeds
   first: `ds["score"].mean("seed")`.
@@ -192,8 +220,14 @@ python -c "import mushin; mushin.show('runs/compare-v1')"
 ```
 
 `show` prints one row per cell that has started, with its status (`running`,
-`completed`, `failed` or `skipped`) and metrics. A cell that has not started
-has no row yet, so compare the row count with the dry run's `num_cells`.
+`completed`, `failed` or `skipped`) and metrics, and returns the rows. A cell
+that has not started has no row yet. This counts the finished cells; the
+sweep is done when the count reaches the dry run's `num_cells`, or when the
+process has exited and `mushin_sweep_manifest.json` exists:
+
+```bash
+python -c "import mushin; r = mushin.show('runs/compare-v1'); print(sum(x['status'] == 'completed' for x in r.rows))"
+```
 
 Use the default launcher for a sweep you run this way. If the process died
 with cells still `running`, check that nothing from that run is still alive
@@ -229,10 +263,11 @@ ds = wf.to_xarray()  # the same (method, lr, seed) dataset as above
 ```
 
 A reloaded sweep with failed, skipped or unfinished cells is not complete, and
-`compare_methods` refuses it. In mushin 0.15.1 and earlier, a reload lost that
-record, and `is_complete` was always true for a reloaded sweep. There, check
-that `mushin.show(root)` lists a `completed` row for every cell of the grid
-before comparing.
+`compare_methods` refuses it. In mushin 0.15.1 and earlier (the first line of
+`python -m mushin guide` is the installed version), a reload lost that record,
+and `is_complete` was always true for a reloaded sweep. There, check that
+`mushin.show(root)` lists a `completed` row for every cell of the grid before
+comparing.
 
 `mushin.show(root)`, `mushin.best(root, metric)` and `mushin.diff(root_a,
 root_b)` read a sweep directory directly; `show` prints its table and also
@@ -250,7 +285,10 @@ Check each of these:
 - There are enough seeds for the number of methods compared (see Rules).
 - The report gives corrected p-values (`p_corrected`) and effect sizes
   (`mean_diff`, `effect_size`), with the direction stated, not raw means alone.
-- The provenance is clean: `"dirty": false` in `mushin_provenance.json`.
+- The provenance is clean: `"dirty": false` in `mushin_provenance.json`, and
+  the final run used `capture_env=True`.
+- The seeds were independent repeats, or the report says they were not; and
+  the settings compared were chosen on other seeds.
 - The report names the sweep's directory, so the run can be found and
   reloaded.
 
@@ -267,5 +305,6 @@ Check each of these:
 - [Multi-node](https://martinez-hub.github.io/mushin/guides/multinode/) and [sharded](https://martinez-hub.github.io/mushin/guides/sharding/) training
 - [Analyzing runs from Claude Code (MCP)](https://martinez-hub.github.io/mushin/guides/mcp/)
 
-For exact signatures: `help(mushin.sweep)` and
-`help(mushin.workflows.BaseWorkflow.run)`.
+For exact signatures: `help(mushin.MultiRunMetricsWorkflow.run)` (every
+keyword `run()` takes; `help(mushin.workflows.BaseWorkflow.run)` adds detail on
+the launcher ones) and `help(compare_methods)`.

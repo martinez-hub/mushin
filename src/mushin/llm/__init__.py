@@ -1,19 +1,14 @@
 """Reproducible, statistically-rigorous evaluation of LLM systems."""
+# ruff: noqa: E402 - the install-hint guard runs before the imports it protects
 
 # Part of the optional evaluation layer — surface a clear install hint instead of
 # a raw scipy/torchmetrics ImportError when the `eval` extra is missing.
-import importlib as _importlib
+from .._extras import require_eval as _require_eval
 
-from .._extras import EVAL_MODULES as _EVAL_MODULES
-
-try:
-    for _module in _EVAL_MODULES:
-        _importlib.import_module(_module)
-except ImportError as _exc:  # pragma: no cover - exercised by the core-only CI job
-    raise ImportError(
-        "mushin's LLM evaluation features require the optional 'eval' extra:\n\n"
-        "    pip install mushin-py[eval]\n"
-    ) from _exc
+_require_eval(
+    "mushin's LLM evaluation features require the optional 'eval' extra:\n\n"
+    "    pip install mushin-py[eval]\n"
+)
 
 from ._compare import compare_llms, compare_scores
 from ._judge import llm_judge

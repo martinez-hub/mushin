@@ -86,14 +86,15 @@ and [analyzing results](https://martinez-hub.github.io/mushin/notebooks/07_analy
 
 mushin ships a guide for AI coding agents that set up experiments: which API to
 use, a tested template, the pitfalls that give wrong results, and what to check
-before reporting. From mushin 0.16 (install it with `pip install mushin-py`,
-not `mushin`), `python -m mushin guide` prints the copy for the installed
-version. The
+before reporting. From mushin 0.16, `python -m mushin guide` prints the copy
+for the installed version (install it with `pip install "mushin-py[eval]"` for
+the template's statistics, not `pip install mushin`). The
 [For AI agents](https://martinez-hub.github.io/mushin/for-agents/) page has a
 block to paste into your project's `AGENTS.md` or `CLAUDE.md`, and
 [`llms.txt`](https://martinez-hub.github.io/mushin/llms.txt) indexes the docs.
-On older versions, point the agent at the
-[raw guide](https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md).
+On mushin 0.10 to 0.15, point the agent at the
+[raw guide](https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md)
+instead; before 0.10, upgrade first.
 
 ## What else it does
 

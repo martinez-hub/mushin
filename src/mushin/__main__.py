@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import sys
 from importlib import metadata, resources
+from pathlib import Path
 
 GUIDE = "agent_guide.md"
 
@@ -37,6 +38,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     path = resources.files("mushin") / GUIDE
     if args.path:
+        if not Path(str(path)).is_file():  # e.g. mushin imported from a zip
+            print(
+                "the guide is not a file on disk here (mushin is imported from "
+                "an archive); print it with `python -m mushin guide`",
+                file=sys.stderr,
+            )
+            return 1
         print(path)
         return 0
     # An HTML comment: valid Markdown, invisible when rendered.

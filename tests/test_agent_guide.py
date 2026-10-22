@@ -21,7 +21,14 @@ from pathlib import Path
 
 import pytest
 
-from _docs_site import ROOT, _nav_urls, _site, markdown_links, python_blocks
+from _docs_site import (
+    ROOT,
+    _nav_urls,
+    _site,
+    markdown_links,
+    python_blocks,
+    stray_python_fences,
+)
 
 GUIDE = resources.files("mushin") / "agent_guide.md"
 
@@ -66,13 +73,11 @@ def test_the_guide_prints_on_a_cp1252_pipe():
 
 
 RAW_PREFIX = "https://raw.githubusercontent.com/martinez-hub/mushin/main/"
-# The files that point agents on mushin < 0.16 at the raw guide.
-RAW_LINK_FILES = [
-    "src/mushin/agent_guide.md",
-    "docs/for-agents.md",
-    "README.md",
-    "docs/llms.txt",
-]
+# The files that point agents on mushin 0.10 to 0.15 at the raw guide.
+RAW_LINK_FILES = ["docs/for-agents.md", "README.md", "docs/llms.txt"]
+# Keywords the guide's prose names that are not parameters of run() or
+# compare_methods: xarray's, and the example knob of the per-method rule.
+PROSE_KEYWORDS_ELSEWHERE = {"keep_attrs", "level"}
 
 
 def _python_blocks() -> list[str]:
@@ -83,16 +88,8 @@ def test_every_python_example_is_tagged_python():
     """Only fences tagged exactly ```python at the start of a line run below.
     Any other Python fence (indented, `~~~`, `Python`, `python3`, `pycon`, or
     with attributes) would show code that never runs, so it fails here."""
-    fences = re.findall(
-        r"^([ \t]*)(`{3,}|~{3,})([ \t]*)(\S*)(.*)$", _text(), re.MULTILINE
-    )
-    bad = [
-        "".join(fence)
-        for fence in fences
-        if re.match(r"[{.]*(py|python3?|pycon|ipython)\b", fence[3], re.IGNORECASE)
-        and fence != ("", "```", "", "python", "")
-    ]
-    assert not bad, bad
+    stray = stray_python_fences(_text())
+    assert not stray, stray
 
 
 def test_the_guide_code_runs(tmp_path):
@@ -257,15 +254,68 @@ def test_the_guide_links_are_nav_pages():
 
 
 def test_raw_guide_links_name_a_file_in_the_repo():
-    """The raw-GitHub URL is the only fallback D2 gives agents on mushin < 0.16,
-    so each file that tells agents to run the command must carry it."""
+    """The raw-GitHub URL is the only fallback D2 gives agents on mushin 0.10 to
+    0.15, so each file that tells agents to run the command must carry it, on
+    this repo's main branch and naming a file that exists."""
     for rel in RAW_LINK_FILES:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        urls = re.findall(re.escape(RAW_PREFIX) + r"[^\s)>`\"']+", text)
-        if rel != "src/mushin/agent_guide.md":  # the guide is the target
-            assert urls, f"{rel} does not link the raw guide"
+        urls = re.findall(r"https://raw\.githubusercontent\.com/[^\s)>`\"']+", text)
+        assert urls, f"{rel} does not link the raw guide"
         for url in urls:
+            assert url.startswith(RAW_PREFIX), f"{rel}: {url} is not on {RAW_PREFIX}"
             assert (ROOT / url.removeprefix(RAW_PREFIX)).is_file(), f"{rel}: {url}"
+
+
+def test_the_guide_prose_keywords_exist():
+    """The rules name keywords in prose (`confirm_above=N`, `sample=N`,
+    `resume=True`, `capture_env=True`...). A renamed one would leave the guide
+    telling agents to pass a keyword that `run()` takes as a task override."""
+    pytest.importorskip("scipy")
+    from mushin.benchmark import compare_methods
+
+    tree = ast.parse("\n".join(_python_blocks()))
+    task_params = {
+        a.arg
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef)
+        for a in n.args.args
+    }
+    prose = re.sub(r"^```.*?^```$", "", _text(), flags=re.DOTALL | re.MULTILINE)
+    named = set(re.findall(r"`([a-z_]+)=", prose))
+    allowed = (
+        _run_parameters()
+        | set(inspect.signature(compare_methods).parameters)
+        | task_params
+        | PROSE_KEYWORDS_ELSEWHERE
+    )
+    assert named, "found no keyword in the guide's prose"
+    assert not named - allowed, sorted(named - allowed)
+
+
+def test_the_guide_install_facts_match_pyproject():
+    """The Python range and the extras the guide states match pyproject.toml,
+    as tests/test_llms_txt.py checks for llms.txt."""
+    import tomllib
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads(pyproject)["project"]
+    minors = sorted(
+        int(c.rsplit(".", 1)[1])
+        for c in project["classifiers"]
+        if re.fullmatch(r"Programming Language :: Python :: 3\.\d+", c)
+    )
+    match = re.search(r"Python 3\.(\d+) to 3\.(\d+) is supported", _text())
+    assert match, "could not find the guide's 'Python 3.X to 3.Y is supported'"
+    assert (int(match[1]), int(match[2])) == (minors[0], minors[-1])
+
+    extras = set(project["optional-dependencies"])
+    install = _text().split("## Install", 1)[1].split("\n## ", 1)[0]
+    missing = sorted(
+        e for e in extras if f"[{e}]" not in install and f"`{e}`" not in install
+    )
+    assert not missing, f"the guide's install section omits extras {missing}"
+    unknown = set(re.findall(r"mushin-py\[(\w+)\]", _text())) - extras
+    assert not unknown, f"the guide names extras pyproject.toml lacks: {unknown}"
 
 
 def test_the_guide_renders_as_lists_on_the_docs_site():

@@ -165,3 +165,21 @@ def test_all_lists_the_eval_names_when_the_extra_is_installed():
 
     assert {"compare", "llm", "classification_battery"} <= set(mushin.__all__)
     assert sorted(mushin.__all__) == dir(mushin)
+
+
+def test_require_eval_raises_the_install_hint(monkeypatch):
+    import importlib
+
+    from mushin import _extras
+
+    real_import = importlib.import_module
+
+    def without_scipy(name, *args, **kwargs):
+        if name == "scipy":
+            raise ModuleNotFoundError("No module named 'scipy'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", without_scipy)
+    with pytest.raises(ImportError, match="the install hint") as info:
+        _extras.require_eval("the install hint")
+    assert isinstance(info.value.__cause__, ModuleNotFoundError)

@@ -84,3 +84,15 @@ def markdown_links(text: str) -> list[str]:
 def python_blocks(text: str) -> list[str]:
     """The bodies of the ```python fences that start a line, in order."""
     return re.findall(r"^```python\n(.*?)^```$", text, re.DOTALL | re.MULTILINE)
+
+
+def stray_python_fences(text: str) -> list[str]:
+    """Python code fences `python_blocks` would not run: indented, `~~~`,
+    another tag (`Python`, `py`, `python3`, `pycon`) or with attributes."""
+    fences = re.findall(r"^([ \t]*)(`{3,}|~{3,})([ \t]*)(\S*)(.*)$", text, re.MULTILINE)
+    return [
+        "".join(fence)
+        for fence in fences
+        if re.match(r"[{.]*(py|python3?|pycon|ipython)\b", fence[3], re.IGNORECASE)
+        and fence != ("", "```", "", "python", "")
+    ]

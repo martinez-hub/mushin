@@ -1,23 +1,18 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
 """Standard evaluation protocols: run a benchmark, get a labeled dataset back."""
+# ruff: noqa: E402 - the install-hint guard runs before the imports it protects
 
 # The evaluation layer (compare, batteries, LLM eval, Study) is an optional extra
 # so the core sweep -> dataset install stays lean. Surface a clear install hint
 # instead of a raw torchmetrics/scipy ImportError when the extra is missing.
-import importlib as _importlib
+from .._extras import require_eval as _require_eval
 
-from .._extras import EVAL_MODULES as _EVAL_MODULES
-
-try:
-    for _module in _EVAL_MODULES:
-        _importlib.import_module(_module)
-except ImportError as _exc:  # pragma: no cover - exercised by the core-only CI job
-    raise ImportError(
-        "mushin's evaluation features (compare, the metric batteries, LLM "
-        "evaluation, and Study) require the optional 'eval' extra:\n\n"
-        "    pip install mushin-py[eval]\n"
-    ) from _exc
+_require_eval(
+    "mushin's evaluation features (compare, the metric batteries, LLM "
+    "evaluation, and Study) require the optional 'eval' extra:\n\n"
+    "    pip install mushin-py[eval]\n"
+)
 
 from ._metrics import (
     audio_battery,

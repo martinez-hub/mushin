@@ -180,7 +180,8 @@ local pass therefore does not cover them, and you should not claim it does.
 1. `make check` passes.
 2. Docs or `src/mushin/agent_guide.md` touched (including `mkdocs.yml` or
    `docs/llms.txt`): `make docs-build` passes, and so does
-   `uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py`.
+   `uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py`
+   (the docs group gives the guide's render test its Markdown extensions).
 3. Notebooks or code they exercise touched: the nbmake command above passes.
 4. A fragment exists in `changes/`.
 

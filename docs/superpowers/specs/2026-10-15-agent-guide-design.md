@@ -542,6 +542,18 @@ detail. In order:
      warning `compare_methods` prints.
    - Seeds: `m * 2 ** (1 - n) < alpha` with `m` comparisons, so 6 seeds for 2
      methods, 7 for 3 and 8 for 4 at alpha 0.05. These are floors, not power.
+   - Each seed must be an independent repeat: seeds that only re-split one
+     small dataset give optimistic p-values, which `compare_methods` does not
+     correct (added after an agent following the guide on the scikit-learn
+     breast-cancer data got p = 0.046 where a corrected resampled t-test gives
+     0.34). Prefer a fixed held-out test set, or say so in the report.
+   - Choose settings on exploration seeds and test on fresh ones; for a knob
+     that differs per method, sweep a level and select per method with a
+     vectorized `ds.sel`, which keeps the failure record.
+   - Work on the Dataset: a variable (`ds["score"]`) has lost the failure
+     record, and `ds.sel(method=...)` silently does not select (`method` is a
+     `sel` keyword). Record the final run's environment with
+     `capture_env=True`: per-cell provenance lists only mushin's own stack.
    - Commit code before final runs, and start them with `git status
      --porcelain` empty. Provenance records the git SHA and whether the tree
      was dirty, and untracked files count, so keep the sweep output and logs

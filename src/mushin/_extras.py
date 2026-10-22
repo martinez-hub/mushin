@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 
-# The third-party modules the evaluation layer imports at module level. The
-# install-hint guards in `mushin.benchmark` and `mushin.llm` import these, and
-# `eval_available` looks them up, so the two cannot drift apart.
+# The third-party modules the evaluation layer imports at module level.
+# `require_eval` (the install-hint guard of `mushin.benchmark` and `mushin.llm`)
+# imports them, and `eval_available` looks them up, so the two cannot drift
+# apart.
 EVAL_MODULES = ("scipy", "torchmetrics")
 
 
@@ -22,3 +24,13 @@ def eval_available() -> bool:
         return all(importlib.util.find_spec(name) is not None for name in EVAL_MODULES)
     except (ImportError, ValueError):  # a broken or half-imported module
         return False
+
+
+def require_eval(message: str) -> None:
+    """Import the `eval` extra's modules, or raise `ImportError(message)` (with
+    the original error as its cause) if one is missing."""
+    try:
+        for name in EVAL_MODULES:
+            importlib.import_module(name)
+    except ImportError as exc:  # pragma: no cover - exercised by the core-only CI job
+        raise ImportError(message) from exc
