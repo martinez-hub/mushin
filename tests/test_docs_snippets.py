@@ -35,14 +35,19 @@ snippets = pytest.importorskip("pymdownx.snippets")
 _RE_MARKER = snippets.SnippetPreprocessor.RE_ALL_SNIPPETS
 _RE_FILE = snippets.SnippetPreprocessor.RE_SNIPPET_FILE
 _RE_SECTION = snippets.SnippetPreprocessor.RE_SNIPPET_SECTION
-# Anything that looks like a snippet marker, however it was respaced.
-_MARKER_LIKE = re.compile(r"^\s*;*-+\s*8\s*<\s*-+")
+# Anything that looks like a snippet marker, however it was respaced, and
+# also after a blockquote's `>`, where snippets does not look for one.
+_MARKER_LIKE = re.compile(r"^[\s>]*;*-+\s*8\s*<\s*-+")
 # A code fence line: a run of 3+ backticks or tildes, then an info string.
 _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*?)\r?$")
 
 ROOT = Path(__file__).resolve().parent.parent
 # docs/superpowers is excluded from the site (mkdocs.yml `exclude_docs`).
-PAGES = sorted(p for p in (ROOT / "docs").rglob("*.md") if "superpowers" not in p.parts)
+PAGES = sorted(
+    p
+    for p in (ROOT / "docs").rglob("*.md")
+    if "superpowers" not in p.relative_to(ROOT / "docs").parts
+)
 
 
 def _scan(page: Path):
@@ -51,13 +56,14 @@ def _scan(page: Path):
     The page is read as MkDocs reads it (dropping a UTF-8 BOM) and split on
     newlines, as Python-Markdown splits it before snippets runs. A fence closes
     only on a bare run of its own character that is at least as long as the one
-    that opened it.
+    that opened it. A run of backticks followed by a backtick is a code span,
+    not a fence (CommonMark).
     """
     fence = None
     text = page.read_text(encoding="utf-8-sig")
     for lineno, line in enumerate(text.split("\n"), 1):
         m = _FENCE.match(line)
-        if m:
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
             run, info = m.groups()
             if fence is None:
                 fence = run
@@ -121,13 +127,20 @@ def test_snippet_markers_are_well_formed(page: Path):
             if m.group("inline_marker") and in_fence and not m.group("escape"):
                 bad.append(f"{lineno}: {line!r}: use the block form inside a fence")
             continue
-        # Snippets drops a line that starts with a section marker from a page;
-        # it is not an include.
+        # Snippets deletes any page line that contains an unescaped section
+        # marker. That is harmless for a lone marker, but loses any other text.
         sec = _RE_SECTION.match(line)
-        if _MARKER_LIKE.match(line) and not (sec and not sec.group("pre").strip()):
+        if sec:
+            if not sec.group("escape") and (sec["pre"] + sec["post"]).strip(" \t>"):
+                bad.append(
+                    f"{lineno}: {line!r}: snippets deletes this whole line because"
+                    " it contains a section marker; escape the marker with `;`"
+                )
+            continue
+        if _MARKER_LIKE.match(line):
             bad.append(
                 f"{lineno}: {line!r}: snippets does not recognize this marker"
-                " (reformatted by ruff, or stray whitespace?)"
+                " (reformatted by ruff, inside a blockquote, or stray whitespace?)"
             )
     assert not bad, "\n".join(f"{page.relative_to(ROOT)}:{b}" for b in bad)
 
