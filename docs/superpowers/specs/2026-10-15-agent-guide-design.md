@@ -10,11 +10,11 @@ its rationale and the alternatives it rejected.
 **Sequencing:** this branch is rebased onto the following before its own PR:
 - **#253** (merged), the docs snippet-include fix. D4 relies on its include
   guard and its CI docs-job step.
-- **#249** (open), which adds a contributor `AGENTS.md`, a `CLAUDE.md` that
-  imports it, and `docs/llms.txt` with tests. D5 extends that `llms.txt`. If
-  #249 is closed unmerged, D5 falls back to adding the file itself (see D5).
-- **D9's bug fix**, its own PR, first: a reloaded sweep keeps its record of
-  failed cells.
+- **#249** (merged 2026-10-22, after a review that fixed its facts and
+  tests), which added a contributor `AGENTS.md`, a `CLAUDE.md` that imports
+  it, and `docs/llms.txt` with tests. D5 extends that `llms.txt`.
+- **#254, D9's bug fix**, its own PR, first: a reloaded sweep reports its
+  cells without a result.
 
 ## Problem
 
@@ -585,36 +585,29 @@ result, as `.run()` does. `to_xarray()` then sets `mushin_failures` and
 returned, and `compare_methods` raises `IncompleteSweepError` on it.
 
 - **The grid** comes from the sweep's overrides (`multirun.yaml`), keyed as
-  `to_xarray` keys a loaded sweep. A cell's status comes from its
-  `mushin_cell_status.json`. The end-of-run manifest is missing after a kill
-  or an `on_error="raise"` crash, so it is not the source.
+  `to_xarray` keys a loaded sweep. A cell has a result when its status says
+  `completed` or it has metrics, as `.run()` counts it. The end-of-run
+  manifest is missing after a kill or an `on_error="raise"` crash, so it is
+  not the source of completeness.
 - **The record:**
   - `failed` cells go in `failures`, with the manifest's error text when the
-    manifest lists this dir, else the last line of the cell's
-    `mushin_error.txt`.
-  - `skipped` cells (sampled out, out of budget) go in `skipped`, and so do
-    cells that never finished: still `running` or `pending`, or with no job
-    dir at all. compare_methods' message already says "not run/skipped".
-  - Job dirs left by an earlier sweep of a reused `working_dir` are ignored,
-    by the rule `mushin.show` uses (the manifest's combo-to-dir map, with an
-    exception for a status newer than the manifest). The rule moves into a
-    shared `is_stale_cell` helper. A dir whose config lacks a swept axis is
-    such residue too, not a crash.
-- **Around it:**
-  - `load_metrics` NaN-fills a `running` or `pending` cell instead of
-    loading a stale sidecar or raising for missing files.
-  - `is_complete` on a loaded workflow reflects the record, instead of
-    always being `True`.
-  - `load_from_dir` resets the metrics, jobs and manifest a reused workflow
-    object kept from an earlier `.run()`.
-  - Paths in the record are absolute, like `.run()`'s.
-- **Tests:** the record equals `.run()`'s for a failed and for a sampled-out
-  cell; a complete sweep gets none; a reused `working_dir` with a narrower
-  grid over other axes neither reports the old cells nor crashes; a sweep
-  killed between cells and one killed mid-cell are recorded as not run; a
-  reused workflow object returns the loaded sweep; paths are absolute; and
-  `compare_methods` refuses a reloaded sweep with a failed cell, and one
-  killed before its last cell.
+    manifest lists this dir and is newer than the cell's status, else None.
+  - Every other cell without a result goes in `skipped`: sampled out, out of
+    budget, still `running` or `pending`, or with no job dir at all.
+    compare_methods' message already says "not run/skipped".
+  - The record is rebuilt on every load: from the cells' statuses alone when
+    no metrics are loaded (`MultiRunMetricsWorkflow(working_dir=...)`), and
+    from statuses and metrics once they are.
+- **Around it:** `load_metrics` NaN-fills a `running` or `pending` cell, a
+  second metrics load refreshes the data with the record, and `is_complete`
+  on a loaded workflow reflects the record.
+- **Out of scope:** a `working_dir` reused by a different sweep (its leftover
+  job dirs can stand in for cells the new sweep has not run; the guide
+  recommends one `working_dir` per sweep), and reusing one workflow object
+  across sweeps.
+- **Review history:** three `/code-review` passes. The second caught two
+  regressions in a first design that guessed which job dirs belong to the
+  sweep. The design above derives completeness from the data instead.
 - **A changelog fragment:** `changes/<PR>.fixed.md`.
 
 **Why first, and separate:** it is a wrong-results bug in the released 0.15.1,
