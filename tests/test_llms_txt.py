@@ -13,52 +13,31 @@ too, because the `test` job skips the docs-only PRs most likely to break it.
 
 from __future__ import annotations
 
-import os
 import re
 import tomllib
 from collections import Counter
 from functools import cache
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
+from _docs_site import (
+    ROOT,
+    _MkdocsLoader,
+    _nav_pages,
+    _nav_urls,
+    _site,
+    _site_url,
+    markdown_links,
+    python_blocks,
+)
+
 LLMS_TXT = ROOT / "docs" / "llms.txt"
-
-
-class _MkdocsLoader(yaml.SafeLoader):
-    """A safe loader that accepts mkdocs' custom tags instead of raising.
-    `!ENV` resolves as mkdocs resolves it (the first variable that is set, else
-    the default), so an environment-driven `site_url` still yields a URL. Any
-    other tag (`!relative`, `!!python/name:...`) loads as its plain value: only
-    `site_url` and `nav` are read here."""
-
-
-def _construct_tagged(loader, tag, node):
-    if isinstance(node, yaml.ScalarNode):
-        value = loader.construct_scalar(node)
-    elif isinstance(node, yaml.SequenceNode):
-        value = loader.construct_sequence(node, deep=True)
-    else:
-        value = loader.construct_mapping(node, deep=True)
-    if tag != "!ENV":
-        return value
-    *names, default = value if isinstance(value, list) else [value, None]
-    return next((os.environ[n] for n in names if n in os.environ), default)
-
-
-_MkdocsLoader.add_multi_constructor("", _construct_tagged)
 
 # Hosts llms.txt may link to besides the docs site itself. A link to any other
 # host, or to the site's host outside the site, is a typo or a stale address.
 EXTERNAL_HOSTS = {"github.com"}
-
-
-@cache
-def _mkdocs() -> dict:
-    return yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), _MkdocsLoader)
 
 
 @cache
@@ -71,40 +50,8 @@ def _llms_txt() -> str:
     return LLMS_TXT.read_text(encoding="utf-8")
 
 
-def _site() -> str:
-    return _mkdocs()["site_url"].rstrip("/") + "/"
-
-
-def _nav_pages(node) -> list[str]:
-    """Every local page path under mkdocs.yml's `nav`, in order. External links
-    (a nav entry may be a URL) are not pages of the site, so they are skipped."""
-    if isinstance(node, str):
-        return [] if "://" in node else [node]
-    if isinstance(node, list):
-        return [page for item in node for page in _nav_pages(item)]
-    if isinstance(node, dict):
-        return [page for value in node.values() for page in _nav_pages(value)]
-    return []
-
-
-def _site_url(page: str) -> str:
-    """The URL mkdocs serves a nav page at, with directory URLs (the default):
-    `a/b.md` at `a/b/`, and an `index.md` or `README.md` at its directory."""
-    parent, _, name = page.rpartition("/")
-    stem = name.rsplit(".", 1)[0]
-    if stem in ("index", "README"):
-        path = f"{parent}/" if parent else ""
-    else:
-        path = f"{parent}/{stem}/" if parent else f"{stem}/"
-    return _site() + path
-
-
-def _nav_urls() -> set[str]:
-    return {_site_url(page) for page in _nav_pages(_mkdocs()["nav"])}
-
-
 def _llms_txt_links() -> list[str]:
-    return re.findall(r"\]\(([^)\s]+)\)", _llms_txt())
+    return markdown_links(_llms_txt())
 
 
 def _llms_txt_urls() -> list[str]:
@@ -223,7 +170,7 @@ def test_llms_txt_lists_every_extra():
 def test_llms_txt_example_runs(cleandir):
     """The examples are the code an agent is most likely to copy; every python
     block must run, in order, and produce what the comments next to it say."""
-    blocks = re.findall(r"```python\n(.*?)```", _llms_txt(), re.DOTALL)
+    blocks = python_blocks(_llms_txt())
     assert blocks, "llms.txt has no python example"
     namespace: dict = {}
     exec(compile("\n".join(blocks), str(LLMS_TXT), "exec"), namespace)
