@@ -82,6 +82,19 @@ executed in CI so they cannot rot: sweeps → datasets,
 [scikit-learn](https://martinez-hub.github.io/mushin/notebooks/06_sklearn_framework_agnostic/),
 and [analyzing results](https://martinez-hub.github.io/mushin/notebooks/07_analyzing_results/).
 
+## Using mushin with an AI agent
+
+mushin ships a guide for AI coding agents that set up experiments: which API to
+use, a tested template, the pitfalls that give wrong results, and what to check
+before reporting. From mushin 0.16 (install it with `pip install mushin-py`,
+not `mushin`), `python -m mushin guide` prints the copy for the installed
+version. The
+[For AI agents](https://martinez-hub.github.io/mushin/for-agents/) page has a
+block to paste into your project's `AGENTS.md` or `CLAUDE.md`, and
+[`llms.txt`](https://martinez-hub.github.io/mushin/llms.txt) indexes the docs.
+On older versions, point the agent at the
+[raw guide](https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md).
+
 ## What else it does
 
 Each links to a guide with a runnable example:

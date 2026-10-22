@@ -37,7 +37,7 @@ LLMS_TXT = ROOT / "docs" / "llms.txt"
 
 # Hosts llms.txt may link to besides the docs site itself. A link to any other
 # host, or to the site's host outside the site, is a typo or a stale address.
-EXTERNAL_HOSTS = {"github.com"}
+EXTERNAL_HOSTS = {"github.com", "raw.githubusercontent.com"}
 
 
 @cache

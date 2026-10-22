@@ -53,6 +53,7 @@ local pass therefore does not cover them, and you should not claim it does.
 | Path | What lives there |
 | --- | --- |
 | `src/mushin/__init__.py` | The public namespace, including the lazy-import tables (see below). |
+| `src/mushin/agent_guide.md`, `__main__.py` | The usage guide for agents that *use* mushin, printed by `python -m mushin guide` and shown at `docs/for-agents.md`. |
 | `src/mushin/workflows.py`, `_sweep_decorator.py` | `MultiRunMetricsWorkflow` and `@mushin.sweep`: the core. |
 | `src/mushin/_resume.py`, `_sweep_io.py`, `_provenance.py` | Resumable sweeps, per-cell sidecars and manifest, provenance capture. |
 | `src/mushin/_show.py`, `export.py` | Offline views of a sweep directory (`show`, `best`, `diff`, CSV export). |
@@ -111,8 +112,14 @@ local pass therefore does not cover them, and you should not claim it does.
   in `mkdocs.yml`'s `nav` means editing `docs/llms.txt` too.
   `tests/test_llms_txt.py` fails otherwise; it also checks that the install
   name, Python range and extras listed there match `pyproject.toml`, and runs
-  its code example. CI runs it, and `tests/test_docs_claims.py`, in the `docs`
-  job on every PR, since the `test` job skips docs-only PRs.
+  its code example. CI runs it, `tests/test_docs_claims.py` and
+  `tests/test_agent_guide.py` in the `docs` job on every PR, since the `test`
+  job skips docs-only PRs.
+- **The agent guide is tested.** `src/mushin/agent_guide.md` is ASCII, its
+  python blocks run in order as one script, the keywords of its `run()` calls
+  exist and its links are nav pages (`tests/test_agent_guide.py`); its seed
+  floors are pinned in `tests/test_docs_claims.py`. When you change behavior
+  the guide describes, change the guide.
 - **Notebooks declare their own installs.** Each notebook shows a
   `%pip install ...` line, and `scripts/check_notebook_prereqs.py` runs it in a
   venv holding exactly that, so the line must cover every import. Outputs are
@@ -171,16 +178,17 @@ local pass therefore does not cover them, and you should not claim it does.
 ## Before you push
 
 1. `make check` passes.
-2. Docs touched (including `mkdocs.yml` or `docs/llms.txt`): `make docs-build`
-   passes, and so does
-   `uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py`.
+2. Docs or `src/mushin/agent_guide.md` touched (including `mkdocs.yml` or
+   `docs/llms.txt`): `make docs-build` passes, and so does
+   `uv run --extra eval pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py`.
 3. Notebooks or code they exercise touched: the nbmake command above passes.
 4. A fragment exists in `changes/`.
 
 ## Using mushin from an agent
 
-If you are writing code that *uses* mushin rather than changing it, read the
-docs index at <https://martinez-hub.github.io/mushin/llms.txt>. To inspect
-completed runs, the `mushin-mcp` server (`pip install "mushin-py[mcp]"`) gives
-an MCP client read-only tools over a directory of runs; see
+If you are writing code that *uses* mushin rather than changing it, run
+`python -m mushin guide` (mushin 0.16 or later), or read the docs index at
+<https://martinez-hub.github.io/mushin/llms.txt>. To inspect completed runs, the
+`mushin-mcp` server (`pip install "mushin-py[mcp]"`) gives an MCP client
+read-only tools over a directory of runs; see
 [docs/guides/mcp.md](docs/guides/mcp.md).
