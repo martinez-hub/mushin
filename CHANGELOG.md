@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.16.0] - 2026-10-22
+
+This release adds a usage guide for AI coding agents, printed by `python -m mushin guide`. It also fixes how a sweep reloaded from disk reports the cells that have no result: before, `compare_methods` could treat an incomplete reloaded sweep as complete.
+
+### Added
+
+- The docs site now serves [`llms.txt`](https://martinez-hub.github.io/mushin/llms.txt), an index of every page written for LLMs and coding agents (the [llms.txt](https://llmstxt.org) convention), and the repository gains an `AGENTS.md` for agents contributing to mushin. (#249)
+- mushin now ships a usage guide for AI coding agents that set up experiments: which API to use for which job, a tested template, the pitfalls that give wrong results, how to run long sweeps from an agent, and what to check before reporting. `python -m mushin guide` prints it (`--path` gives its file), the new [For AI agents](https://martinez-hub.github.io/mushin/for-agents/) page shows it with a block to paste into a project's `AGENTS.md` or `CLAUDE.md`, and `llms.txt` and the README point to it. `help(mushin)` now describes the package and points to the guide, and on a core install it renders, as do `from mushin import *` and `inspect.getmembers(mushin)`. `dir(mushin)` no longer lists the deprecated `BaseWorkflow` and `RobustnessCurve` aliases, which still import with a warning. (#255)
+
+### Fixed
+
+- The Tutorial and seven guides (Workflows & sweeps, Comparing methods, Built-in batteries, LLM evaluation, Studies, Segmentation, and Custom metrics & predict_fn) show their example code again. Since ruff 0.16 reformatted the docs' example includes in July 2026, those pages had shown a `--8 < --"examples/..."` line where the code belonged. (#253)
+- A sweep reloaded with `load_from_dir` now reports every cell of its grid that has no result, as `.run()` does: failed cells in `.failures`, and the rest (skipped, still running, or never started because the sweep was killed) in `.skipped`. `to_xarray()` carries them as the `mushin_failures` / `mushin_skipped` attrs, and `is_complete` reflects them. Before, `compare_methods` on such a reloaded sweep compared it as if it were complete instead of raising `IncompleteSweepError`. Holm correction then covered fewer comparisons, so it could report a pair as significant that the complete sweep does not support. (#254)
+
+### Misc
+
+- #248, #256, #257
+
+
 ## [0.15.1] - 2026-10-15
 
 No changes to mushin's code since 0.15.0. This release fixes the source tree's uv configuration, which uv 0.12.14 and later could not re-resolve (#243).
@@ -631,7 +650,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/martinez-hub/mushin/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/martinez-hub/mushin/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/martinez-hub/mushin/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/martinez-hub/mushin/compare/v0.14.1...v0.14.2
