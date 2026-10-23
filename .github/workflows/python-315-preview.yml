@@ -75,6 +75,12 @@ jobs:
         # torch back to the stable minor. Without torchvision, the detection
         # and image tests skip (they importorskip it).
         #
+        # No --prerelease flag: the test channel publishes a release candidate
+        # under its final version (2.15.0, not 2.15.0rc1), so uv's default
+        # policy picks it as the newest stable version there. Allowing
+        # prereleases would instead admit the channel's alpha builds (it holds
+        # torchvision 0.29.0a0, for one). The check step below logs the version.
+        #
         # bash for the steps that branch on the channel; the runners all have
         # it, and the test step keeps each runner's default shell, as in ci.yml.
         shell: bash
