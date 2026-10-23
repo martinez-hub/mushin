@@ -1,16 +1,21 @@
 name: Python 3.15 preview
+run-name: Python 3.15 preview (torch ${{ inputs.torch-channel || 'stable' }})
 
 # Does mushin's code work on Python 3.15? This is NOT a supported-version leg
 # (3.15 is not advertised yet) and NOT part of ci.yml's required `ci-ok`. It
 # is expected to fail until upstream catches up, and a standing red in the
 # required CI would bury real failures.
 #
-# Blockers as of 2026-10-14:
-#   - hydra-zen 0.17.0 does not import on 3.15 (Python 3.15 removed
-#     dataclasses._MISSING_TYPE). Fixed by hydra-zen#903, to ship as 0.17.1.
-#   - PyPI has no cp315 torch. PyTorch's own index does, and this workflow
-#     installs from it, but its macOS/Windows cp315 wheels crash
-#     (pytorch#200779). Fixed in torch 2.15.
+# Blockers as of 2026-10-22:
+#   - PyPI has no cp315 torch (2.14.1 is the latest). PyTorch's own index
+#     does, and this workflow installs from it, but its 2.14 macOS/Windows
+#     cp315 wheels crash on the first tensor op in a non-main thread
+#     (pytorch#200779). The fix ships in torch 2.15, whose release candidates
+#     are on PyTorch's test channel: dispatch with `torch-channel: test` to
+#     run against them.
+#   - hydra-zen 0.17.0 does not import on 3.15; 0.17.1 (on PyPI since
+#     2026-10-15) fixes it, and this workflow resolves it fresh. Promotion
+#     raises the floor to 0.17.1.
 #
 # This answers "does the code work", not "is it installable from PyPI with
 # the committed lock". That is the promotion question, with its own
@@ -19,9 +24,17 @@ name: Python 3.15 preview
 
 on:
   workflow_dispatch:
+    inputs:
+      torch-channel:
+        description: >-
+          PyTorch index to install torch from: stable (released versions) or
+          test (release candidates; installs torch without torchvision)
+        type: choice
+        options: [stable, test]
+        default: stable
   # workflow_dispatch only works once this file is on the default branch. A
-  # PR that adds or edits the file runs it, so changes to it are exercised
-  # before merge.
+  # PR that adds or edits the file runs it (with the stable channel), so
+  # changes to it are exercised before merge.
   pull_request:
     paths:
       - ".github/workflows/python-315-preview.yml"
@@ -30,7 +43,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: python-315-preview-${{ github.ref }}
+  group: python-315-preview-${{ github.ref }}-${{ inputs.torch-channel || 'stable' }}
   cancel-in-progress: true
 
 jobs:
@@ -43,6 +56,9 @@ jobs:
       matrix:
         # The platforms the 3.14 legs cover.
         os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # A pull_request run has no inputs, so it takes the stable channel.
+      TORCH_CHANNEL: ${{ inputs.torch-channel || 'stable' }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -50,14 +66,52 @@ jobs:
           enable-cache: true
       - name: Create a Python 3.15 virtual environment
         run: uv venv --python 3.15
-      - name: Install torch and torchvision from the PyTorch CPU index
+      - name: Install torch from the PyTorch CPU index
         # The only cp315 torch builds; PyPI's torch stops at cp314.
-        run: uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        #
+        # On the test channel, torch goes in alone: each torchvision release
+        # pins one torch minor, and torchvision's release candidate tends to
+        # land after torch's, so taking torchvision from there would pull
+        # torch back to the stable minor. Without torchvision, the detection
+        # and image tests skip (they importorskip it).
+        #
+        # No --prerelease flag: the test channel publishes a release candidate
+        # under its final version (2.15.0, not 2.15.0rc1), so uv's default
+        # policy picks it as the newest stable version there. Allowing
+        # prereleases would instead admit the channel's alpha builds (it holds
+        # torchvision 0.29.0a0, for one). The check step below logs the version.
+        #
+        # bash for the steps that branch on the channel; the runners all have
+        # it, and the test step keeps each runner's default shell, as in ci.yml.
+        shell: bash
+        run: |
+          if [ "$TORCH_CHANNEL" = test ]; then
+            uv pip install torch --index-url https://download.pytorch.org/whl/test/cpu
+          else
+            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          fi
+          echo "TORCH_VERSION=$(uv run --no-sync python -c 'import torch; print(torch.__version__)')" >> "$GITHUB_ENV"
       - name: Install mushin with the battery extras and the dev group
         # Resolved fresh, not from uv.lock: the lock pins PyPI torch and scipy
         # 1.17.1, neither of which has cp315 wheels. The torch installed above
-        # satisfies mushin's requirement, so it is kept.
-        run: uv pip install -e ".[eval,detection,image,audio]" --group dev
+        # satisfies mushin's requirement, so it is kept. The detection and
+        # image extras need torchvision, so the test channel leaves them out.
+        shell: bash
+        run: |
+          if [ "$TORCH_CHANNEL" = test ]; then
+            extras="eval,audio"
+          else
+            extras="eval,detection,image,audio"
+          fi
+          uv pip install -e ".[$extras]" --group dev
+      - name: Check the installed torch is the one from the PyTorch index
+        # A dependency that pins a different torch would make the resolve above
+        # replace it, and the run would test something else.
+        shell: bash
+        run: |
+          now=$(uv run --no-sync python -c 'import torch; print(torch.__version__)')
+          echo "torch $TORCH_VERSION from the $TORCH_CHANNEL channel; now $now"
+          test "$now" = "$TORCH_VERSION"
       - name: Show resolved environment
         run: uv pip list
       - name: Run tests
