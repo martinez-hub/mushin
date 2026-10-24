@@ -362,9 +362,7 @@ def _attach_item_bootstrap(
     correct = _CORRECTIONS[correction]
     item_p = np.asarray(cols["item_p"], dtype=float)
     corrected = np.full(item_p.shape, np.nan)
-    metrics = out["metric"].to_numpy()
-    for metric in dict.fromkeys(metrics.tolist()):
-        where = metrics == metric
+    for where in by_metric.values():
         family = item_p[where]
         corrected[where] = correct(family) if family.size > 1 else family
     out["item_p_corrected"] = corrected

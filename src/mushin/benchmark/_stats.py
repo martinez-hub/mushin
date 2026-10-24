@@ -475,6 +475,7 @@ def paired_item_bootstrap(
         n_resamples=n_resamples,
         alpha=alpha,
         seed=seed,
+        _stacklevel=4,
     )[0]
 
 
@@ -486,34 +487,33 @@ def paired_item_bootstraps(
     n_resamples: int = 10_000,
     alpha: float = 0.05,
     seed: int = 0,
+    _stacklevel: int = 3,
 ) -> list[tuple[float, float, float, float]]:
     """:func:`paired_item_bootstrap` for every ``(a, b)`` in ``pairs``, over the
     per-item scores in ``systems``, in one pass over the resamples.
 
-    Each result is bit-identical to the per-pair call with the same ``seed``:
-    every pair of one eval set resamples the same number of units, so the
-    per-pair calls drew the very same indices, and drawing them once for all
-    pairs (``rng.integers`` was about 70% of the time) changes nothing but the
-    speed. The validation, early returns and warnings of the per-pair call
-    happen for each pair, in order, as before.
+    Every system must score the same eval set (one score per item, in the same
+    order), which is what makes the pass shared: each pair then resamples the
+    same number of units, so the per-pair calls drew the very same indices, and
+    drawing them once for all pairs (``rng.integers`` was about 70% of the time)
+    changes nothing but the speed. Each result is bit-identical to the per-pair
+    call with the same ``seed``, and the validation, early returns and warnings
+    of the per-pair call happen for each pair, in order, as before. Pairs of
+    different lengths raise ``ValueError``.
+
+    ``_stacklevel`` points the warnings at the caller; the per-pair wrapper adds
+    its own frame.
     """
-    # The cluster labels are shared, so they are validated and factorized once,
-    # at the point the first per-pair call would have: after that pair's own
-    # checks, so a sweep of tiny inputs returns NaN before the labels are read.
-    units: list | None = None
-
-    def cluster_units():
-        nonlocal units
-        if units is None:
-            units = list(_cluster_units(clusters, n))
-        return units
-
     results: list[tuple[float, float, float, float] | None] = []
     to_resample: list[
         tuple[int, float, np.ndarray]
     ] = []  # (pair index, observed, d or sums)
-    n_units = None
-    sizes = None
+    # The cluster labels are shared, so they are validated and factorized once,
+    # at the point the first per-pair call would have: after that pair's own
+    # checks, so a sweep of tiny or non-finite inputs returns NaN before the
+    # labels are read.
+    codes = sizes = None
+    n_items = None
     for a_items, b_items in ((systems[a], systems[b]) for a, b in pairs):
         a = np.asarray(a_items, dtype=float)
         b = np.asarray(b_items, dtype=float)
@@ -523,39 +523,47 @@ def paired_item_bootstraps(
                 f"{a.shape} and {b.shape}"
             )
         d = a - b
-        n = d.size
+        if n_items is None:
+            n_items = d.size
+        elif d.size != n_items:
+            raise ValueError(
+                "every system must score the same items: one pair has "
+                f"{d.size} per-item scores and another {n_items}"
+            )
         observed = float(d.mean())
-        if n < 2 or not np.isfinite(d).all():
+        if d.size < 2 or not np.isfinite(d).all():
             results.append((observed, float("nan"), float("nan"), float("nan")))
             continue
-        codes, sizes = cluster_units()
-        done, values = _bootstrap_prelude(d, observed, codes, sizes)
+        if clusters is not None and codes is None:
+            codes, sizes = _cluster_units(clusters, d.shape)
+        done, values = _bootstrap_prelude(d, observed, codes, sizes, _stacklevel)
         if done is not None:
             results.append(done)
             continue
-        n_units = n if codes is None else sizes.size
         results.append(None)
         to_resample.append((len(results) - 1, observed, values))
 
     if to_resample:
         means = _bootstrap_means(
-            [values for _, _, values in to_resample], sizes, n_units, n_resamples, seed
+            [values for _, _, values in to_resample], sizes, n_resamples, seed
         )
         for (i, observed, _), m in zip(to_resample, means, strict=True):
             results[i] = _bootstrap_summary(observed, m, alpha, n_resamples)
     return results  # type: ignore[return-value]
 
 
-def _cluster_units(clusters, n: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+def _cluster_units(
+    clusters, shape: tuple
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """``(codes, sizes)`` of the cluster labels: each item's group index and
-    each group's item count; ``(None, None)`` without clusters."""
+    each group's item count; ``(None, None)`` without clusters. ``shape`` is
+    the per-item scores', which the labels must match."""
     if clusters is None:
         return None, None
     labels = np.asarray(clusters)
-    if labels.shape != (n,):
+    if labels.shape != shape:
         raise ValueError(
-            f"`clusters` must have one label per item, got {labels.shape} "
-            f"for {(n,)} items"
+            f"`clusters` must have one label per item, got {labels.shape} for {shape} items"
         )
     # Missing labels, checked dtype-agnostically: `v != v` is True for float,
     # complex and OBJECT-dtype NaN alike (a float-only `dtype.kind == "f"`
@@ -583,7 +591,7 @@ def _cluster_units(clusters, n: int) -> tuple[np.ndarray | None, np.ndarray | No
     return codes, np.bincount(codes).astype(float)
 
 
-def _bootstrap_prelude(d, observed: float, codes, sizes):
+def _bootstrap_prelude(d, observed: float, codes, sizes, stacklevel: int):
     """The checks before resampling one pair. Returns ``(result, None)`` when
     the pair needs no resampling, else ``(None, values)``: the per-item
     differences, or with clusters the per-cluster sums of them."""
@@ -617,7 +625,7 @@ def _bootstrap_prelude(d, observed: float, codes, sizes):
             "interval). For an all-or-nothing binary metric, use an exact sign "
             "test on the discordant items instead.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=stacklevel,
         )
         return (observed, float("nan"), float("nan"), float("nan")), None
 
@@ -631,15 +639,16 @@ def _bootstrap_prelude(d, observed: float, codes, sizes):
             f"unreliable below ~{_MIN_BOOTSTRAP_UNITS} {unit} and the p-value is "
             "anti-conservative. Treat the interval as indicative only.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=stacklevel,
         )
     return None, (d if codes is None else sums)
 
 
-def _bootstrap_means(values: list, sizes, n_units: int, n_resamples: int, seed: int):
+def _bootstrap_means(values: list, sizes, n_resamples: int, seed: int):
     """The resampled mean difference of every pair, ``(len(values), n_resamples)``.
     ``values`` holds each pair's per-item differences, or with clusters (``sizes``
-    not None) its per-cluster sums."""
+    not None) its per-cluster sums; every entry has one value per unit."""
+    n_units = values[0].size
     rng = np.random.default_rng(seed)
     means = np.empty((len(values), n_resamples))
     # Chunked so peak memory does not scale with n_resamples * n_units (a 20k-item
