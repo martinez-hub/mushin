@@ -541,3 +541,145 @@ def test_cluster_degeneracy_tolerates_float_noise():
             d, np.zeros(12), clusters=labels, n_resamples=200
         )
     assert np.isnan(lo) and np.isnan(hi) and np.isnan(p)
+
+
+# --- paired_item_bootstraps: one pass over the resamples for every pair -------
+
+
+def _per_pair(systems, pairs, **kw):
+    """The batch result, computed the old way: one call per pair."""
+    return [paired_item_bootstrap(systems[a], systems[b], **kw) for a, b in pairs]
+
+
+def _with_warnings(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = fn()
+    return result, sorted(str(w.message) for w in caught)
+
+
+def test_paired_item_bootstraps_matches_the_per_pair_calls_bit_for_bit():
+    """Shared draws change nothing but the speed: every result, and every
+    warning, is the one the per-pair call gives. Random scores, binary and
+    float, with and without clusters, and pairs that need no resampling."""
+    import itertools
+
+    from hypothesis import given, settings
+    from hypothesis import strategies as st
+
+    from mushin.benchmark._stats import paired_item_bootstraps
+
+    @settings(max_examples=40, deadline=None)
+    @given(
+        n_items=st.integers(1, 60),
+        n_sys=st.integers(2, 4),
+        binary=st.booleans(),
+        n_clusters=st.one_of(st.none(), st.integers(1, 8)),
+        seed=st.integers(0, 10**6),
+    )
+    def check(n_items, n_sys, binary, n_clusters, seed):
+        rng = np.random.default_rng(seed)
+        base = rng.random(n_items)
+        systems = {}
+        for i in range(n_sys):
+            p = np.clip(base + 0.05 * i, 0, 1)
+            systems[f"s{i}"] = (
+                (rng.random(n_items) < p).astype(float)
+                if binary
+                else p + rng.normal(0, 0.1, n_items)
+            )
+        systems["same"] = systems["s0"].copy()  # a pair with no sampling distribution
+        systems["shift"] = systems["s0"] + 0.5  # constant nonzero difference: masked
+        pairs = list(itertools.combinations(systems, 2))
+        clusters = None if n_clusters is None else rng.integers(0, n_clusters, n_items)
+        kw = dict(clusters=clusters, n_resamples=300, alpha=0.1, seed=3)
+        batch, batch_warnings = _with_warnings(
+            lambda: paired_item_bootstraps(systems, pairs, **kw)
+        )
+        single, single_warnings = _with_warnings(
+            lambda: _per_pair(systems, pairs, **kw)
+        )
+        # repr: NaN equal, and the types too.
+        assert repr(batch) == repr(single)
+        assert batch_warnings == single_warnings
+
+    check()
+
+
+def test_paired_item_bootstraps_draws_each_block_once(monkeypatch):
+    """The speedup: the index draws, most of the per-pair cost, happen once per
+    block for every pair of the batch, not once per pair."""
+    import itertools
+
+    from mushin.benchmark._stats import paired_item_bootstraps
+
+    draws = []
+    real_default_rng = np.random.default_rng
+
+    class CountingRng:
+        def __init__(self, seed):
+            self._rng = real_default_rng(seed)
+
+        def integers(self, *args, **kwargs):
+            draws.append(kwargs.get("size"))
+            return self._rng.integers(*args, **kwargs)
+
+    # The Generator type is immutable, so the module's factory is replaced.
+    monkeypatch.setattr(np.random, "default_rng", CountingRng)
+    r = real_default_rng(0)
+    systems = {f"s{i}": r.random(100) for i in range(5)}
+    pairs = list(itertools.combinations(systems, 2))  # 10 pairs
+    paired_item_bootstraps(systems, pairs, n_resamples=1000)
+    assert len(draws) == 1  # one block covers 1000 x 100 cells
+    assert draws[0] == (1000, 100)
+
+
+def test_paired_item_bootstraps_validates_each_pair_and_the_clusters_as_before():
+    """Errors come from the pair, or the clusters, that the per-pair calls
+    would have reported, with the same message."""
+    from mushin.benchmark._stats import paired_item_bootstraps
+
+    systems = {"a": np.arange(5.0), "b": np.arange(5.0) + 1, "short": np.arange(4.0)}
+    with pytest.raises(ValueError, match="equal-length per-item scores"):
+        paired_item_bootstraps(systems, [("a", "b"), ("a", "short")])
+    with pytest.raises(ValueError, match="one label per item"):
+        paired_item_bootstraps(systems, [("a", "b")], clusters=[0, 1])
+    with pytest.raises(ValueError, match="missing label"):
+        paired_item_bootstraps(systems, [("a", "b")], clusters=[0, 1, None, 1, 0])
+    # Tiny inputs return before the labels are read, as the per-pair call does.
+    tiny = {"a": np.array([1.0]), "b": np.array([2.0])}
+    assert repr(paired_item_bootstraps(tiny, [("a", "b")], clusters=[0, 1, 2])) == repr(
+        [paired_item_bootstrap(tiny["a"], tiny["b"], clusters=[0, 1, 2])]
+    )
+    assert paired_item_bootstraps(systems, []) == []
+
+
+def test_paired_item_bootstrap_golden_values():
+    """The exact numbers the bootstrap gave before its resampling loop was
+    shared across pairs (#262), so a change to the estimator or the rng stream
+    shows as a changed digit. The clustered interval differs from the plain one
+    by more than a rescaling, which a wrong cluster estimator would not."""
+    a = np.array([0.774, 0.439, 0.859, 0.697, 0.094, 0.976, 0.761, 0.786, 0.128, 0.45,
+                  0.371, 0.927, 0.644, 0.823, 0.443, 0.227, 0.555, 0.064, 0.828, 0.632,
+                  0.758, 0.355, 0.971, 0.893, 0.778, 0.195, 0.467, 0.044, 0.154, 0.683,
+                  0.745, 0.968, 0.326, 0.37, 0.47, 0.189, 0.13, 0.476, 0.227, 0.67])  # fmt: skip
+    b = np.array([0.437, 0.833, 0.7, 0.312, 0.832, 0.805, 0.387, 0.288, 0.682, 0.14,
+                  0.2, 0.007, 0.787, 0.665, 0.705, 0.781, 0.459, 0.569, 0.14, 0.115,
+                  0.668, 0.471, 0.565, 0.765, 0.635, 0.554, 0.559, 0.304, 0.031, 0.437,
+                  0.215, 0.409, 0.853, 0.234, 0.058, 0.281, 0.294, 0.662, 0.557, 0.784])  # fmt: skip
+    assert paired_item_bootstrap(a, b, n_resamples=500, seed=7) == (
+        0.054174999999999994,
+        -0.07318374999999999,
+        0.16304499999999983,
+        0.40718562874251496,
+    )
+    with pytest.warns(UserWarning, match="only 8 clusters"):
+        clustered = paired_item_bootstrap(
+            a, b, clusters=np.repeat(np.arange(8), 5), n_resamples=500, seed=7
+        )
+    assert clustered == (
+        0.054174999999999994,
+        -0.03474062500000001,
+        0.13771874999999997,
+        0.23952095808383234,
+    )

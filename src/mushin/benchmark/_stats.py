@@ -7,6 +7,8 @@ from __future__ import annotations
 import itertools
 import json
 import warnings
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -466,62 +468,134 @@ def paired_item_bootstrap(
     whole groups are drawn with replacement, so within-group correlation is
     preserved and unequal group sizes are handled automatically.
     """
-    a = np.asarray(a_items, dtype=float)
-    b = np.asarray(b_items, dtype=float)
-    if a.shape != b.shape:
-        raise ValueError(
-            f"paired bootstrap needs equal-length per-item scores, got "
-            f"{a.shape} and {b.shape}"
+    return paired_item_bootstraps(
+        {"a": a_items, "b": b_items},
+        [("a", "b")],
+        clusters=clusters,
+        n_resamples=n_resamples,
+        alpha=alpha,
+        seed=seed,
+    )[0]
+
+
+def paired_item_bootstraps(
+    systems: Mapping[Any, Any],
+    pairs: Sequence[tuple[Any, Any]],
+    *,
+    clusters=None,
+    n_resamples: int = 10_000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> list[tuple[float, float, float, float]]:
+    """:func:`paired_item_bootstrap` for every ``(a, b)`` in ``pairs``, over the
+    per-item scores in ``systems``, in one pass over the resamples.
+
+    Each result is bit-identical to the per-pair call with the same ``seed``:
+    every pair of one eval set resamples the same number of units, so the
+    per-pair calls drew the very same indices, and drawing them once for all
+    pairs (``rng.integers`` was about 70% of the time) changes nothing but the
+    speed. The validation, early returns and warnings of the per-pair call
+    happen for each pair, in order, as before.
+    """
+    # The cluster labels are shared, so they are validated and factorized once,
+    # at the point the first per-pair call would have: after that pair's own
+    # checks, so a sweep of tiny inputs returns NaN before the labels are read.
+    units: list | None = None
+
+    def cluster_units():
+        nonlocal units
+        if units is None:
+            units = list(_cluster_units(clusters, n))
+        return units
+
+    results: list[tuple[float, float, float, float] | None] = []
+    to_resample: list[
+        tuple[int, float, np.ndarray]
+    ] = []  # (pair index, observed, d or sums)
+    n_units = None
+    sizes = None
+    for a_items, b_items in ((systems[a], systems[b]) for a, b in pairs):
+        a = np.asarray(a_items, dtype=float)
+        b = np.asarray(b_items, dtype=float)
+        if a.shape != b.shape:
+            raise ValueError(
+                f"paired bootstrap needs equal-length per-item scores, got "
+                f"{a.shape} and {b.shape}"
+            )
+        d = a - b
+        n = d.size
+        observed = float(d.mean())
+        if n < 2 or not np.isfinite(d).all():
+            results.append((observed, float("nan"), float("nan"), float("nan")))
+            continue
+        codes, sizes = cluster_units()
+        done, values = _bootstrap_prelude(d, observed, codes, sizes)
+        if done is not None:
+            results.append(done)
+            continue
+        n_units = n if codes is None else sizes.size
+        results.append(None)
+        to_resample.append((len(results) - 1, observed, values))
+
+    if to_resample:
+        means = _bootstrap_means(
+            [values for _, _, values in to_resample], sizes, n_units, n_resamples, seed
         )
-    d = a - b
-    n = d.size
-    observed = float(d.mean())
-    if n < 2 or not np.isfinite(d).all():
-        return observed, float("nan"), float("nan"), float("nan")
+        for (i, observed, _), m in zip(to_resample, means, strict=True):
+            results[i] = _bootstrap_summary(observed, m, alpha, n_resamples)
+    return results  # type: ignore[return-value]
+
+
+def _cluster_units(clusters, n: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """``(codes, sizes)`` of the cluster labels: each item's group index and
+    each group's item count; ``(None, None)`` without clusters."""
+    if clusters is None:
+        return None, None
+    labels = np.asarray(clusters)
+    if labels.shape != (n,):
+        raise ValueError(
+            f"`clusters` must have one label per item, got {labels.shape} "
+            f"for {(n,)} items"
+        )
+    # Missing labels, checked dtype-agnostically: `v != v` is True for float,
+    # complex and OBJECT-dtype NaN alike (a float-only `dtype.kind == "f"`
+    # test misses `df.to_numpy()[:, 0]`, which upcasts to object). NaT is
+    # excluded deliberately — datetime64 groups correctly.
+    flat = labels.tolist()
+    if any(v is None or (v != v and not isinstance(v, np.datetime64)) for v in flat):
+        raise ValueError(
+            "`clusters` contains missing label(s) (NaN/None); every item must "
+            "carry a real group id, or it would be excluded from or split out "
+            "of the resampling. Drop or impute those items first."
+        )
+    if labels.dtype.kind == "O":
+        # np.unique sorts, and object arrays sort unreliably (mixed types
+        # raise; NaN is unorderable), which silently splits equal labels into
+        # separate codes. A dict factorization groups by equality directly.
+        mapping: dict = {}
+        codes = np.array(
+            [mapping.setdefault(v, len(mapping)) for v in flat], dtype=np.intp
+        )
+    else:
+        # return_inverse gives every item a code, so groups always partition
+        # the data (and it avoids an O(n_groups * n) rescan).
+        codes = np.unique(labels, return_inverse=True)[1].ravel()
+    return codes, np.bincount(codes).astype(float)
+
+
+def _bootstrap_prelude(d, observed: float, codes, sizes):
+    """The checks before resampling one pair. Returns ``(result, None)`` when
+    the pair needs no resampling, else ``(None, values)``: the per-item
+    differences, or with clusters the per-cluster sums of them."""
     # Resolve the resampling unit first: with clusters the effective sample size
     # is the number of GROUPS, not items, and both the degeneracy and small-n
     # checks below must be judged on that unit.
-    codes = sizes = sums = None
-    if clusters is not None:
-        labels = np.asarray(clusters)
-        if labels.shape != d.shape:
-            raise ValueError(
-                f"`clusters` must have one label per item, got {labels.shape} "
-                f"for {d.shape} items"
-            )
-        # Missing labels, checked dtype-agnostically: `v != v` is True for float,
-        # complex and OBJECT-dtype NaN alike (a float-only `dtype.kind == "f"`
-        # test misses `df.to_numpy()[:, 0]`, which upcasts to object). NaT is
-        # excluded deliberately — datetime64 groups correctly.
-        flat = labels.tolist()
-        if any(
-            v is None or (v != v and not isinstance(v, np.datetime64)) for v in flat
-        ):
-            raise ValueError(
-                "`clusters` contains missing label(s) (NaN/None); every item must "
-                "carry a real group id, or it would be excluded from or split out "
-                "of the resampling. Drop or impute those items first."
-            )
-        if labels.dtype.kind == "O":
-            # np.unique sorts, and object arrays sort unreliably (mixed types
-            # raise; NaN is unorderable), which silently splits equal labels into
-            # separate codes. A dict factorization groups by equality directly.
-            mapping: dict = {}
-            codes = np.array(
-                [mapping.setdefault(v, len(mapping)) for v in flat], dtype=np.intp
-            )
-        else:
-            # return_inverse gives every item a code, so groups always partition
-            # the data (and it avoids an O(n_groups * n) rescan).
-            codes = np.unique(labels, return_inverse=True)[1].ravel()
-        sizes = np.bincount(codes).astype(float)
-        sums = np.bincount(codes, weights=d)
-
-    n_units = n if codes is None else sizes.size
+    sums = None if codes is None else np.bincount(codes, weights=d)
+    n_units = d.size if codes is None else sizes.size
     unit = "items" if codes is None else "clusters"
     if n_units < 2:
         # One resampling unit has no sampling distribution at all.
-        return observed, float("nan"), float("nan"), float("nan")
+        return (observed, float("nan"), float("nan"), float("nan")), None
 
     # Degeneracy is a property of the RESAMPLED distribution. Un-clustered that
     # means every item difference identical; clustered it means every cluster
@@ -535,7 +609,7 @@ def paired_item_bootstrap(
         # p-value at any n. Mirror how compare_methods treats the seed axis —
         # indistinguishable -> p=1, constant-but-nonzero -> masked.
         if np.isclose(observed, 0.0):
-            return observed, observed, observed, 1.0
+            return (observed, observed, observed, 1.0), None
         warnings.warn(
             f"every {unit[:-1]} shows an identical difference of {observed:g}, so "
             "the bootstrap has no sampling distribution and cannot bound the "
@@ -543,9 +617,9 @@ def paired_item_bootstrap(
             "interval). For an all-or-nothing binary metric, use an exact sign "
             "test on the discordant items instead.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=4,
         )
-        return observed, float("nan"), float("nan"), float("nan")
+        return (observed, float("nan"), float("nan"), float("nan")), None
 
     if n_units < _MIN_BOOTSTRAP_UNITS:
         # Measured under a true null: ~49% false-positive rate at 2 units, ~16%
@@ -557,11 +631,17 @@ def paired_item_bootstrap(
             f"unreliable below ~{_MIN_BOOTSTRAP_UNITS} {unit} and the p-value is "
             "anti-conservative. Treat the interval as indicative only.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=4,
         )
+    return None, (d if codes is None else sums)
 
+
+def _bootstrap_means(values: list, sizes, n_units: int, n_resamples: int, seed: int):
+    """The resampled mean difference of every pair, ``(len(values), n_resamples)``.
+    ``values`` holds each pair's per-item differences, or with clusters (``sizes``
+    not None) its per-cluster sums."""
     rng = np.random.default_rng(seed)
-    means = np.empty(n_resamples)
+    means = np.empty((len(values), n_resamples))
     # Chunked so peak memory does not scale with n_resamples * n_units (a 20k-item
     # eval set would otherwise allocate gigabytes at the default 10_000
     # resamples). Drawing in blocks consumes the SAME rng stream, so results stay
@@ -570,12 +650,18 @@ def paired_item_bootstrap(
     for begin in range(0, n_resamples, block):
         k = min(block, n_resamples - begin)
         draw = rng.integers(0, n_units, size=(k, n_units))
-        if codes is None:
-            means[begin : begin + k] = d[draw].mean(axis=1)
-        else:
-            # Ratio of sums over the drawn groups: the usual cluster-bootstrap
-            # estimator, which weights each drawn group by its own size.
-            means[begin : begin + k] = sums[draw].sum(axis=1) / sizes[draw].sum(axis=1)
+        drawn_sizes = None if sizes is None else sizes[draw].sum(axis=1)
+        for p, v in enumerate(values):
+            if sizes is None:
+                means[p, begin : begin + k] = v[draw].mean(axis=1)
+            else:
+                # Ratio of sums over the drawn groups: the usual cluster-bootstrap
+                # estimator, which weights each drawn group by its own size.
+                means[p, begin : begin + k] = v[draw].sum(axis=1) / drawn_sizes
+    return means
+
+
+def _bootstrap_summary(observed: float, means, alpha: float, n_resamples: int):
     low, high = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     # Two-sided: how often does a resample land on the other side of 0?
     opposite = (means <= 0).sum() if observed > 0 else (means >= 0).sum()

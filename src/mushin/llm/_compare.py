@@ -20,7 +20,7 @@ from mushin.benchmark._stats import (
     available_corrections,
     available_tests,
     compare_methods,
-    paired_item_bootstrap,
+    paired_item_bootstraps,
 )
 
 from ._cache import OutputCache
@@ -330,19 +330,28 @@ def _attach_item_bootstrap(
             for meth in methods
         }
     cols = {c: [] for c in ("item_diff", "item_ci_low", "item_ci_high", "item_p")}
-    for _, row in comparisons.iterrows():
-        vals = reduced.get(str(row["metric"]))
+    # One bootstrap pass per metric: its pairs share one eval set, so they
+    # resample the same indices, drawn once (paired_item_bootstraps).
+    rows = list(comparisons.itertuples(index=False))
+    by_metric: dict[str, list[int]] = {}
+    for i, row in enumerate(rows):
+        by_metric.setdefault(str(row.metric), []).append(i)
+    stats_rows: list[tuple] = [(float("nan"),) * 4] * len(rows)
+    for metric, where in by_metric.items():
+        vals = reduced.get(metric)
         if vals is None:
-            stats_row = (float("nan"),) * 4
-        else:
-            stats_row = paired_item_bootstrap(
-                vals[row["method_a"]],
-                vals[row["method_b"]],
-                clusters=clusters,
-                n_resamples=n,
-                alpha=alpha,
-                seed=0,
-            )
+            continue
+        batch = paired_item_bootstraps(
+            vals,
+            [(rows[i].method_a, rows[i].method_b) for i in where],
+            clusters=clusters,
+            n_resamples=n,
+            alpha=alpha,
+            seed=0,
+        )
+        for i, stats_row in zip(where, batch, strict=True):
+            stats_rows[i] = stats_row
+    for stats_row in stats_rows:
         for c, v in zip(cols, stats_row, strict=True):
             cols[c].append(v)
     out = comparisons.copy()
