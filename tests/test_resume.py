@@ -1,10 +1,17 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+import json
+import os
+from pathlib import Path
+
+import pytest
+
 from mushin._resume import (
     STATUS_FILE,
     ResumeContext,
     discover_last_ckpt,
     read_cell_status,
+    sidecar_job_fields,
     write_cell_status,
 )
 
@@ -16,6 +23,155 @@ def test_write_then_read_cell_status(tmp_path):
     assert got["attempt"] == 1
     assert got["combo"] == {"seed": 0}
     assert (tmp_path / STATUS_FILE).exists()
+
+
+def test_write_cell_status_records_job_fields_only_when_known(tmp_path):
+    """Outside a Hydra job there is no job number, and the sidecar says
+    nothing rather than something made up."""
+    write_cell_status(tmp_path, status="running", combo={}, attempt=1)
+    got = read_cell_status(tmp_path)
+    assert "job_num" not in got and "choices" not in got
+    assert sidecar_job_fields(tmp_path) is None
+    # Never one field without the other: a reload needs both to skip hydra.yaml.
+    write_cell_status(tmp_path, status="running", combo={}, attempt=1, job_num=2)
+    got = read_cell_status(tmp_path)
+    assert "job_num" not in got and "choices" not in got
+
+    choices = {"model": "small", "hydra/env": None}
+    write_cell_status(
+        tmp_path, status="running", combo={}, attempt=1, job_num=2, choices=choices
+    )
+    got = read_cell_status(tmp_path)
+    assert got["job_num"] == 2 and got["choices"] == choices
+    assert sidecar_job_fields(tmp_path) == (2, choices)
+
+    # The writer applies the reader's rule, and never coerces: a bool is not
+    # job number 1, and a value that is not an option name is not recorded.
+    for bad in [dict(job_num=True, choices={}), dict(job_num=2, choices={"m": 3})]:
+        write_cell_status(tmp_path, status="running", combo={}, attempt=1, **bad)
+        got = read_cell_status(tmp_path)
+        assert "job_num" not in got and "choices" not in got, bad
+
+
+def test_sidecar_job_fields_defers_to_a_hydra_yaml_it_cannot_examine(
+    tmp_path, monkeypatch
+):
+    """Only a missing hydra.yaml means there is nothing to defer to. One that
+    is there but cannot be examined sends the reload to the hydra.yaml path,
+    which reports the problem as it always did.
+
+    The failure is injected. An on-disk fixture (a regular file where the
+    `.hydra` directory should be) is NotADirectoryError on POSIX but
+    FileNotFoundError on Windows, where it reads as a missing hydra.yaml."""
+    write_cell_status(
+        tmp_path, status="completed", combo={}, attempt=1, job_num=5, choices={}
+    )
+    hydra_yaml = tmp_path / "hydra.yaml"
+    hydra_yaml.write_text("hydra:\n  job:\n    num: 0\n")
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == hydra_yaml.name:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert sidecar_job_fields(tmp_path, hydra_yaml) is None
+
+
+def test_sidecar_job_fields_without_the_file_it_read(tmp_path, monkeypatch):
+    """A sidecar removed between its read and the age check (a concurrent
+    resume or gc) has no claim over the hydra.yaml that is there."""
+    from mushin import _resume
+
+    monkeypatch.setattr(
+        _resume, "read_cell_status", lambda d: {"job_num": 1, "choices": {}}
+    )
+    hydra_yaml = tmp_path / "hydra.yaml"
+    hydra_yaml.write_text("hydra:\n  job:\n    num: 0\n")
+    assert sidecar_job_fields(tmp_path, hydra_yaml) is None
+    assert sidecar_job_fields(tmp_path) == (1, {})  # no hydra.yaml to defer to
+
+
+@pytest.mark.parametrize(
+    "job_num, choices",
+    [
+        ("3", {}),  # a string job number
+        (True, {}),  # JSON true reads as a Python bool, an int subclass
+        (True, {"model": "small"}),
+        (3.0, {}),
+        (None, {}),
+        (3, ["adam"]),  # choices must map group names to option names
+        (3, {"optimizer": 1}),
+        (3, {"optimizer": "adam", "model": 2.5}),
+        (3, None),  # mushin never writes a number without the choices
+        (3, {"model": "???"}),  # not option names, as the hydra.yaml read has it
+        (3, {"model": "${oc.env:MODEL}"}),
+    ],
+)
+def test_sidecar_job_fields_rejects_what_hydra_does_not_write(
+    tmp_path, job_num, choices
+):
+    payload = {"status": "completed", "combo": {}, "attempt": 1}
+    payload["job_num"], payload["choices"] = job_num, choices
+    (tmp_path / STATUS_FILE).write_text(json.dumps(payload))
+    assert sidecar_job_fields(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "job_num, choices",
+    [(0, {}), (3, {"optimizer": None, "model": "small"})],
+)
+def test_sidecar_job_fields_accepts_what_hydra_writes(tmp_path, job_num, choices):
+    payload = {"status": "completed", "combo": {}, "attempt": 1}
+    payload["job_num"], payload["choices"] = job_num, choices
+    (tmp_path / STATUS_FILE).write_text(json.dumps(payload))
+    assert sidecar_job_fields(tmp_path) == (job_num, choices)
+
+
+def test_sidecar_job_fields_without_a_sidecar(tmp_path):
+    assert sidecar_job_fields(tmp_path) is None
+    (tmp_path / STATUS_FILE).write_text("{not json")
+    assert sidecar_job_fields(tmp_path) is None
+
+
+def test_sidecar_job_fields_defers_to_a_newer_hydra_yaml(tmp_path):
+    """Hydra writes hydra.yaml before the task writes the sidecar, so a
+    sidecar older than hydra.yaml is a previous sweep's, and is not used. A
+    missing hydra.yaml, or one of the same age, leaves the sidecar in use."""
+    write_cell_status(
+        tmp_path, status="completed", combo={}, attempt=1, job_num=5, choices={}
+    )
+    hydra_yaml = tmp_path / "hydra.yaml"
+    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, {})  # no such file
+
+    hydra_yaml.write_text("hydra:\n  job:\n    num: 0\n")
+    t = (tmp_path / STATUS_FILE).stat().st_mtime_ns
+    os.utime(hydra_yaml, ns=(t + 10**9, t + 10**9))
+    assert sidecar_job_fields(tmp_path, hydra_yaml) is None
+    os.utime(hydra_yaml, ns=(t, t))
+    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, {})
+    os.utime(hydra_yaml, ns=(t - 10**9, t - 10**9))
+    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, {})
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xff\xfe{}",  # not UTF-8
+        b'{"job_num": ' + b"9" * 5000 + b"}",  # past Python's int digit limit
+        b"[" * 100_000,  # nested past the recursion limit
+    ],
+    # pytest would otherwise name the cases after the bytes themselves (5,000
+    # and 100,000 characters), which the Windows CI jobs could not handle.
+    ids=["not-utf8", "huge-int", "deep-nesting"],
+)
+def test_read_cell_status_treats_any_unreadable_file_as_corrupt(tmp_path, content):
+    """The MCP server lists directories it did not write; one planted or
+    damaged sidecar must not make the whole directory unqueryable."""
+    (tmp_path / STATUS_FILE).write_bytes(content)
+    assert read_cell_status(tmp_path) is None
+    assert sidecar_job_fields(tmp_path) is None
 
 
 def test_read_cell_status_missing_or_corrupt_returns_none(tmp_path):
