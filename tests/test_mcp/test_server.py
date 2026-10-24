@@ -549,6 +549,62 @@ def test_job_sort_key_reads_hydra_yaml_without_omegaconf(tmp_path, monkeypatch):
     assert _job_sort_key(hydra_dir, None) == (0, 4, "")
 
 
+def test_job_sort_key_prefers_the_runs_own_sidecar(tmp_path):
+    """The run's status sidecar orders it, as load_from_dir does, so a run
+    sorts by job number without its hydra.yaml being parsed (or present)."""
+    from mushin._resume import write_cell_status
+    from mushin.mcp.server import _job_sort_key
+
+    run = tmp_path / "exp" / "zzz"
+    (run / ".hydra").mkdir(parents=True)
+    write_cell_status(
+        run, status="completed", combo={}, attempt=1, job_num=4, choices=None
+    )
+    # Without the sidecar the key would be the directory name's, (1, 0, "zzz").
+    assert _job_sort_key(run / ".hydra", None) == (0, 4, "")
+
+
+def test_job_sort_key_ignores_an_out_of_root_sidecar(tmp_path):
+    """A symlinked status sidecar pointing outside --root must not be read."""
+    from mushin._resume import STATUS_FILE, write_cell_status
+    from mushin.mcp.server import _job_sort_key
+
+    root = tmp_path / "allowed"
+    run = root / "exp" / "7"  # numeric dir name -> fallback key (0, 7, "")
+    (run / ".hydra").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_cell_status(
+        outside, status="completed", combo={}, attempt=1, job_num=0, choices=None
+    )
+    (run / STATUS_FILE).symlink_to(outside / STATUS_FILE)
+
+    # If the outside sidecar were read, the key would be (0, 0, "").
+    assert _job_sort_key(run / ".hydra", root.resolve()) == (0, 7, "")
+
+
+def test_job_sort_key_defers_to_a_newer_hydra_yaml(tmp_path):
+    """A sidecar older than the run's hydra.yaml is a previous sweep's record
+    of a reused directory; hydra.yaml's job number is the current one."""
+    import os
+
+    from mushin._resume import STATUS_FILE, write_cell_status
+    from mushin.mcp.server import _job_sort_key
+
+    run = tmp_path / "exp" / "zzz"
+    hydra_dir = run / ".hydra"
+    hydra_dir.mkdir(parents=True)
+    write_cell_status(
+        run, status="completed", combo={}, attempt=1, job_num=4, choices=None
+    )
+    OmegaConf.save(
+        OmegaConf.create({"hydra": {"job": {"num": 2}}}), hydra_dir / "hydra.yaml"
+    )
+    later = (run / STATUS_FILE).stat().st_mtime_ns + 10**9
+    os.utime(hydra_dir / "hydra.yaml", ns=(later, later))
+    assert _job_sort_key(hydra_dir, None) == (0, 2, "")
+
+
 def test_legacy_nonzip_metrics_not_misread(tmp_path):
     """A legacy non-zip torch.save file must be skipped, never read as garbage."""
     import zipfile

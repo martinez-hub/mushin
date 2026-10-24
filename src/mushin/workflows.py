@@ -309,6 +309,27 @@ def _current_group_choice(name: str) -> str | None:
     return None
 
 
+def _current_job_fields() -> tuple[int | None, dict | None]:
+    """The current Hydra job's number and ``runtime.choices``, as its
+    hydra.yaml records them, for the cell's status sidecar. ``(None, None)``
+    outside a Hydra job (a task called directly) and in a single run, whose
+    job has no number."""
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        if not HydraConfig.initialized():
+            return None, None
+        hydra = HydraConfig.get()
+        num = hydra.job.num
+    except Exception:  # noqa: BLE001 - no job number: nothing to record
+        return None, None
+    if type(num) is not int:
+        return None, None
+    from ._hydra_yaml import hydra_choices
+
+    return num, hydra_choices(hydra)
+
+
 # Pip package per Hydra launcher name, for the missing-plugin install hint.
 _LAUNCHER_PLUGINS: dict[str, str] = {
     "joblib": "hydra-joblib-launcher",
@@ -458,21 +479,18 @@ class _TaskRunner:
         )
 
         chash = config_fingerprint(cfg)
+        # Hydra's job number and config-group choices go into every status
+        # write below, so a reload of this sweep sorts and keys its cells from
+        # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
+        job_num, choices = _current_job_fields()
 
         # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
         # job number is not in the selected sample never runs (NaN); keying on
         # the job index (not the combo) makes the selection launcher- and
         # axis-type-agnostic and identical across a resume. An un-sampled cell is
         # recorded 'skipped', so a later resume WITHOUT `sample` fills it in.
+        # No job number -> don't skip.
         if self.sampled_indices is not None:
-            from hydra.core.hydra_config import HydraConfig
-
-            job_num = None
-            try:
-                if HydraConfig.initialized():
-                    job_num = HydraConfig.get().job.num
-            except Exception:  # noqa: BLE001 - no job num -> don't skip
-                job_num = None
             if job_num is not None and job_num not in self.sampled_indices:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
@@ -483,6 +501,8 @@ class _TaskRunner:
                     attempt=1,
                     config_hash=chash,
                     code_hash=self.code_hash,
+                    job_num=job_num,
+                    choices=choices,
                 )
                 # A skipped cell has no valid metrics; drop any sidecar a prior
                 # sweep left in this reused dir so show/export don't list old
@@ -554,6 +574,8 @@ class _TaskRunner:
                             attempt=1,
                             config_hash=chash,
                             code_hash=self.code_hash,
+                            job_num=job_num,
+                            choices=choices,
                         )
                         return cached
 
@@ -577,6 +599,8 @@ class _TaskRunner:
                     attempt=1,
                     config_hash=chash,
                     code_hash=self.code_hash,
+                    job_num=job_num,
+                    choices=choices,
                 )
                 return cached
 
@@ -621,6 +645,8 @@ class _TaskRunner:
                     attempt=1,
                     config_hash=chash,
                     code_hash=self.code_hash,
+                    job_num=job_num,
+                    choices=choices,
                 )
                 # Same reused-dir hygiene as the sampling skip above.
                 try:
@@ -647,6 +673,8 @@ class _TaskRunner:
                 attempt=rc.attempt,
                 config_hash=chash,
                 code_hash=self.code_hash,
+                job_num=job_num,
+                choices=choices,
             )
             # Set the contextvar AFTER the (fallible) status write, so a failed
             # write can't leave the token set with no matching reset -> a stale
@@ -662,6 +690,8 @@ class _TaskRunner:
                     attempt=rc.attempt,
                     config_hash=chash,
                     code_hash=self.code_hash,
+                    job_num=job_num,
+                    choices=choices,
                 )
                 # A metrics sidecar left by a prior successful attempt no longer
                 # describes this cell — remove it so offline tools (show/best/
@@ -696,6 +726,8 @@ class _TaskRunner:
                 attempt=rc.attempt,
                 config_hash=chash,
                 code_hash=self.code_hash,
+                job_num=job_num,
+                choices=choices,
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
@@ -717,6 +749,8 @@ class _TaskRunner:
                         attempt=1,
                         config_hash=chash,
                         code_hash=self.code_hash,
+                        job_num=job_num,
+                        choices=choices,
                     )
                 except Exception:  # noqa: BLE001 - never mask the real failure
                     pass
@@ -2392,19 +2426,30 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 f"{self.working_dir}: {why}."
             )
 
-        # ensure working dirs are sorted by job num; while each hydra.yaml is
-        # open, also recover the job's `runtime.choices` so a config-GROUP axis
-        # keys by its chosen option name offline exactly as it does in-process
-        # (without this, `_combo_of_cfg` falls back to the composed sub-config
-        # and no combo ever matches the choice-name grid coordinates).
+        # ensure working dirs are sorted by job num; alongside, recover each
+        # job's `runtime.choices` so a config-GROUP axis keys by its chosen
+        # option name offline exactly as it does in-process (without this,
+        # `_combo_of_cfg` falls back to the composed sub-config and no combo
+        # ever matches the choice-name grid coordinates). Both come from the
+        # cell's status sidecar when `run` recorded them there, unless Hydra
+        # wrote the cell's hydra.yaml after it (a reused directory whose new
+        # job never reached its first status write); otherwise, as for a sweep
+        # from before they were recorded, from hydra.yaml, whose parse is most
+        # of a reload's time.
         from ._hydra_yaml import hydra_job_fields, load_hydra_record
+        from ._resume import sidecar_job_fields
 
+        hydra_yamls = [d / f"{self.output_subdir}/hydra.yaml" for d in job_dirs]
+        fields = [
+            sidecar_job_fields(d, y) for d, y in zip(job_dirs, hydra_yamls, strict=True)
+        ]
+        from_yaml = [i for i, f in enumerate(fields) if f is None]
         # Every file is loaded before any field is read, so a sweep with
         # several broken files reports the error it always did.
-        _records = [
-            load_hydra_record(d / f"{self.output_subdir}/hydra.yaml") for d in job_dirs
-        ]
-        _job_nums, _choices = zip(*map(hydra_job_fields, _records), strict=True)
+        _records = [load_hydra_record(hydra_yamls[i]) for i in from_yaml]
+        for i, record in zip(from_yaml, _records, strict=True):
+            fields[i] = hydra_job_fields(record)
+        _job_nums, _choices = zip(*fields, strict=True)
         job_dirs = _sort_x_by_k(job_dirs, _job_nums)
         cfgs = []
         for dir_ in job_dirs:

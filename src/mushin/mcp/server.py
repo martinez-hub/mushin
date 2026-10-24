@@ -19,6 +19,7 @@ from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
 from mushin._hydra_yaml import read_hydra_job
+from mushin._resume import STATUS_FILE, sidecar_job_fields
 from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE, read_metrics_sidecar
 from mushin._utils import Experiment
 
@@ -146,14 +147,24 @@ def _flatten(value: Any, prefix: str = "") -> dict:
 def _job_sort_key(hydra_dir: Path, root: Path | None = None):
     """Order runs by Hydra's recorded job number when available.
 
-    Mirrors mushin's own reload path, which sorts by ``.hydra/hydra.yaml``'s
-    ``hydra.job.num``. Falls back to a numeric directory name, then to the
-    lexicographic name, so custom ``hydra.sweep.subdir`` layouts still order
-    deterministically. ``hydra.yaml`` is only read when it stays within ``root``
-    (resolving symlinks), so a symlinked metadata file cannot escape ``--root``.
+    Mirrors mushin's own reload path: the job number in the run's status
+    sidecar when it records one (a sweep run on a mushin that writes it, and
+    the sidecar is not older than the run's ``hydra.yaml``), else
+    ``.hydra/hydra.yaml``'s ``hydra.job.num``. Falls back to a numeric
+    directory name, then to the lexicographic name, so custom
+    ``hydra.sweep.subdir`` layouts still order deterministically. Each file is
+    only read (and ``hydra.yaml``'s age only checked) when it stays within
+    ``root`` (resolving symlinks), so a symlinked metadata file cannot escape
+    ``--root``.
     """
     hydra_yaml = hydra_dir / "hydra.yaml"
-    if _within_root(hydra_yaml, root):
+    run_dir = hydra_dir.parent
+    yaml_in_root = _within_root(hydra_yaml, root)
+    if _within_root(run_dir / STATUS_FILE, root):
+        fields = sidecar_job_fields(run_dir, hydra_yaml if yaml_in_root else None)
+        if fields is not None:
+            return (0, fields[0], "")
+    if yaml_in_root:
         try:
             num, _ = read_hydra_job(hydra_yaml)
             return (0, int(num), "")
