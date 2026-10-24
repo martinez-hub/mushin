@@ -18,12 +18,8 @@ import torch
 from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
-from mushin._sweep_io import (
-    MANIFEST_FILE,
-    METRICS_FILE,
-    read_hydra_job,
-    read_metrics_sidecar,
-)
+from mushin._hydra_yaml import read_hydra_job
+from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE, read_metrics_sidecar
 from mushin._utils import Experiment
 
 # Globals an MCP-loaded metrics file may legitimately reference. Everything here

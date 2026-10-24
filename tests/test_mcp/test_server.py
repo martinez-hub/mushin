@@ -528,10 +528,10 @@ def test_job_sort_key_reads_hydra_yaml_without_omegaconf(tmp_path, monkeypatch):
     replaced was most of describe_experiment's and get_metrics' time."""
     import hydra_zen
 
-    from mushin import _sweep_io
+    from mushin import _hydra_yaml
     from mushin.mcp.server import _job_sort_key
 
-    if _sweep_io.CParser is None:
+    if _hydra_yaml.CParser is None:
         pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
     hydra_dir = tmp_path / "exp" / "zzz" / ".hydra"
     hydra_dir.mkdir(parents=True)

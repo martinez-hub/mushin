@@ -1571,6 +1571,67 @@ def test_load_from_dir_that_fails_partway_reloads_on_retry(tmp_path):
     assert sorted(float(v) for v in ds["m"].values) == [1.0, 2.0, 3.0]
 
 
+def test_load_from_dir_reports_a_broken_file_before_a_bad_field(tmp_path):
+    """Every job's hydra.yaml is loaded before any field is read, as with the
+    full OmegaConf load, so a sweep holding both a file that does not parse
+    and a `???` job number reports the parse error, in either order."""
+    from omegaconf import OmegaConf
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    W().run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    files = sorted((tmp_path / "s").glob("*/.hydra/hydra.yaml"))
+    unset = OmegaConf.to_yaml(OmegaConf.create({"hydra": {"job": {"num": "???"}}}))
+    for bad, missing in [(files[0], files[1]), (files[1], files[0])]:
+        missing.write_text(unset)
+        bad.write_text("hydra: [\n")
+        with pytest.raises(Exception) as err:
+            MultiRunMetricsWorkflow().load_from_dir(
+                tmp_path / "s", "mushin_metrics.json"
+            )
+        assert type(err.value).__module__.startswith("yaml"), repr(err.value)
+
+
+@pytest.mark.config_group("model")
+def test_load_from_dir_on_a_workflow_that_ran_drops_its_run(
+    tmp_path, restore_config_group
+):
+    """Reloading another sweep into a workflow that ran in-process must not
+    key its cells by the old run's config-group choices."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import make_config
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model=None):
+            return dict(w=float(model["width"]))
+
+    W(make_config(model=None)).run(
+        working_dir=str(tmp_path / "b"), model=multirun(["big", "small"])
+    )
+    wf = W(make_config(model=None))
+    wf.run(working_dir=str(tmp_path / "a"), model=multirun(["small", "big"]))
+    (tmp_path / "b" / "0" / "mushin_metrics.json").write_text('{"w": 80.0}')
+
+    ds = wf.load_from_dir(tmp_path / "b", "mushin_metrics.json").to_xarray()
+    assert float(ds["w"].sel(model="big")) == 80.0
+    assert float(ds["w"].sel(model="small")) == 4.0
+    assert wf.is_complete
+
+
 def test_load_from_dir_nan_fills_failed_cells(tmp_path):
     """A fail-soft sweep must be reloadable offline: a failed cell has no
     metrics sidecar, so load_metrics must NaN-fill it (consulting the cell's

@@ -1,6 +1,6 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""`_sweep_io.read_hydra_job`, the fast read of a job's hydra.yaml that
+"""`_hydra_yaml.read_hydra_job`, the fast read of a job's hydra.yaml that
 `load_from_dir` and the MCP server use: it must give what the full
 `OmegaConf.load` read gave, or fail with the same error type, for every file.
 Files Hydra wrote take the fast path; everything else goes to OmegaConf."""
@@ -16,8 +16,8 @@ import yaml
 from hypothesis import given, settings
 from omegaconf import OmegaConf
 
-from mushin import _sweep_io
-from mushin._sweep_io import read_hydra_job
+from mushin import _hydra_yaml
+from mushin._hydra_yaml import read_hydra_job
 
 # These tests are what guarantees the fast read matches OmegaConf.load, and the
 # repo's `fast` profile (10 examples) would barely exercise them.
@@ -56,7 +56,7 @@ def _forbid_rereading(monkeypatch):
     libyaml, which has no fast path."""
     import hydra_zen
 
-    if _sweep_io.CParser is None:
+    if _hydra_yaml.CParser is None:
         pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
 
     def _slow(path):
@@ -81,7 +81,7 @@ def _read_in_subprocess(path) -> subprocess.CompletedProcess:
     so that a crash or a hang cannot take pytest down with it."""
     code = (
         "import sys\n"
-        "from mushin._sweep_io import read_hydra_job\n"
+        "from mushin._hydra_yaml import read_hydra_job\n"
         "try:\n"
         "    print(read_hydra_job(sys.argv[1]))\n"
         "except Exception as e:\n"
@@ -147,6 +147,26 @@ def test_types_values_as_omegaconf_does(tmp_path, monkeypatch):
     assert repr(read_hydra_job(p)) == repr(expected)
 
 
+def test_takes_files_the_two_emitters_write_differently(tmp_path, monkeypatch):
+    """libyaml's emitter writes a character outside the BMP escaped, and a
+    long key as `? key`, where Hydra's (OmegaConf's Python dumper) writes them
+    plainly. Such files still take the fast path, through the second check."""
+    long_key = "\xe9" * 130
+    tree = {
+        "hydra": {
+            "job": {"num": 4, "override_dirname": "label=rocket\U0001f680"},
+            "runtime": {"choices": {"db": "mysql"}},
+            "extra": {long_key: 1, "": 2},
+        }
+    }
+    p = tmp_path / "hydra.yaml"
+    p.write_text(_hydra_text(tree), encoding="utf-8")
+    expected = _read_as_before(p)
+
+    _forbid_omegaconf(monkeypatch)
+    assert read_hydra_job(p) == expected == (4, {"db": "mysql"})
+
+
 def test_takes_a_str_path_and_pathlib_values(tmp_path, monkeypatch):
     tree = {"hydra": {"job": {"num": 3}, "runtime": {"cwd": Path("/tmp")}}}
     p = tmp_path / "hydra.yaml"
@@ -161,30 +181,68 @@ def test_plain_codecs_parse_in_c_and_compose_in_python():
     nesting raises RecursionError instead of crashing (see below)."""
     from yaml.composer import Composer
 
-    if _sweep_io.CParser is None:
+    if _hydra_yaml.CParser is None:
         pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
-    codecs = _sweep_io._plain_codecs()
+    from omegaconf._utils import get_omega_conf_dumper
+
+    codecs = _hydra_yaml._plain_codecs()
     assert codecs is not None
-    loader, dumper = codecs
-    assert issubclass(loader, _sweep_io.CParser)
+    loader, libyaml_dumper, omegaconf_dumper = codecs
+    assert issubclass(loader, _hydra_yaml.CParser)
     assert loader.compose_node is Composer.compose_node
     assert not issubclass(loader, yaml.CSafeLoader)
-    assert issubclass(dumper, _sweep_io.CDumper)
+    assert issubclass(libyaml_dumper, _hydra_yaml.CDumper)
+    assert omegaconf_dumper is get_omega_conf_dumper()
 
 
 def test_plain_codecs_follow_pyyaml_tables(monkeypatch):
     """OmegaConf builds its loader afresh from PyYAML's tables on each load;
     the cached codecs are rebuilt when a library changes those tables."""
-    if _sweep_io.CParser is None:
+    if _hydra_yaml.CParser is None:
         pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
-    before = _sweep_io._plain_codecs()
+    before = _hydra_yaml._plain_codecs()
     grown = {k: list(v) for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
     grown.setdefault("~", []).append(
         ("tag:example,2026:x", __import__("re").compile("x"))
     )
     monkeypatch.setattr(yaml.SafeLoader, "yaml_implicit_resolvers", grown)
-    after = _sweep_io._plain_codecs()
+    after = _hydra_yaml._plain_codecs()
     assert after is not None and after is not before
+
+
+def test_plain_codecs_follow_a_replaced_constructor(tmp_path, monkeypatch):
+    """Replacing an existing constructor keeps each table's identity and size;
+    the fast read must still follow it, as OmegaConf.load does."""
+    if _hydra_yaml.CParser is None:
+        pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
+    p = tmp_path / "hydra.yaml"
+    p.write_text(_hydra_text({"hydra": {"job": {"num": 3}}}), encoding="utf-8")
+    assert read_hydra_job(p) == (3, None)  # builds and caches the codecs
+
+    def plus_100(loader, node):
+        return int(loader.construct_scalar(node)) + 100
+
+    monkeypatch.setitem(
+        yaml.SafeLoader.yaml_constructors, "tag:yaml.org,2002:int", plus_100
+    )
+    assert (
+        _outcome(read_hydra_job, p)
+        == _outcome(_read_as_before, p)
+        == ("returns", "(103, None)")
+    )
+
+
+def test_a_helper_of_another_shape_steps_aside(tmp_path, monkeypatch):
+    """If OmegaConf's loader helper returns something other than a loader
+    class, the fast read steps aside (the file then goes to OmegaConf.load,
+    which uses the same helper) instead of raising itself."""
+    import omegaconf._utils
+
+    p = tmp_path / "hydra.yaml"
+    p.write_text(_hydra_text({"hydra": {"job": {"num": 3}}}), encoding="utf-8")
+    monkeypatch.setattr(omegaconf._utils, "get_yaml_loader", lambda: object())
+    assert _hydra_yaml._plain_codecs() is None
+    assert _hydra_yaml._parse_plain(p) is None
 
 
 @pytest.mark.parametrize("helper", ["get_yaml_loader", "get_omega_conf_dumper"])
@@ -201,7 +259,7 @@ def test_plain_codecs_step_aside_if_omegaconf_changes(monkeypatch, helper):
         return type(cls.__name__, (cls.__bases__[0],), {**vars(cls), "extra": 1})
 
     monkeypatch.setattr(omegaconf._utils, helper, grown)
-    assert _sweep_io._plain_codecs() is None
+    assert _hydra_yaml._plain_codecs() is None
 
 
 def test_finishes_odd_fields_without_rereading(tmp_path, monkeypatch):
@@ -257,7 +315,7 @@ def test_falls_back_to_omegaconf(tmp_path, monkeypatch):
     p = tmp_path / "hydra.yaml"
     p.write_text(_hydra_text({"hydra": {"job": {"num": 1}}}), encoding="utf-8")
     fast = read_hydra_job(p)
-    monkeypatch.setattr(_sweep_io, "_plain_codecs", lambda: None)
+    monkeypatch.setattr(_hydra_yaml, "_plain_codecs", lambda: None)
     assert read_hydra_job(p) == fast == (1, None)
 
 
@@ -408,12 +466,19 @@ _EDGE_STRINGS = [
 ]
 
 
+# Any text: every Unicode character but lone surrogates, which no file holds.
+_ANY_TEXT = st.text(st.characters(exclude_categories=("Cs",)), max_size=12)
+# Long text with spaces, line breaks and quotes, which emitters fold and quote.
+_LONG_TEXT = st.text(" ab-#:'\"\n\u2028\x85\xe9\U0001f600", min_size=40, max_size=120)
+
+
 def _hydra_docs():
     """Random hydra.yaml documents: the two fields a reload reads, plus other
     fields, built from keys and values that OmegaConf and YAML treat
-    specially."""
+    specially, and from arbitrary text."""
     keys = st.one_of(
         st.sampled_from(["a", "b", "job", "1e3", "yes", "", "a?b"]),
+        _ANY_TEXT,
         st.integers(-3, 3),
         st.none(),
         st.booleans(),
@@ -425,6 +490,8 @@ def _hydra_docs():
         st.integers(-10, 10),
         st.floats(allow_nan=False, width=16),
         st.sampled_from(_EDGE_STRINGS),
+        _ANY_TEXT,
+        _LONG_TEXT,
         st.binary(max_size=3),
         st.dates(),
         st.sets(st.integers(0, 3), max_size=2),
@@ -448,7 +515,9 @@ def _hydra_docs():
             st.one_of(
                 st.sampled_from(["db", "hydra/launcher"]), st.none(), st.integers(0, 2)
             ),
-            st.one_of(st.none(), st.sampled_from(_EDGE_STRINGS), st.integers(0, 2)),
+            st.one_of(
+                st.none(), st.sampled_from(_EDGE_STRINGS), _ANY_TEXT, st.integers(0, 2)
+            ),
             max_size=3,
         ),
     )
@@ -499,30 +568,32 @@ def test_matches_the_old_read_on_random_files():
 
 
 def test_emitted_yaml_parses_alike_in_libyaml_and_python():
-    """What the canonical-text check rests on: YAML that libyaml's emitter
-    writes (with OmegaConf's representers) parses to the same tree in the
-    plain loader (libyaml) and in OmegaConf's loader (pure Python). The two
-    emitters need not agree (libyaml writes an empty-string key as `? ''`):
-    where they differ, a file Hydra wrote just takes the slow path."""
+    """What the canonical-text check rests on: YAML that either emitter the
+    check uses writes (libyaml's, or OmegaConf's own in pure Python, with
+    OmegaConf's representers) parses to the same tree in the plain loader
+    (libyaml) and in OmegaConf's loader (pure Python), whole tree compared.
+    It also fails if OmegaConf's loader starts treating mappings differently,
+    since its construct_mapping is not copied."""
     from omegaconf._utils import get_yaml_loader
 
-    if _sweep_io.CParser is None:
+    if _hydra_yaml.CParser is None:
         pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
-    loader, dumper = _sweep_io._plain_codecs()
+    loader, *dumpers = _hydra_yaml._plain_codecs()
 
     @settings(max_examples=_PARITY_EXAMPLES, deadline=None)
     @given(_hydra_docs())
     def check(doc):
-        text = yaml.dump(
-            doc,
-            Dumper=dumper,
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-        )
-        plain = yaml.load(text, Loader=loader)
-        python = yaml.load(text, Loader=get_yaml_loader())
-        assert repr(plain) == repr(python)
+        for dumper in dumpers:
+            text = yaml.dump(
+                doc,
+                Dumper=dumper,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+            )
+            plain = yaml.load(text, Loader=loader)
+            python = yaml.load(text, Loader=get_yaml_loader())
+            assert repr(plain) == repr(python), dumper
 
     check()
 

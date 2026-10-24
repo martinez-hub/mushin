@@ -322,7 +322,7 @@ _LAUNCHER_PLUGINS: dict[str, str] = {
 
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
-    from ._sweep_io import hydra_choices
+    from ._hydra_yaml import hydra_choices
 
     try:
         hydra = job.hydra_cfg.hydra
@@ -2364,6 +2364,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # `to_xarray` and `load_metrics` reload when it is None, so a load that
         # fails partway is retried, not half-reused.
         self.multirun_working_dirs = None
+        # This loads a sweep from disk: drop what an earlier in-process `run`
+        # on this object left, which would otherwise describe that sweep (its
+        # jobs' config-group choices, failures and skipped cells).
+        self.jobs = []
+        self._metrics_by_combo = {}
 
         self.working_dir = Path(working_dir)
         self.output_subdir = load_from_yaml(
@@ -2381,6 +2386,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 )
             else:
                 why = (
+                    "no job has started yet (a sweep still queued on a cluster), "
                     "the sweep was killed before its first job started, or its "
                     "job directories were removed"
                 )
@@ -2394,12 +2400,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # keys by its chosen option name offline exactly as it does in-process
         # (without this, `_combo_of_cfg` falls back to the composed sub-config
         # and no combo ever matches the choice-name grid coordinates).
-        from ._sweep_io import read_hydra_job
+        from ._hydra_yaml import hydra_job_fields, load_hydra_record
 
-        _jobs = [
-            read_hydra_job(d / f"{self.output_subdir}/hydra.yaml") for d in job_dirs
+        # Every file is loaded before any field is read, so a sweep with
+        # several broken files reports the error it always did.
+        _records = [
+            load_hydra_record(d / f"{self.output_subdir}/hydra.yaml") for d in job_dirs
         ]
-        _job_nums, _choices = zip(*_jobs, strict=True)
+        _job_nums, _choices = zip(*map(hydra_job_fields, _records), strict=True)
         job_dirs = _sort_x_by_k(job_dirs, _job_nums)
         cfgs = []
         for dir_ in job_dirs:
