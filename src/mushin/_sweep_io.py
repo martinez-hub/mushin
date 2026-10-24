@@ -1,10 +1,12 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""On-disk primitives for resilient/resumable sweeps: canonical combo keys and
-the per-job metrics sidecar + sweep manifest (see the sweep-resilience design)."""
+"""On-disk primitives for resilient/resumable sweeps: canonical combo keys,
+the per-job metrics sidecar + sweep manifest (see the sweep-resilience design),
+and a fast read of each job's Hydra record."""
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import uuid
@@ -109,6 +111,69 @@ def read_metrics_sidecar(job_dir) -> dict | None:
     try:
         return _restore_nonfinite(json.loads(p.read_text()))
     except (json.JSONDecodeError, OSError):
+        return None
+
+
+@functools.cache
+def _plain_yaml_loader() -> type | None:
+    """A YAML loader that types each scalar as ``OmegaConf.load`` does, built on
+    libyaml's C parser when PyYAML has it. None when OmegaConf's loader (a
+    private helper) cannot be copied, so callers fall back to OmegaConf."""
+    import yaml
+
+    try:
+        from omegaconf._utils import get_yaml_loader
+
+        resolvers = get_yaml_loader().yaml_implicit_resolvers
+    except Exception:  # noqa: BLE001 - only the fast path is lost
+        return None
+    # OmegaConf's loader parses floats such as `1e3` that YAML 1.1 reads as
+    # strings, and leaves dates as strings; copying its resolvers keeps that.
+    base = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    return type(
+        "_PlainYamlLoader",
+        (base,),
+        {"yaml_implicit_resolvers": {k: list(v) for k, v in resolvers.items()}},
+    )
+
+
+def read_hydra_job(hydra_yaml: Path) -> tuple[Any, dict | None]:
+    """The job number and the config-group choices in a job's ``hydra.yaml``.
+
+    The file holds Hydra's whole runtime config (about 150 lines), and a reload
+    needs two of its fields. Building an OmegaConf config from it was about 90%
+    of ``load_from_dir``'s time on a 1000-cell sweep, so it is read as plain
+    YAML, typed as OmegaConf types it. What that read cannot settle (a missing
+    field, a ``???`` or ``${...}`` value, a tag safe YAML refuses) goes to
+    ``OmegaConf.load``, which resolves it or raises as before.
+    """
+    loader = _plain_yaml_loader()
+    try:
+        if loader is None:
+            raise LookupError("no plain YAML loader")
+        import yaml
+
+        text = hydra_yaml.read_text(encoding="utf-8")
+        hydra = yaml.load(text, Loader=loader)["hydra"]
+        num, choices = hydra["job"]["num"], _hydra_choices(hydra)
+        if isinstance(num, str) or any(
+            isinstance(v, str) and "${" in v for v in (choices or {}).values()
+        ):
+            raise ValueError("a value for OmegaConf to resolve")
+    except Exception:  # noqa: BLE001 - the slow path decides
+        from hydra_zen import load_from_yaml
+
+        hydra = load_from_yaml(hydra_yaml).hydra
+        num, choices = hydra.job.num, _hydra_choices(hydra)
+    return num, choices
+
+
+def _hydra_choices(hydra: Any) -> dict | None:
+    """``runtime.choices`` of a parsed ``hydra`` node, plain or OmegaConf."""
+    try:
+        ch = hydra["runtime"]["choices"]
+        return None if ch is None else dict(ch)
+    except Exception:  # noqa: BLE001 - older dirs without choices
         return None
 
 

@@ -18,7 +18,12 @@ import torch
 from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
-from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE, read_metrics_sidecar
+from mushin._sweep_io import (
+    MANIFEST_FILE,
+    METRICS_FILE,
+    read_hydra_job,
+    read_metrics_sidecar,
+)
 from mushin._utils import Experiment
 
 # Globals an MCP-loaded metrics file may legitimately reference. Everything here
@@ -154,7 +159,7 @@ def _job_sort_key(hydra_dir: Path, root: Path | None = None):
     hydra_yaml = hydra_dir / "hydra.yaml"
     if _within_root(hydra_yaml, root):
         try:
-            num = load_from_yaml(hydra_yaml).hydra.job.num
+            num, _ = read_hydra_job(hydra_yaml)
             return (0, int(num), "")
         except Exception:
             pass

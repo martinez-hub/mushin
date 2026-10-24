@@ -2373,18 +2373,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # keys by its chosen option name offline exactly as it does in-process
         # (without this, `_combo_of_cfg` falls back to the composed sub-config
         # and no combo ever matches the choice-name grid coordinates).
-        _hydra_cfgs = [
-            load_from_yaml(dir_ / f"{self.output_subdir}/hydra.yaml")
+        from ._sweep_io import read_hydra_job
+
+        _jobs = [
+            read_hydra_job(dir_ / f"{self.output_subdir}/hydra.yaml")
             for dir_ in self.multirun_working_dirs
         ]
-        _job_nums = [hc.hydra.job.num for hc in _hydra_cfgs]
-        _choices: list[dict | None] = []
-        for hc in _hydra_cfgs:
-            try:
-                ch = hc.hydra.runtime.choices
-                _choices.append(None if ch is None else dict(ch))
-            except Exception:  # noqa: BLE001 - older dirs without choices
-                _choices.append(None)
+        _job_nums = [num for num, _ in _jobs]
+        _choices: list[dict | None] = [choices for _, choices in _jobs]
 
         self.multirun_working_dirs = _sort_x_by_k(self.multirun_working_dirs, _job_nums)
         self._loaded_job_choices = (
