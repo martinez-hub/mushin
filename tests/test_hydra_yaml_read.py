@@ -437,6 +437,11 @@ _SAME_AS_BEFORE = {
         "hydra:\n  job:\n    num: 0\n  runtime:\n    choices:\n      db:\n        a: 1\n"
     ),
     "aliased string": "a: &s abc\nb:\n- *s\n- *s\nhydra:\n  job:\n    num: 5\n",
+    # Not a mapping at the top: OmegaConf.load builds a ListConfig or rejects it.
+    "top-level list": "- a\n",
+    "empty list": "[]\n",
+    "list holding the hydra node": "- hydra:\n    job:\n      num: 1\n",
+    "top-level int": "1\n",
     # libyaml reads these where PyYAML's Python scanner (OmegaConf's) raises or
     # reads something else; none is text an emitter writes.
     "tab after a colon": "hydra:\n  job:\n    num:\t5\n",
@@ -777,9 +782,9 @@ def test_the_second_write_back_runs_only_where_the_emitters_differ(
 
     monkeypatch.setattr(_hydra_yaml, "_write_back", counting)
     edited = tmp_path / "edited.yaml"
-    edited.write_text(
-        "# edited\n" + _hydra_text({"hydra": {"job": {"num": 5}}}), encoding="utf-8"
-    )
+    tree = {"hydra": {"job": {"num": 5}, "runtime": {"cwd": "C:\\Users\\me\\new"}}}
+    edited.write_text("# edited\n" + _hydra_text(tree), encoding="utf-8")
+    assert "\\" in edited.read_text()  # a Windows path, in a plain scalar
     assert _hydra_yaml._parse_plain(edited) is None
     assert len(calls) == 1
 
@@ -791,3 +796,22 @@ def test_the_second_write_back_runs_only_where_the_emitters_differ(
     )
     assert _hydra_yaml._parse_plain(emoji) is not None
     assert len(calls) == 2
+
+
+def test_a_path_resolver_on_safe_loader_sends_files_to_omegaconf(tmp_path, monkeypatch):
+    """A path resolver registered on yaml.SafeLoader retypes a field for
+    OmegaConf's loader (a SafeLoader subclass) and not for the plain loader,
+    so the fast read must step aside."""
+    p = tmp_path / "hydra.yaml"
+    p.write_text(_hydra_text({"hydra": {"job": {"num": "5"}}}), encoding="utf-8")
+    assert read_hydra_job(p) == ("5", None)  # builds the codecs
+
+    monkeypatch.setattr(yaml.SafeLoader, "yaml_path_resolvers", {}, raising=False)
+    yaml.add_path_resolver(
+        "tag:yaml.org,2002:int",
+        [(dict, "hydra"), (dict, "job"), (dict, "num")],
+        yaml.ScalarNode,
+        Loader=yaml.SafeLoader,
+    )
+    assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
+    assert read_hydra_job(p) == (5, None)

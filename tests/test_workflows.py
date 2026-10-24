@@ -1547,8 +1547,9 @@ def test_load_from_dir_names_a_null_output_subdir(tmp_path):
 
 def test_load_from_dir_that_fails_partway_reloads_on_retry(tmp_path):
     """A cell missing its config.yaml fails the load before any of the job
-    directories or configs are kept, so a later to_xarray reloads them
-    instead of pairing them with a partial config list."""
+    directories or configs are kept. On a workflow that held another sweep,
+    a later to_xarray then reloads (and fails again, until the file is back)
+    instead of reading the earlier sweep's cells under the new directory."""
     from mushin import multirun
     from mushin.workflows import MultiRunMetricsWorkflow
 
@@ -1561,10 +1562,15 @@ def test_load_from_dir_that_fails_partway_reloads_on_retry(tmp_path):
     cfg = tmp_path / "s" / "2" / ".hydra" / "config.yaml"
     kept = cfg.read_text()
     cfg.unlink()
-    wf = W()
+    # Prior state from a load, not a run: an in-process run's jobs outlive a
+    # reload (as on main), which is a separate issue.
+    W().run(a=multirun([7, 8]), working_dir=str(tmp_path / "other"))
+    wf = W().load_from_dir(tmp_path / "other", "mushin_metrics.json")
     with pytest.raises(FileNotFoundError, match="config.yaml not found"):
         wf.load_from_dir(tmp_path / "s", "mushin_metrics.json")
     assert wf.multirun_working_dirs is None
+    with pytest.raises(FileNotFoundError, match="config.yaml not found"):
+        wf.to_xarray(metrics_filename="mushin_metrics.json")
 
     cfg.write_text(kept)
     ds = wf.to_xarray(metrics_filename="mushin_metrics.json")

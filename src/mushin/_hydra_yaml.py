@@ -193,11 +193,12 @@ def _parse_plain(hydra_yaml: Path) -> dict | None:
         written = _write_back(doc, libyaml_dumper)
         if written == text:
             return doc
-        # Over 4,000 random documents, the two emitters wrote different text
-        # only where one of them wrote an escape or a complex key (`? `): a
-        # character outside the BMP, a long or an empty key. Elsewhere this
-        # second write-back is skipped, so a hand-edited file does not pay for
-        # it; a skip costs at most the fast path, never the result.
+        # Over 6,000 random documents, the two emitters wrote different text
+        # only where one of them wrote a complex key (`? `) or an escape, and
+        # escapes only occur in double-quoted scalars. Elsewhere this second
+        # write-back is skipped, so a hand-edited file does not pay for it (a
+        # backslash in a plain scalar, such as a Windows path, does not count).
+        # A skip costs at most the fast path, never the result.
         if _emitters_may_differ(written) or _emitters_may_differ(text):
             if _write_back(doc, omegaconf_dumper) == text:
                 return doc
@@ -218,7 +219,7 @@ def _write_back(doc: dict, dumper: type) -> str:
 
 
 def _emitters_may_differ(text: str) -> bool:
-    return "\\" in text or "? " in text
+    return "? " in text or ("\\" in text and '"' in text)
 
 
 def _plain_codecs() -> tuple[type, type, type] | None:
