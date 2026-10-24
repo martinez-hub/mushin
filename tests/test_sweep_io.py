@@ -144,15 +144,31 @@ def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
     assert back == {"weird": {"__mushin_nonfinite__": "hello"}}
 
 
-# Unquoted scalars that YAML 1.1 and OmegaConf type differently: OmegaConf
-# reads `1e3` as a float and keeps dates as strings.
-_TRICKY_HYDRA_YAML = """\
+# Option names that YAML 1.1 would not read as strings but OmegaConf does: it
+# drops the date resolver. Quoted ones are how Hydra writes a name that looks
+# like a number.
+_STRING_CHOICES_YAML = """\
 hydra:
   job:
     num: 7
   runtime:
     choices:
       date: 2024-01-01
+      quoted_sci: '1e3'
+      quoted_bool: 'yes'
+      plain: adam
+      unset: null
+"""
+
+# Unquoted scalars that YAML 1.1 and OmegaConf type differently (OmegaConf reads
+# `1e3` as a float), or that are not strings at all. Hydra never writes these as
+# option names; a hand-edited file goes to OmegaConf.
+_NON_STRING_CHOICES_YAML = """\
+hydra:
+  job:
+    num: 7
+  runtime:
+    choices:
       sci: 1e3
       dotted: 1.5
       under: 1_000
@@ -160,10 +176,8 @@ hydra:
       sexagesimal: 1:30
       yes_word: yes
       on_word: on
-      tilde: ~
       inf: .inf
       nan: .nan
-      quoted: '1e3'
       plain: adam
 """
 
@@ -185,12 +199,12 @@ def test_read_hydra_job_types_values_as_omegaconf_does(tmp_path, monkeypatch):
     from mushin._sweep_io import read_hydra_job
 
     p = tmp_path / "hydra.yaml"
-    p.write_text(_TRICKY_HYDRA_YAML, encoding="utf-8")
+    p.write_text(_STRING_CHOICES_YAML, encoding="utf-8")
     ref = OmegaConf.load(p).hydra
     expected = (ref.job.num, dict(ref.runtime.choices))
 
     _forbid_omegaconf(monkeypatch)
-    # repr compares the types too (1000 vs 1000.0 vs '1000'), and NaN equal.
+    # repr compares the types too: the date stays the string '2024-01-01'.
     assert repr(read_hydra_job(p)) == repr(expected)
 
 
@@ -255,18 +269,150 @@ def test_read_hydra_job_falls_back_to_omegaconf(tmp_path, monkeypatch):
     # Without a plain loader (OmegaConf's private helper moved), the result
     # is the same, only slower.
     p = tmp_path / "hydra.yaml"
-    p.write_text(_TRICKY_HYDRA_YAML, encoding="utf-8")
+    p.write_text(_STRING_CHOICES_YAML, encoding="utf-8")
     fast = read_hydra_job(p)
     monkeypatch.setattr(_sweep_io, "_plain_yaml_loader", lambda: None)
     assert repr(read_hydra_job(p)) == repr(fast)
 
 
-def test_plain_yaml_loader_uses_libyaml_when_present():
+def test_plain_yaml_loader_parses_in_c_and_composes_in_python():
+    """libyaml parses; PyYAML's Python composer builds the tree, so deep
+    nesting raises RecursionError instead of crashing (see below)."""
+    import pytest
     import yaml
+    from yaml.composer import Composer
 
     from mushin._sweep_io import _plain_yaml_loader
 
+    if not yaml.__with_libyaml__:
+        pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
+    from yaml.cyaml import CParser
+
     loader = _plain_yaml_loader()
     assert loader is not None
-    if yaml.__with_libyaml__:
-        assert issubclass(loader, yaml.CSafeLoader)
+    assert issubclass(loader, CParser)
+    assert loader.compose_node is Composer.compose_node
+    assert not issubclass(loader, yaml.CSafeLoader)
+
+
+def test_read_hydra_job_survives_deep_nesting(tmp_path):
+    """libyaml's C composer recurses on the C stack with no limit, so a deeply
+    nested file killed the process (SIGSEGV) past any `except`. It must raise
+    RecursionError, as OmegaConf.load does. A subprocess keeps a regression
+    from taking pytest down with it."""
+    import subprocess
+    import sys
+
+    p = tmp_path / "hydra.yaml"
+    p.write_text(
+        "hydra:\n  job:\n    num: 0\n  junk: " + "[" * 100_000 + "]" * 100_000 + "\n",
+        encoding="utf-8",
+    )
+    code = (
+        "import sys\n"
+        "from mushin._sweep_io import read_hydra_job\n"
+        "try:\n"
+        "    read_hydra_job(sys.argv[1])\n"
+        "except RecursionError:\n"
+        "    print('RecursionError')\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code, str(p)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr[-2000:])
+    assert r.stdout.strip() == "RecursionError"
+
+
+def _read_as_before(path):
+    """What load_from_dir and the MCP server did before the plain read: a full
+    OmegaConf load, then the two fields."""
+    from hydra_zen import load_from_yaml
+
+    hc = load_from_yaml(path)
+    num = hc.hydra.job.num
+    try:
+        ch = hc.hydra.runtime.choices
+        choices = None if ch is None else dict(ch)
+    except Exception:  # noqa: BLE001 - as the old code did
+        choices = None
+    return num, choices
+
+
+def _outcome(read, path):
+    try:
+        return "returns", repr(read(path))
+    except Exception as e:  # noqa: BLE001 - the error type is the outcome
+        return "raises", type(e).__name__
+
+
+_SAME_AS_BEFORE = {
+    "non-string options": _NON_STRING_CHOICES_YAML,
+    "empty file": "",
+    "no hydra node": "x: 1\n",
+    "missing job number": "hydra:\n  job:\n    name: a\n",
+    "??? job number": "hydra:\n  job:\n    num: ???\n",
+    "bool job number": "hydra:\n  job:\n    num: true\n",
+    "duplicate key in the job": "hydra:\n  job:\n    num: 1\n    num: 5\n",
+    "duplicate key elsewhere": "hydra:\n  job:\n    num: 1\n  run:\n    dir: a\n    dir: b\n",
+    "??? choice": "hydra:\n  job:\n    num: 0\n  runtime:\n    choices:\n      db: ???\n",
+    "interpolated choice": (
+        "name: mysql\nhydra:\n  job:\n    num: 0\n"
+        "  runtime:\n    choices:\n      db: ${name}\n"
+    ),
+    "interpolated choices node": (
+        "x:\n  db: mysql\nhydra:\n  job:\n    num: 1\n  runtime:\n    choices: ${x}\n"
+    ),
+    "interpolated runtime node": (
+        "x:\n  choices:\n    db: mysql\nhydra:\n  job:\n    num: 1\n  runtime: ${x}\n"
+    ),
+    "null runtime": "hydra:\n  job:\n    num: 2\n  runtime: null\n",
+    "null choices": "hydra:\n  job:\n    num: 2\n  runtime:\n    choices: null\n",
+    "null option": "hydra:\n  job:\n    num: 2\n  runtime:\n    choices:\n      db: null\n",
+    "null group name": "hydra:\n  job:\n    num: 0\n  runtime:\n    choices:\n      null: a\n",
+    "nested choice": "hydra:\n  job:\n    num: 0\n  runtime:\n    choices:\n      db: {a: 1}\n",
+    "pathlib tag": (
+        "hydra:\n  job:\n    num: 3\n  runtime:\n"
+        "    cwd: !!python/object/apply:pathlib.Path\n    - /tmp\n"
+    ),
+}
+
+
+def test_read_hydra_job_matches_the_old_read(tmp_path):
+    """Every file reads to the same result, or fails with the same error, as
+    the full OmegaConf load it replaces: what the plain read cannot settle goes
+    to OmegaConf instead of returning something else."""
+    from mushin._sweep_io import read_hydra_job
+
+    for name, text in _SAME_AS_BEFORE.items():
+        p = tmp_path / f"{name.replace(' ', '_')}.yaml"
+        p.write_text(text, encoding="utf-8")
+        assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p), name
+
+
+def test_read_hydra_job_takes_a_str_path_and_pathlib_tags_on_the_fast_path(
+    tmp_path, monkeypatch
+):
+    from mushin._sweep_io import read_hydra_job
+
+    p = tmp_path / "hydra.yaml"
+    p.write_text(_SAME_AS_BEFORE["pathlib tag"], encoding="utf-8")
+    _forbid_omegaconf(monkeypatch)
+    assert read_hydra_job(str(p)) == (3, None)
+
+
+def test_read_hydra_job_ignores_fields_it_does_not_read(tmp_path):
+    """Deliberately unlike OmegaConf.load, a malformed interpolation in a field
+    a reload never reads does not stop the reload."""
+    import pytest
+    from omegaconf.errors import GrammarParseError
+
+    from mushin._sweep_io import read_hydra_job
+
+    p = tmp_path / "hydra.yaml"
+    p.write_text("hydra:\n  job:\n    num: 4\n    name: ${broken\n", encoding="utf-8")
+    with pytest.raises(GrammarParseError):
+        _read_as_before(p)
+    assert read_hydra_job(p) == (4, None)

@@ -1521,6 +1521,18 @@ def test_config_group_sweep_survives_offline_reload(tmp_path, restore_config_gro
     assert float(ds["w"].sel(model="small")) == 4.0
 
 
+def test_load_from_dir_without_job_dirs_says_so(tmp_path):
+    """A sweep killed before its first job has a multirun.yaml and no cells;
+    the reload names that instead of failing to unpack an empty sort."""
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    OmegaConf.save({"hydra": {"output_subdir": ".hydra"}}, tmp_path / "multirun.yaml")
+    with pytest.raises(FileNotFoundError, match="no job directories"):
+        MultiRunMetricsWorkflow().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
 def test_load_from_dir_nan_fills_failed_cells(tmp_path):
     """A fail-soft sweep must be reloadable offline: a failed cell has no
     metrics sidecar, so load_metrics must NaN-fill it (consulting the cell's

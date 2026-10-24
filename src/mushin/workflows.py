@@ -322,11 +322,13 @@ _LAUNCHER_PLUGINS: dict[str, str] = {
 
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
+    from ._sweep_io import hydra_choices
+
     try:
-        choices = job.hydra_cfg.hydra.runtime.choices
-        return None if choices is None else dict(choices)
+        hydra = job.hydra_cfg.hydra
     except Exception:  # noqa: BLE001 - jobs loaded without hydra_cfg
         return None
+    return hydra_choices(hydra)
 
 
 class _TaskRunner:
@@ -2367,6 +2369,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self.multirun_working_dirs = list(
             x.parent for x in self.working_dir.glob(f"**/*/{self.output_subdir}")
         )
+        if not self.multirun_working_dirs:
+            raise FileNotFoundError(
+                f"no job directories (*/{self.output_subdir}) under "
+                f"{self.working_dir}; the sweep was killed before its first job "
+                "started, or its cells were removed."
+            )
 
         # ensure working dirs are sorted by job num; while each hydra.yaml is
         # open, also recover the job's `runtime.choices` so a config-GROUP axis
