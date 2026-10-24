@@ -310,27 +310,26 @@ def _current_group_choice(name: str) -> str | None:
     return None
 
 
-def _current_job_fields() -> tuple[int, dict] | None:
+def _current_job_fields() -> tuple[int | None, dict | None]:
     """The current Hydra job's number and ``runtime.choices``, as its
-    hydra.yaml records them, for the cell's status sidecar. None outside a
-    Hydra job (a task called directly), in a single run (whose job has no
-    number) and when Hydra records no choices: an incomplete record is not
-    written, so a reload reads hydra.yaml instead of trusting it."""
+    hydra.yaml records them, each None when unknown: outside a Hydra job (a
+    task called directly), in a single run (whose job has no number), or when
+    Hydra records no choices. The number alone still drives ``sample=``; the
+    status sidecar records the two only together."""
     try:
         from hydra.core.hydra_config import HydraConfig
 
         if not HydraConfig.initialized():
-            return None
+            return None, None
         hydra = HydraConfig.get()
         num = hydra.job.num
-    except Exception:  # noqa: BLE001 - no job number: nothing to record
-        return None
+    except Exception:  # noqa: BLE001 - no job number
+        return None, None
     if type(num) is not int:
-        return None
+        return None, None
     from ._hydra_yaml import hydra_choices
 
-    choices = hydra_choices(hydra)
-    return None if choices is None else (num, choices)
+    return num, hydra_choices(hydra)
 
 
 # Pip package per Hydra launcher name, for the missing-plugin install hint.
@@ -485,8 +484,7 @@ class _TaskRunner:
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
         # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
-        job_fields = _current_job_fields()
-        job_num, choices = job_fields if job_fields is not None else (None, None)
+        job_num, choices = _current_job_fields()
         write_status = functools.partial(
             write_cell_status,
             config_hash=chash,

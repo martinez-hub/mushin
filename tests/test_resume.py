@@ -44,14 +44,36 @@ def test_write_cell_status_records_job_fields_only_when_known(tmp_path):
     assert got["job_num"] == 2 and got["choices"] == choices
     assert sidecar_job_fields(tmp_path) == (2, choices)
 
+    # The writer applies the reader's rule, and never coerces: a bool is not
+    # job number 1, and a value that is not an option name is not recorded.
+    for bad in [dict(job_num=True, choices={}), dict(job_num=2, choices={"m": 3})]:
+        write_cell_status(tmp_path, status="running", combo={}, attempt=1, **bad)
+        got = read_cell_status(tmp_path)
+        assert "job_num" not in got and "choices" not in got, bad
+
+
+def test_sidecar_job_fields_without_the_file_it_read(tmp_path, monkeypatch):
+    """A sidecar removed between its read and the age check (a concurrent
+    resume or gc) has no claim over the hydra.yaml that is there."""
+    from mushin import _resume
+
+    monkeypatch.setattr(
+        _resume, "read_cell_status", lambda d: {"job_num": 1, "choices": {}}
+    )
+    hydra_yaml = tmp_path / "hydra.yaml"
+    hydra_yaml.write_text("hydra:\n  job:\n    num: 0\n")
+    assert sidecar_job_fields(tmp_path, hydra_yaml) is None
+    assert sidecar_job_fields(tmp_path) == (1, {})  # no hydra.yaml to defer to
+
 
 @pytest.mark.parametrize(
     "job_num, choices",
     [
-        ("3", None),  # a string job number
-        (True, None),  # JSON true reads as a Python bool, an int subclass
-        (3.0, None),
-        (None, None),
+        ("3", {}),  # a string job number
+        (True, {}),  # JSON true reads as a Python bool, an int subclass
+        (True, {"model": "small"}),
+        (3.0, {}),
+        (None, {}),
         (3, ["adam"]),  # choices must map group names to option names
         (3, {"optimizer": 1}),
         (3, {"optimizer": "adam", "model": 2.5}),

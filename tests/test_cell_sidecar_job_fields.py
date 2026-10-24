@@ -70,22 +70,85 @@ def test_run_records_what_hydra_yaml_records(tmp_path):
         assert choices  # Hydra records its own groups (hydra/launcher, ...)
 
 
+def _assert_fields(root, n=4):
+    cells = _cells(root)
+    assert len(cells) == n
+    for cell in cells:
+        status = read_cell_status(cell)
+        assert status["job_num"] == int(cell.name), (root, status)
+        assert isinstance(status["choices"], dict), (root, status)
+
+
 def test_skipped_cached_and_resumed_cells_record_them_too(tmp_path):
     """The status writes that bypass the task (a cell outside the sample, a
-    cache hit, a resumed cell) record the fields as a computed cell does."""
+    cache hit, a resumed cell) record the fields as a computed cell does.
+    Each is checked before the next sweep rewrites the sidecars."""
+    computed = []
+
+    class C(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            computed.append(a)
+            return dict(m=float(a))
+
+    def sweep(root, **kwargs):
+        C().run(a=multirun([1, 2, 3, 4]), working_dir=str(root), **kwargs)
+
     cache = str(tmp_path / "cache")
-    _sweep(tmp_path / "sampled", values=(1, 2, 3, 4), sample=2, cache_dir=cache)
-    _sweep(tmp_path / "cached", values=(1, 2, 3, 4), cache_dir=cache)
-    _sweep(tmp_path / "cached", values=(1, 2, 3, 4), cache_dir=cache, resume=True)
-    for root in ("sampled", "cached"):
-        cells = _cells(tmp_path / root)
-        assert len(cells) == 4
-        for cell in cells:
-            status = read_cell_status(cell)
-            assert status["job_num"] == int(cell.name), (root, status)
-            assert isinstance(status["choices"], dict), (root, status)
+    sweep(tmp_path / "sampled", sample=2, cache_dir=cache)
+    assert len(computed) == 2
+    _assert_fields(tmp_path / "sampled")
     statuses = [read_cell_status(c)["status"] for c in _cells(tmp_path / "sampled")]
     assert statuses.count("skipped") == 2
+
+    sweep(tmp_path / "cached", cache_dir=cache)
+    assert len(computed) == 4  # two cells came from the cache
+    _assert_fields(tmp_path / "cached")
+
+    sweep(tmp_path / "cached", cache_dir=cache, resume=True)
+    assert len(computed) == 4  # every cell was resumed
+    _assert_fields(tmp_path / "cached")
+
+
+def test_a_pre_task_failure_records_them_too(tmp_path, monkeypatch):
+    """The setup-phase 'failed' write (pre_task raised, before the task) is
+    the reused-directory case the ordering is about: it carries the fields,
+    so the cell sorts from its sidecar."""
+
+    class Bad(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(a):
+            if a == 2:
+                raise RuntimeError("setup boom")
+
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    with pytest.warns(UserWarning, match="failed"):
+        Bad().run(
+            a=multirun([1, 2, 3]), working_dir=str(tmp_path / "s"), on_error="nan"
+        )
+    _assert_fields(tmp_path / "s", n=3)
+    statuses = [read_cell_status(c)["status"] for c in _cells(tmp_path / "s")]
+    assert statuses == ["completed", "failed", "completed"]
+    for cell in _cells(tmp_path / "s"):
+        (cell / ".hydra" / "hydra.yaml").unlink()
+    _forbid_hydra_yaml(monkeypatch)
+    assert _order(tmp_path / "s") == ["0", "1", "2"]
+
+
+def test_sample_does_not_depend_on_the_choices(tmp_path, monkeypatch):
+    """`sample=` keys on the job number alone. With no choices to record,
+    nothing goes into the sidecar, and the sample still applies."""
+    from mushin import _hydra_yaml
+
+    monkeypatch.setattr(_hydra_yaml, "hydra_choices", lambda hydra: None)
+    with pytest.warns(UserWarning, match="not run"):
+        _sweep(tmp_path / "s", values=(1, 2, 3, 4), sample=2)
+    statuses = [read_cell_status(c)["status"] for c in _cells(tmp_path / "s")]
+    assert statuses.count("skipped") == 2
+    assert all("job_num" not in read_cell_status(c) for c in _cells(tmp_path / "s"))
 
 
 def test_failed_and_budget_skipped_cells_record_them_too(tmp_path, monkeypatch):

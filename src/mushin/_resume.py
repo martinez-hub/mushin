@@ -47,10 +47,13 @@ def write_cell_status(
 
     ``job_num`` and ``choices`` are the Hydra job number and config-group
     choices the job's hydra.yaml also records. Written when both are known
-    (inside a Hydra multirun job), never one without the other, they let a
-    reload sort the cells and key config-group axes without parsing
-    hydra.yaml, which is most of a reload's time; see
-    :func:`sidecar_job_fields`."""
+    (inside a Hydra multirun job) and are what Hydra writes (the rule the
+    reader applies, so nothing is recorded that a reload would then reject),
+    never one without the other, they let a reload sort the cells and key
+    config-group axes without parsing hydra.yaml, which is most of a reload's
+    time; see :func:`sidecar_job_fields`."""
+    from ._hydra_yaml import job_fields_as_written
+
     payload: dict[str, Any] = {
         "status": status,
         "combo": combo,
@@ -60,9 +63,9 @@ def write_cell_status(
         payload["config_hash"] = config_hash
     if code_hash is not None:
         payload["code_hash"] = code_hash
-    if job_num is not None and choices is not None:
-        payload["job_num"] = int(job_num)
-        payload["choices"] = dict(choices)
+    if isinstance(choices, dict) and job_fields_as_written(job_num, choices):
+        payload["job_num"] = job_num
+        payload["choices"] = choices
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
 
 
@@ -88,10 +91,11 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
         return None
     if hydra_yaml is not None:
         try:
-            newer = (
-                Path(hydra_yaml).stat().st_mtime_ns
-                > (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
-            )
+            written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
+        except OSError:  # the sidecar went away since it was read
+            return None
+        try:
+            newer = Path(hydra_yaml).stat().st_mtime_ns > written
         except OSError:  # no hydra.yaml: nothing newer to defer to
             newer = False
         if newer:
