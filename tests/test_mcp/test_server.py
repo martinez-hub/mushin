@@ -549,19 +549,48 @@ def test_job_sort_key_reads_hydra_yaml_without_omegaconf(tmp_path, monkeypatch):
     assert _job_sort_key(hydra_dir, None) == (0, 4, "")
 
 
-def test_job_sort_key_prefers_the_runs_own_sidecar(tmp_path):
-    """The run's status sidecar orders it, as load_from_dir does, so a run
-    sorts by job number without its hydra.yaml being parsed (or present)."""
-    from mushin._resume import write_cell_status
+def test_job_sort_key_prefers_the_runs_own_sidecar(tmp_path, monkeypatch):
+    """The run's status sidecar orders it, as load_from_dir does, and its
+    hydra.yaml is not parsed (the cost the sidecar removes) when both exist
+    and the sidecar is not the older. A run without hydra.yaml sorts too."""
+    import os
+
+    from mushin._resume import STATUS_FILE, write_cell_status
+    from mushin.mcp import server
     from mushin.mcp.server import _job_sort_key
 
     run = tmp_path / "exp" / "zzz"
-    (run / ".hydra").mkdir(parents=True)
+    hydra_dir = run / ".hydra"
+    hydra_dir.mkdir(parents=True)
     write_cell_status(
-        run, status="completed", combo={}, attempt=1, job_num=4, choices=None
+        run, status="completed", combo={}, attempt=1, job_num=4, choices={}
     )
     # Without the sidecar the key would be the directory name's, (1, 0, "zzz").
-    assert _job_sort_key(run / ".hydra", None) == (0, 4, "")
+    assert _job_sort_key(hydra_dir, None) == (0, 4, "")
+
+    OmegaConf.save(
+        OmegaConf.create({"hydra": {"job": {"num": 9}}}), hydra_dir / "hydra.yaml"
+    )
+    t = (run / STATUS_FILE).stat().st_mtime_ns
+    os.utime(hydra_dir / "hydra.yaml", ns=(t, t))
+
+    def _parsed(path):
+        raise AssertionError(f"parsed {path}")
+
+    monkeypatch.setattr(server, "read_hydra_job", _parsed)
+    assert _job_sort_key(hydra_dir, None) == (0, 4, "")
+
+
+def test_job_sort_key_survives_an_unreadable_sidecar(tmp_path):
+    """One damaged sidecar in a directory of runs costs that run its key, not
+    the whole listing (the hydra.yaml read beside it already failed soft)."""
+    from mushin._resume import STATUS_FILE
+    from mushin.mcp.server import _job_sort_key
+
+    run = tmp_path / "exp" / "7"
+    (run / ".hydra").mkdir(parents=True)
+    (run / STATUS_FILE).write_bytes(b"\xff\xfe{}")
+    assert _job_sort_key(run / ".hydra", None) == (0, 7, "")
 
 
 def test_job_sort_key_ignores_an_out_of_root_sidecar(tmp_path):
@@ -575,7 +604,7 @@ def test_job_sort_key_ignores_an_out_of_root_sidecar(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     write_cell_status(
-        outside, status="completed", combo={}, attempt=1, job_num=0, choices=None
+        outside, status="completed", combo={}, attempt=1, job_num=0, choices={}
     )
     (run / STATUS_FILE).symlink_to(outside / STATUS_FILE)
 
@@ -595,7 +624,7 @@ def test_job_sort_key_defers_to_a_newer_hydra_yaml(tmp_path):
     hydra_dir = run / ".hydra"
     hydra_dir.mkdir(parents=True)
     write_cell_status(
-        run, status="completed", combo={}, attempt=1, job_num=4, choices=None
+        run, status="completed", combo={}, attempt=1, job_num=4, choices={}
     )
     OmegaConf.save(
         OmegaConf.create({"hydra": {"job": {"num": 2}}}), hydra_dir / "hydra.yaml"

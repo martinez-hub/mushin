@@ -351,16 +351,24 @@ def _plain_hydra_fields(doc: dict) -> tuple[int, dict | None] | None:
         choices = None if runtime is None else runtime.get("choices")
     except Exception:  # noqa: BLE001 - OmegaConf decides, and raises its own error
         return None
+    return (num, choices) if job_fields_as_written(num, choices) else None
+
+
+def job_fields_as_written(num: Any, choices: Any) -> bool:
+    """Whether ``num`` and ``choices`` are a job number and choices as Hydra
+    writes them: an int, and None or a mapping of group names to option names
+    (or None). The fast read and the status sidecar (``_resume``) accept only
+    these; anything else (``???``, ``${...}``, a bool, a string number) is
+    for OmegaConf to resolve or reject."""
     if type(num) is not int:
-        return None
-    if choices is None:
-        return num, None
-    if not isinstance(choices, dict) or not all(
-        isinstance(k, str) and (v is None or _is_option_name(v))
-        for k, v in choices.items()
-    ):
-        return None
-    return num, choices
+        return False
+    return choices is None or (
+        isinstance(choices, dict)
+        and all(
+            isinstance(k, str) and (v is None or _is_option_name(v))
+            for k, v in choices.items()
+        )
+    )
 
 
 def _is_option_name(v: Any) -> bool:

@@ -2,6 +2,7 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
+import functools
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from inspect import getattr_static
@@ -309,25 +310,27 @@ def _current_group_choice(name: str) -> str | None:
     return None
 
 
-def _current_job_fields() -> tuple[int | None, dict | None]:
+def _current_job_fields() -> tuple[int, dict] | None:
     """The current Hydra job's number and ``runtime.choices``, as its
-    hydra.yaml records them, for the cell's status sidecar. ``(None, None)``
-    outside a Hydra job (a task called directly) and in a single run, whose
-    job has no number."""
+    hydra.yaml records them, for the cell's status sidecar. None outside a
+    Hydra job (a task called directly), in a single run (whose job has no
+    number) and when Hydra records no choices: an incomplete record is not
+    written, so a reload reads hydra.yaml instead of trusting it."""
     try:
         from hydra.core.hydra_config import HydraConfig
 
         if not HydraConfig.initialized():
-            return None, None
+            return None
         hydra = HydraConfig.get()
         num = hydra.job.num
     except Exception:  # noqa: BLE001 - no job number: nothing to record
-        return None, None
+        return None
     if type(num) is not int:
-        return None, None
+        return None
     from ._hydra_yaml import hydra_choices
 
-    return num, hydra_choices(hydra)
+    choices = hydra_choices(hydra)
+    return None if choices is None else (num, choices)
 
 
 # Pip package per Hydra launcher name, for the missing-plugin install hint.
@@ -482,7 +485,15 @@ class _TaskRunner:
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
         # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
-        job_num, choices = _current_job_fields()
+        job_fields = _current_job_fields()
+        job_num, choices = job_fields if job_fields is not None else (None, None)
+        write_status = functools.partial(
+            write_cell_status,
+            config_hash=chash,
+            code_hash=self.code_hash,
+            job_num=job_num,
+            choices=choices,
+        )
 
         # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
         # job number is not in the selected sample never runs (NaN); keying on
@@ -494,16 +505,7 @@ class _TaskRunner:
             if job_num is not None and job_num not in self.sampled_indices:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
-                write_cell_status(
-                    cwd,
-                    status="skipped",
-                    combo=combo,
-                    attempt=1,
-                    config_hash=chash,
-                    code_hash=self.code_hash,
-                    job_num=job_num,
-                    choices=choices,
-                )
+                write_status(cwd, status="skipped", combo=combo, attempt=1)
                 # A skipped cell has no valid metrics; drop any sidecar a prior
                 # sweep left in this reused dir so show/export don't list old
                 # metrics on a 'skipped' row while to_xarray NaN-fills it.
@@ -567,16 +569,7 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         cwd = Path.cwd()
                         write_metrics_sidecar(cwd, cached)
-                        write_cell_status(
-                            cwd,
-                            status="completed",
-                            combo=sc,
-                            attempt=1,
-                            config_hash=chash,
-                            code_hash=self.code_hash,
-                            job_num=job_num,
-                            choices=choices,
-                        )
+                        write_status(cwd, status="completed", combo=sc, attempt=1)
                         return cached
 
         # (1.4) content-addressed cache: reuse a cell computed under the same
@@ -592,16 +585,7 @@ class _TaskRunner:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
                 write_metrics_sidecar(cwd, cached)
-                write_cell_status(
-                    cwd,
-                    status="completed",
-                    combo=combo,
-                    attempt=1,
-                    config_hash=chash,
-                    code_hash=self.code_hash,
-                    job_num=job_num,
-                    choices=choices,
-                )
+                write_status(cwd, status="completed", combo=combo, attempt=1)
                 return cached
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
@@ -638,16 +622,7 @@ class _TaskRunner:
             elif now >= self._deadline:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
-                write_cell_status(
-                    cwd,
-                    status="skipped",
-                    combo=combo,
-                    attempt=1,
-                    config_hash=chash,
-                    code_hash=self.code_hash,
-                    job_num=job_num,
-                    choices=choices,
-                )
+                write_status(cwd, status="skipped", combo=combo, attempt=1)
                 # Same reused-dir hygiene as the sampling skip above.
                 try:
                     (cwd / METRICS_FILE).unlink(missing_ok=True)
@@ -658,24 +633,21 @@ class _TaskRunner:
         # (2) fail-soft wraps everything below, only when on_error == "nan"
         failed_recorded = False
         try:
-            self.pre_task(cfg)
             cwd = Path.cwd()
             combo = self._combo(cfg, self.swept_names)
             rc = build_resume_context(cwd, combo)
+            # 'running' is written before the hooks that take time (pre_task,
+            # provenance capture), so a job killed in them leaves its own record
+            # in the dir, not a prior sweep's: a reload would take that one's
+            # 'completed' status and metrics for this cell's, and its job
+            # number and choices (`load_from_dir` checks their age against
+            # hydra.yaml, but a record of this job is what makes it certain).
+            write_status(cwd, status="running", combo=combo, attempt=rc.attempt)
+            self.pre_task(cfg)
             try:
                 write_provenance(cwd, cfg, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
-            write_cell_status(
-                cwd,
-                status="running",
-                combo=combo,
-                attempt=rc.attempt,
-                config_hash=chash,
-                code_hash=self.code_hash,
-                job_num=job_num,
-                choices=choices,
-            )
             # Set the contextvar AFTER the (fallible) status write, so a failed
             # write can't leave the token set with no matching reset -> a stale
             # ResumeContext leaking into later in-process cells.
@@ -683,16 +655,7 @@ class _TaskRunner:
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
-                write_cell_status(
-                    cwd,
-                    status="failed",
-                    combo=combo,
-                    attempt=rc.attempt,
-                    config_hash=chash,
-                    code_hash=self.code_hash,
-                    job_num=job_num,
-                    choices=choices,
-                )
+                write_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
                 # A metrics sidecar left by a prior successful attempt no longer
                 # describes this cell — remove it so offline tools (show/best/
                 # diff/load) cannot present stale metrics as current results.
@@ -719,38 +682,25 @@ class _TaskRunner:
                         write_metrics_sidecar(cache_cell, result)
                     except OSError:
                         pass
-            write_cell_status(
-                cwd,
-                status="completed",
-                combo=combo,
-                attempt=rc.attempt,
-                config_hash=chash,
-                code_hash=self.code_hash,
-                job_num=job_num,
-                choices=choices,
-            )
+            write_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
             if not failed_recorded:
-                # A SETUP-phase failure (pre_task, combo extraction, the
-                # 'running' status write) never reached the task-body handler
-                # above, so the cell dir may still carry a prior sweep's
-                # 'completed' status + metrics sidecar. Record the failure and
-                # remove the stale sidecar so offline tools cannot present the
-                # old metrics as this sweep's results. Best-effort: the combo
-                # itself may be what failed to compute.
+                # A SETUP-phase failure (combo extraction, the 'running' status
+                # write, pre_task) never reached the task-body handler above, so
+                # the cell dir carries this job's 'running' status, or still a
+                # prior sweep's 'completed' status + metrics sidecar. Record the
+                # failure and remove the stale sidecar so offline tools cannot
+                # present the old metrics as this sweep's results. Best-effort:
+                # the combo itself may be what failed to compute.
                 try:
                     cwd = Path.cwd()
                     (cwd / METRICS_FILE).unlink(missing_ok=True)
-                    write_cell_status(
+                    write_status(
                         cwd,
                         status="failed",
                         combo=self._combo(cfg, self.swept_names),
                         attempt=1,
-                        config_hash=chash,
-                        code_hash=self.code_hash,
-                        job_num=job_num,
-                        choices=choices,
                     )
                 except Exception:  # noqa: BLE001 - never mask the real failure
                     pass
@@ -2341,8 +2291,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     def _job_choices(self, i: int) -> dict | None:
         """``runtime.choices`` for job ``i``, when jobs align with cfgs.
 
-        Falls back to the choices recovered from each cell's hydra.yaml by
-        `load_from_dir`, so offline loads key config-group axes correctly."""
+        Falls back to the choices `load_from_dir` recovered for each cell (from
+        its status sidecar, else its hydra.yaml), so offline loads key
+        config-group axes correctly."""
         jobs = getattr(self, "jobs", None)
         if jobs and len(jobs) == len(self.cfgs):
             return _group_choices_of_job(jobs[i])

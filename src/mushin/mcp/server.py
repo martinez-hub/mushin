@@ -161,7 +161,10 @@ def _job_sort_key(hydra_dir: Path, root: Path | None = None):
     run_dir = hydra_dir.parent
     yaml_in_root = _within_root(hydra_yaml, root)
     if _within_root(run_dir / STATUS_FILE, root):
-        fields = sidecar_job_fields(run_dir, hydra_yaml if yaml_in_root else None)
+        try:
+            fields = sidecar_job_fields(run_dir, hydra_yaml if yaml_in_root else None)
+        except Exception:  # an unreadable sidecar: the run keeps its other keys
+            fields = None
         if fields is not None:
             return (0, fields[0], "")
     if yaml_in_root:

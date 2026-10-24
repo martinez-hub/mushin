@@ -46,10 +46,11 @@ def write_cell_status(
     """Atomically write this cell's status sidecar into its own dir.
 
     ``job_num`` and ``choices`` are the Hydra job number and config-group
-    choices the job's hydra.yaml also records. Written when the job number is
-    known (inside a Hydra multirun job), they let a reload sort the cells and
-    key config-group axes without parsing hydra.yaml, which is most of a
-    reload's time; see :func:`sidecar_job_fields`."""
+    choices the job's hydra.yaml also records. Written when both are known
+    (inside a Hydra multirun job), never one without the other, they let a
+    reload sort the cells and key config-group axes without parsing
+    hydra.yaml, which is most of a reload's time; see
+    :func:`sidecar_job_fields`."""
     payload: dict[str, Any] = {
         "status": status,
         "combo": combo,
@@ -59,36 +60,31 @@ def write_cell_status(
         payload["config_hash"] = config_hash
     if code_hash is not None:
         payload["code_hash"] = code_hash
-    if job_num is not None:
+    if job_num is not None and choices is not None:
         payload["job_num"] = int(job_num)
-        payload["choices"] = choices
+        payload["choices"] = dict(choices)
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
 
 
-def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict | None] | None:
+def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
     """The job number and config-group choices this cell's status sidecar
     records, as ``read_hydra_job`` reads them from its hydra.yaml, or None
     when the sidecar has none to use: a sweep from before they were recorded,
-    a field of the wrong shape, or a sidecar older than ``hydra_yaml``.
+    a field of the wrong shape (choices must be a mapping; a sidecar never
+    records a number without them), or a sidecar older than ``hydra_yaml``.
 
     Hydra writes a job's hydra.yaml before the task runs, and the task writes
     the sidecar, so a sidecar older than the hydra.yaml beside it is a previous
     sweep's record of a reused directory (the new job was killed before its
     first status write), and that hydra.yaml is the record to read."""
+    from ._hydra_yaml import job_fields_as_written
+
     status = read_cell_status(cell_dir)
     if status is None:
         return None
     num = status.get("job_num")
     choices = status.get("choices")
-    if type(num) is not int:  # a bool or float is not a job number either
-        return None
-    if choices is not None and not (
-        isinstance(choices, dict)
-        and all(
-            isinstance(k, str) and (v is None or isinstance(v, str))
-            for k, v in choices.items()
-        )
-    ):
+    if not isinstance(choices, dict) or not job_fields_as_written(num, choices):
         return None
     if hydra_yaml is not None:
         try:
@@ -159,7 +155,11 @@ def read_cell_status(cell_dir) -> dict | None:
         return None
     try:
         data = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError, RecursionError):
+        # ValueError covers JSONDecodeError, a non-UTF-8 file and an integer
+        # past Python's digit limit; RecursionError a file nested too deep. All
+        # read as a corrupt sidecar, as the MCP server lists a directory of runs
+        # it did not write.
         return None
     return data if isinstance(data, dict) else None
 

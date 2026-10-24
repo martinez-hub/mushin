@@ -31,6 +31,10 @@ def test_write_cell_status_records_job_fields_only_when_known(tmp_path):
     got = read_cell_status(tmp_path)
     assert "job_num" not in got and "choices" not in got
     assert sidecar_job_fields(tmp_path) is None
+    # Never one field without the other: a reload needs both to skip hydra.yaml.
+    write_cell_status(tmp_path, status="running", combo={}, attempt=1, job_num=2)
+    got = read_cell_status(tmp_path)
+    assert "job_num" not in got and "choices" not in got
 
     choices = {"model": "small", "hydra/env": None}
     write_cell_status(
@@ -51,6 +55,9 @@ def test_write_cell_status_records_job_fields_only_when_known(tmp_path):
         (3, ["adam"]),  # choices must map group names to option names
         (3, {"optimizer": 1}),
         (3, {"optimizer": "adam", "model": 2.5}),
+        (3, None),  # mushin never writes a number without the choices
+        (3, {"model": "???"}),  # not option names, as the hydra.yaml read has it
+        (3, {"model": "${oc.env:MODEL}"}),
     ],
 )
 def test_sidecar_job_fields_rejects_what_hydra_does_not_write(
@@ -64,7 +71,7 @@ def test_sidecar_job_fields_rejects_what_hydra_does_not_write(
 
 @pytest.mark.parametrize(
     "job_num, choices",
-    [(3, None), (0, {}), (3, {"optimizer": None, "model": "small"})],
+    [(0, {}), (3, {"optimizer": None, "model": "small"})],
 )
 def test_sidecar_job_fields_accepts_what_hydra_writes(tmp_path, job_num, choices):
     payload = {"status": "completed", "combo": {}, "attempt": 1}
@@ -84,19 +91,35 @@ def test_sidecar_job_fields_defers_to_a_newer_hydra_yaml(tmp_path):
     sidecar older than hydra.yaml is a previous sweep's, and is not used. A
     missing hydra.yaml, or one of the same age, leaves the sidecar in use."""
     write_cell_status(
-        tmp_path, status="completed", combo={}, attempt=1, job_num=5, choices=None
+        tmp_path, status="completed", combo={}, attempt=1, job_num=5, choices={}
     )
     hydra_yaml = tmp_path / "hydra.yaml"
-    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, None)  # no such file
+    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, {})  # no such file
 
     hydra_yaml.write_text("hydra:\n  job:\n    num: 0\n")
     t = (tmp_path / STATUS_FILE).stat().st_mtime_ns
     os.utime(hydra_yaml, ns=(t + 10**9, t + 10**9))
     assert sidecar_job_fields(tmp_path, hydra_yaml) is None
     os.utime(hydra_yaml, ns=(t, t))
-    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, None)
+    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, {})
     os.utime(hydra_yaml, ns=(t - 10**9, t - 10**9))
-    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, None)
+    assert sidecar_job_fields(tmp_path, hydra_yaml) == (5, {})
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xff\xfe{}",  # not UTF-8
+        b'{"job_num": ' + b"9" * 5000 + b"}",  # past Python's int digit limit
+        b"[" * 100_000,  # nested past the recursion limit
+    ],
+)
+def test_read_cell_status_treats_any_unreadable_file_as_corrupt(tmp_path, content):
+    """The MCP server lists directories it did not write; one planted or
+    damaged sidecar must not make the whole directory unqueryable."""
+    (tmp_path / STATUS_FILE).write_bytes(content)
+    assert read_cell_status(tmp_path) is None
+    assert sidecar_job_fields(tmp_path) is None
 
 
 def test_read_cell_status_missing_or_corrupt_returns_none(tmp_path):

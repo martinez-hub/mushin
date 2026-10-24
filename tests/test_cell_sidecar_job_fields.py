@@ -88,6 +88,73 @@ def test_skipped_cached_and_resumed_cells_record_them_too(tmp_path):
     assert statuses.count("skipped") == 2
 
 
+def test_failed_and_budget_skipped_cells_record_them_too(tmp_path, monkeypatch):
+    """The fail-soft 'failed' write and the budget 'skipped' write carry the
+    fields, so a reload of the sweeps one most often inspects offline (the
+    ones that went wrong) skips hydra.yaml like any other."""
+    import time
+
+    class Flaky(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            if a == 2:
+                raise RuntimeError("boom")
+            return dict(m=float(a))
+
+    class Slow(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            time.sleep(0.05)
+            return dict(m=float(a))
+
+    with pytest.warns(UserWarning, match="failed"):
+        Flaky().run(
+            a=multirun([1, 2, 3]), working_dir=str(tmp_path / "f"), on_error="nan"
+        )
+    with pytest.warns(UserWarning, match="not run"):
+        Slow().run(
+            a=multirun([1, 2, 3]),
+            working_dir=str(tmp_path / "b"),
+            max_total_seconds=0.01,
+        )
+    statuses = {}
+    for root in ("f", "b"):
+        for cell in _cells(tmp_path / root):
+            status = read_cell_status(cell)
+            statuses.setdefault(root, []).append(status["status"])
+            assert status["job_num"] == int(cell.name), (root, status)
+            assert isinstance(status["choices"], dict), (root, status)
+            (cell / ".hydra" / "hydra.yaml").unlink()
+    assert statuses["f"].count("failed") == 1
+    assert "skipped" in statuses["b"]
+
+    _forbid_hydra_yaml(monkeypatch)
+    for root in ("f", "b"):
+        wf = W().load_from_dir(tmp_path / root, "mushin_metrics.json")
+        assert [d.name for d in wf.multirun_working_dirs] == ["0", "1", "2"]
+
+
+def test_running_is_recorded_before_pre_task_and_provenance(tmp_path):
+    """The job's own record, with the fields, is in the directory before the
+    hooks that take time, so a job killed in them leaves no prior sweep's
+    'completed' status, metrics, job number or choices for a reload to take."""
+    seen = []
+
+    class P(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(*args, **kwargs):
+            seen.append(read_cell_status(Path.cwd()))
+
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    P().run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    assert [s["status"] for s in seen] == ["running", "running"]
+    assert sorted(s["job_num"] for s in seen) == [0, 1]
+    assert all(isinstance(s["choices"], dict) for s in seen)
+
+
 def test_load_from_dir_reads_no_hydra_yaml_for_a_new_sweep(tmp_path, monkeypatch):
     """A sweep run on this version reloads from its sidecars alone: the
     hydra.yaml parse they replace was most of a reload's time."""
