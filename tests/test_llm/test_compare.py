@@ -872,3 +872,69 @@ def test_compare_scores_column_vector_warns_but_runs():
             }
         )
     assert res is not None
+
+
+def test_item_bootstrap_rows_map_to_their_own_pair_and_metric():
+    """Three systems and two per-item metrics: every row's item_diff is the
+    mean per-item difference of that row's pair on that row's metric, so a
+    batch result cannot land on another pair's or another metric's row."""
+    import numpy as np
+
+    from mushin.llm import compare_scores
+
+    rng = np.random.default_rng(0)
+    arrays = {
+        name: rng.random((3, 200)) + shift
+        for name, shift in [("a", 0), ("b", 0.1), ("c", 0.3)]
+    }
+    result = compare_scores(arrays, metric_name="acc", item_bootstrap=200)
+    comps = result.comparisons
+    assert len(comps) == 3
+    for row in comps.itertuples():
+        expected = (
+            arrays[row.method_a].mean(axis=0).mean()
+            - arrays[row.method_b].mean(axis=0).mean()
+        )
+        assert row.item_diff == pytest.approx(expected)
+        assert row.mean_diff == pytest.approx(expected)
+
+
+def test_item_p_is_corrected_within_each_metric_not_across_metrics():
+    """Two per-item metrics and three systems: each metric's three comparisons
+    form their own Holm family, as on the seed axis, not one family of six."""
+    import numpy as np
+
+    from mushin.benchmark._stats import holm_correction
+    from mushin.llm import compare_llms
+
+    def system(k):
+        def run(inputs, seed):
+            rng = np.random.default_rng(100 * k + seed)
+            return [x if rng.random() < 0.5 + 0.1 * k else "miss" for x in inputs]
+
+        return run
+
+    data = [{"input": f"q{i}", "reference": f"q{i}"} for i in range(300)]
+    metrics = {
+        "exact": lambda out, ref: float(out == ref),
+        "length": lambda out, ref: float(len(out) == len(ref)),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        comps = compare_llms(
+            {f"s{k}": system(k) for k in range(3)},
+            data,
+            metric=metrics,
+            seeds=range(2),
+            item_bootstrap=200,
+        ).comparisons
+    assert sorted(comps["metric"].unique()) == ["exact", "length"]
+    for metric, rows in comps.groupby("metric"):
+        assert len(rows) == 3
+        np.testing.assert_allclose(
+            rows["item_p_corrected"].to_numpy(),
+            holm_correction(rows["item_p"].to_numpy()),
+        )
+    # The two families differ from one family of six, so the check discriminates.
+    one_family = holm_correction(comps["item_p"].to_numpy())
+    assert not np.allclose(comps["item_p_corrected"].to_numpy(), one_family)
