@@ -634,6 +634,20 @@ def test_job_sort_key_defers_to_a_newer_hydra_yaml(tmp_path):
     assert _job_sort_key(hydra_dir, None) == (0, 2, "")
 
 
+def test_job_sort_key_survives_a_symlink_loop_under_root(tmp_path):
+    """A sidecar that is a symlink to itself cannot be resolved; the
+    containment check treats it as not shown to be inside root, and the run
+    keeps its directory-name key instead of the listing failing."""
+    from mushin._resume import STATUS_FILE
+    from mushin.mcp.server import _job_sort_key
+
+    root = tmp_path / "allowed"
+    run = root / "exp" / "7"
+    (run / ".hydra").mkdir(parents=True)
+    (run / STATUS_FILE).symlink_to(run / STATUS_FILE)
+    assert _job_sort_key(run / ".hydra", root.resolve()) == (0, 7, "")
+
+
 def test_legacy_nonzip_metrics_not_misread(tmp_path):
     """A legacy non-zip torch.save file must be skipped, never read as garbage."""
     import zipfile

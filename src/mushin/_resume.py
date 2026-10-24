@@ -52,7 +52,6 @@ def write_cell_status(
     never one without the other, they let a reload sort the cells and key
     config-group axes without parsing hydra.yaml, which is most of a reload's
     time; see :func:`sidecar_job_fields`."""
-    from ._hydra_yaml import job_fields_as_written
 
     payload: dict[str, Any] = {
         "status": status,
@@ -63,10 +62,19 @@ def write_cell_status(
         payload["config_hash"] = config_hash
     if code_hash is not None:
         payload["code_hash"] = code_hash
-    if isinstance(choices, dict) and job_fields_as_written(job_num, choices):
+    if _records_job_fields(job_num, choices):
         payload["job_num"] = job_num
         payload["choices"] = choices
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
+
+
+def _records_job_fields(num: Any, choices: Any) -> bool:
+    """The one rule for what the sidecar records and what a reload accepts:
+    a job number and choices as Hydra writes them, the choices a mapping (a
+    number is never recorded without them)."""
+    from ._hydra_yaml import job_fields_as_written
+
+    return isinstance(choices, dict) and job_fields_as_written(num, choices)
 
 
 def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
@@ -74,33 +82,35 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
     records, as ``read_hydra_job`` reads them from its hydra.yaml, or None
     when the sidecar has none to use: a sweep from before they were recorded,
     a field of the wrong shape (choices must be a mapping; a sidecar never
-    records a number without them), or a sidecar older than ``hydra_yaml``.
+    records a number without them), a sidecar older than ``hydra_yaml``, or a
+    ``hydra_yaml`` that is there but cannot be examined.
 
     Hydra writes a job's hydra.yaml before the task runs, and the task writes
     the sidecar, so a sidecar older than the hydra.yaml beside it is a previous
     sweep's record of a reused directory (the new job was killed before its
     first status write), and that hydra.yaml is the record to read."""
-    from ._hydra_yaml import job_fields_as_written
-
+    if hydra_yaml is not None:
+        # The sidecar's age is taken before its content: a sidecar replaced in
+        # between is then read in its newer state, and only its age is
+        # understated, so the comparison errs toward hydra.yaml.
+        try:
+            written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
+        except OSError:
+            return None
+        try:
+            newer = Path(hydra_yaml).stat().st_mtime_ns > written
+        except FileNotFoundError:  # no hydra.yaml: nothing newer to defer to
+            newer = False
+        except OSError:  # unreadable: let the hydra.yaml path report it
+            return None
+        if newer:
+            return None
     status = read_cell_status(cell_dir)
     if status is None:
         return None
     num = status.get("job_num")
     choices = status.get("choices")
-    if not isinstance(choices, dict) or not job_fields_as_written(num, choices):
-        return None
-    if hydra_yaml is not None:
-        try:
-            written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
-        except OSError:  # the sidecar went away since it was read
-            return None
-        try:
-            newer = Path(hydra_yaml).stat().st_mtime_ns > written
-        except OSError:  # no hydra.yaml: nothing newer to defer to
-            newer = False
-        if newer:
-            return None
-    return num, choices
+    return (num, choices) if _records_job_fields(num, choices) else None
 
 
 def config_fingerprint(cfg) -> str | None:

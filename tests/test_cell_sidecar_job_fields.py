@@ -11,7 +11,7 @@ import pytest
 
 from mushin import multirun
 from mushin._hydra_yaml import read_hydra_job
-from mushin._resume import STATUS_FILE, read_cell_status
+from mushin._resume import STATUS_FILE, read_cell_status, sidecar_job_fields
 from mushin.workflows import MultiRunMetricsWorkflow
 
 
@@ -105,9 +105,14 @@ def test_skipped_cached_and_resumed_cells_record_them_too(tmp_path):
     assert len(computed) == 4  # two cells came from the cache
     _assert_fields(tmp_path / "cached")
 
+    for cell in _cells(tmp_path / "cached"):
+        _strip_job_fields(cell)  # the resume must write them back
     sweep(tmp_path / "cached", cache_dir=cache, resume=True)
     assert len(computed) == 4  # every cell was resumed
     _assert_fields(tmp_path / "cached")
+    for cell in _cells(tmp_path / "cached"):
+        # Not older than the hydra.yaml Hydra rewrote for the resumed job.
+        assert sidecar_job_fields(cell, cell / ".hydra" / "hydra.yaml") is not None
 
 
 def test_a_pre_task_failure_records_them_too(tmp_path, monkeypatch):
@@ -216,6 +221,32 @@ def test_running_is_recorded_before_pre_task_and_provenance(tmp_path):
     assert [s["status"] for s in seen] == ["running", "running"]
     assert sorted(s["job_num"] for s in seen) == [0, 1]
     assert all(isinstance(s["choices"], dict) for s in seen)
+
+
+def test_a_checkpoint_staged_by_pre_task_is_seen_on_resume(tmp_path):
+    """The 'running' write moved ahead of pre_task; checkpoint discovery did
+    not: a pre_task that stages a checkpoint into the cell dir (the resilience
+    guide's pattern) still hands it to the task as ``last_ckpt``."""
+    seen = {}
+
+    class S(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(a):
+            if read_cell_status(Path.cwd())["attempt"] == 2:
+                (Path.cwd() / "last.ckpt").write_text("staged")
+
+        @staticmethod
+        def task(a, mushin_resume=None):
+            seen[mushin_resume.attempt] = mushin_resume.last_ckpt
+            if mushin_resume.attempt == 1:
+                raise RuntimeError("first attempt fails")
+            return dict(m=float(a))
+
+    with pytest.warns(UserWarning, match="failed"):
+        S().run(a=multirun([1]), working_dir=str(tmp_path / "s"), on_error="nan")
+    S().run(a=multirun([1]), working_dir=str(tmp_path / "s"), resume=True)
+    assert seen[1] is None
+    assert seen[2] is not None and seen[2].name == "last.ckpt"
 
 
 def test_load_from_dir_reads_no_hydra_yaml_for_a_new_sweep(tmp_path, monkeypatch):

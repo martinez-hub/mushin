@@ -183,7 +183,10 @@ def _within_root(target: Path, root: Path | None) -> bool:
     """True if ``target`` (after resolving symlinks) is inside ``root``."""
     if root is None:
         return True
-    resolved = target.resolve()
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError):  # a symlink loop (RuntimeError before 3.13)
+        return False  # a path that cannot be resolved is not shown to be inside
     return resolved == root or root in resolved.parents
 
 

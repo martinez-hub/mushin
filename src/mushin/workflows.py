@@ -2,6 +2,7 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
+import dataclasses
 import functools
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -470,6 +471,7 @@ class _TaskRunner:
             _CURRENT_RESUME,
             build_resume_context,
             config_fingerprint,
+            discover_last_ckpt,
             read_cell_status,
             write_cell_status,
         )
@@ -633,6 +635,8 @@ class _TaskRunner:
         try:
             cwd = Path.cwd()
             combo = self._combo(cfg, self.swept_names)
+            # The prior sidecar (attempt, is_resume) is read before the write
+            # below replaces it.
             rc = build_resume_context(cwd, combo)
             # 'running' is written before the hooks that take time (pre_task,
             # provenance capture), so a job killed in them leaves its own record
@@ -642,6 +646,11 @@ class _TaskRunner:
             # hydra.yaml, but a record of this job is what makes it certain).
             write_status(cwd, status="running", combo=combo, attempt=rc.attempt)
             self.pre_task(cfg)
+            if rc.is_resume:
+                # pre_task may stage a checkpoint into the cell dir (the
+                # resilience guide's pattern), so the checkpoint is looked for
+                # after it, as it was when the hook ran first.
+                rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
             try:
                 write_provenance(cwd, cfg, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort

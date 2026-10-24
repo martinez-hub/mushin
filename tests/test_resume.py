@@ -52,6 +52,17 @@ def test_write_cell_status_records_job_fields_only_when_known(tmp_path):
         assert "job_num" not in got and "choices" not in got, bad
 
 
+def test_sidecar_job_fields_defers_to_a_hydra_yaml_it_cannot_examine(tmp_path):
+    """Only a missing hydra.yaml means there is nothing to defer to. One that
+    is there but cannot be examined sends the reload to the hydra.yaml path,
+    which reports the problem as it always did."""
+    write_cell_status(
+        tmp_path, status="completed", combo={}, attempt=1, job_num=5, choices={}
+    )
+    (tmp_path / "file").write_text("not a directory")
+    assert sidecar_job_fields(tmp_path, tmp_path / "file" / "hydra.yaml") is None
+
+
 def test_sidecar_job_fields_without_the_file_it_read(tmp_path, monkeypatch):
     """A sidecar removed between its read and the age check (a concurrent
     resume or gc) has no claim over the hydra.yaml that is there."""
