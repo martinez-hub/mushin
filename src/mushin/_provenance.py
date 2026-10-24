@@ -8,6 +8,7 @@ import json
 import platform
 import re
 import subprocess
+import sys
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -91,8 +92,15 @@ def _accelerator() -> dict:
     """Accelerator identity: the part of GPU numerics the torch wheel version
     alone cannot reconstruct: CUDA/cuDNN + device name on NVIDIA, the MPS
     device on Apple Silicon. All-None on CPU-only builds (and if torch itself
-    fails to import)."""
+    fails to import), and in a process that has not imported torch."""
     out: dict = {"cuda": None, "cudnn": None, "device": None}
+    # A sweep that never loads torch (a scikit-learn comparison, say) has no
+    # accelerator numerics to record, and importing torch only to learn that
+    # costs about half a second per run(). A task that trains with torch or
+    # Lightning has imported it by now, through its module's imports; one that
+    # imports torch only inside its body records None.
+    if sys.modules.get("torch") is None:
+        return out
     try:
         import torch
 

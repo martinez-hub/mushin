@@ -74,6 +74,32 @@ def test_capture_base_records_accelerator():
     assert set(acc) == {"cuda", "cudnn", "device"}
 
 
+def test_accelerator_does_not_import_torch_for_a_sweep_without_it(monkeypatch):
+    """A process that has not imported torch has no accelerator numerics to
+    record, and importing torch to learn that costs about half a second per
+    run(); the record is all-None and torch stays unimported."""
+    import sys
+
+    from mushin import _provenance
+
+    # An import attempt is observed at the finders, not through sys.modules:
+    # re-importing torch over its loaded extension fails, and a failed import
+    # leaves sys.modules as it was, which would look like no attempt.
+    attempted = []
+
+    class Recorder:
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            if name == "torch" or name.startswith("torch."):
+                attempted.append(name)
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [Recorder, *sys.meta_path])
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    assert _provenance._accelerator() == {"cuda": None, "cudnn": None, "device": None}
+    assert attempted == []
+
+
 def test_env_snapshot_never_overwrites_prior_run(tmp_path):
     """A resume runs in a possibly-different environment; it must not
     overwrite the snapshot recorded for the cells that ran earlier."""
