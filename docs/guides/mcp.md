@@ -49,7 +49,7 @@ Add an entry to your `claude_desktop_config.json`:
 | `get_config` | The resolved Hydra config for a run (or all runs). |
 | `read_dataset` | Dimensions, coordinates, data variables, and basic statistics of a saved netCDF file. |
 | `get_failures` | Failed sweep cells from the manifest: combo, directory, error, and the recorded traceback. |
-| `get_provenance` | Per-run provenance records: git SHA, package versions, accelerator (CUDA/cuDNN/device). |
+| `get_provenance` | Per-run provenance records: git SHA, package versions, accelerator (CUDA/cuDNN/device, when the cell's process imported torch). |
 
 All tools are read-only. The server never writes files, trains models, or
 launches sweeps.

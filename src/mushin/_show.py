@@ -358,8 +358,11 @@ def _flatten(d: dict, prefix: str = "") -> dict:
 
 
 def _accelerator_unrecorded(record: dict | None) -> bool:
-    acc = (record or {}).get("accelerator")
-    return not isinstance(acc, dict) or all(v is None for v in acc.values())
+    return not isinstance((record or {}).get("accelerator"), dict)
+
+
+def _is_accelerator_key(key: str) -> bool:
+    return key == "accelerator" or key.startswith("accelerator.")
 
 
 def _diff_provenance(a: dict | None, b: dict | None) -> dict:
@@ -370,14 +373,14 @@ def _diff_provenance(a: dict | None, b: dict | None) -> dict:
     other)."""
     fa = _flatten({k: v for k, v in (a or {}).items() if k not in _PROV_VOLATILE})
     fb = _flatten({k: v for k, v in (b or {}).items() if k not in _PROV_VOLATILE})
-    # An all-None accelerator means "not recorded" (the cell's process never
-    # imported torch; before mushin 0.17, a CPU-only torch build), not a
-    # different machine: a torch sweep against a scikit-learn sweep on the same
-    # box is no hardware change. Compare the accelerator only when both sides
-    # recorded one.
+    # A null accelerator means "not recorded": the cell's process never
+    # imported torch, so a torch sweep against a scikit-learn sweep on the same
+    # box is no hardware change. A dict of None values is recorded (torch was
+    # loaded and found no CUDA or MPS device) and still compares, so a CPU-only
+    # torch build against a GPU box is reported, as it always was.
     if _accelerator_unrecorded(a) or _accelerator_unrecorded(b):
-        fa = {k: v for k, v in fa.items() if not k.startswith("accelerator.")}
-        fb = {k: v for k, v in fb.items() if not k.startswith("accelerator.")}
+        fa = {k: v for k, v in fa.items() if not _is_accelerator_key(k)}
+        fb = {k: v for k, v in fb.items() if not _is_accelerator_key(k)}
     changed = {}
     for k in sorted(set(fa) | set(fb)):
         va, vb = fa.get(k), fb.get(k)

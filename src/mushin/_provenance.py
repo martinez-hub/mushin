@@ -14,6 +14,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ._sweep_io import _atomic_write_json
+
 _PKGS = ("mushin-py", "torch", "numpy", "pytorch-lightning", "hydra-core", "hydra-zen")
 
 _REDACTED = "***REDACTED***"
@@ -91,22 +93,23 @@ def _apple_chip() -> str | None:
 _NO_ACCELERATOR: dict = {"cuda": None, "cudnn": None, "device": None}
 
 
-def _accelerator() -> dict:
+def _accelerator() -> dict | None:
     """Accelerator identity: the part of GPU numerics the torch wheel version
-    alone cannot reconstruct: CUDA/cuDNN + device name on NVIDIA, the MPS
-    device on Apple Silicon. All-None on CPU-only builds, and in a process
-    that has not imported torch."""
-    out = dict(_NO_ACCELERATOR)
-    # Never import torch here. Importing it is the dominant cost of a
-    # provenance capture, and a process that has not loaded torch has no
-    # accelerator numerics to record: a sweep that never uses torch (a
-    # scikit-learn comparison, say) would pay the import to record None. The
-    # record each cell keeps is taken from the process that ran it, after its
-    # task returned (`record_accelerator`), when a task that uses torch has
-    # imported it, wherever the import statement sits.
+    alone cannot reconstruct: CUDA/cuDNN build + device name on NVIDIA, the MPS
+    device on Apple Silicon. ``None`` (not recorded) in a process that has not
+    imported torch; all-None values when torch is loaded but found no device.
+    Never initializes CUDA itself: the device is named once the task has."""
     torch = sys.modules.get("torch")
     if torch is None:
-        return out
+        # Never import torch here. Importing it is the dominant cost of a
+        # provenance capture, and a process that has not loaded torch has no
+        # accelerator numerics to record: a sweep that never uses torch (a
+        # scikit-learn comparison, say) would pay the import to record None.
+        # Each cell's record is taken from the process that ran it, after its
+        # task returned (`record_accelerator`), when a task that uses torch has
+        # imported it, wherever the import statement sits.
+        return None
+    out = dict(_NO_ACCELERATOR)
     try:
         out["cuda"] = torch.version.cuda
         try:
@@ -116,7 +119,14 @@ def _accelerator() -> dict:
             pass
         try:
             if torch.cuda.is_available():
-                out["device"] = torch.cuda.get_device_name(0)
+                # get_device_name initializes CUDA. In a worker whose task never
+                # touched the GPU that would create a context (hundreds of MB)
+                # and make the next cell's pin_gpu_round_robin raise, so the
+                # name is read only once the task has initialized CUDA itself.
+                if torch.cuda.is_initialized():
+                    out["device"] = torch.cuda.get_device_name(
+                        torch.cuda.current_device()
+                    )
             elif (
                 getattr(torch.backends, "mps", None) is not None
                 and torch.backends.mps.is_available()
@@ -132,9 +142,19 @@ def _accelerator() -> dict:
     return out
 
 
-# The accelerator of this process, queried once torch is loaded: the answer
-# cannot change afterwards (visible devices are fixed once CUDA initializes),
-# and the query costs about 10 ms, which a 1000-cell sweep would pay per cell.
+def _accelerator_settled() -> bool:
+    """Whether this process's accelerator answer can no longer change. A CUDA
+    device is named only once CUDA is initialized, which a later cell's task
+    may be the first to do."""
+    torch = sys.modules.get("torch")
+    try:
+        return not torch.cuda.is_available() or torch.cuda.is_initialized()
+    except Exception:  # noqa: BLE001 - best-effort
+        return False
+
+
+# The accelerator of this process once the answer is settled. The query costs
+# about 10 ms, which a 1000-cell sweep would otherwise pay per cell.
 _ACCELERATOR_SEEN: dict | None = None
 
 
@@ -154,23 +174,28 @@ def record_accelerator(job_dir) -> None:
         return
     path = Path(job_dir) / "mushin_provenance.json"
     try:
-        if _ACCELERATOR_SEEN is None:
-            _ACCELERATOR_SEEN = _accelerator()
+        seen = _ACCELERATOR_SEEN
+        if seen is None:
+            seen = _accelerator()
+            if _accelerator_settled():
+                _ACCELERATOR_SEEN = seen
         record = json.loads(path.read_text())
-        if record.get("accelerator") == _ACCELERATOR_SEEN:
+        if record.get("accelerator") == seen:
             return
-        record["accelerator"] = _ACCELERATOR_SEEN
-        path.write_text(json.dumps(record, indent=2))
+        record["accelerator"] = seen
+        _atomic_write_json(path, record)
     except Exception:  # noqa: BLE001 - provenance is best-effort
         pass
 
 
 def capture_base() -> dict:
     """The sweep-constant part of a provenance record: python/platform plus the
-    git state, package versions, and accelerator identity. This is identical
-    for every cell in a sweep but expensive to compute (``_git()`` spawns three
-    git subprocesses), so a sweep captures it ONCE and reuses it for all cells
-    rather than paying it per cell (3N git subprocesses for an N-cell sweep)."""
+    git state and package versions, which are identical for every cell in a
+    sweep but expensive to compute (``_git()`` spawns three git subprocesses),
+    so a sweep captures it ONCE and reuses it for all cells rather than paying
+    it per cell (3N git subprocesses for an N-cell sweep). The accelerator in
+    it is this process's view, a placeholder that ``record_accelerator``
+    replaces in each cell once its task has run."""
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -183,9 +208,14 @@ def capture_base() -> dict:
 def capture(config: Any = None, base: dict | None = None) -> dict:
     """A full provenance record. ``base`` is the sweep-constant part from
     ``capture_base()``; when omitted it is computed fresh (so a standalone call
-    still works). Only ``timestamp`` and ``config`` vary per cell."""
+    still works, with this process's view of the accelerator). Only
+    ``timestamp`` and ``config`` vary per cell."""
     if base is None:
         base = capture_base()
+    if _ACCELERATOR_SEEN is not None:
+        # Known from an earlier cell of this process: the record is right at
+        # its first write, and record_accelerator has nothing to rewrite.
+        base = {**base, "accelerator": _ACCELERATOR_SEEN}
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         **base,
@@ -194,9 +224,10 @@ def capture(config: Any = None, base: dict | None = None) -> dict:
 
 
 def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> None:
-    (Path(job_dir) / "mushin_provenance.json").write_text(
-        json.dumps(capture(config, base), indent=2)
-    )
+    # Atomic: under an external multi-rank launch every rank writes the same
+    # cell's record, and a reader (show, the MCP server, record_accelerator)
+    # must never see a torn file.
+    _atomic_write_json(Path(job_dir) / "mushin_provenance.json", capture(config, base))
 
 
 def _redact_config(obj: Any) -> Any:
