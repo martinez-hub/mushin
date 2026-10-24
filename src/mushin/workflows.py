@@ -2360,8 +2360,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
-        # Unset until the load succeeds: `to_xarray` and `load_metrics` reload
-        # when it is None, so a failed load is retried, not half-reused.
+        # Unset until the job directories and their configs are read:
+        # `to_xarray` and `load_metrics` reload when it is None, so a load that
+        # fails partway is retried, not half-reused.
         self.multirun_working_dirs = None
 
         self.working_dir = Path(working_dir)
@@ -2399,11 +2400,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             read_hydra_job(d / f"{self.output_subdir}/hydra.yaml") for d in job_dirs
         ]
         _job_nums, _choices = zip(*_jobs, strict=True)
-        self.multirun_working_dirs = _sort_x_by_k(job_dirs, _job_nums)
-        self._loaded_job_choices = _sort_x_by_k(list(_choices), _job_nums)
-        self.cfgs = []
-
-        for dir_ in self.multirun_working_dirs:
+        job_dirs = _sort_x_by_k(job_dirs, _job_nums)
+        cfgs = []
+        for dir_ in job_dirs:
             # Ensure we load saved YAML configurations for each job (in hydra.job.output_subdir)
             cfg_file = dir_ / f"{self.output_subdir}/config.yaml"
             if not cfg_file.exists():
@@ -2412,7 +2411,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     "was cleaned. Re-run the sweep, or point load_from_dir at a "
                     "directory whose cells still have their .hydra/config.yaml."
                 )
-            self.cfgs.append(load_from_yaml(cfg_file))
+            cfgs.append(load_from_yaml(cfg_file))
+        self.multirun_working_dirs = job_dirs
+        self._loaded_job_choices = _sort_x_by_k(list(_choices), _job_nums)
+        self.cfgs = cfgs
 
         if metrics_filename is not None:
             self.load_metrics(metrics_filename)

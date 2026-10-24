@@ -19,9 +19,9 @@ from yaml.constructor import ConstructorError, SafeConstructor
 from yaml.resolver import BaseResolver, Resolver
 
 try:  # libyaml, which PyYAML's wheels include
-    from yaml.cyaml import CParser
+    from yaml.cyaml import CDumper, CParser
 except ImportError:  # a PyYAML built without it: reloads take OmegaConf's path
-    CParser = None
+    CDumper = CParser = None
 
 METRICS_FILE = "mushin_metrics.json"
 MANIFEST_FILE = "mushin_sweep_manifest.json"
@@ -160,14 +160,29 @@ if CParser is not None:
             return super().construct_mapping(node, deep=deep)
 
 
-# What OmegaConf's loader defines over yaml.SafeLoader, in omegaconf 2.2.3 to
-# 2.3.1, leaving out dunders (Python adds its own: 3.13 adds
-# __static_attributes__ and __firstlineno__ to every class). _LibyamlLoader
-# copies the tables and reimplements construct_mapping.
+# Names Python itself puts in a class __dict__ (3.13 adds the last two).
+_CLASS_METADATA = {
+    "__module__",
+    "__doc__",
+    "__qualname__",
+    "__dict__",
+    "__weakref__",
+    "__firstlineno__",
+    "__static_attributes__",
+}
+# What OmegaConf's loader and dumper define over yaml.SafeLoader and
+# yaml.Dumper, in omegaconf 2.2.3 to 2.3.1. _LibyamlLoader copies the loader's
+# tables and reimplements its construct_mapping; the dumper's representers
+# are copied whole.
 _OMEGACONF_LOADER_ATTRS = {
     "construct_mapping",
     "yaml_constructors",
     "yaml_implicit_resolvers",
+}
+_OMEGACONF_DUMPER_ATTRS = {
+    "str_representer",
+    "str_representer_added",
+    "yaml_representers",
 }
 
 # Hydra's hydra.yaml nests about 6 deep. OmegaConf.create recurses per level
@@ -176,32 +191,75 @@ _OMEGACONF_LOADER_ATTRS = {
 _MAX_PLAIN_DEPTH = 16
 
 
-def _plain_yaml_loader() -> type | None:
-    """``_LibyamlLoader`` with the tables of OmegaConf's own loader: it reads
-    ``1e3`` as a float, leaves dates as strings and builds pathlib tags.
-    OmegaConf rebuilds that loader on every load, so this does too (about
-    15 us). None without libyaml, or if OmegaConf's private helper moves or
-    its loader gains anything beyond those tables and the duplicate-key check
-    copied here; the caller then takes OmegaConf's path."""
+def _plain_codecs() -> tuple[type, type] | None:
+    """A libyaml loader and dumper that read and write YAML as OmegaConf's do,
+    or None (no libyaml, or OmegaConf's private helpers moved or changed
+    shape), which sends every file to OmegaConf.
+
+    OmegaConf builds its loader afresh for each load, from PyYAML's tables;
+    these are rebuilt only when OmegaConf's helpers or those tables change,
+    which a library adding a resolver, constructor or representer does."""
     if CParser is None:
         return None
     try:
-        from omegaconf._utils import get_yaml_loader
+        from omegaconf import _utils
 
-        omegaconf_loader = get_yaml_loader()
+        key = (_utils.get_yaml_loader, _utils.get_omega_conf_dumper, _yaml_tables())
     except Exception:  # noqa: BLE001 - only the fast path is lost
         return None
-    defined = {k for k in vars(omegaconf_loader) if not k.startswith("__")}
-    if defined != _OMEGACONF_LOADER_ATTRS:
+    return _build_plain_codecs(key)
+
+
+def _yaml_tables() -> tuple:
+    """The identity and size of each PyYAML table OmegaConf's loader and
+    dumper start from. Entries are added in place, so the size tells."""
+    from omegaconf._utils import get_omega_conf_dumper
+
+    tables = (
+        yaml.SafeLoader.yaml_implicit_resolvers,
+        yaml.SafeLoader.yaml_constructors,
+        yaml.SafeLoader.yaml_multi_constructors,
+        yaml.Dumper.yaml_implicit_resolvers,
+        yaml.Dumper.yaml_multi_representers,
+        get_omega_conf_dumper().yaml_representers,
+    )
+    return tuple(
+        (id(t), sum(len(v) if isinstance(v, list) else 1 for v in t.values()))
+        for t in tables
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _build_plain_codecs(key: tuple) -> tuple[type, type] | None:
+    get_yaml_loader, get_omega_conf_dumper, _ = key
+    try:
+        omegaconf_loader = get_yaml_loader()
+        omegaconf_dumper = get_omega_conf_dumper()
+    except Exception:  # noqa: BLE001 - only the fast path is lost
         return None
-    return type(
+    if (
+        omegaconf_loader.__bases__ != (yaml.SafeLoader,)
+        or set(vars(omegaconf_loader)) - _CLASS_METADATA != _OMEGACONF_LOADER_ATTRS
+        or omegaconf_dumper.__bases__ != (yaml.Dumper,)
+        or set(vars(omegaconf_dumper)) - _CLASS_METADATA != _OMEGACONF_DUMPER_ATTRS
+    ):
+        return None
+    loader = type(
         "_HydraYamlLoader",
         (_LibyamlLoader,),
         {
+            # OmegaConf reads `1e3` as a float, leaves dates as strings and
+            # builds pathlib tags; its tables carry all of that.
             "yaml_implicit_resolvers": omegaconf_loader.yaml_implicit_resolvers,
             "yaml_constructors": omegaconf_loader.yaml_constructors,
         },
     )
+    dumper = type(
+        "_HydraYamlDumper",
+        (CDumper,),
+        {"yaml_representers": omegaconf_dumper.yaml_representers},
+    )
+    return loader, dumper
 
 
 def read_hydra_job(hydra_yaml: Path | str) -> tuple[Any, dict | None]:
@@ -238,24 +296,36 @@ def read_hydra_job(hydra_yaml: Path | str) -> tuple[Any, dict | None]:
 def _parse_plain(hydra_yaml: Path) -> dict | None:
     """The file parsed as ``OmegaConf.load`` would parse it, without building
     a config, or None to leave the file to ``OmegaConf.load``: on any error, so
-    it raises its own, and on anything the two could treat differently."""
-    loader = _plain_yaml_loader()
-    if loader is None:
+    it raises its own, and on anything the two could treat differently.
+
+    libyaml is more lenient than PyYAML's pure-Python scanner, which
+    ``OmegaConf.load`` uses: it accepts tabs as separators, a byte-order mark
+    at any line start, an empty ``!`` tag, a comment right after a block-scalar
+    header and a ``?`` inside a flow scalar, among others. Rather than chase
+    each one, the parsed tree is written back the way Hydra writes hydra.yaml
+    (``OmegaConf.to_yaml``), on libyaml's emitter. Only a file that comes out
+    byte for byte the same is read here: text that a YAML emitter produced,
+    which both parsers read alike. Anything hand-edited goes to OmegaConf.
+    """
+    codecs = _plain_codecs()
+    if codecs is None:
         return None
+    loader, dumper = codecs
     try:
         text = hydra_yaml.read_text(encoding="utf-8")
-        # libyaml takes a tab as a separator, and a byte-order mark at the
-        # start of any line, where OmegaConf's pure-Python scanner raises.
-        # Fuzzing a real hydra.yaml found no other difference. Hydra never
-        # writes either: its dumper escapes both.
-        if "\t" in text or "\ufeff" in text:
-            return None
         doc = yaml.load(text, Loader=loader)
+        if not isinstance(doc, dict) or not _omegaconf_would_create(doc):
+            return None
+        canonical = yaml.dump(
+            doc,
+            Dumper=dumper,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        )
     except Exception:  # noqa: BLE001 - OmegaConf decides, and raises its own error
         return None
-    if not isinstance(doc, dict) or not _omegaconf_would_create(doc):
-        return None
-    return doc
+    return doc if canonical == text else None
 
 
 def _plain_hydra_fields(doc: dict) -> tuple[int, dict | None] | None:

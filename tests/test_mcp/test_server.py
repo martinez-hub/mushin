@@ -535,12 +535,16 @@ def test_job_sort_key_reads_hydra_yaml_without_omegaconf(tmp_path, monkeypatch):
         pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
     hydra_dir = tmp_path / "exp" / "zzz" / ".hydra"
     hydra_dir.mkdir(parents=True)
-    (hydra_dir / "hydra.yaml").write_text("hydra:\n  job:\n    num: 4\n")
+    # As Hydra writes it: only that text takes the fast path.
+    (hydra_dir / "hydra.yaml").write_text(
+        OmegaConf.to_yaml(OmegaConf.create({"hydra": {"job": {"num": 4}}}))
+    )
 
-    def _slow(path):
-        raise AssertionError(f"fell back to OmegaConf for {path}")
+    def _slow(*args, **kwargs):
+        raise AssertionError("fell back to OmegaConf")
 
     monkeypatch.setattr(hydra_zen, "load_from_yaml", _slow)
+    monkeypatch.setattr(OmegaConf, "create", staticmethod(_slow))
     # A fallback that failed would give the directory-name key (1, 0, "zzz").
     assert _job_sort_key(hydra_dir, None) == (0, 4, "")
 

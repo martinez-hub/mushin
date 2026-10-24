@@ -1533,6 +1533,44 @@ def test_load_from_dir_without_job_dirs_says_so(tmp_path):
         MultiRunMetricsWorkflow().load_from_dir(tmp_path, "mushin_metrics.json")
 
 
+def test_load_from_dir_names_a_null_output_subdir(tmp_path):
+    """With hydra.output_subdir=null, no job keeps a record to reload from;
+    the error says so instead of blaming a killed sweep."""
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    OmegaConf.save({"hydra": {"output_subdir": None}}, tmp_path / "multirun.yaml")
+    with pytest.raises(FileNotFoundError, match="output_subdir=null"):
+        MultiRunMetricsWorkflow().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
+def test_load_from_dir_that_fails_partway_reloads_on_retry(tmp_path):
+    """A cell missing its config.yaml fails the load before any of the job
+    directories or configs are kept, so a later to_xarray reloads them
+    instead of pairing them with a partial config list."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    W().run(a=multirun([1, 2, 3]), working_dir=str(tmp_path / "s"))
+    cfg = tmp_path / "s" / "2" / ".hydra" / "config.yaml"
+    kept = cfg.read_text()
+    cfg.unlink()
+    wf = W()
+    with pytest.raises(FileNotFoundError, match="config.yaml not found"):
+        wf.load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert wf.multirun_working_dirs is None
+
+    cfg.write_text(kept)
+    ds = wf.to_xarray(metrics_filename="mushin_metrics.json")
+    assert sorted(float(v) for v in ds["m"].values) == [1.0, 2.0, 3.0]
+
+
 def test_load_from_dir_nan_fills_failed_cells(tmp_path):
     """A fail-soft sweep must be reloadable offline: a failed cell has no
     metrics sidecar, so load_metrics must NaN-fill it (consulting the cell's
