@@ -466,7 +466,7 @@ class _TaskRunner:
         import warnings
         from pathlib import Path
 
-        from ._provenance import write_provenance
+        from ._provenance import record_accelerator, write_provenance
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
@@ -675,6 +675,10 @@ class _TaskRunner:
             finally:
                 if token is not None:
                     _CURRENT_RESUME.reset(token)
+                # The accelerator comes from this process, after the task that
+                # may have imported torch has returned or raised; the record
+                # written above carries the parent's view from before any cell.
+                record_accelerator(cwd)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)
                 # Store the freshly-computed cell in the content-addressed cache

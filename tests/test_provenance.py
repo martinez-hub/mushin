@@ -66,12 +66,177 @@ def test_git_captured_once_per_sweep_not_per_cell(monkeypatch, tmp_path):
 def test_capture_base_records_accelerator():
     """GPU numerics depend on the CUDA/cuDNN build and the physical device,
     not just the torch wheel version -- the provenance record must carry them
-    (None values on CPU-only builds, but the keys must exist)."""
+    (None values on CPU-only builds, but the keys must exist) once torch is
+    loaded in the process."""
+    import torch  # noqa: F401 - the accelerator is recorded only with torch loaded
+
     from mushin._provenance import capture_base
 
     base = capture_base()
     acc = base["accelerator"]
     assert set(acc) == {"cuda", "cudnn", "device"}
+
+
+def test_accelerator_does_not_import_torch_for_a_sweep_without_it(
+    tmp_path, monkeypatch
+):
+    """A process that has not imported torch has no accelerator numerics to
+    record, and importing torch to learn that is the dominant cost of a
+    provenance capture; the record says "not recorded" (null) and torch stays
+    unimported."""
+    import json
+    import sys
+
+    from mushin import _provenance
+
+    # An import attempt is observed at the finders, not through sys.modules:
+    # re-importing torch over its loaded extension fails, and a failed import
+    # leaves sys.modules as it was, which would look like no attempt.
+    attempted = []
+
+    class Recorder:
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            if name == "torch" or name.startswith("torch."):
+                attempted.append(name)
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [Recorder, *sys.meta_path])
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    assert _provenance._accelerator() is None
+    assert _provenance.capture_base()["accelerator"] is None
+    # record_accelerator leaves the cell's record as written, and does not
+    # import torch either.
+    record = json.dumps({"git": {"sha": "x"}, "accelerator": None})
+    (tmp_path / "mushin_provenance.json").write_text(record)
+    monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", None)
+    _provenance.record_accelerator(tmp_path)
+    assert (tmp_path / "mushin_provenance.json").read_text() == record
+    assert attempted == []
+    # Nothing is cached either: a later cell whose task imports torch must
+    # still get its accelerator recorded.
+    assert _provenance._ACCELERATOR_SEEN is None
+
+
+def test_run_does_not_import_torch_for_a_sweep_without_it(tmp_path):
+    """The whole run() path, in a fresh interpreter: a sweep whose task never
+    imports torch finishes without mushin importing it, and records a null
+    accelerator. Guards the run path, not just the provenance helpers."""
+    import subprocess
+    import sys
+
+    code = f"""
+import json, sys
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):
+        return dict(y=float(x))
+
+wf = W()
+wf.run(x=multirun([0, 1]), working_dir={str(tmp_path / "s")!r})
+prov = json.loads((wf.multirun_working_dirs[1] / "mushin_provenance.json").read_text())
+print("torch" in sys.modules, json.dumps(prov["accelerator"]))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    # Hydra logs its launches to stdout; the probe's line comes last.
+    assert result.stdout.strip().splitlines()[-1] == "False null", result.stderr[-2000:]
+
+
+def test_record_accelerator_rewrites_only_that_field(tmp_path, monkeypatch):
+    """The cell's process rewrites the record's accelerator, keeping every
+    other field, atomically, and does nothing when the record is missing (the
+    best-effort write before the task failed). It never initializes CUDA: the
+    device is named only once the task has, and the answer is cached only
+    once it can no longer change."""
+    import json
+
+    import torch
+
+    from mushin import _provenance
+
+    monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    # The query is best-effort (its exceptions are swallowed), so the calls
+    # are recorded rather than made to raise.
+    named = []
+
+    def get_device_name(i):
+        named.append(i)
+        return f"NVIDIA H100 #{i}"
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", get_device_name)
+    before = {"git": {"sha": "x"}, "accelerator": None}
+    (tmp_path / "mushin_provenance.json").write_text(json.dumps(before))
+    _provenance.record_accelerator(tmp_path)
+    after = json.loads((tmp_path / "mushin_provenance.json").read_text())
+    assert after["git"] == {"sha": "x"}
+    assert set(after["accelerator"]) == {"cuda", "cudnn", "device"}
+    assert after["accelerator"]["device"] is None  # CUDA not initialized: no name
+    assert named == []  # get_device_name would have initialized it
+    assert _provenance._ACCELERATOR_SEEN is None  # a later cell may initialize it
+
+    # The task initialized CUDA: the device is named, and the answer cached.
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    _provenance.record_accelerator(tmp_path)
+    after = json.loads((tmp_path / "mushin_provenance.json").read_text())
+    assert after["accelerator"]["device"] == "NVIDIA H100 #0"
+    assert named == [0]
+    assert _provenance._ACCELERATOR_SEEN == after["accelerator"]
+    assert not list(tmp_path.glob("*.tmp"))  # atomic write, no residue
+
+    # Cached: a later cell reuses the answer without querying torch again...
+    (tmp_path / "mushin_provenance.json").write_text(json.dumps(before))
+    _provenance.record_accelerator(tmp_path)
+    after = json.loads((tmp_path / "mushin_provenance.json").read_text())
+    assert after["accelerator"]["device"] == "NVIDIA H100 #0"
+    assert named == [0]
+    # ...and gets it at its first write, so there is nothing to rewrite.
+    assert _provenance.capture(base=before)["accelerator"] == after["accelerator"]
+
+    _provenance.record_accelerator(tmp_path / "no-such-cell")
+    assert not (tmp_path / "no-such-cell").exists()
+
+
+def test_sweep_records_the_accelerator_the_cell_saw_after_its_task(
+    tmp_path, monkeypatch
+):
+    """The accelerator in each cell's record is the one the cell's process
+    reports after the task ran, for a completed and for a failed cell: a task
+    that imports torch inside its body, or that runs on another node than the
+    one that called run(), records what it used."""
+    import json
+
+    import torch  # noqa: F401 - record_accelerator acts only with torch loaded
+
+    from mushin import _provenance, multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {"cuda": "12.8", "cudnn": 91000, "device": "NVIDIA H100"}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            # What a task body's `import torch` changes: the process's view
+            # of the accelerator, after capture_base ran in the parent.
+            monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", None)
+            monkeypatch.setattr(_provenance, "_accelerator", lambda: dict(seen))
+            if x == 1:
+                raise RuntimeError("boom")
+            return dict(y=float(x))
+
+    wf = W()
+    wf.run(x=multirun([0, 1]), working_dir=str(tmp_path / "s"), on_error="nan")
+    for d in wf.multirun_working_dirs:
+        prov = json.loads((d / "mushin_provenance.json").read_text())
+        assert prov["accelerator"] == seen, d
+        assert "sha" in prov["git"]
 
 
 def test_env_snapshot_never_overwrites_prior_run(tmp_path):

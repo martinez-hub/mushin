@@ -248,7 +248,7 @@ runs/compare-v1/
     mushin_cell_status.json    completed, failed, skipped or running
     mushin_metrics.json        the dict the task returned (completed cells)
     mushin_error.txt           the traceback (failed cells, on_error="nan")
-    mushin_provenance.json     git commit, package versions, hardware (cells that ran)
+    mushin_provenance.json     git commit, package versions, hardware if torch ran (cells that ran)
     mushin_workflow.log, .hydra/
 ```
 
