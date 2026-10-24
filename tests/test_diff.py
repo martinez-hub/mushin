@@ -73,6 +73,28 @@ def test_diff_provenance_helper_flattens_and_excludes_volatile():
     assert "git.dirty" not in ch  # unchanged field omitted
 
 
+def test_diff_provenance_compares_the_accelerator_only_when_both_recorded_one():
+    """An all-None accelerator is "not recorded" (the cell never imported
+    torch), not a different machine: a scikit-learn sweep against a torch
+    sweep, or against a record from before 0.17, reports no hardware change.
+    Two recorded accelerators that differ still do."""
+    from mushin._show import _diff_provenance
+
+    gpu = {"accelerator": {"cuda": "13.0", "cudnn": 92400, "device": "NVIDIA A100"}}
+    none = {"accelerator": {"cuda": None, "cudnn": None, "device": None}}
+    assert _diff_provenance(gpu, none) == {}
+    assert _diff_provenance(none, gpu) == {}
+    assert _diff_provenance(gpu, {}) == {}  # a record with no accelerator at all
+    other = {"accelerator": {"cuda": "13.0", "cudnn": 92400, "device": "NVIDIA H100"}}
+    assert _diff_provenance(gpu, other) == {
+        "accelerator.device": ("NVIDIA A100", "NVIDIA H100")
+    }
+    # The rest of the record is still compared when the accelerator is not.
+    assert _diff_provenance({**gpu, "python": "3.11"}, {**none, "python": "3.12"}) == {
+        "python": ("3.11", "3.12")
+    }
+
+
 def test_diff_missing_dir_raises(tmp_path):
     _run(tmp_path / "a")
     with pytest.raises(FileNotFoundError):

@@ -152,8 +152,9 @@ different cell. Tasks that don't declare `mushin_resume` are unaffected.
 Every run (fail-soft or not) writes a per-job provenance record,
 `mushin_provenance.json`, into each job directory *before* the task executes, so
 even a failing cell leaves its lineage behind. It captures the git SHA, key
-package versions, the resolved config and, when the process has imported torch,
-the accelerator (CUDA and cuDNN build, device):
+package versions, the resolved config and, once the task has returned, the
+accelerator the cell's process used (CUDA and cuDNN build, device; `null` when
+that process never imported torch):
 
 ```python
 wf.provenance  # dict: {"git": {"sha": ...}, "packages": {...}, "config": {...}, ...}

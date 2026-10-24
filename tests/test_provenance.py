@@ -74,10 +74,13 @@ def test_capture_base_records_accelerator():
     assert set(acc) == {"cuda", "cudnn", "device"}
 
 
-def test_accelerator_does_not_import_torch_for_a_sweep_without_it(monkeypatch):
+def test_accelerator_does_not_import_torch_for_a_sweep_without_it(
+    tmp_path, monkeypatch
+):
     """A process that has not imported torch has no accelerator numerics to
-    record, and importing torch to learn that costs about half a second per
-    run(); the record is all-None and torch stays unimported."""
+    record, and importing torch to learn that is the dominant cost of a
+    provenance capture; the record is all-None and torch stays unimported."""
+    import json
     import sys
 
     from mushin import _provenance
@@ -97,7 +100,82 @@ def test_accelerator_does_not_import_torch_for_a_sweep_without_it(monkeypatch):
     monkeypatch.setattr(sys, "meta_path", [Recorder, *sys.meta_path])
     monkeypatch.delitem(sys.modules, "torch", raising=False)
     assert _provenance._accelerator() == {"cuda": None, "cudnn": None, "device": None}
+    # record_accelerator leaves the cell's record as written, and does not
+    # import torch either.
+    record = json.dumps(
+        {"git": {"sha": "x"}, "accelerator": _provenance._accelerator()}
+    )
+    (tmp_path / "mushin_provenance.json").write_text(record)
+    monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", None)
+    _provenance.record_accelerator(tmp_path)
+    assert (tmp_path / "mushin_provenance.json").read_text() == record
     assert attempted == []
+    # Nothing is cached either: a later cell whose task imports torch must
+    # still get its accelerator recorded.
+    assert _provenance._ACCELERATOR_SEEN is None
+
+
+def test_record_accelerator_rewrites_only_that_field(tmp_path, monkeypatch):
+    """The cell's process queries torch once and rewrites the record's
+    accelerator, keeping every other field, and does nothing when the record is
+    missing (the best-effort write before the task failed)."""
+    import json
+    import sys
+
+    from mushin import _provenance
+
+    assert "torch" in sys.modules  # the MPS tests above imported it
+    seen = {"cuda": "12.8", "cudnn": 91000, "device": "NVIDIA H100"}
+    monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", None)
+    monkeypatch.setattr(_provenance, "_accelerator", lambda: dict(seen))
+    before = {"git": {"sha": "x"}, "accelerator": _provenance._NO_ACCELERATOR}
+    (tmp_path / "mushin_provenance.json").write_text(json.dumps(before))
+    _provenance.record_accelerator(tmp_path)
+    after = json.loads((tmp_path / "mushin_provenance.json").read_text())
+    assert after == {"git": {"sha": "x"}, "accelerator": seen}
+
+    # Queried once per process: a later cell reuses the answer.
+    monkeypatch.setattr(_provenance, "_accelerator", lambda: {"device": "other"})
+    (tmp_path / "mushin_provenance.json").write_text(json.dumps(before))
+    _provenance.record_accelerator(tmp_path)
+    after = json.loads((tmp_path / "mushin_provenance.json").read_text())
+    assert after["accelerator"] == seen
+
+    _provenance.record_accelerator(tmp_path / "no-such-cell")
+    assert not (tmp_path / "no-such-cell").exists()
+
+
+def test_sweep_records_the_accelerator_the_cell_saw_after_its_task(
+    tmp_path, monkeypatch
+):
+    """The accelerator in each cell's record is the one the cell's process
+    reports after the task ran, for a completed and for a failed cell: a task
+    that imports torch inside its body, or that runs on another node than the
+    one that called run(), records what it used."""
+    import json
+
+    from mushin import _provenance, multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {"cuda": "12.8", "cudnn": 91000, "device": "NVIDIA H100"}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            # What a task body's `import torch` changes: the process's view
+            # of the accelerator, after capture_base ran in the parent.
+            monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", None)
+            monkeypatch.setattr(_provenance, "_accelerator", lambda: dict(seen))
+            if x == 1:
+                raise RuntimeError("boom")
+            return dict(y=float(x))
+
+    wf = W()
+    wf.run(x=multirun([0, 1]), working_dir=str(tmp_path / "s"), on_error="nan")
+    for d in wf.multirun_working_dirs:
+        prov = json.loads((d / "mushin_provenance.json").read_text())
+        assert prov["accelerator"] == seen, d
+        assert "sha" in prov["git"]
 
 
 def test_env_snapshot_never_overwrites_prior_run(tmp_path):

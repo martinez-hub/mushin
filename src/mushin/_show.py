@@ -357,13 +357,27 @@ def _flatten(d: dict, prefix: str = "") -> dict:
     return out
 
 
+def _accelerator_unrecorded(record: dict | None) -> bool:
+    acc = (record or {}).get("accelerator")
+    return not isinstance(acc, dict) or all(v is None for v in acc.values())
+
+
 def _diff_provenance(a: dict | None, b: dict | None) -> dict:
     """Flattened field-by-field diff of two provenance records, excluding
-    volatile fields. Returns ``{dotted_key: (a_value, b_value)}`` for every field
-    whose value differs (a field present on only one side reads as ``None`` on
-    the other)."""
+    volatile fields and an accelerator that either side did not record.
+    Returns ``{dotted_key: (a_value, b_value)}`` for every field whose value
+    differs (a field present on only one side reads as ``None`` on the
+    other)."""
     fa = _flatten({k: v for k, v in (a or {}).items() if k not in _PROV_VOLATILE})
     fb = _flatten({k: v for k, v in (b or {}).items() if k not in _PROV_VOLATILE})
+    # An all-None accelerator means "not recorded" (the cell's process never
+    # imported torch; before mushin 0.17, a CPU-only torch build), not a
+    # different machine: a torch sweep against a scikit-learn sweep on the same
+    # box is no hardware change. Compare the accelerator only when both sides
+    # recorded one.
+    if _accelerator_unrecorded(a) or _accelerator_unrecorded(b):
+        fa = {k: v for k, v in fa.items() if not k.startswith("accelerator.")}
+        fb = {k: v for k, v in fb.items() if not k.startswith("accelerator.")}
     changed = {}
     for k in sorted(set(fa) | set(fb)):
         va, vb = fa.get(k), fb.get(k)
@@ -401,7 +415,7 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     cell may carry a stale sidecar from a prior attempt; its row appears with
     empty ``deltas``). Cells present in only one sweep are reported separately,
     along with a diff of the two runs' environment provenance
-    (git/packages/python/accelerator).
+    (git/packages/python, and the accelerator when both runs recorded one).
 
     Returns
     -------

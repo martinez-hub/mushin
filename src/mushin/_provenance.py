@@ -88,22 +88,26 @@ def _apple_chip() -> str | None:
         return None
 
 
+_NO_ACCELERATOR: dict = {"cuda": None, "cudnn": None, "device": None}
+
+
 def _accelerator() -> dict:
     """Accelerator identity: the part of GPU numerics the torch wheel version
     alone cannot reconstruct: CUDA/cuDNN + device name on NVIDIA, the MPS
-    device on Apple Silicon. All-None on CPU-only builds (and if torch itself
-    fails to import), and in a process that has not imported torch."""
-    out: dict = {"cuda": None, "cudnn": None, "device": None}
-    # A sweep that never loads torch (a scikit-learn comparison, say) has no
-    # accelerator numerics to record, and importing torch only to learn that
-    # costs about half a second per run(). A task that trains with torch or
-    # Lightning has imported it by now, through its module's imports; one that
-    # imports torch only inside its body records None.
-    if sys.modules.get("torch") is None:
+    device on Apple Silicon. All-None on CPU-only builds, and in a process
+    that has not imported torch."""
+    out = dict(_NO_ACCELERATOR)
+    # Never import torch here. Importing it is the dominant cost of a
+    # provenance capture, and a process that has not loaded torch has no
+    # accelerator numerics to record: a sweep that never uses torch (a
+    # scikit-learn comparison, say) would pay the import to record None. The
+    # record each cell keeps is taken from the process that ran it, after its
+    # task returned (`record_accelerator`), when a task that uses torch has
+    # imported it, wherever the import statement sits.
+    torch = sys.modules.get("torch")
+    if torch is None:
         return out
     try:
-        import torch
-
         out["cuda"] = torch.version.cuda
         try:
             if torch.backends.cudnn.is_available():
@@ -123,9 +127,42 @@ def _accelerator() -> dict:
                 out["device"] = f"mps ({_apple_chip() or platform.machine()})"
         except Exception:  # noqa: BLE001 - best-effort
             pass
-    except Exception:  # noqa: BLE001 - best-effort
+    except Exception:  # noqa: BLE001 - best-effort: torch may be mid-import
         pass
     return out
+
+
+# The accelerator of this process, queried once torch is loaded: the answer
+# cannot change afterwards (visible devices are fixed once CUDA initializes),
+# and the query costs about 10 ms, which a 1000-cell sweep would pay per cell.
+_ACCELERATOR_SEEN: dict | None = None
+
+
+def record_accelerator(job_dir) -> None:
+    """Rewrite the ``accelerator`` of a cell's provenance record from the
+    process that ran the cell, once its task has returned or raised.
+
+    ``capture_base`` runs in the process that called ``run()``, before the
+    first cell. That process is a login node under submitit, and has not
+    imported torch when the task does so inside its body (as the GPU-packing
+    example does), so its record can miss the device the cell ran on, or name
+    one the cell never used. The cell's own process, after its task, knows: a
+    process that has not imported torch by then did not use it, and leaves the
+    record as written. Best-effort, like every provenance write."""
+    global _ACCELERATOR_SEEN
+    if sys.modules.get("torch") is None:
+        return
+    path = Path(job_dir) / "mushin_provenance.json"
+    try:
+        if _ACCELERATOR_SEEN is None:
+            _ACCELERATOR_SEEN = _accelerator()
+        record = json.loads(path.read_text())
+        if record.get("accelerator") == _ACCELERATOR_SEEN:
+            return
+        record["accelerator"] = _ACCELERATOR_SEEN
+        path.write_text(json.dumps(record, indent=2))
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        pass
 
 
 def capture_base() -> dict:
