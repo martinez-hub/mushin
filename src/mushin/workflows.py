@@ -2354,6 +2354,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         -------
         loaded_workflow : Self
         """
+        # Point at the new directory first: the setter refuses one that does
+        # not exist, and then this workflow is left as it was.
+        self.working_dir = Path(working_dir)
         # Reset memoized caches so a reused workflow object does not return
         # stale overrides/coordinates from a previously loaded directory.
         self._multirun_task_overrides = {}
@@ -2370,7 +2373,6 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self.jobs = []
         self._metrics_by_combo = {}
 
-        self.working_dir = Path(working_dir)
         self.output_subdir = load_from_yaml(
             self.working_dir / "multirun.yaml"
         ).hydra.output_subdir

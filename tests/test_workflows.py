@@ -1632,6 +1632,26 @@ def test_load_from_dir_on_a_workflow_that_ran_drops_its_run(
     assert wf.is_complete
 
 
+def test_load_from_dir_with_a_mistyped_path_changes_nothing(tmp_path):
+    """The path is checked before any state is reset, so a typo leaves a
+    workflow that ran as it was."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    wf = W()
+    wf.run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    dirs, jobs = list(wf.multirun_working_dirs), list(wf.jobs)
+    with pytest.raises(FileNotFoundError):
+        wf.load_from_dir(tmp_path / "typo", "mushin_metrics.json")
+    assert wf.multirun_working_dirs == dirs and wf.jobs == jobs
+    assert sorted(float(v) for v in wf.to_xarray()["m"].values) == [1.0, 2.0]
+
+
 def test_load_from_dir_nan_fills_failed_cells(tmp_path):
     """A fail-soft sweep must be reloadable offline: a failed cell has no
     metrics sidecar, so load_metrics must NaN-fill it (consulting the cell's

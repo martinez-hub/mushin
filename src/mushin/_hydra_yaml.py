@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from yaml.composer import Composer
+from yaml.composer import Composer, ComposerError
 from yaml.constructor import SafeConstructor
+from yaml.events import AliasEvent
 from yaml.resolver import Resolver
 
 try:  # libyaml, which PyYAML's wheels include
@@ -42,6 +43,12 @@ if CParser is not None:
         Hydra's 3 KB hydra.yaml it takes 0.4 ms, against 0.3 ms all in C and
         3 ms all in Python.
 
+        It refuses any alias (``*a``), which Hydra never writes, so the file
+        goes to OmegaConf. Writing an aliased tree back repeats each aliased
+        string once per alias, which lets a small crafted file take memory
+        that grows with the square of its size, and a cyclic alias would make
+        OmegaConf.create recurse until RecursionError.
+
         OmegaConf's loader also refuses a duplicate key. This one keeps the
         last value, as PyYAML does, and the round trip in ``_parse_plain``
         refuses the file instead: a mapping parsed with one entry for two keys
@@ -53,6 +60,13 @@ if CParser is not None:
             Composer.__init__(self)
             SafeConstructor.__init__(self)
             Resolver.__init__(self)
+
+        def compose_node(self, parent: Any, index: Any) -> Any:
+            if self.check_event(AliasEvent):
+                raise ComposerError(
+                    None, None, "found an alias", self.peek_event().start_mark
+                )
+            return super().compose_node(parent, index)
 
 
 # Names Python itself puts in a class __dict__ (3.13 adds the last two).
@@ -295,11 +309,11 @@ def _omegaconf_would_create(tree: Any) -> bool:
     every key of a type a DictConfig takes, every leaf of a type its nodes take,
     and valid syntax in every string holding ``${`` (it parses each one).
 
-    False, which sends the file to OmegaConf to decide, also for a container
-    reached twice (a YAML alias: a cyclic one makes OmegaConf.create recurse
-    until RecursionError), for nesting deeper than ``_MAX_PLAIN_DEPTH``, and if
-    those private helpers move. Walks with a stack, since a recursion here
-    would undo the composer's RecursionError guard."""
+    False, which sends the file to OmegaConf to decide, also for nesting
+    deeper than ``_MAX_PLAIN_DEPTH`` and if those private helpers move. (No
+    container is reached twice: the loader refuses aliases.) Walks with a
+    stack, since a recursion here would undo the composer's RecursionError
+    guard."""
     try:
         from omegaconf import DictKeyType
         from omegaconf._utils import is_primitive_type_annotation
@@ -307,14 +321,12 @@ def _omegaconf_would_create(tree: Any) -> bool:
         key_types = DictKeyType.__args__  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - only the fast path is lost
         return False
-    seen: set[int] = set()
     stack = [(tree, 0)]
     while stack:
         node, depth = stack.pop()
         if isinstance(node, dict) or type(node) in (list, tuple):
-            if id(node) in seen or depth > _MAX_PLAIN_DEPTH:
+            if depth > _MAX_PLAIN_DEPTH:
                 return False
-            seen.add(id(node))
             if isinstance(node, dict):
                 if not all(isinstance(k, key_types) for k in node):
                     return False

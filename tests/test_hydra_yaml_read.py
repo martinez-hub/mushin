@@ -44,11 +44,22 @@ def _read_as_before(path):
     return num, choices
 
 
+def _types(x):
+    """The type of every container and leaf in ``x``, which repr hides: a
+    DictConfig and a dict print alike."""
+    if isinstance(x, (tuple, list)) or type(x).__name__ == "ListConfig":
+        return type(x).__name__, tuple(_types(v) for v in x)
+    if hasattr(x, "items"):
+        return type(x).__name__, tuple((k, _types(v)) for k, v in x.items())
+    return type(x).__name__
+
+
 def _outcome(read, path):
     try:
-        return "returns", repr(read(path))
+        result = read(path)
     except Exception as e:  # noqa: BLE001 - the error type is the outcome
         return "raises", type(e).__name__
+    return "returns", repr(result), _types(result)
 
 
 def _forbid_rereading(monkeypatch):
@@ -189,8 +200,12 @@ def test_plain_codecs_parse_in_c_and_compose_in_python():
     assert codecs is not None
     loader, libyaml_dumper, omegaconf_dumper = codecs
     assert issubclass(loader, _hydra_yaml.CParser)
-    assert loader.compose_node is Composer.compose_node
+    assert issubclass(loader, Composer)
+    assert loader.compose_document is Composer.compose_document
     assert not issubclass(loader, yaml.CSafeLoader)
+    # It refuses any alias, which Hydra never writes.
+    with pytest.raises(yaml.composer.ComposerError, match="alias"):
+        yaml.load("a: &x 1\nb: *x\n", Loader=loader)
     assert issubclass(libyaml_dumper, _hydra_yaml.CDumper)
     assert omegaconf_dumper is get_omega_conf_dumper()
 
@@ -225,11 +240,8 @@ def test_plain_codecs_follow_a_replaced_constructor(tmp_path, monkeypatch):
     monkeypatch.setitem(
         yaml.SafeLoader.yaml_constructors, "tag:yaml.org,2002:int", plus_100
     )
-    assert (
-        _outcome(read_hydra_job, p)
-        == _outcome(_read_as_before, p)
-        == ("returns", "(103, None)")
-    )
+    assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
+    assert read_hydra_job(p) == (103, None)
 
 
 def test_a_helper_of_another_shape_steps_aside(tmp_path, monkeypatch):
@@ -281,8 +293,8 @@ def test_finishes_odd_fields_without_rereading(tmp_path, monkeypatch):
         paths[name] = tmp_path / f"{name}.yaml"
         paths[name].write_text(_hydra_text(tree), encoding="utf-8")
     expected = {name: _outcome(_read_as_before, p) for name, p in paths.items()}
-    assert expected["interp"] == ("returns", "(3, None)")
-    assert expected["choice"] == ("returns", "(0, {'db': 'mysql'})")
+    assert expected["interp"][:2] == ("returns", "(3, None)")
+    assert expected["choice"][:2] == ("returns", "(0, {'db': 'mysql'})")
 
     _forbid_rereading(monkeypatch)
     with pytest.raises(MissingMandatoryValue):
@@ -410,6 +422,19 @@ _SAME_AS_BEFORE = {
     + "[" * 150
     + "]" * 150
     + "\n",
+    # As an emitter writes them, so they pass the round trip and reach the
+    # depth, leaf-type and option-name checks.
+    "150 levels deep, as emitted": (
+        "hydra:\n  job:\n    num: 0\n  junk:\n"
+        + "".join("  " * (i + 2) + "k:\n" for i in range(149))
+        + "  " * 151
+        + "k: x\n"
+    ),
+    "set value, as emitted": "hydra:\n  job:\n    num: 4\n  run: !!set\n    a: null\n",
+    "nested choice, as emitted": (
+        "hydra:\n  job:\n    num: 0\n  runtime:\n    choices:\n      db:\n        a: 1\n"
+    ),
+    "aliased string": "a: &s abc\nb:\n- *s\n- *s\nhydra:\n  job:\n    num: 5\n",
     # libyaml reads these where PyYAML's Python scanner (OmegaConf's) raises or
     # reads something else; none is text an emitter writes.
     "tab after a colon": "hydra:\n  job:\n    num:\t5\n",
@@ -686,3 +711,32 @@ def test_matches_the_old_read_on_mutated_hydra_files(tmp_path):
             assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
 
     check()
+
+
+def test_an_aliased_string_is_not_written_back(tmp_path, monkeypatch):
+    """Writing back a tree whose string is aliased N times would emit it N
+    times: a 220 KB file took 2.2 GB. The loader refuses the alias, so the
+    file goes to OmegaConf without anything being written back."""
+    p = tmp_path / "hydra.yaml"
+    p.write_text(
+        "hydra:\n  job:\n    num: 3\na: &a "
+        + "x" * 10_000
+        + "\nb: ["
+        + "*a, " * 500
+        + "*a]\n",
+        encoding="utf-8",
+    )
+    expected = _outcome(_read_as_before, p)
+    # Count calls: an exception raised here would be swallowed by the fast
+    # path's own fallback.
+    dumps = []
+    real_dump = yaml.dump
+
+    def counting_dump(*args, **kwargs):
+        dumps.append(1)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "dump", counting_dump)
+    assert _hydra_yaml._parse_plain(p) is None
+    assert dumps == []
+    assert _outcome(read_hydra_job, p) == expected
