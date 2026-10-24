@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -52,15 +53,30 @@ def test_write_cell_status_records_job_fields_only_when_known(tmp_path):
         assert "job_num" not in got and "choices" not in got, bad
 
 
-def test_sidecar_job_fields_defers_to_a_hydra_yaml_it_cannot_examine(tmp_path):
+def test_sidecar_job_fields_defers_to_a_hydra_yaml_it_cannot_examine(
+    tmp_path, monkeypatch
+):
     """Only a missing hydra.yaml means there is nothing to defer to. One that
     is there but cannot be examined sends the reload to the hydra.yaml path,
-    which reports the problem as it always did."""
+    which reports the problem as it always did.
+
+    The failure is injected. An on-disk fixture (a regular file where the
+    `.hydra` directory should be) is NotADirectoryError on POSIX but
+    FileNotFoundError on Windows, where it reads as a missing hydra.yaml."""
     write_cell_status(
         tmp_path, status="completed", combo={}, attempt=1, job_num=5, choices={}
     )
-    (tmp_path / "file").write_text("not a directory")
-    assert sidecar_job_fields(tmp_path, tmp_path / "file" / "hydra.yaml") is None
+    hydra_yaml = tmp_path / "hydra.yaml"
+    hydra_yaml.write_text("hydra:\n  job:\n    num: 0\n")
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == hydra_yaml.name:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert sidecar_job_fields(tmp_path, hydra_yaml) is None
 
 
 def test_sidecar_job_fields_without_the_file_it_read(tmp_path, monkeypatch):
