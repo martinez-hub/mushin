@@ -160,12 +160,29 @@ if CParser is not None:
             return super().construct_mapping(node, deep=deep)
 
 
+# What OmegaConf's loader defines over yaml.SafeLoader, in omegaconf 2.2.3 to
+# 2.3.1: _LibyamlLoader copies the tables and reimplements construct_mapping.
+_OMEGACONF_LOADER_ATTRS = {
+    "__doc__",
+    "__module__",
+    "construct_mapping",
+    "yaml_constructors",
+    "yaml_implicit_resolvers",
+}
+
+# Hydra's hydra.yaml nests about 6 deep. OmegaConf.create recurses per level
+# and overflows somewhere past 100, at a depth that depends on the recursion
+# limit, so a deeper file is left to it.
+_MAX_PLAIN_DEPTH = 16
+
+
 def _plain_yaml_loader() -> type | None:
     """``_LibyamlLoader`` with the tables of OmegaConf's own loader: it reads
     ``1e3`` as a float, leaves dates as strings and builds pathlib tags.
     OmegaConf rebuilds that loader on every load, so this does too (about
-    15 us). None without libyaml, or if OmegaConf's private helper moves;
-    the caller then takes OmegaConf's path."""
+    15 us). None without libyaml, or if OmegaConf's private helper moves or
+    its loader gains anything beyond those tables and the duplicate-key check
+    copied here; the caller then takes OmegaConf's path."""
     if CParser is None:
         return None
     try:
@@ -173,6 +190,8 @@ def _plain_yaml_loader() -> type | None:
 
         omegaconf_loader = get_yaml_loader()
     except Exception:  # noqa: BLE001 - only the fast path is lost
+        return None
+    if set(vars(omegaconf_loader)) != _OMEGACONF_LOADER_ATTRS:
         return None
     return type(
         "_HydraYamlLoader",
@@ -190,40 +209,60 @@ def read_hydra_job(hydra_yaml: Path | str) -> tuple[Any, dict | None]:
     The file holds Hydra's whole runtime config (about 150 lines), and a reload
     needs two of its fields. Building an OmegaConf config from it was about 90%
     of ``load_from_dir``'s time on a 1000-cell sweep, so it is read as plain
-    YAML, typed as OmegaConf types it. Whatever that read cannot settle goes to
-    ``OmegaConf.load``, which resolves it or raises as before. A file that
-    ``OmegaConf.load`` rejects anywhere, not only in these two fields, goes
-    there too: the loader refuses what OmegaConf's refuses (duplicate keys,
-    unknown tags), and the parsed tree is checked as ``OmegaConf.create``
-    checks it.
+    YAML, typed as OmegaConf types it, and the two fields are taken from that.
+    The result is always what ``OmegaConf.load`` gives:
+
+    - A file that ``OmegaConf.load`` would parse or check differently, anywhere
+      in it, goes to ``OmegaConf.load`` (see ``_parse_plain``).
+    - Fields Hydra does not write that way (a ``???`` or ``${...}`` job number,
+      choices that are not names) are taken from ``OmegaConf.create`` on the
+      parsed tree, which is what ``OmegaConf.load`` builds its config from.
     """
     hydra_yaml = Path(hydra_yaml)
-    plain = _read_hydra_job_plain(hydra_yaml)
-    if plain is not None:
-        return plain
-    from hydra_zen import load_from_yaml
+    doc = _parse_plain(hydra_yaml)
+    if doc is None:
+        from hydra_zen import load_from_yaml
 
-    hydra = load_from_yaml(hydra_yaml).hydra
+        hydra = load_from_yaml(hydra_yaml).hydra
+    else:
+        fields = _plain_hydra_fields(doc)
+        if fields is not None:
+            return fields
+        from omegaconf import OmegaConf
+
+        hydra = OmegaConf.create(doc).hydra
     return hydra.job.num, hydra_choices(hydra)
 
 
-def _read_hydra_job_plain(hydra_yaml: Path) -> tuple[int, dict | None] | None:
-    """``read_hydra_job`` without OmegaConf, or None to leave the file to it.
-
-    None on any error, so OmegaConf raises its own, and on any value of the two
-    fields that Hydra does not write: a job number that is not an int (``???``,
-    ``${...}``), or choices that are not a mapping of names to option names or
-    None (``???``, ``${...}``, an interpolated node). OmegaConf resolves those
-    or rejects them.
-    """
+def _parse_plain(hydra_yaml: Path) -> dict | None:
+    """The file parsed as ``OmegaConf.load`` would parse it, without building
+    a config, or None to leave the file to ``OmegaConf.load``: on any error, so
+    it raises its own, and on anything the two could treat differently."""
     loader = _plain_yaml_loader()
     if loader is None:
         return None
     try:
         text = hydra_yaml.read_text(encoding="utf-8")
-        doc = yaml.load(text, Loader=loader)
-        if not _omegaconf_would_create(doc):
+        # libyaml takes a tab as a separator, and a byte-order mark at the
+        # start of any line, where OmegaConf's pure-Python scanner raises.
+        # Fuzzing a real hydra.yaml found no other difference. Hydra never
+        # writes either: its dumper escapes both.
+        if "\t" in text or "\ufeff" in text:
             return None
+        doc = yaml.load(text, Loader=loader)
+    except Exception:  # noqa: BLE001 - OmegaConf decides, and raises its own error
+        return None
+    if not isinstance(doc, dict) or not _omegaconf_would_create(doc):
+        return None
+    return doc
+
+
+def _plain_hydra_fields(doc: dict) -> tuple[int, dict | None] | None:
+    """The job number and choices from the parsed tree, when they are what
+    Hydra writes: an int, and a mapping of group names to option names (or
+    None). None otherwise (``???``, ``${...}``, an interpolated node, a missing
+    field), for OmegaConf to resolve or reject."""
+    try:
         hydra = doc["hydra"]
         num = hydra["job"]["num"]
         runtime = hydra.get("runtime")
@@ -245,10 +284,13 @@ def _read_hydra_job_plain(hydra_yaml: Path) -> tuple[int, dict | None] | None:
 def _omegaconf_would_create(tree: Any) -> bool:
     """Whether ``OmegaConf.create`` accepts this parsed YAML, by its own rules:
     every key of a type a DictConfig takes, every leaf of a type its nodes take,
-    and valid syntax in every string holding ``${`` (it parses each one). False
-    also if those private helpers move, which sends the file to OmegaConf.
-    Walks with a stack, since a recursion here would undo the composer's
-    RecursionError guard."""
+    and valid syntax in every string holding ``${`` (it parses each one).
+
+    False, which sends the file to OmegaConf to decide, also for a container
+    reached twice (a YAML alias: a cyclic one makes OmegaConf.create recurse
+    until RecursionError), for nesting deeper than ``_MAX_PLAIN_DEPTH``, and if
+    those private helpers move. Walks with a stack, since a recursion here
+    would undo the composer's RecursionError guard."""
     try:
         from omegaconf import DictKeyType
         from omegaconf._utils import is_primitive_type_annotation
@@ -256,15 +298,20 @@ def _omegaconf_would_create(tree: Any) -> bool:
         key_types = DictKeyType.__args__  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - only the fast path is lost
         return False
-    stack = [tree]
+    seen: set[int] = set()
+    stack = [(tree, 0)]
     while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            if not all(isinstance(k, key_types) for k in node):
+        node, depth = stack.pop()
+        if isinstance(node, dict) or type(node) in (list, tuple):
+            if id(node) in seen or depth > _MAX_PLAIN_DEPTH:
                 return False
-            stack.extend(node.values())
-        elif type(node) in (list, tuple):
-            stack.extend(node)
+            seen.add(id(node))
+            if isinstance(node, dict):
+                if not all(isinstance(k, key_types) for k in node):
+                    return False
+                stack.extend((v, depth + 1) for v in node.values())
+            else:
+                stack.extend((v, depth + 1) for v in node)
         elif isinstance(node, str):
             if "${" in node and not _valid_interpolation(node):
                 return False
@@ -273,10 +320,11 @@ def _omegaconf_would_create(tree: Any) -> bool:
     return True
 
 
-@functools.lru_cache(maxsize=4096)
+@functools.lru_cache(maxsize=256)
 def _valid_interpolation(text: str) -> bool:
     """OmegaConf's syntax check on a string holding ``${``. Cached: the cells
-    of a sweep repeat the same few, and a full grammar parse is slow."""
+    of a sweep repeat the same few, and a full grammar parse is slow. Small,
+    since the MCP server lives long and reads many sweeps."""
     try:
         from omegaconf._utils import get_value_kind
 

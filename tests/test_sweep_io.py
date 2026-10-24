@@ -184,8 +184,15 @@ hydra:
 
 def _forbid_omegaconf(monkeypatch):
     """Make the OmegaConf fallback of read_hydra_job fail, so a test proves the
-    fast path produced the result."""
+    fast path produced the result. Skips where PyYAML has no libyaml, which
+    has no fast path."""
     import hydra_zen
+    import pytest
+
+    from mushin import _sweep_io
+
+    if _sweep_io.CParser is None:
+        pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
 
     def _slow(path):
         raise AssertionError(f"read_hydra_job fell back to OmegaConf for {path}")
@@ -395,6 +402,20 @@ _SAME_AS_BEFORE = {
         "hydra:\n  job:\n    num: 4\n  run:\n    2: a\n    1.5: b\n    true: c\n"
     ),
     "omap value": "hydra:\n  job:\n    num: 4\n  run: !!omap [a: 1, b: 2]\n",
+    # libyaml accepts these where OmegaConf's Python scanner raises.
+    "tab after the job number's colon": "hydra:\n  job:\n    num:\t5\n",
+    "tab in a choice": "hydra:\n  job:\n    num: 5\n  runtime:\n    choices:\n      db:\tmysql\n",
+    "tab before a comment": "hydra:\n  job:\n    num: 5\t# c\n",
+    "byte-order mark at a line start": "hydra:\n  job:\n\ufeff    num: 5\n",
+    "byte-order mark at the start": "\ufeffhydra:\n  job:\n    num: 5\n",
+    "shared alias": "a: &x {k: 1}\nhydra:\n  job:\n    num: 5\n  run: *x\n",
+    "150 levels deep": (
+        "hydra:\n  job:\n    num: 0\n  junk: " + "[" * 150 + "]" * 150 + "\n"
+    ),
+    "20 levels deep": "hydra:\n  job:\n    num: 0\n  junk: "
+    + "[" * 20
+    + "]" * 20
+    + "\n",
 }
 
 
@@ -517,3 +538,179 @@ def test_read_hydra_job_matches_the_old_read_on_random_files():
             assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
 
     check()
+
+
+def test_read_hydra_job_on_a_cyclic_alias_raises_as_before(tmp_path):
+    """A YAML alias inside its own anchor builds a cyclic tree. OmegaConf.load
+    raises RecursionError on it; a tree walk without a seen-set never ends.
+    A subprocess with a timeout keeps a regression from hanging pytest."""
+    import subprocess
+    import sys
+
+    files = {
+        "list": "hydra:\n  job:\n    num: 5\n  junk: &a [*a, *a]\n",
+        "mapping": "hydra:\n  job:\n    num: 5\n  junk: &h\n    me: *h\n",
+    }
+    for name, text in files.items():
+        p = tmp_path / f"{name}.yaml"
+        p.write_text(text, encoding="utf-8")
+        code = (
+            "import sys\n"
+            "from mushin._sweep_io import read_hydra_job\n"
+            "try:\n"
+            "    read_hydra_job(sys.argv[1])\n"
+            "except RecursionError:\n"
+            "    print('RecursionError')\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code, str(p)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert r.returncode == 0, (name, r.returncode, r.stderr[-2000:])
+        assert r.stdout.strip() == "RecursionError", name
+        assert _outcome(_read_as_before, p) == ("raises", "RecursionError"), name
+
+
+def test_plain_yaml_loader_steps_aside_if_omegaconf_loader_changes(monkeypatch):
+    """The plain loader copies the tables of OmegaConf's loader and its
+    duplicate-key check. If that loader defines anything more, the copy could
+    type values differently, so reloads take OmegaConf's path instead."""
+    import omegaconf._utils
+
+    from mushin._sweep_io import _plain_yaml_loader
+
+    original = omegaconf._utils.get_yaml_loader
+
+    def grown():
+        loader = original()
+        loader.construct_yaml_str = lambda self, node: "changed"
+        return loader
+
+    monkeypatch.setattr(omegaconf._utils, "get_yaml_loader", grown)
+    assert _plain_yaml_loader() is None
+
+
+# Characters YAML gives meaning to, the two libyaml and PyYAML's Python scanner
+# disagree on (tab, byte-order mark), and some it refuses.
+_MUTATIONS = [
+    "\t",
+    "\ufeff",
+    "\r",
+    "\r\n",
+    "\x85",
+    "\u2028",
+    "\x00",
+    "\x07",
+    "\xa0",
+    "\U0001f600",
+    "%",
+    "!",
+    "&a ",
+    "*a",
+    "|",
+    ">",
+    '"',
+    "'",
+    "#",
+    "@",
+    "`",
+    ":",
+    ": ",
+    "- ",
+    "? ",
+    "[",
+    "]",
+    "{",
+    "}",
+    ",",
+    " ",
+    "\n",
+    "\\",
+    "---",
+    "...",
+    "!!str ",
+    "!!int ",
+    "!!null ",
+    "<<: ",
+    "~",
+    "${",
+    "}",
+]
+
+
+def test_read_hydra_job_matches_the_old_read_on_mutated_hydra_files(tmp_path):
+    """A real hydra.yaml with a few characters inserted or replaced reads the
+    same as through OmegaConf, or fails with the same error type. This is what
+    found the tab and byte-order-mark differences of libyaml's scanner."""
+    import tempfile
+    from pathlib import Path
+
+    import hypothesis.strategies as st
+    from hypothesis import given, settings
+
+    from mushin import multirun
+    from mushin._sweep_io import read_hydra_job
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    W().run(a=multirun([1]), working_dir=str(tmp_path / "s"))
+    (real,) = (tmp_path / "s").glob("*/.hydra/hydra.yaml")
+    base = real.read_text(encoding="utf-8")
+    edits = st.lists(
+        st.tuples(
+            st.integers(0, len(base) - 1), st.sampled_from(_MUTATIONS), st.booleans()
+        ),
+        min_size=1,
+        max_size=3,
+    )
+
+    @settings(max_examples=300, deadline=None)
+    @given(edits)
+    def check(changes):
+        text = base
+        for pos, piece, replace in changes:
+            pos = min(pos, len(text) - 1)
+            text = text[:pos] + piece + text[pos + replace :]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "hydra.yaml"
+            p.write_text(text, encoding="utf-8")
+            assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
+
+    check()
+
+
+def test_read_hydra_job_finishes_odd_fields_without_rereading(tmp_path, monkeypatch):
+    """A `???` or `${...}` job number (Hydra writes `???` for a single run) goes
+    to OmegaConf.create on the tree already parsed, not to a second parse of
+    the file through OmegaConf.load. The result and the error stay the same."""
+    import pytest
+    from omegaconf.errors import MissingMandatoryValue
+
+    from mushin._sweep_io import read_hydra_job
+
+    single = tmp_path / "single.yaml"
+    single.write_text("hydra:\n  job:\n    num: ???\n", encoding="utf-8")
+    interp = tmp_path / "interp.yaml"
+    interp.write_text("base: 3\nhydra:\n  job:\n    num: ${base}\n", encoding="utf-8")
+    choice = tmp_path / "choice.yaml"
+    choice.write_text(
+        "db_name: mysql\nhydra:\n  job:\n    num: 0\n"
+        "  runtime:\n    choices:\n      db: ${db_name}\n",
+        encoding="utf-8",
+    )
+    expected = [_outcome(_read_as_before, p) for p in (single, interp, choice)]
+
+    _forbid_omegaconf(monkeypatch)
+    with pytest.raises(MissingMandatoryValue):
+        read_hydra_job(single)
+    assert [_outcome(read_hydra_job, p) for p in (single, interp, choice)] == expected
+    assert expected[1:] == [
+        ("returns", "(3, None)"),
+        ("returns", "(0, {'db': 'mysql'})"),
+    ]

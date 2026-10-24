@@ -76,12 +76,12 @@ dependencies = [
     "omegaconf >= 2.2",
     # mushin reads each job's hydra.yaml with PyYAML itself (on libyaml's C
     # parser when present) instead of through OmegaConf, so it declares the
-    # dependency omegaconf already brings. Floor is 6.0, the first release with
-    # Python 3.11 wheels; older ones build from source there, and their source
-    # does not build with Cython 3. Newer Pythons need newer releases for
-    # wheels (6.0.1 for 3.12, 6.0.2 for 3.13, 6.0.3 for 3.14), which a resolver
-    # picks unless told otherwise. Verified by the min-version CI job (3.11).
-    "pyyaml >= 6.0",
+    # dependency omegaconf already brings. Floor is 6.0.3, the first release
+    # with wheels for every supported Python (3.11 to 3.14). An older floor
+    # would fail to install at the floor on the newer ones: 6.0 has wheels only
+    # up to 3.11, 6.0.1 to 3.12 and 6.0.2 to 3.13, and their source does not
+    # build with Cython 3. Verified by the min-version CI job.
+    "pyyaml >= 6.0.3",
     # xarray 2024.6.0 is the first NumPy-2-compatible release (older xarray uses
     # `np.unicode_`, removed in NumPy 2). Verified by the min-version CI job.
     "xarray >= 2024.6.0",

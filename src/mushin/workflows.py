@@ -2360,20 +2360,32 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
+        # Unset until the load succeeds: `to_xarray` and `load_metrics` reload
+        # when it is None, so a failed load is retried, not half-reused.
+        self.multirun_working_dirs = None
 
         self.working_dir = Path(working_dir)
         self.output_subdir = load_from_yaml(
             self.working_dir / "multirun.yaml"
         ).hydra.output_subdir
 
-        self.multirun_working_dirs = list(
+        job_dirs = [
             x.parent for x in self.working_dir.glob(f"**/*/{self.output_subdir}")
-        )
-        if not self.multirun_working_dirs:
+        ]
+        if not job_dirs:
+            if self.output_subdir is None:
+                why = (
+                    "it ran with hydra.output_subdir=null, so its jobs kept no "
+                    "record to reload from"
+                )
+            else:
+                why = (
+                    "the sweep was killed before its first job started, or its "
+                    "job directories were removed"
+                )
             raise FileNotFoundError(
-                f"no job directories (*/{self.output_subdir}) under "
-                f"{self.working_dir}; the sweep was killed before its first job "
-                "started, or its cells were removed."
+                f"no job directories (**/*/{self.output_subdir}) under "
+                f"{self.working_dir}: {why}."
             )
 
         # ensure working dirs are sorted by job num; while each hydra.yaml is
@@ -2384,16 +2396,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         from ._sweep_io import read_hydra_job
 
         _jobs = [
-            read_hydra_job(dir_ / f"{self.output_subdir}/hydra.yaml")
-            for dir_ in self.multirun_working_dirs
+            read_hydra_job(d / f"{self.output_subdir}/hydra.yaml") for d in job_dirs
         ]
-        _job_nums = [num for num, _ in _jobs]
-        _choices: list[dict | None] = [choices for _, choices in _jobs]
-
-        self.multirun_working_dirs = _sort_x_by_k(self.multirun_working_dirs, _job_nums)
-        self._loaded_job_choices = (
-            _sort_x_by_k(_choices, _job_nums) if _choices else None
-        )
+        _job_nums, _choices = zip(*_jobs, strict=True)
+        self.multirun_working_dirs = _sort_x_by_k(job_dirs, _job_nums)
+        self._loaded_job_choices = _sort_x_by_k(list(_choices), _job_nums)
         self.cfgs = []
 
         for dir_ in self.multirun_working_dirs:
