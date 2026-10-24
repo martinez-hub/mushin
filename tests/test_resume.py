@@ -146,6 +146,9 @@ def test_sidecar_job_fields_defers_to_a_newer_hydra_yaml(tmp_path):
         b'{"job_num": ' + b"9" * 5000 + b"}",  # past Python's int digit limit
         b"[" * 100_000,  # nested past the recursion limit
     ],
+    # pytest would otherwise name the cases after the bytes themselves (5,000
+    # and 100,000 characters), which the Windows CI jobs could not handle.
+    ids=["not-utf8", "huge-int", "deep-nesting"],
 )
 def test_read_cell_status_treats_any_unreadable_file_as_corrupt(tmp_path, content):
     """The MCP server lists directories it did not write; one planted or
