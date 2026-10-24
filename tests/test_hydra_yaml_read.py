@@ -55,11 +55,13 @@ def _types(x):
 
 
 def _outcome(read, path):
+    # _types iterates any config returned, which resolves its interpolations
+    # and can raise: inside the try, so that counts as the outcome too.
     try:
         result = read(path)
+        return "returns", repr(result), _types(result)
     except Exception as e:  # noqa: BLE001 - the error type is the outcome
         return "raises", type(e).__name__
-    return "returns", repr(result), _types(result)
 
 
 def _forbid_rereading(monkeypatch):
@@ -740,3 +742,52 @@ def test_an_aliased_string_is_not_written_back(tmp_path, monkeypatch):
     assert _hydra_yaml._parse_plain(p) is None
     assert dumps == []
     assert _outcome(read_hydra_job, p) == expected
+
+
+def test_a_patched_safe_loader_sends_files_to_omegaconf(tmp_path, monkeypatch):
+    """OmegaConf's loader subclasses yaml.SafeLoader and the plain loader does
+    not, so a library that patches SafeLoader changes OmegaConf.load alone;
+    the fast read must then step aside."""
+    p = tmp_path / "hydra.yaml"
+    tree = {"hydra": {"job": {"num": 3}, "runtime": {"choices": {"db": "mysql"}}}}
+    p.write_text(_hydra_text(tree), encoding="utf-8")
+    assert read_hydra_job(p) == (3, {"db": "mysql"})  # builds the codecs
+
+    def upper_keys(self, node, deep=False):
+        mapping = yaml.constructor.SafeConstructor.construct_mapping(self, node, deep)
+        return {k.upper() if isinstance(k, str) else k: v for k, v in mapping.items()}
+
+    monkeypatch.setattr(yaml.SafeLoader, "construct_mapping", upper_keys, raising=False)
+    assert _hydra_yaml._plain_codecs() is None
+    assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
+
+
+def test_the_second_write_back_runs_only_where_the_emitters_differ(
+    tmp_path, monkeypatch
+):
+    """OmegaConf's Python dumper (1.8 ms) runs only for text libyaml's emitter
+    writes differently (escapes, complex keys), so a hand-edited file does not
+    pay for it before going to OmegaConf."""
+    calls = []
+    real = _hydra_yaml._write_back
+
+    def counting(doc, dumper):
+        calls.append(dumper)
+        return real(doc, dumper)
+
+    monkeypatch.setattr(_hydra_yaml, "_write_back", counting)
+    edited = tmp_path / "edited.yaml"
+    edited.write_text(
+        "# edited\n" + _hydra_text({"hydra": {"job": {"num": 5}}}), encoding="utf-8"
+    )
+    assert _hydra_yaml._parse_plain(edited) is None
+    assert len(calls) == 1
+
+    calls.clear()
+    emoji = tmp_path / "emoji.yaml"
+    emoji.write_text(
+        _hydra_text({"hydra": {"job": {"num": 5, "name": "rocket\U0001f680"}}}),
+        encoding="utf-8",
+    )
+    assert _hydra_yaml._parse_plain(emoji) is not None
+    assert len(calls) == 2

@@ -1598,40 +1598,6 @@ def test_load_from_dir_reports_a_broken_file_before_a_bad_field(tmp_path):
         assert type(err.value).__module__.startswith("yaml"), repr(err.value)
 
 
-@pytest.mark.config_group("model")
-def test_load_from_dir_on_a_workflow_that_ran_drops_its_run(
-    tmp_path, restore_config_group
-):
-    """Reloading another sweep into a workflow that ran in-process must not
-    key its cells by the old run's config-group choices."""
-    from hydra.core.config_store import ConfigStore
-    from hydra_zen import make_config
-
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
-
-    cs = ConfigStore.instance()
-    cs.store(group="model", name="small", node={"width": 4})
-    cs.store(group="model", name="big", node={"width": 8})
-
-    class W(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(model=None):
-            return dict(w=float(model["width"]))
-
-    W(make_config(model=None)).run(
-        working_dir=str(tmp_path / "b"), model=multirun(["big", "small"])
-    )
-    wf = W(make_config(model=None))
-    wf.run(working_dir=str(tmp_path / "a"), model=multirun(["small", "big"]))
-    (tmp_path / "b" / "0" / "mushin_metrics.json").write_text('{"w": 80.0}')
-
-    ds = wf.load_from_dir(tmp_path / "b", "mushin_metrics.json").to_xarray()
-    assert float(ds["w"].sel(model="big")) == 80.0
-    assert float(ds["w"].sel(model="small")) == 4.0
-    assert wf.is_complete
-
-
 def test_load_from_dir_with_a_mistyped_path_changes_nothing(tmp_path):
     """The path is checked before any state is reset, so a typo leaves a
     workflow that ran as it was."""

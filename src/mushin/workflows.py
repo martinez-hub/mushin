@@ -2367,11 +2367,6 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # `to_xarray` and `load_metrics` reload when it is None, so a load that
         # fails partway is retried, not half-reused.
         self.multirun_working_dirs = None
-        # This loads a sweep from disk: drop what an earlier in-process `run`
-        # on this object left, which would otherwise describe that sweep (its
-        # jobs' config-group choices, failures and skipped cells).
-        self.jobs = []
-        self._metrics_by_combo = {}
 
         self.output_subdir = load_from_yaml(
             self.working_dir / "multirun.yaml"

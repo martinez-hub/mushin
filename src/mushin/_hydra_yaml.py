@@ -94,6 +94,14 @@ _OMEGACONF_DUMPER_ATTRS = {
     "yaml_representers",
 }
 
+# The PyYAML tables a class may hold in its own __dict__ once something adds
+# to them.
+_YAML_TABLES = {
+    "yaml_constructors",
+    "yaml_multi_constructors",
+    "yaml_implicit_resolvers",
+}
+
 # Hydra's hydra.yaml nests about 6 deep. OmegaConf.create recurses per level
 # and overflows somewhere past 100, at a depth that depends on the recursion
 # limit, so a deeper file is left to it.
@@ -181,19 +189,36 @@ def _parse_plain(hydra_yaml: Path) -> dict | None:
         doc = yaml.load(text, Loader=loader)
         if not isinstance(doc, dict) or not _omegaconf_would_create(doc):
             return None
-        for dumper in dumpers:
-            written = yaml.dump(
-                doc,
-                Dumper=dumper,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-            )
-            if written == text:
+        libyaml_dumper, omegaconf_dumper = dumpers
+        written = _write_back(doc, libyaml_dumper)
+        if written == text:
+            return doc
+        # Over 4,000 random documents, the two emitters wrote different text
+        # only where one of them wrote an escape or a complex key (`? `): a
+        # character outside the BMP, a long or an empty key. Elsewhere this
+        # second write-back is skipped, so a hand-edited file does not pay for
+        # it; a skip costs at most the fast path, never the result.
+        if _emitters_may_differ(written) or _emitters_may_differ(text):
+            if _write_back(doc, omegaconf_dumper) == text:
                 return doc
     except Exception:  # noqa: BLE001 - OmegaConf decides, and raises its own error
         return None
     return None
+
+
+def _write_back(doc: dict, dumper: type) -> str:
+    """``doc`` as ``OmegaConf.to_yaml`` writes a config, on ``dumper``."""
+    return yaml.dump(
+        doc,
+        Dumper=dumper,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
+def _emitters_may_differ(text: str) -> bool:
+    return "\\" in text or "? " in text
 
 
 def _plain_codecs() -> tuple[type, type, type] | None:
@@ -218,7 +243,9 @@ def _plain_codecs() -> tuple[type, type, type] | None:
 
 
 def _omegaconf_inputs() -> tuple:
-    """Everything OmegaConf's loader and dumper are built from, by value."""
+    """Everything OmegaConf's loader and dumper are built from, by value,
+    including what ``yaml.SafeLoader`` itself defines, so a later patch of it
+    is seen."""
     from omegaconf import _utils
 
     dumper = _utils.get_omega_conf_dumper()
@@ -226,6 +253,9 @@ def _omegaconf_inputs() -> tuple:
         _utils.get_yaml_loader,
         _utils.get_omega_conf_dumper,
         dumper,
+        tuple(
+            (k, v) for k, v in vars(yaml.SafeLoader).items() if k not in _YAML_TABLES
+        ),
         *(
             tuple((k, tuple(v) if isinstance(v, list) else v) for k, v in t.items())
             for t in (
@@ -246,6 +276,7 @@ def _build_plain_codecs(inputs: tuple) -> tuple[type, type, type] | None:
     if not (
         _defines(omegaconf_loader, yaml.SafeLoader, _OMEGACONF_LOADER_ATTRS)
         and _defines(omegaconf_dumper, yaml.Dumper, _OMEGACONF_DUMPER_ATTRS)
+        and _safe_loader_is_pyyamls()
     ):
         return None
     loader = type(
@@ -256,14 +287,45 @@ def _build_plain_codecs(inputs: tuple) -> tuple[type, type, type] | None:
             # builds pathlib tags; its tables carry all of that.
             "yaml_implicit_resolvers": omegaconf_loader.yaml_implicit_resolvers,
             "yaml_constructors": omegaconf_loader.yaml_constructors,
+            "yaml_multi_constructors": omegaconf_loader.yaml_multi_constructors,
         },
     )
     libyaml_dumper = type(
         "_HydraYamlDumper",
         (CDumper,),
-        {"yaml_representers": omegaconf_dumper.yaml_representers},
+        {
+            "yaml_representers": omegaconf_dumper.yaml_representers,
+            "yaml_multi_representers": omegaconf_dumper.yaml_multi_representers,
+            "yaml_implicit_resolvers": omegaconf_dumper.yaml_implicit_resolvers,
+        },
     )
     return loader, libyaml_dumper, omegaconf_dumper
+
+
+def _safe_loader_is_pyyamls() -> bool:
+    """Whether ``yaml.SafeLoader``, which OmegaConf's loader subclasses, is
+    PyYAML's own: its usual bases, and nothing defined on it but PyYAML's
+    ``__init__`` and the tables. The plain loader does not subclass it, so a
+    library that patches it would change OmegaConf.load and not this."""
+    from yaml.parser import Parser
+    from yaml.reader import Reader
+    from yaml.scanner import Scanner
+
+    if yaml.SafeLoader.__bases__ != (
+        Reader,
+        Scanner,
+        Parser,
+        Composer,
+        SafeConstructor,
+        Resolver,
+    ):
+        return False
+    own = set(vars(yaml.SafeLoader)) - _CLASS_METADATA - _YAML_TABLES
+    init = vars(yaml.SafeLoader).get("__init__")
+    return own == {"__init__"} and (
+        getattr(getattr(init, "__code__", None), "co_filename", None)
+        == yaml.loader.__file__
+    )
 
 
 def _defines(cls: Any, base: type, attrs: set[str]) -> bool:
