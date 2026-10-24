@@ -425,8 +425,9 @@ def test_read_hydra_job_matches_the_old_read(tmp_path):
     to OmegaConf instead of returning something else."""
     from mushin._sweep_io import read_hydra_job
 
-    for name, text in _SAME_AS_BEFORE.items():
-        p = tmp_path / f"{name.replace(' ', '_')}.yaml"
+    # Numbered files: some case names hold characters Windows refuses (`?`).
+    for i, (name, text) in enumerate(_SAME_AS_BEFORE.items()):
+        p = tmp_path / f"case{i}.yaml"
         p.write_text(text, encoding="utf-8")
         assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p), name
 

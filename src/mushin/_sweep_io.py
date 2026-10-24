@@ -161,10 +161,10 @@ if CParser is not None:
 
 
 # What OmegaConf's loader defines over yaml.SafeLoader, in omegaconf 2.2.3 to
-# 2.3.1: _LibyamlLoader copies the tables and reimplements construct_mapping.
+# 2.3.1, leaving out dunders (Python adds its own: 3.13 adds
+# __static_attributes__ and __firstlineno__ to every class). _LibyamlLoader
+# copies the tables and reimplements construct_mapping.
 _OMEGACONF_LOADER_ATTRS = {
-    "__doc__",
-    "__module__",
     "construct_mapping",
     "yaml_constructors",
     "yaml_implicit_resolvers",
@@ -191,7 +191,8 @@ def _plain_yaml_loader() -> type | None:
         omegaconf_loader = get_yaml_loader()
     except Exception:  # noqa: BLE001 - only the fast path is lost
         return None
-    if set(vars(omegaconf_loader)) != _OMEGACONF_LOADER_ATTRS:
+    defined = {k for k in vars(omegaconf_loader) if not k.startswith("__")}
+    if defined != _OMEGACONF_LOADER_ATTRS:
         return None
     return type(
         "_HydraYamlLoader",
