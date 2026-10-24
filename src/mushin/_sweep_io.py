@@ -6,6 +6,7 @@ and a fast read of each job's Hydra record."""
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import uuid
@@ -190,9 +191,11 @@ def read_hydra_job(hydra_yaml: Path | str) -> tuple[Any, dict | None]:
     needs two of its fields. Building an OmegaConf config from it was about 90%
     of ``load_from_dir``'s time on a 1000-cell sweep, so it is read as plain
     YAML, typed as OmegaConf types it. Whatever that read cannot settle goes to
-    ``OmegaConf.load``, which resolves it or raises as before. The plain read
-    checks only these two fields: an unrelated malformed value elsewhere in the
-    file, which ``OmegaConf.load`` would reject, does not stop a reload.
+    ``OmegaConf.load``, which resolves it or raises as before. A file that
+    ``OmegaConf.load`` rejects anywhere, not only in these two fields, goes
+    there too: the loader refuses what OmegaConf's refuses (duplicate keys,
+    unknown tags), and the parsed tree is checked as ``OmegaConf.create``
+    checks it.
     """
     hydra_yaml = Path(hydra_yaml)
     plain = _read_hydra_job_plain(hydra_yaml)
@@ -218,7 +221,10 @@ def _read_hydra_job_plain(hydra_yaml: Path) -> tuple[int, dict | None] | None:
         return None
     try:
         text = hydra_yaml.read_text(encoding="utf-8")
-        hydra = yaml.load(text, Loader=loader)["hydra"]
+        doc = yaml.load(text, Loader=loader)
+        if not _omegaconf_would_create(doc):
+            return None
+        hydra = doc["hydra"]
         num = hydra["job"]["num"]
         runtime = hydra.get("runtime")
         choices = None if runtime is None else runtime.get("choices")
@@ -234,6 +240,50 @@ def _read_hydra_job_plain(hydra_yaml: Path) -> tuple[int, dict | None] | None:
     ):
         return None
     return num, choices
+
+
+def _omegaconf_would_create(tree: Any) -> bool:
+    """Whether ``OmegaConf.create`` accepts this parsed YAML, by its own rules:
+    every key of a type a DictConfig takes, every leaf of a type its nodes take,
+    and valid syntax in every string holding ``${`` (it parses each one). False
+    also if those private helpers move, which sends the file to OmegaConf.
+    Walks with a stack, since a recursion here would undo the composer's
+    RecursionError guard."""
+    try:
+        from omegaconf import DictKeyType
+        from omegaconf._utils import is_primitive_type_annotation
+
+        key_types = DictKeyType.__args__  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - only the fast path is lost
+        return False
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if not all(isinstance(k, key_types) for k in node):
+                return False
+            stack.extend(node.values())
+        elif type(node) in (list, tuple):
+            stack.extend(node)
+        elif isinstance(node, str):
+            if "${" in node and not _valid_interpolation(node):
+                return False
+        elif not is_primitive_type_annotation(node):
+            return False
+    return True
+
+
+@functools.lru_cache(maxsize=4096)
+def _valid_interpolation(text: str) -> bool:
+    """OmegaConf's syntax check on a string holding ``${``. Cached: the cells
+    of a sweep repeat the same few, and a full grammar parse is slow."""
+    try:
+        from omegaconf._utils import get_value_kind
+
+        get_value_kind(text, strict_interpolation_validation=True)
+    except Exception:  # noqa: BLE001 - a syntax error, or the helper moved
+        return False
+    return True
 
 
 def _is_option_name(v: Any) -> bool:

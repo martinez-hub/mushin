@@ -377,6 +377,24 @@ _SAME_AS_BEFORE = {
         "hydra:\n  job:\n    num: 3\n  runtime:\n"
         "    cwd: !!python/object/apply:pathlib.Path\n    - /tmp\n"
     ),
+    # Fields a reload never reads: OmegaConf.load still checks them.
+    "malformed interpolation elsewhere": "hydra:\n  job:\n    num: 4\n    name: ${broken\n",
+    "malformed interpolation in a list": (
+        "hydra:\n  job:\n    num: 4\n  overrides:\n    task:\n    - a=${\n"
+    ),
+    "valid interpolations elsewhere": (
+        "hydra:\n  job:\n    num: 4\n    name: ${x}_${oc.env:HOME}\n"
+    ),
+    "null key elsewhere": "hydra:\n  job:\n    num: 4\n  run:\n    null: a\n",
+    "set value elsewhere": "hydra:\n  job:\n    num: 4\n  run: !!set {a: null}\n",
+    "explicit timestamp elsewhere": (
+        "hydra:\n  job:\n    num: 4\n  run:\n    at: !!timestamp 2001-01-01\n"
+    ),
+    "binary value elsewhere": "hydra:\n  job:\n    num: 4\n  run:\n    raw: !!binary aGk=\n",
+    "int, float and bool keys": (
+        "hydra:\n  job:\n    num: 4\n  run:\n    2: a\n    1.5: b\n    true: c\n"
+    ),
+    "omap value": "hydra:\n  job:\n    num: 4\n  run: !!omap [a: 1, b: 2]\n",
 }
 
 
@@ -403,16 +421,99 @@ def test_read_hydra_job_takes_a_str_path_and_pathlib_tags_on_the_fast_path(
     assert read_hydra_job(str(p)) == (3, None)
 
 
-def test_read_hydra_job_ignores_fields_it_does_not_read(tmp_path):
-    """Deliberately unlike OmegaConf.load, a malformed interpolation in a field
-    a reload never reads does not stop the reload."""
-    import pytest
-    from omegaconf.errors import GrammarParseError
+_EDGE_STRINGS = [
+    "${a}",
+    "${broken",
+    "x${y}z",
+    "${oc.env:HOME}",
+    "\\${x}",
+    "${a.b}",
+    "${",
+    "}${",
+    "???",
+    "2024-01-01",
+    "1e3",
+    "yes",
+    "",
+    "adam",
+]
+
+
+def _hydra_docs():
+    """Random hydra.yaml documents: the two fields a reload reads, plus other
+    fields, built from the keys and values that OmegaConf and YAML treat
+    specially."""
+    import hypothesis.strategies as st
+
+    keys = st.one_of(
+        st.sampled_from(["a", "b", "job", "1e3", "yes", ""]),
+        st.integers(-3, 3),
+        st.none(),
+        st.booleans(),
+        st.floats(allow_nan=False, allow_infinity=False, width=16),
+    )
+    leaves = st.one_of(
+        st.none(),
+        st.booleans(),
+        st.integers(-10, 10),
+        st.floats(allow_nan=False, width=16),
+        st.sampled_from(_EDGE_STRINGS),
+        st.binary(max_size=3),
+        st.dates(),
+        st.sets(st.integers(0, 3), max_size=2),
+    )
+    trees = st.recursive(
+        leaves,
+        lambda inner: (
+            st.lists(inner, max_size=3) | st.dictionaries(keys, inner, max_size=3)
+        ),
+        max_leaves=8,
+    )
+    num = st.one_of(
+        st.integers(0, 50),
+        st.sampled_from(["???", "${a}", "abc"]),
+        st.booleans(),
+        st.none(),
+    )
+    choices = st.one_of(
+        st.none(),
+        st.dictionaries(
+            st.one_of(
+                st.sampled_from(["db", "hydra/launcher"]), st.none(), st.integers(0, 2)
+            ),
+            st.one_of(st.none(), st.sampled_from(_EDGE_STRINGS), st.integers(0, 2)),
+            max_size=3,
+        ),
+    )
+    return st.builds(
+        lambda n, c, extra, top: {
+            "a": top,
+            "hydra": {"job": {"num": n}, "runtime": {"choices": c}, "extra": extra},
+        },
+        num,
+        choices,
+        trees,
+        trees,
+    )
+
+
+def test_read_hydra_job_matches_the_old_read_on_random_files():
+    """Whatever a hydra.yaml holds, the reload returns what the full OmegaConf
+    load returned, or fails with the same error type."""
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+    from hypothesis import given, settings
 
     from mushin._sweep_io import read_hydra_job
 
-    p = tmp_path / "hydra.yaml"
-    p.write_text("hydra:\n  job:\n    num: 4\n    name: ${broken\n", encoding="utf-8")
-    with pytest.raises(GrammarParseError):
-        _read_as_before(p)
-    assert read_hydra_job(p) == (4, None)
+    @settings(max_examples=300, deadline=None)
+    @given(_hydra_docs())
+    def check(doc):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "hydra.yaml"
+            p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+            assert _outcome(read_hydra_job, p) == _outcome(_read_as_before, p)
+
+    check()
