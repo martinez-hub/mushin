@@ -322,11 +322,13 @@ _LAUNCHER_PLUGINS: dict[str, str] = {
 
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
+    from ._hydra_yaml import hydra_choices
+
     try:
-        choices = job.hydra_cfg.hydra.runtime.choices
-        return None if choices is None else dict(choices)
+        hydra = job.hydra_cfg.hydra
     except Exception:  # noqa: BLE001 - jobs loaded without hydra_cfg
         return None
+    return hydra_choices(hydra)
 
 
 class _TaskRunner:
@@ -2352,47 +2354,60 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         -------
         loaded_workflow : Self
         """
+        # Point at the new directory first: the setter refuses one that does
+        # not exist, and then this workflow is left as it was.
+        self.working_dir = Path(working_dir)
         # Reset memoized caches so a reused workflow object does not return
         # stale overrides/coordinates from a previously loaded directory.
         self._multirun_task_overrides = {}
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
+        # Unset until the job directories and their configs are read:
+        # `to_xarray` and `load_metrics` reload when it is None, so a load that
+        # fails partway is retried, not half-reused.
+        self.multirun_working_dirs = None
 
-        self.working_dir = Path(working_dir)
         self.output_subdir = load_from_yaml(
             self.working_dir / "multirun.yaml"
         ).hydra.output_subdir
 
-        self.multirun_working_dirs = list(
+        job_dirs = [
             x.parent for x in self.working_dir.glob(f"**/*/{self.output_subdir}")
-        )
+        ]
+        if not job_dirs:
+            if self.output_subdir is None:
+                why = (
+                    "it ran with hydra.output_subdir=null, so its jobs kept no "
+                    "record to reload from"
+                )
+            else:
+                why = (
+                    "no job has started yet (a sweep still queued on a cluster), "
+                    "the sweep was killed before its first job started, or its "
+                    "job directories were removed"
+                )
+            raise FileNotFoundError(
+                f"no job directories (**/*/{self.output_subdir}) under "
+                f"{self.working_dir}: {why}."
+            )
 
         # ensure working dirs are sorted by job num; while each hydra.yaml is
         # open, also recover the job's `runtime.choices` so a config-GROUP axis
         # keys by its chosen option name offline exactly as it does in-process
         # (without this, `_combo_of_cfg` falls back to the composed sub-config
         # and no combo ever matches the choice-name grid coordinates).
-        _hydra_cfgs = [
-            load_from_yaml(dir_ / f"{self.output_subdir}/hydra.yaml")
-            for dir_ in self.multirun_working_dirs
+        from ._hydra_yaml import hydra_job_fields, load_hydra_record
+
+        # Every file is loaded before any field is read, so a sweep with
+        # several broken files reports the error it always did.
+        _records = [
+            load_hydra_record(d / f"{self.output_subdir}/hydra.yaml") for d in job_dirs
         ]
-        _job_nums = [hc.hydra.job.num for hc in _hydra_cfgs]
-        _choices: list[dict | None] = []
-        for hc in _hydra_cfgs:
-            try:
-                ch = hc.hydra.runtime.choices
-                _choices.append(None if ch is None else dict(ch))
-            except Exception:  # noqa: BLE001 - older dirs without choices
-                _choices.append(None)
-
-        self.multirun_working_dirs = _sort_x_by_k(self.multirun_working_dirs, _job_nums)
-        self._loaded_job_choices = (
-            _sort_x_by_k(_choices, _job_nums) if _choices else None
-        )
-        self.cfgs = []
-
-        for dir_ in self.multirun_working_dirs:
+        _job_nums, _choices = zip(*map(hydra_job_fields, _records), strict=True)
+        job_dirs = _sort_x_by_k(job_dirs, _job_nums)
+        cfgs = []
+        for dir_ in job_dirs:
             # Ensure we load saved YAML configurations for each job (in hydra.job.output_subdir)
             cfg_file = dir_ / f"{self.output_subdir}/config.yaml"
             if not cfg_file.exists():
@@ -2401,7 +2416,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     "was cleaned. Re-run the sweep, or point load_from_dir at a "
                     "directory whose cells still have their .hydra/config.yaml."
                 )
-            self.cfgs.append(load_from_yaml(cfg_file))
+            cfgs.append(load_from_yaml(cfg_file))
+        self.multirun_working_dirs = job_dirs
+        self._loaded_job_choices = _sort_x_by_k(list(_choices), _job_nums)
+        self.cfgs = cfgs
 
         if metrics_filename is not None:
             self.load_metrics(metrics_filename)

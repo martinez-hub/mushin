@@ -523,6 +523,32 @@ def test_job_sort_key_ignores_out_of_root_hydra_yaml(tmp_path):
     assert _job_sort_key(run / ".hydra", root.resolve()) == (0, 7, "")
 
 
+def test_job_sort_key_reads_hydra_yaml_without_omegaconf(tmp_path, monkeypatch):
+    """The sort key takes the plain YAML read; the full OmegaConf load it
+    replaced was most of describe_experiment's and get_metrics' time."""
+    import hydra_zen
+
+    from mushin import _hydra_yaml
+    from mushin.mcp.server import _job_sort_key
+
+    if _hydra_yaml.CParser is None:
+        pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
+    hydra_dir = tmp_path / "exp" / "zzz" / ".hydra"
+    hydra_dir.mkdir(parents=True)
+    # As Hydra writes it: only that text takes the fast path.
+    (hydra_dir / "hydra.yaml").write_text(
+        OmegaConf.to_yaml(OmegaConf.create({"hydra": {"job": {"num": 4}}}))
+    )
+
+    def _slow(*args, **kwargs):
+        raise AssertionError("fell back to OmegaConf")
+
+    monkeypatch.setattr(hydra_zen, "load_from_yaml", _slow)
+    monkeypatch.setattr(OmegaConf, "create", staticmethod(_slow))
+    # A fallback that failed would give the directory-name key (1, 0, "zzz").
+    assert _job_sort_key(hydra_dir, None) == (0, 4, "")
+
+
 def test_legacy_nonzip_metrics_not_misread(tmp_path):
     """A legacy non-zip torch.save file must be skipped, never read as garbage."""
     import zipfile

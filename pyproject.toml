@@ -74,6 +74,15 @@ dependencies = [
     "torch >= 2.4.0",
     "numpy >= 2",
     "omegaconf >= 2.2",
+    # mushin reads each job's hydra.yaml with PyYAML itself (on libyaml's C
+    # parser when present) instead of through OmegaConf, so it declares the
+    # dependency omegaconf already brings. Floor is 6.0.3, the first release
+    # with wheels (which bundle libyaml) for every supported Python, 3.11 to
+    # 3.14. Older releases have no wheel for the newest: 6.0's source does not
+    # build with Cython 3, and 6.0.1 and 6.0.2 build from source without
+    # libyaml, which silently turns the fast hydra.yaml read off. The
+    # min-version CI job installs the floor on Python 3.11.
+    "pyyaml >= 6.0.3",
     # xarray 2024.6.0 is the first NumPy-2-compatible release (older xarray uses
     # `np.unicode_`, removed in NumPy 2). Verified by the min-version CI job.
     "xarray >= 2024.6.0",
@@ -175,12 +184,8 @@ dev = [
     # scikit-learn is ABI-incompatible with NumPy 2. The
     # min-versions CI job (dev group at lowest-direct, NumPy-2) verifies this.
     "scikit-learn >= 1.4.2",
-    # tests/test_llms_txt.py parses mkdocs.yml. PyYAML already arrives through
-    # omegaconf, but a test that imports it should not depend on that. Floor is
-    # 6.0.3, the first release with wheels for every supported Python (3.11 to
-    # 3.14). Older releases build from source on the newer ones, and 6.0's
-    # source does not build with Cython 3.
-    "pyyaml >= 6.0.3",
+    # PyYAML, which tests/test_llms_txt.py uses to parse mkdocs.yml, is a core
+    # dependency (see above), so it is not listed here.
     # Example-notebook toolchain (docs/notebooks/). jupytext converts the
     # percent-format .py sources into .ipynb and executes them; nbstripout keeps
     # outputs but strips nondeterministic metadata; nbmake (a pytest plugin)

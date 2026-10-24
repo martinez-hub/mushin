@@ -1521,6 +1521,109 @@ def test_config_group_sweep_survives_offline_reload(tmp_path, restore_config_gro
     assert float(ds["w"].sel(model="small")) == 4.0
 
 
+def test_load_from_dir_without_job_dirs_says_so(tmp_path):
+    """A sweep killed before its first job has a multirun.yaml and no cells;
+    the reload names that instead of failing to unpack an empty sort."""
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    OmegaConf.save({"hydra": {"output_subdir": ".hydra"}}, tmp_path / "multirun.yaml")
+    with pytest.raises(FileNotFoundError, match="no job directories"):
+        MultiRunMetricsWorkflow().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
+def test_load_from_dir_names_a_null_output_subdir(tmp_path):
+    """With hydra.output_subdir=null, no job keeps a record to reload from;
+    the error says so instead of blaming a killed sweep."""
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    OmegaConf.save({"hydra": {"output_subdir": None}}, tmp_path / "multirun.yaml")
+    with pytest.raises(FileNotFoundError, match="output_subdir=null"):
+        MultiRunMetricsWorkflow().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
+def test_load_from_dir_that_fails_partway_reloads_on_retry(tmp_path):
+    """A cell missing its config.yaml fails the load before any of the job
+    directories or configs are kept. On a workflow that held another sweep,
+    a later to_xarray then reloads (and fails again, until the file is back)
+    instead of reading the earlier sweep's cells under the new directory."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    W().run(a=multirun([1, 2, 3]), working_dir=str(tmp_path / "s"))
+    cfg = tmp_path / "s" / "2" / ".hydra" / "config.yaml"
+    kept = cfg.read_text()
+    cfg.unlink()
+    # Prior state from a load, not a run: an in-process run's jobs outlive a
+    # reload (as on main), which is a separate issue.
+    W().run(a=multirun([7, 8]), working_dir=str(tmp_path / "other"))
+    wf = W().load_from_dir(tmp_path / "other", "mushin_metrics.json")
+    with pytest.raises(FileNotFoundError, match="config.yaml not found"):
+        wf.load_from_dir(tmp_path / "s", "mushin_metrics.json")
+    assert wf.multirun_working_dirs is None
+    with pytest.raises(FileNotFoundError, match="config.yaml not found"):
+        wf.to_xarray(metrics_filename="mushin_metrics.json")
+
+    cfg.write_text(kept)
+    ds = wf.to_xarray(metrics_filename="mushin_metrics.json")
+    assert sorted(float(v) for v in ds["m"].values) == [1.0, 2.0, 3.0]
+
+
+def test_load_from_dir_reports_a_broken_file_before_a_bad_field(tmp_path):
+    """Every job's hydra.yaml is loaded before any field is read, as with the
+    full OmegaConf load, so a sweep holding both a file that does not parse
+    and a `???` job number reports the parse error, in either order."""
+    from omegaconf import OmegaConf
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    W().run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    files = sorted((tmp_path / "s").glob("*/.hydra/hydra.yaml"))
+    unset = OmegaConf.to_yaml(OmegaConf.create({"hydra": {"job": {"num": "???"}}}))
+    for bad, missing in [(files[0], files[1]), (files[1], files[0])]:
+        missing.write_text(unset)
+        bad.write_text("hydra: [\n")
+        with pytest.raises(Exception) as err:
+            MultiRunMetricsWorkflow().load_from_dir(
+                tmp_path / "s", "mushin_metrics.json"
+            )
+        assert type(err.value).__module__.startswith("yaml"), repr(err.value)
+
+
+def test_load_from_dir_with_a_mistyped_path_changes_nothing(tmp_path):
+    """The path is checked before any state is reset, so a typo leaves a
+    workflow that ran as it was."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    wf = W()
+    wf.run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    dirs, jobs = list(wf.multirun_working_dirs), list(wf.jobs)
+    with pytest.raises(FileNotFoundError):
+        wf.load_from_dir(tmp_path / "typo", "mushin_metrics.json")
+    assert wf.multirun_working_dirs == dirs and wf.jobs == jobs
+    assert sorted(float(v) for v in wf.to_xarray()["m"].values) == [1.0, 2.0]
+
+
 def test_load_from_dir_nan_fills_failed_cells(tmp_path):
     """A fail-soft sweep must be reloadable offline: a failed cell has no
     metrics sidecar, so load_metrics must NaN-fill it (consulting the cell's
