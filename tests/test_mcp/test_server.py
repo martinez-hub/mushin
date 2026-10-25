@@ -869,7 +869,11 @@ def test_get_failures_reads_a_traceback_an_earlier_release_wrote(tmp_path, monke
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "cp1252")
+    # In UTF-8 mode too (PYTHONUTF8=1, which the agent guide recommends on
+    # Windows), where getpreferredencoding() says utf-8 but the machine's code
+    # page, the one the file was written in, is still cp1252.
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "utf-8")
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
     (f,) = _get_failures(base)["failures"]
     assert f"C:\\Users\\{jose}\\task.py" in f["traceback"]
 

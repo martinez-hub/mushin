@@ -797,10 +797,13 @@ def _write_env_snapshot(working_dir: Path) -> None:
         out = working_dir / f"mushin_env.{n}.txt"
 
     # uv writes UTF-8, so its output is decoded as such ("replace" for any
-    # byte that is not) and the snapshot is written in UTF-8. Decoded in the
-    # locale's encoding, as before, a non-ASCII path in uv's output came out
-    # garbled, or, where the decode raised, the snapshot silently fell back to
-    # the bare package list below.
+    # byte that is not) and the snapshot is written in UTF-8. Earlier, it was
+    # decoded and re-encoded in the locale's codec: where that decode worked
+    # the file kept uv's bytes, but where it raised (any non-ASCII byte under
+    # an ASCII locale; under cp1252 a UTF-8 byte the code page leaves
+    # undefined, 0x81, 0x8D, 0x8F, 0x90 or 0x9D, as in "A" or "I" with an
+    # acute accent and some CJK characters) the snapshot silently fell back
+    # to the bare package list below.
     for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
         try:
             res = subprocess.run(
@@ -1870,31 +1873,35 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # Sniff the content (not the extension): a JSON metrics sidecar starts
         # with `{`/`[`; a torch pickle/zip starts with other bytes. This lets
         # the default loader read the JSON sidecar written by dict-returning
-        # tasks without the caller overriding metric_load_fn.
+        # tasks without the caller overriding metric_load_fn. The first bytes
+        # are decoded before the check (the encoding json detects consumes a
+        # byte-order mark), so a JSON file with one or in UTF-16/32, as
+        # Windows tools write, is not taken for a pickle.
+        import json
+
         try:
             with open(file_path, "rb") as f:
-                head = f.read(64).lstrip()
+                head = f.read(64)
         except OSError:
             head = b""
-        if head[:1] in (b"{", b"["):
-            import json
-
-            from ._sweep_io import _restore_nonfinite
+        # "replace", not "ignore": a byte that is not text must not vanish
+        # and leave a "{" behind it at the start.
+        start = head.decode(json.detect_encoding(head), errors="replace")
+        if start.lstrip()[:1] in ("{", "["):
+            from ._sweep_io import _restore_nonfinite, decode_legacy
 
             with open(file_path, "rb") as f:
                 data = f.read()
-            # mushin's sidecar is UTF-8 (ASCII, in fact), but this loader also
-            # reads a JSON file the user names (load_metrics("my.json")), which
-            # an earlier release decoded in the locale's encoding. json.loads
-            # on bytes reads UTF-8, UTF-16 and UTF-32; a file that is none of
-            # them (cp1252 on Windows) is read in the locale's encoding, as
-            # before.
-            try:
-                loaded = json.loads(data)
-            except UnicodeDecodeError:
-                import locale
 
-                loaded = json.loads(data.decode(locale.getpreferredencoding(False)))
+            # mushin's sidecar is UTF-8 (ASCII, in fact), but this loader
+            # also reads a JSON file the user names (load_metrics("my.json")),
+            # which an earlier release decoded in the locale's encoding: the
+            # encoding json detects (UTF-8, UTF-16 or UTF-32, with or without
+            # a byte-order mark) first, then the locale's, strictly, so a file
+            # in neither raises rather than load with replaced characters.
+            loaded = json.loads(
+                decode_legacy(data, encoding=json.detect_encoding(data))
+            )
             # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
             # as a tagged marker) so an offline reload yields the same
             # float values the in-process run produced.

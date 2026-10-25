@@ -68,9 +68,14 @@ def _print_path(path: str) -> int:
             path.encode(encoding, errors)
         except UnicodeEncodeError:
             return _print_path_bytes(path, stream, encoding)
-    # Outside the try: a tee that wrote part of the line and then raised must
-    # not get the path a second time, as bytes.
-    stream.write(path + "\n")
+    try:
+        stream.write(path + "\n")
+    except UnicodeEncodeError:
+        # The stream reported a wider encoding than the sink it forwards to
+        # (a tee, pytest's tee-sys, Jupyter echoing to cp1252). Part of the
+        # line may be out already; it is not written again, as bytes or text,
+        # and the exit status says it is no path to use.
+        return _cannot_print_path(getattr(stream, "encoding", None))
     return 0
 
 
@@ -82,11 +87,15 @@ def _print_path_bytes(path: str, stream, encoding: str) -> int:
         buffer.flush()
         stream.write("\n")  # through the text layer, translated as print() would
         return 0
+    return _cannot_print_path(encoding)
+
+
+def _cannot_print_path(encoding: str | None) -> int:
     # PYTHONUTF8=1 alone does not help when PYTHONIOENCODING is what narrowed
     # stdout, since that variable wins: name both.
     echo(
         "python -m mushin guide --path: the guide's path holds a character "
-        f"this console's encoding ({encoding}) cannot represent; run with "
+        f"this console cannot represent (stdout reports {encoding}); run with "
         "PYTHONUTF8=1 and with PYTHONIOENCODING unset (or set to utf-8), or "
         "print the guide itself with `python -m mushin guide`",
         file=sys.stderr,

@@ -1,3 +1,5 @@
+import pytest
+
 from mushin._sweep_io import (
     Manifest,
     combo_key,
@@ -63,6 +65,22 @@ def test_manifest_load_or_new_corrupt_returns_fresh(tmp_path):
     m = Manifest.load_or_new(tmp_path, ["a", "b"])
     assert m.cells == {}
     assert m.params == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"\xff\xfe{}", b"[" * 100_000],
+    # Short ids: pytest would otherwise name a case after its 100,000 bytes.
+    ids=["not-utf8", "deep-nesting"],
+)
+def test_manifest_load_or_new_unreadable_returns_fresh(tmp_path, content):
+    """Bytes that are not UTF-8, or JSON nested past the recursion limit, read
+    as a corrupt manifest, as they do for the status and metrics sidecars."""
+    from mushin._sweep_io import MANIFEST_FILE, Manifest
+
+    (tmp_path / MANIFEST_FILE).write_bytes(content)
+    m = Manifest.load_or_new(tmp_path, ["a", "b"])
+    assert m.cells == {}
 
 
 def test_from_cell_status_survives_corrupt_manifest(tmp_path):

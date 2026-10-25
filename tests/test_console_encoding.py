@@ -336,13 +336,19 @@ class _TeeWithBytes:
 
 
 def test_guide_path_is_written_at_most_once_to_a_tee(monkeypatch):
-    # The path fits the reported encoding, so it is written as text, once; a
-    # sink that then raises must not get it a second time as bytes.
-    stream = _TeeWithBytes()
-    with pytest.raises(UnicodeEncodeError):
-        _on_stdout(monkeypatch, stream, cli._print_path, f"site-{ALPHA}")
+    # The path fits the reported encoding, so it is written as text, once. A
+    # sink that then raises must not get it a second time as bytes, and the
+    # command ends with the message and status 1, not a traceback.
+    stream, stderr = _TeeWithBytes(), io.StringIO()
+    with monkeypatch.context() as m:
+        m.setattr(sys, "stdout", stream)
+        m.setattr(sys, "stderr", stderr)
+        code = cli._print_path(f"site-{ALPHA}")
+    assert code == 1
     assert stream.terminal == [f"site-{ALPHA}\n"]
     assert stream.buffer.getvalue() == b""
+    assert "PYTHONUTF8=1" in stderr.getvalue()
+    assert "PYTHONIOENCODING" in stderr.getvalue()
 
 
 def test_main_module_runs_by_path(tmp_path):
@@ -627,9 +633,8 @@ def test_fail_soft_survives_an_error_message_the_locale_cannot_encode(
 
 
 def test_env_snapshot_keeps_uv_output_the_locale_cannot_decode(ascii_locale_run):
-    # Decoded in the locale's encoding, uv's UTF-8 output raised (or, in a
-    # code page that takes every byte, came out garbled), and the snapshot
-    # silently fell back to the bare package list.
+    # Decoded in an ASCII locale's encoding, uv's UTF-8 output raised, and the
+    # snapshot silently fell back to the bare package list.
     wd, _, _ = ascii_locale_run
     snapshot = (wd / "mushin_env.txt").read_text(encoding="utf-8")
     assert f"/home/{ALPHA}/project" in snapshot
@@ -657,11 +662,26 @@ def test_mcp_get_failures_reads_the_traceback_under_that_locale(ascii_locale_run
         # A file in the locale's encoding, as Windows writes by default and as
         # an earlier release read every JSON metrics file: not UTF-8.
         ZURICH_JSON.encode("cp1252"),
-        # UTF-16 (no byte-order mark, so the content sniff still sees "{").
-        ZURICH_JSON.encode("utf-16-le"),
         ZURICH_JSON.encode("utf-8"),
+        # With a byte-order mark, or in UTF-16/32 (as Windows tools write): the
+        # first byte is not "{", so the sniff must decode before it looks.
+        ZURICH_JSON.encode("utf-8-sig"),
+        ZURICH_JSON.encode("utf-16"),
+        ZURICH_JSON.encode("utf-16-le"),
+        ZURICH_JSON.encode("utf-16-be"),
+        ZURICH_JSON.encode("utf-32"),
+        ("\n" + ZURICH_JSON).encode("utf-16-le"),
     ],
-    ids=["cp1252-locale", "utf-16", "utf-8"],
+    ids=[
+        "cp1252-locale",
+        "utf-8",
+        "utf-8-sig",
+        "utf-16-bom",
+        "utf-16-le",
+        "utf-16-be",
+        "utf-32-bom",
+        "utf-16-le-leading-newline",
+    ],
 )
 def test_metric_load_fn_reads_a_users_json_in_any_of_its_encodings(
     tmp_path, monkeypatch, data
@@ -670,7 +690,11 @@ def test_metric_load_fn_reads_a_users_json_in_any_of_its_encodings(
 
     path = tmp_path / "my_metrics.json"
     path.write_bytes(data)
-    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "cp1252")
+    # UTF-8 mode (PYTHONUTF8=1, which the agent guide recommends on Windows):
+    # getpreferredencoding() says utf-8, while the locale's code page, the one
+    # the file was written in, is cp1252.
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "utf-8")
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
     assert MultiRunMetricsWorkflow.metric_load_fn(path) == {ZURICH: 1.0}
 
 

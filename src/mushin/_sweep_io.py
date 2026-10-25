@@ -15,6 +15,27 @@ METRICS_FILE = "mushin_metrics.json"
 MANIFEST_FILE = "mushin_sweep_manifest.json"
 
 
+def decode_legacy(
+    data: bytes, *, encoding: str = "utf-8", errors: str = "strict"
+) -> str:
+    """Text from a file that mushin, a user or an earlier mushin release
+    wrote: ``encoding`` first (UTF-8, which mushin now writes on every
+    platform), then the machine's locale encoding, which earlier releases
+    wrote and which Windows tools write by default (cp1252 on Western
+    systems). ``errors`` applies to that fallback only.
+
+    The locale encoding is ``locale.getencoding()``, not
+    ``getpreferredencoding()``: in UTF-8 mode (``PYTHONUTF8=1``, which the
+    agent guide recommends on Windows, and the default from Python 3.15) the
+    latter says "utf-8", so a cp1252 file would fail UTF-8 twice."""
+    import locale
+
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError:
+        return data.decode(locale.getencoding(), errors)
+
+
 def _esc(s: Any) -> str:
     """Escape the ``combo_key`` delimiters in a key or value so the join is
     injective: a value literally containing ``,`` or ``=`` cannot be confused
@@ -168,8 +189,9 @@ class Manifest:
             try:
                 d = json.loads(p.read_text(encoding="utf-8"))
             # ValueError, not just JSONDecodeError: bytes that are not
-            # UTF-8 raise UnicodeDecodeError, a corrupt file all the same.
-            except (ValueError, OSError):
+            # UTF-8 raise UnicodeDecodeError, a corrupt file all the same;
+            # RecursionError a file nested too deep, as for the sidecars.
+            except (ValueError, OSError, RecursionError):
                 return cls(root, params)
             # A valid-JSON manifest of the wrong SHAPE (list payload, non-dict
             # cells) degrades like a corrupt one instead of crashing callers.
