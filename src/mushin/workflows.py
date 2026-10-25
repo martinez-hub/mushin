@@ -378,7 +378,8 @@ class _TaskRunner:
         max_total_seconds=None,
         sampled_indices=None,
         cache_dir=None,
-        code_deps=None,
+        code_roots=(),
+        code_body_roots=(),
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -388,14 +389,17 @@ class _TaskRunner:
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
         self.code_hash = code_hash  # hash of the task source (resume guard)
-        # What the project code the task reaches looks like ({"python": ...,
-        # "code": {where-looked-up: hash}}, see project_fingerprints), or None
-        # when it could not be taken. The other half of the code guard: an
-        # edited helper re-runs the cell. The cache key's third part is fixed
-        # for the run, so it is built once.
-        self.code_deps = code_deps
-        reached = code_deps.get("code") if isinstance(code_deps, dict) else None
-        self._deps_key = ":" + json.dumps(code_deps, sort_keys=True) if reached else ""
+        # The roots of the project-code record (the task, Study's training
+        # functions; code_body_roots also have their bodies recorded: pre_task).
+        # The record is taken in each cell's own process (cell_project_record),
+        # since a parallel worker imports the code it runs from disk, and the
+        # code the driver loaded may not be what ran. The token keys the
+        # per-process cache of the roots' walk and is shared by pickled copies.
+        import uuid
+
+        self.code_roots = tuple(code_roots)
+        self.code_body_roots = tuple(code_body_roots)
+        self._code_token = uuid.uuid4().hex
         # Grid subsampling: the set of Hydra job numbers to actually run (None =
         # run every cell). A cell whose job.num is not selected is skipped
         # (NaN), keyed on the deterministic job index so it's launcher- and
@@ -414,21 +418,24 @@ class _TaskRunner:
         self._deadline = None
         self._budget_rank_warned = False
 
-    def _cache_key(self, config_hash) -> str | None:
+    def _cache_key(self, config_hash, deps) -> str | None:
         """The content-address for this cell: a hash of its resolved-config and
-        task-source fingerprints and of the project code the task reaches, or
-        None if the first two are unavailable (so an unresolvable cell is simply
-        never cached). A task that reaches no project file keeps the two-part
-        key, so its entries from before the third part are still found."""
+        task-source fingerprints and of the project code the cell reaches
+        (``deps``, its project-code record), or None if the first two are
+        unavailable (so an unresolvable cell is simply never cached). A cell
+        that reaches no project code keeps the two-part key, so its entries
+        from before the third part are still found."""
         if not self.cache_dir or config_hash is None or self.code_hash is None:
             return None
-        if self.code_deps is None:
+        if deps is None:
             # The project code could not be fingerprinted: no key would tell
-            # this code era from another, so the cache is not used this run.
+            # this code era from another, so the cache is not used.
             return None
         import hashlib
 
-        payload = f"{config_hash}:{self.code_hash}{self._deps_key}"
+        payload = f"{config_hash}:{self.code_hash}"
+        if deps.get("code"):
+            payload += ":" + json.dumps(deps, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     @staticmethod
@@ -486,9 +493,11 @@ class _TaskRunner:
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
+            cell_project_record,
             changed_project_code,
             config_fingerprint,
             discover_last_ckpt,
+            merge_project_records,
             read_cell_status,
             write_cell_status,
         )
@@ -500,6 +509,11 @@ class _TaskRunner:
         )
 
         chash = config_fingerprint(cfg)
+        # This cell's project-code record, taken here, in the process that will
+        # run (or reuse) it: see cell_project_record.
+        deps = cell_project_record(
+            self._code_token, self.code_roots, self.code_body_roots, cfg
+        )
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
         # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
@@ -508,7 +522,7 @@ class _TaskRunner:
             write_cell_status,
             config_hash=chash,
             code_hash=self.code_hash,
-            code_deps=self.code_deps,
+            code_deps=deps,
             job_num=job_num,
             choices=choices,
         )
@@ -566,7 +580,7 @@ class _TaskRunner:
                 # Judged on the names both runs reached, under one Python
                 # version; None when they cannot be compared (a sidecar from
                 # before the field, another interpreter, an unknown record).
-                changed_deps = changed_project_code(prior_deps, self.code_deps)
+                changed_deps = changed_project_code(prior_deps, deps)
                 deps_changed = bool(changed_deps)
                 if config_changed or code_changed or deps_changed:
                     parts = []
@@ -599,14 +613,16 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         cwd = Path.cwd()
                         write_metrics_sidecar(cwd, cached)
-                        # Keep the reused cell's record when this run has
-                        # none: dropping it would make a later resume reuse the
-                        # cell unchecked.
-                        keep = {}
-                        if self.code_deps is None and prior_deps is not None:
-                            keep["code_deps"] = prior_deps
+                        # Keep the reused cell's prior record merged with this
+                        # one: dropping a key (or the whole record, when this
+                        # run has none) would let a later resume reuse the cell
+                        # unchecked.
                         write_status(
-                            cwd, status="completed", combo=sc, attempt=1, **keep
+                            cwd,
+                            status="completed",
+                            combo=sc,
+                            attempt=1,
+                            code_deps=merge_project_records(prior_deps, deps),
                         )
                         return cached
 
@@ -615,7 +631,7 @@ class _TaskRunner:
         # fingerprints (not the combo/dir), so it survives a fresh working_dir.
         # The cache hit refreshes this job dir (metrics + completed status) so
         # the manifest and an offline load see a normal completed cell.
-        cache_key = self._cache_key(chash)
+        cache_key = self._cache_key(chash, deps)
         if cache_key is not None:
             cache_cell = Path(self.cache_dir) / cache_key
             cached = read_metrics_sidecar(cache_cell)
@@ -725,7 +741,7 @@ class _TaskRunner:
                 # so a future sweep with the same config+code reuses it. Keyed on
                 # the fingerprints; best-effort (a cache-write failure must never
                 # fail the cell itself).
-                cache_key = self._cache_key(chash)
+                cache_key = self._cache_key(chash, deps)
                 if cache_key is not None:
                     try:
                         cache_cell = Path(self.cache_dir) / cache_key
@@ -1547,7 +1563,7 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import code_fingerprint, project_fingerprints
+        from ._resume import code_fingerprint
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -1575,10 +1591,10 @@ class BaseWorkflow:
             sampled_indices=sampled_indices,
             cache_dir=cache_dir,
             # Further roots a subclass names (Study's training functions,
-            # which its task calls but does not import).
-            code_deps=project_fingerprints(
-                self.task, *getattr(self, "_mushin_code_roots", ())
-            ),
+            # which its task calls but does not import), and pre_task, whose
+            # own body nothing else covers.
+            code_roots=(self.task, *getattr(self, "_mushin_code_roots", ())),
+            code_body_roots=(self.pre_task,),
         )
 
         self._capture_env = capture_env
@@ -1967,23 +1983,25 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             metrics are read from the sidecar) and re-run the rest. A completed
             cell is reused only if its swept-parameter combination AND
             fingerprints of its resolved config, its task source and the
-            project code the task reaches still match. The project code is
-            found from the names the task's code uses, followed through the
-            project's own functions, classes, modules and constants as this
-            process has loaded them, which is the code that will run: a helper
-            it calls, a constant it reads (``from consts import THRESH``
-            included), a function in a notebook or in a script's main block.
-            Functions are hashed by their bytecode, so a comment or a moved
-            definition is not an edit. A changed non-swept value, an edited
-            task body or an edited helper re-runs that cell, with a warning
-            naming where the change is (``helpers:scale``). Not covered:
-            installed packages other than editable ones, data files, the
-            environment, a mutable module-level container, and code reached
-            only through a string (a class named by ``_target_`` that nothing
-            the task uses imports). A resume under another Python version does
-            not compare project code (its bytecode differs). After upgrading a
-            dependency, changing the data or editing such code, re-run from a
-            fresh ``working_dir`` rather than resuming.
+            project code the cell reaches still match. The project code is
+            found from the names the task's code uses (and ``pre_task``'s, and
+            the classes the cell's config names as ``_target_``), followed
+            through the project's own functions, classes, modules and constants
+            as the cell's process has loaded them, which is the code that runs:
+            a helper it calls, a constant it reads (``from consts import
+            THRESH`` included), a class in a registry dict it indexes, a
+            function in a notebook or in a script's main block. Functions are
+            hashed by their bytecode, so a comment or a moved definition is not
+            an edit. A changed non-swept value, an edited task body or an
+            edited helper re-runs that cell, with a warning naming where the
+            change is (``helpers:scale``). Not covered: installed packages
+            other than editable ones, data files, the environment, the contents
+            of a mutable container (beyond the code it holds), a ``_target_``
+            whose module the cell's process has not imported, and code reached
+            only through some other string. A resume under another Python
+            version does not compare project code (its bytecode differs).
+            After upgrading a dependency, changing the data or editing such
+            code, re-run from a fresh ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to

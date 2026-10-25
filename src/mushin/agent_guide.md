@@ -151,11 +151,13 @@ rules:
   in.
 - **Resume.** `resume=True` with the same `working_dir` reruns the cells that
   are incomplete or whose config, task function or project code changed: the
-  helpers, classes and constants the task uses, followed through the
-  project's own modules as the running process has loaded them (a notebook's
-  functions and a script's main block included). A comment is not an edit. It
-  does not see an installed package, data files, or code reached only through
-  a string such as a `_target_`. After such a change, use a new
+  helpers, classes and constants the task (and `pre_task`) uses, followed
+  through the project's own modules as the running process has loaded them
+  (a notebook's functions, a script's main block and a registry dict of
+  classes included), and the config's `_target_` classes once their module is
+  imported. A comment is not an edit. It does not see an installed package,
+  data files, or code reached only through some other string. After such a
+  change, use a new
   `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
   lists every cell when a resume launches; the completed ones return their
   saved metrics without running.

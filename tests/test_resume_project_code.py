@@ -297,7 +297,9 @@ def test_an_installed_but_editable_distribution_is_the_project(monkeypatch):
     an installed package; an editable install is the project itself."""
     import mushin._resume as r
 
-    monkeypatch.setattr(r, "_installed_top_levels", lambda: frozenset({"clusterlib"}))
+    monkeypatch.setattr(
+        r, "_installed_roots", lambda: {"clusterlib": (pathlib.Path("/x"),)}
+    )
     r._is_foreign_module.cache_clear()
     try:
         assert r._is_foreign_module("clusterlib.ops")
@@ -475,29 +477,26 @@ def test_cache_dir_misses_after_a_helper_edit_and_hits_when_it_is_undone(project
 
 
 def test_cache_key_keeps_main_two_part_form_without_project_code():
-    """A task that reaches no project code keeps main's key, so its entries from
+    """A cell that reaches no project code keeps main's key, so its entries from
     before this change are still found; one that does gets another; one whose
     project code could not be fingerprinted does not use the cache."""
     from mushin.workflows import _TaskRunner
 
-    def runner(deps):
-        return _TaskRunner(
-            task=None,
-            pre_task=None,
-            swept_names=(),
-            base_provenance=None,
-            on_error="raise",
-            inject_resume=False,
-            prior_manifest=None,
-            code_hash="c0de",
-            cache_dir="cache",
-            code_deps=deps,
-        )
-
+    runner = _TaskRunner(
+        task=None,
+        pre_task=None,
+        swept_names=(),
+        base_provenance=None,
+        on_error="raise",
+        inject_resume=False,
+        prior_manifest=None,
+        code_hash="c0de",
+        cache_dir="cache",
+    )
     two_part = hashlib.sha256(b"h:c0de").hexdigest()[:32]
-    assert runner({"python": PY, "code": {}})._cache_key("h") == two_part
-    assert runner({"python": PY, "code": {"m:f": "1"}})._cache_key("h") != two_part
-    assert runner(None)._cache_key("h") is None
+    assert runner._cache_key("h", {"python": PY, "code": {}}) == two_part
+    assert runner._cache_key("h", {"python": PY, "code": {"m:f": "1"}}) != two_part
+    assert runner._cache_key("h", None) is None
 
 
 # --- a task defined in the script that runs it --------------------------------
@@ -668,3 +667,373 @@ def test_study_methods_fingerprint_is_the_one_main_recorded(project, in_cwd):
         assert f"{HELPERS}:scale" in code  # the training function's helper
     finally:
         sys.modules.pop("mushin_t_train2", None)
+
+
+def test_the_hash_is_the_same_in_every_process(tmp_path):
+    """A frozenset constant (`x in {"a", "b"}`) prints in string-hash order,
+    which PYTHONHASHSEED changes per process; the hash must not."""
+    (tmp_path / "mushin_t_seeded.py").write_text(
+        textwrap.dedent("""
+            NAMES = frozenset({"alpha", "beta", "gamma", "delta"})
+
+
+            def task(a):
+                return dict(v=float(a in {"x", "y", "z", "w", "q"} or a in NAMES))
+            """)
+    )
+    probe = (
+        "import json, sys; sys.path.insert(0, sys.argv[1]); "
+        "import mushin_t_seeded as m; from mushin._resume import project_fingerprints; "
+        "from mushin._resume import code_fingerprint, _code_hash; "
+        "print(json.dumps([project_fingerprints(m.task), _code_hash(m.task.__code__)]))"
+    )
+    outs = {
+        subprocess.run(
+            [sys.executable, "-c", probe, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONDONTWRITEBYTECODE": "1"},
+        ).stdout
+        for seed in ("0", "1", "2", "3")
+    }
+    assert len(outs) == 1, outs
+
+
+def test_enum_values_and_decorated_functions_are_reached(project):
+    """An enum member's value is a constant the task reads; a function behind a
+    foreign decorator (functools.lru_cache) is code it runs."""
+    root, exp = project
+    src = textwrap.dedent("""
+        import enum
+        import functools
+
+
+        class Mode(enum.Enum):
+            FAST = {fast}
+
+
+        @functools.lru_cache
+        def cached(a):
+            return a * {factor}
+
+
+        def task(a):
+            return dict(v=float(cached(a) + Mode.FAST.value))
+        """)
+    (root / f"{EXP}.py").write_text(src.format(fast=1, factor=2))
+    exp = importlib.reload(exp)
+    before = project_fingerprints(exp.task)
+    assert f"{EXP}:cached.__wrapped__" in before["code"]
+    (root / f"{EXP}.py").write_text(src.format(fast=5, factor=2))
+    exp = importlib.reload(exp)
+    assert f"{EXP}:Mode" in changed_project_code(before, project_fingerprints(exp.task))
+    (root / f"{EXP}.py").write_text(src.format(fast=1, factor=3))
+    exp = importlib.reload(exp)
+    assert f"{EXP}:cached.__wrapped__" in changed_project_code(
+        before, project_fingerprints(exp.task)
+    )
+
+
+# --- round 4: the walk's precision ----------------------------------------------
+
+
+def _module(root, name, src):
+    (root / f"{name}.py").write_text(textwrap.dedent(src))
+    sys.modules.pop(name, None)
+    return importlib.import_module(name)
+
+
+def _changed(before, fn, **kwargs):
+    return changed_project_code(before, project_fingerprints(fn, **kwargs))
+
+
+def test_a_module_reached_by_two_functions_is_walked_for_both(project):
+    """The names a second function reads in a module the first already reached
+    are fingerprinted too."""
+    root, _ = project
+    _module(root, "mushin_t_h2", "OFFSET = 1\n\n\ndef scale(x):\n    return x * 2\n")
+    src = """
+        import mushin_t_h2 as h
+
+
+        def inner(a):
+            return h.OFFSET * a
+
+
+        def task(a):
+            return dict(v=inner(a) + h.scale(a))
+        """
+    mod = _module(root, "mushin_t_two", src)
+    try:
+        code = project_fingerprints(mod.task)["code"]
+        assert {"mushin_t_h2:OFFSET", "mushin_t_h2:scale"} <= set(code)
+    finally:
+        for n in ("mushin_t_h2", "mushin_t_two"):
+            sys.modules.pop(n, None)
+
+
+def test_a_name_that_stops_being_hashable_is_still_an_edit(project):
+    """`LAYERS = 3` becoming a list, or a helper becoming a foreign function,
+    keeps its key with a stand-in hash, so the edit shows."""
+    root, _ = project
+    src = """
+        import math
+
+        LAYERS = {layers}
+        {act}
+
+
+        def task(a):
+            return dict(v=act(a) * len(str(LAYERS)))
+        """
+    mod = _module(
+        root,
+        "mushin_t_kinds",
+        textwrap.dedent(src).format(layers=3, act="def act(x):\n    return abs(x)"),
+    )
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(
+            root,
+            "mushin_t_kinds",
+            textwrap.dedent(src).format(layers="[64, 64]", act="act = math.fabs"),
+        )
+        assert set(_changed(before, mod.task)) == {
+            "mushin_t_kinds:LAYERS",
+            "mushin_t_kinds:act",
+        }
+    finally:
+        sys.modules.pop("mushin_t_kinds", None)
+
+
+def test_a_registry_of_project_classes_is_walked(project):
+    """`MODELS = {"cnn": CNN}` with the task picking one by name: the classes it
+    holds are code the task runs."""
+    root, _ = project
+    src = """
+        class CNN:
+            def forward(self, a):
+                return a * {k}
+
+
+        MODELS = {{"cnn": CNN}}
+
+
+        def task(method, a):
+            return dict(v=MODELS[method]().forward(a))
+        """
+    mod = _module(root, "mushin_t_registry", src.format(k=2))
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(root, "mushin_t_registry", src.format(k=3))
+        assert "mushin_t_registry:MODELS['cnn']" in _changed(before, mod.task)
+    finally:
+        sys.modules.pop("mushin_t_registry", None)
+
+
+def test_partial_keywords_closures_and_properties_are_code(project):
+    root, _ = project
+    src = """
+        import functools
+
+
+        def mul(x, factor):
+            return x * factor
+
+
+        def make(k):
+            def f(x):
+                return x + k
+
+            return f
+
+
+        class Model:
+            @property
+            def lr(self):
+                return {lr}
+
+
+        pscale = functools.partial(mul, factor={factor})
+        s10 = make({k10})
+        s100 = make(100)
+
+
+        def task(a):
+            return dict(v=pscale(a) + s10(a) + s100(a) + Model().lr)
+        """
+    mod = _module(root, "mushin_t_wrapped", src.format(lr=0.01, factor=10, k10=10))
+    try:
+        before = project_fingerprints(mod.task)
+        for edit, key in (
+            (dict(lr=0.5, factor=10, k10=10), "mushin_t_wrapped:Model"),
+            (dict(lr=0.01, factor=99, k10=10), "mushin_t_wrapped:pscale"),
+            (dict(lr=0.01, factor=10, k10=20), "mushin_t_wrapped:s10.<k>"),
+        ):
+            mod = _module(root, "mushin_t_wrapped", src.format(**edit))
+            assert key in _changed(before, mod.task), edit
+    finally:
+        sys.modules.pop("mushin_t_wrapped", None)
+
+
+def test_class_bookkeeping_is_not_code(project):
+    """3.13+ stores __firstlineno__ on every class: a comment above it would
+    otherwise be an edit. Dunder values (module, doc, line) are not code."""
+    root, _ = project
+    mod = _module(
+        root,
+        "mushin_t_cls",
+        "class M:\n    def f(self):\n        return 1\n\n\ndef task(a):\n    return dict(v=M().f())\n",
+    )
+    try:
+        before = project_fingerprints(mod.task)
+        mod.M.__firstlineno__ = 999
+        mod.M.__doc__ = "now documented"
+        assert _changed(before, mod.task) == []
+    finally:
+        sys.modules.pop("mushin_t_cls", None)
+
+
+def test_an_attribute_named_like_a_global_is_not_that_global(project):
+    """`random.seed(a)` next to a module-level `seed = 0`: the attribute is not
+    the global, so changing the global is not an edit to the task."""
+    root, _ = project
+    src = "import random\n\nseed = {seed}\n\n\ndef task(a):\n    random.seed(a)\n    return dict(v=a)\n"
+    mod = _module(root, "mushin_t_attr", src.format(seed=0))
+    try:
+        before = project_fingerprints(mod.task)
+        assert "mushin_t_attr:seed" not in before["code"]
+        mod = _module(root, "mushin_t_attr", src.format(seed=1))
+        assert _changed(before, mod.task) == []
+    finally:
+        sys.modules.pop("mushin_t_attr", None)
+
+
+def test_relative_import_levels_are_read_on_every_python():
+    """3.14 loads the level with LOAD_SMALL_INT; a large int constant earlier in
+    the body must not be taken for it."""
+    from mushin._resume import _code_names
+
+    ns = {}
+    exec(
+        "def f():\n    n = 100000\n    import helpers\n    from .lazy import K\n    from ..up import U\n",
+        ns,
+    )
+    _, _, imports = _code_names(ns["f"].__code__)
+    assert ("helpers", 0) in imports and ("lazy", 1) in imports and ("up", 2) in imports
+
+
+def test_roots_from_two_packages_with_the_same_file_name_do_not_collide(project):
+    """Study methods in pa/train.py and pb/train.py: keys use import names."""
+    root, _ = project
+    for pkg, lr in (("mushin_t_pa", 0.1), ("mushin_t_pb", 0.5)):
+        (root / pkg).mkdir()
+        (root / pkg / "__init__.py").write_text("")
+        (root / pkg / "train.py").write_text(
+            f"LR = {lr}\n\n\ndef train(seed):\n    return LR\n"
+        )
+    try:
+        a = importlib.import_module("mushin_t_pa.train")
+        b = importlib.import_module("mushin_t_pb.train")
+        code = project_fingerprints(a.train, b.train)["code"]
+        assert {"mushin_t_pa.train:LR", "mushin_t_pb.train:LR"} <= set(code)
+    finally:
+        for n in (
+            "mushin_t_pa",
+            "mushin_t_pa.train",
+            "mushin_t_pb",
+            "mushin_t_pb.train",
+        ):
+            sys.modules.pop(n, None)
+
+
+def test_a_project_file_is_the_project_even_if_an_installed_name_matches(
+    project, monkeypatch
+):
+    """A checkout's `utils` next to an installed wheel that ships a top-level
+    `utils`: the loaded module's file decides."""
+    import mushin._resume as r
+
+    root, exp = project
+    elsewhere = root.parent / "site"
+    elsewhere.mkdir()
+    monkeypatch.setattr(
+        r, "_installed_roots", lambda: {EXP: (elsewhere.resolve(),), "numpy": ()}
+    )
+    r._is_foreign_module.cache_clear()
+    try:
+        assert not r._is_foreign_module(EXP)  # its file is in the project
+        monkeypatch.setattr(r, "_installed_roots", lambda: {EXP: (root.resolve(),)})
+        r._is_foreign_module.cache_clear()
+        assert r._is_foreign_module(EXP)  # its file is inside the install dir
+    finally:
+        r._is_foreign_module.cache_clear()
+
+
+def test_pre_task_and_config_targets_are_roots(project):
+    """pre_task's body and what it calls, and the classes the config names as
+    `_target_` (hydra-zen's builds), are code a cell runs."""
+    from mushin._resume import cell_project_record
+
+    root, _ = project
+    src = """
+        SEED_OFFSET = {off}
+
+
+        def pre_task(seed):
+            return seed + SEED_OFFSET
+
+
+        class Model:
+            def forward(self, a):
+                return a * {k}
+
+
+        def task(model, a):
+            return dict(v=model.forward(a))
+        """
+    mod = _module(root, "mushin_t_roots", src.format(off=0, k=2))
+    cfg = {"model": {"_target_": "mushin_t_roots.Model"}, "a": 1}
+    try:
+        before = cell_project_record("tok-a", (mod.task,), (mod.pre_task,), cfg)
+        assert {"mushin_t_roots:pre_task", "target:mushin_t_roots.Model"} <= set(
+            before["code"]
+        )
+        mod = _module(root, "mushin_t_roots", src.format(off=1, k=2))
+        after = cell_project_record("tok-b", (mod.task,), (mod.pre_task,), cfg)
+        assert changed_project_code(before, after) == ["mushin_t_roots:SEED_OFFSET"]
+        mod = _module(root, "mushin_t_roots", src.format(off=0, k=3))
+        after = cell_project_record("tok-c", (mod.task,), (mod.pre_task,), cfg)
+        assert "target:mushin_t_roots.Model" in changed_project_code(before, after)
+    finally:
+        sys.modules.pop("mushin_t_roots", None)
+
+
+def test_a_reused_cell_keeps_the_keys_only_its_prior_record_had():
+    """A key only one kind of process reaches (a lazily imported module hashed
+    by file in a fresh process) stays, so a later resume can compare it."""
+    from mushin._resume import merge_project_records
+
+    prior = {"python": PY, "code": {"pkg.lazy (file)": "1", "m:f": "2"}}
+    current = {"python": PY, "code": {"pkg.lazy:K": "3", "m:f": "2"}}
+    merged = merge_project_records(prior, current)
+    assert merged["code"] == {"pkg.lazy (file)": "1", "pkg.lazy:K": "3", "m:f": "2"}
+    assert merge_project_records(prior, None) == prior
+    assert merge_project_records(None, current) == current
+    other = {"python": "0.0", "code": {"m:f": "9"}}
+    assert merge_project_records(other, current) == current
+
+
+def test_a_method_default_is_part_of_its_class(project):
+    """`def scale(self, x, factor=2)` to `factor=20` leaves the code object as it
+    was; the default is what changed (Codex, #270)."""
+    root, _ = project
+    src = "class Scaler:\n    def scale(self, x, factor={f}):\n        return x * factor\n\n\ndef task(a):\n    return dict(v=Scaler().scale(a))\n"
+    mod = _module(root, "mushin_t_defaults", src.format(f=2))
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(root, "mushin_t_defaults", src.format(f=20))
+        assert "mushin_t_defaults:Scaler" in _changed(before, mod.task)
+    finally:
+        sys.modules.pop("mushin_t_defaults", None)
