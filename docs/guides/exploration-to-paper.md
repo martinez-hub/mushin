@@ -35,7 +35,17 @@ of them away. Four options make that cheap:
   grid larger than `N` cells, so an accidental combinatorial blow-up fails fast.
 - **`max_total_seconds=T`** time-boxes a run: once the budget is spent the
   remaining cells are skipped (NaN) rather than the sweep running to the end, and
-  a later `resume=True` finishes them when you have more time.
+  a later `resume=True` finishes them when you have more time, on a budget of its
+  own. The clock starts with the first cell that computes (cells reused by a
+  resume or from `cache_dir` do not count), no cell starts more than `T` seconds
+  later, and a running cell is never cut short. There is one deadline for the
+  whole sweep, whatever the launcher: under `launcher="joblib"` or submitit every
+  worker stops starting cells at the same moment, so `T` bounds the elapsed
+  time, not the compute summed over the workers. The workers share the start
+  through a hidden file in the sweep directory, so on several nodes they need a
+  shared filesystem and synchronized clocks. The budget is disabled, with a
+  warning, for a cell that runs on several ranks (see
+  [Multi-node training](multinode.md)).
 
 A typical exploration loop:
 

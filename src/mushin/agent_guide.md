@@ -137,9 +137,11 @@ rules:
   `mushin.original_cwd() / "data" / "train.csv"`.
 - **Check the size first.** Run with `dry_run=True` before anything expensive.
   `confirm_above=N`, or the `MUSHIN_MAX_CELLS` environment variable, refuses a
-  grid of more than `N` cells. `max_total_seconds=` stops starting cells once a
-  time budget runs out, but only with the default launcher: under
-  `launcher="joblib"` it has no effect, so bound such a run another way.
+  grid of more than `N` cells. `max_total_seconds=T` stops starting cells `T`
+  seconds after the first cell that computes, and records the rest as skipped;
+  a later `resume=True` runs them with a fresh budget. Under
+  `launcher="joblib"` every worker honors the same deadline, so `T` bounds the
+  elapsed time, not the compute summed over the workers.
 - **Failures.** With `on_error="nan"`, the sweep goes on when a cell raises:
   the cell becomes NaN, `experiment.workflow.failures` lists it, and its
   traceback is in `mushin_error.txt` in the cell's directory. `compare_methods`
