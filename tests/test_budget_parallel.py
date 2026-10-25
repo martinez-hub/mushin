@@ -26,6 +26,7 @@ from omegaconf import OmegaConf
 import mushin.workflows as wf_mod
 from mushin import multirun
 from mushin._resume import read_cell_status, write_cell_status
+from mushin._sweep_io import read_metrics_sidecar
 from mushin.workflows import MultiRunMetricsWorkflow, _SkippedRun, _TaskRunner
 
 # Each cell outlasts the budget, so a worker's second cell always starts after
@@ -118,11 +119,15 @@ def test_budget_holds_across_joblib_workers(tmp_path):
 
 class _GridWF(MultiRunMetricsWorkflow):
     @staticmethod
-    def task(a, b):
+    def task(a, b, root):
         import time
+        from pathlib import Path
 
+        # Where the start file is while the cell runs, before any cleanup: the
+        # cell that created it, or read it, must have found it in the root.
+        in_root = any(Path(root).glob(".mushin_budget_start.*"))
         time.sleep(_CELL_SECONDS)
-        return dict(v=float(10 * a + b))
+        return dict(v=float(10 * a + b), start_in_root=float(in_root))
 
 
 def test_budget_holds_under_a_nested_sweep_subdir(tmp_path):
@@ -137,6 +142,7 @@ def test_budget_holds_under_a_nested_sweep_subdir(tmp_path):
         _GridWF().run(
             a=multirun([0, 1]),
             b=multirun([0, 1, 2, 3]),
+            root=str(root),
             max_total_seconds=_BUDGET,
             overrides=[
                 f"hydra.sweep.dir='{root.as_posix()}'",
@@ -163,6 +169,10 @@ def test_budget_holds_under_a_nested_sweep_subdir(tmp_path):
     # cell, the first two dispatched (a_0's); with a start per `a` group, the
     # first a_1 cell would start a second clock and run.
     assert completed and set(completed) <= {"a_0/b_0", "a_0/b_1"}, status
+    # Each worker fixes its deadline from its first cell, an a_0 cell, so the
+    # count alone cannot tell where those cells put the start: they report it.
+    for cell in completed:
+        assert read_metrics_sidecar(root / cell)["start_in_root"] == 1.0, cell
     assert sorted(root.rglob(".mushin_budget_start.*")) == []
 
 
@@ -360,23 +370,17 @@ def test_copies_in_one_process_share_its_deadline(tmp_path, monkeypatch):
     process. When the start file cannot be created, that process times the
     budget from its own first cell, as the warning says, and its later copies
     keep that deadline instead of each restarting the clock."""
-    real_open = os.open
-
-    def open_refusing_start_files(path, *args, **kwargs):
-        if ".mushin_budget_start." in os.fspath(path):
-            raise PermissionError(13, "Permission denied", os.fspath(path))
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", open_refusing_start_files)
+    _refuse_start_files(monkeypatch, PermissionError(13, "Permission denied"))
     root = tmp_path / "s"
     runner = _runner(max_total_seconds=0.2)
     with pytest.warns(UserWarning, match="may not hold across worker"):
         assert _copy(runner)(_cell(root, 0, monkeypatch)) == {"v": 0.0}
     time.sleep(0.3)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # no second attempt, so no second warning
+    with warnings.catch_warnings(record=True) as again:
+        warnings.simplefilter("always")
         for num in (1, 2, 3):
             assert isinstance(_copy(runner)(_cell(root, num, monkeypatch)), _SkippedRun)
+    assert again == []  # no second attempt at the file, so no second warning
 
 
 def test_a_requeued_cell_runs_after_the_deadline(tmp_path, monkeypatch):
@@ -527,24 +531,40 @@ def test_both_clocks_are_read_after_the_file_io(tmp_path, monkeypatch):
     assert 0.3 < remaining <= 0.8, remaining  # 2.0 s from the start, 1.2 s gone
 
 
+def _refuse_start_files(monkeypatch, error):
+    """Make `os.open` of a start file raise ``error``, as an unwritable sweep
+    root (`PermissionError`) or a file that vanishes between the create and
+    the read (`FileExistsError` with no file) would."""
+    real_open = os.open
+
+    def guarded_open(path, *args, **kwargs):
+        if ".mushin_budget_start." in os.fspath(path):
+            raise error
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+
+
+def _warned_here(record):
+    """Every warning names this test module, the caller of the runner's
+    `__call__`, not a frame inside mushin or pytest."""
+    return [Path(w.filename).name for w in record] == ["test_budget_parallel.py"] * len(
+        record
+    )
+
+
 def test_a_vanished_start_file_falls_back_to_this_process(tmp_path, monkeypatch):
     """A start file that exists at the create but is gone at the read is no
     start to share: like an uncreatable one, the process times the budget
-    from this cell and warns; this cell did not start the sweep's clock."""
-    real_open = os.open
-
-    def open_finding_a_start(path, *args, **kwargs):
-        if ".mushin_budget_start." in os.fspath(path):
-            raise FileExistsError(17, "File exists", os.fspath(path))
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", open_finding_a_start)
-    _cell(tmp_path / "s", 0, monkeypatch)
-    copy = _copy(_runner(max_total_seconds=60))
-    with pytest.warns(UserWarning, match="vanished"):
-        assert copy._start_budget() is False
-    assert copy._known_deadline() is not None
-    assert copy._budget_expired() is False
+    from this cell and warns. That cell runs, however small the budget."""
+    _refuse_start_files(monkeypatch, FileExistsError(17, "File exists"))
+    root = tmp_path / "s"
+    runner = _runner(max_total_seconds=1e-6)
+    with pytest.warns(UserWarning, match="vanished") as record:
+        assert _copy(runner)(_cell(root, 0, monkeypatch)) == {"v": 0.0}
+    assert _warned_here(record)
+    # The next cell in this process meets the deadline its fallback fixed.
+    assert isinstance(_copy(runner)(_cell(root, 1, monkeypatch)), _SkippedRun)
 
 
 def test_an_unexpected_budget_error_never_fails_the_cell(tmp_path, monkeypatch):
@@ -558,10 +578,37 @@ def test_an_unexpected_budget_error_never_fails_the_cell(tmp_path, monkeypatch):
     monkeypatch.setattr(wf_mod, "_cell_sweep_root", broken_root)
     root = tmp_path / "s"
     runner = _runner(max_total_seconds=0.2)
-    with pytest.warns(UserWarning, match="shared budget failed"):
+    with pytest.warns(UserWarning, match="shared budget failed") as record:
         assert _copy(runner)(_cell(root, 0, monkeypatch)) == {"v": 0.0}
+    assert _warned_here(record)
     time.sleep(0.3)
     assert isinstance(_copy(runner)(_cell(root, 1, monkeypatch)), _SkippedRun)
+
+
+def test_a_warning_turned_error_never_fails_the_cell(tmp_path, monkeypatch):
+    """Workers inherit PYTHONWARNINGS=error. The fallback's warning then
+    raises, which must neither fail the cell nor leave the process without a
+    deadline."""
+    _refuse_start_files(monkeypatch, PermissionError(13, "Permission denied"))
+    root = tmp_path / "s"
+    runner = _runner(max_total_seconds=0.2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _copy(runner)(_cell(root, 0, monkeypatch)) == {"v": 0.0}
+        time.sleep(0.3)
+        assert isinstance(_copy(runner)(_cell(root, 1, monkeypatch)), _SkippedRun)
+
+
+def _as_pickled_by_an_earlier_mushin(runner):
+    """``runner`` as an earlier mushin pickled and a worker unpickles it: its
+    state has none of the fields this one added, and the per-copy `_deadline`
+    that version kept (pickle calls `__new__`, then `__setstate__`)."""
+    added = {"budget_id", "_shared_budget", "_shipped"}
+    state = {k: v for k, v in vars(runner).items() if k not in added}
+    state["_deadline"] = None
+    old = _TaskRunner.__new__(_TaskRunner)
+    old.__setstate__(state)
+    return old
 
 
 def test_a_runner_pickled_by_an_earlier_mushin_keeps_its_own_budget(
@@ -571,14 +618,104 @@ def test_a_runner_pickled_by_an_earlier_mushin_keeps_its_own_budget(
     before an upgrade) has no `budget_id`: it must not fail before the
     fail-soft guard, and it times a budget of its own, as it did."""
     root = tmp_path / "s"
-    runner = _runner(max_total_seconds=0.2)
-    del runner.budget_id, runner._shared_budget
-    runner._deadline = None  # what that version kept on the runner
-    old = _copy(runner)
+    old = _as_pickled_by_an_earlier_mushin(_runner(max_total_seconds=0.2))
     assert old(_cell(root, 0, monkeypatch)) == {"v": 0.0}
     time.sleep(0.3)
     assert isinstance(old(_cell(root, 1, monkeypatch)), _SkippedRun)
     assert sorted(root.rglob(".mushin_budget_start.*")) == []
+
+
+def test_a_runner_pickled_by_an_earlier_mushin_runs_without_a_budget(
+    tmp_path, monkeypatch
+):
+    """Without `max_total_seconds` (the default), no budget code reads the id,
+    but the 'running' record does."""
+    old = _as_pickled_by_an_earlier_mushin(_runner(max_total_seconds=None))
+    assert old(_cell(tmp_path / "s", 0, monkeypatch)) == {"v": 0.0}
+
+
+def test_a_runner_pickled_by_an_earlier_mushin_runs_under_a_multi_rank_launch(
+    tmp_path, monkeypatch
+):
+    """Under a multi-rank launch the budget is disabled, so nothing but the
+    'running' record reads the id."""
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("SLURM_PROCID", "0")
+    old = _as_pickled_by_an_earlier_mushin(_runner(max_total_seconds=0.2))
+    with pytest.warns(UserWarning, match="multi-rank"):
+        assert old(_cell(tmp_path / "s", 0, monkeypatch)) == {"v": 0.0}
+
+
+def _launched(cwd, job_dir, subdir="${hydra.job.num}"):
+    """A launched job as run() gets it back: its dir and its detached hydra
+    config, in which a subdir like ``a_${a}`` cannot resolve."""
+    from types import SimpleNamespace
+
+    hydra = {
+        "runtime": {"cwd": str(cwd)},
+        "sweep": {"subdir": subdir},
+        "job": {"num": 0},
+    }
+    return SimpleNamespace(
+        hydra_cfg=OmegaConf.create({"hydra": hydra}), working_dir=str(job_dir)
+    )
+
+
+def _shipped(runner):
+    pickle.dumps(runner)  # as a parallel launcher does, in the driver
+    return runner
+
+
+def test_the_cleanup_climbs_one_level_past_the_subdir_depth_at_most(tmp_path):
+    runner = _shipped(_runner(max_total_seconds=60))
+    root = tmp_path / "a" / "b" / "s"
+    root.mkdir(parents=True)
+    job = _launched(tmp_path, root / "0")  # depth 1: looks in s and in b
+    far = runner.budget_start_path(tmp_path / "a")
+    far.touch()
+    wf_mod._remove_budget_start(runner, [job], None)
+    assert far.exists()  # never climbs to the filesystem root
+
+    near = runner.budget_start_path(root.parent)
+    near.touch()
+    wf_mod._remove_budget_start(runner, [job], None)
+    assert not near.exists() and far.exists()
+
+
+def test_the_cleanup_counts_an_unresolvable_subdir_by_its_text(tmp_path):
+    """The detached config cannot resolve ``x_${a}/y_${b}/z_${c}``, but its
+    text still says the root is three levels up."""
+    runner = _shipped(_runner(max_total_seconds=60))
+    root = tmp_path / "s"
+    job_dir = root / "x_0" / "y_0" / "z_0"
+    job_dir.mkdir(parents=True)
+    start = runner.budget_start_path(root)
+    start.touch()
+    job = _launched(tmp_path, job_dir, subdir="x_${a}/y_${b}/z_${c}")
+    wf_mod._remove_budget_start(runner, [job], None)
+    assert not start.exists()
+
+
+def test_the_cleanup_never_climbs_past_working_dir(tmp_path):
+    runner = _shipped(_runner(max_total_seconds=60))
+    root = tmp_path / "s"
+    root.mkdir()
+    above = runner.budget_start_path(tmp_path)  # within depth + 1, above root
+    above.touch()
+    wf_mod._remove_budget_start(runner, [_launched(tmp_path, root / "0")], str(root))
+    assert above.exists()
+
+
+def test_a_sequential_run_does_not_search_for_a_start(tmp_path):
+    """The sequential launcher's runner is never pickled, so no worker wrote a
+    start file and the cleanup looks for none."""
+    runner = _runner(max_total_seconds=60)  # never pickled
+    root = tmp_path / "s"
+    root.mkdir()
+    stray = runner.budget_start_path(root)
+    stray.touch()
+    wf_mod._remove_budget_start(runner, [_launched(tmp_path, root / "0")], str(root))
+    assert stray.exists()
 
 
 def test_the_deadline_table_keeps_only_recent_runs(monkeypatch):

@@ -48,9 +48,10 @@ of them away. Four options make that cheap:
   launcher keeps the deadline in memory; a parallel launcher's workers share the
   start through a hidden file in the sweep directory, so on several nodes they
   need a shared filesystem and synchronized clocks. `run` removes the file when
-  it returns; a run that raises leaves it for the jobs a scheduler still holds,
-  and no later run reads it. The budget is disabled, with a warning, for a cell
-  that runs on several ranks (see [Multi-node training](multinode.md)).
+  its launch returns normally; a launch that raises leaves it for the jobs a
+  scheduler still holds, and no later run reads it. The budget is disabled,
+  with a warning, for a cell that runs on several ranks (see
+  [Multi-node training](multinode.md)).
 
 A typical exploration loop:
 
