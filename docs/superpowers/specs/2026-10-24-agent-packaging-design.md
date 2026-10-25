@@ -85,10 +85,17 @@ plugins/mushin/skills/guide/SKILL.md
 `SKILL.md` frontmatter: `name: guide`; a `description` that names the trigger
 (writing or changing an experiment that uses mushin, `mushin-py`, sweeps,
 `compare_methods`, `Study`) and says it loads the guide matching the installed
-version; `allowed-tools: Bash(python -m mushin guide:*)`. The body is a short
-heading, the line `` !`python -m mushin guide` ``, and one paragraph for the
-case the command fails: install `mushin-py[eval]` (0.16 or later), or read the
-raw-GitHub copy. The skill contains no guide text of its own.
+version. The body is a short heading, one shell line, and one paragraph for
+the case the guide did not print: install `mushin-py[eval]` (0.16 or later),
+or read the raw-GitHub copy. The skill contains no guide text of its own.
+
+The shell line (revised in review) is
+`python -m mushin guide 2>/dev/null || python3 -m mushin guide 2>/dev/null || echo "..."`:
+`python3` is the only interpreter name on many machines, and a failing
+injected command aborts the whole invocation before the body is seen, so the
+line must never exit non-zero. `allowed-tools` pre-approves each subcommand,
+the echo by its exact text (a prefix rule would let any echo run unprompted
+for the rest of the turn).
 
 The marketplace lives at the repository root so the install is
 `/plugin marketplace add martinez-hub/mushin` then
@@ -137,10 +144,10 @@ mushin's releases (the skill content comes from the installed mushin).
   prompt and resource propagate that as an MCP error, which the client shows.
   The existing CI step that checks the built wheel ships the guide keeps that
   from happening in a release.
-- The skill's shell command failing (no mushin, mushin before 0.16, a `python`
-  that is not the project's) aborts the invocation with the command's error;
-  the body's fallback paragraph is not shown in that case, so the fallback is
-  repeated in the docs section that tells the human how to install.
+- The skill's shell line cannot fail (see section 2): when mushin is missing,
+  older than 0.16, or not on this shell's `python` or `python3`, the echo
+  stands where the guide would be and the body's fallback paragraph is shown.
+  The docs section that tells the human how to install repeats it.
 
 ## Alternatives considered
 

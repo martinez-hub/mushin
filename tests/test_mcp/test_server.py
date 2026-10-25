@@ -245,6 +245,28 @@ def test_server_serves_the_guide_as_prompt_and_resource(tmp_path):
         ("mushin://guide", "text/markdown")
     ]
     assert [c.text for c in resource.contents] == [guide_text()]
+    # The docs name the prompt and the resource as the server registers them,
+    # in the forms each page uses (the MCP guide and llms.txt name them, the
+    # For AI agents page shows Claude Code's slash command and @-mention).
+    [prompt_name] = [p.name for p in prompts.prompts]
+    [resource_uri] = [str(r.uri) for r in resources.resources]
+    repo = Path(__file__).resolve().parents[2]
+    expected = {
+        "docs/guides/mcp.md": (
+            f"`{prompt_name}`",
+            f"`{resource_uri}`",
+            f"/{server.name}:{prompt_name} (MCP)",
+        ),
+        "docs/llms.txt": (f"`{prompt_name}`", f"`{resource_uri}`"),
+        "docs/for-agents.md": (
+            f"/{server.name}:{prompt_name} (MCP)",
+            f"@{server.name}:{resource_uri}",
+        ),
+    }
+    for page, names in expected.items():
+        text = (repo / page).read_text(encoding="utf-8")
+        for name in names:
+            assert name in text, (page, name)
 
 
 def test_main_builds_server_without_running(monkeypatch):

@@ -18,6 +18,7 @@ import torch
 from hydra_zen import load_from_yaml
 from omegaconf import OmegaConf
 
+from mushin.__main__ import guide_text
 from mushin._hydra_yaml import read_hydra_job
 from mushin._resume import STATUS_FILE, sidecar_job_fields
 from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE, read_metrics_sidecar
@@ -541,18 +542,10 @@ def create_server(root: str | Path | None = None):
     # with: a prompt (a slash command in Claude Code) and a resource (an
     # @-mention). Both return what `python -m mushin guide` prints.
     @mcp.prompt("guide")
+    @mcp.resource("mushin://guide", mime_type="text/markdown")
     def guide() -> str:
         """mushin's usage guide for writing experiments, matching the
         installed version (what `python -m mushin guide` prints)."""
-        from mushin.__main__ import guide_text
-
-        return guide_text()
-
-    @mcp.resource("mushin://guide", mime_type="text/markdown")
-    def guide_resource() -> str:
-        """mushin's usage guide for writing experiments (Markdown)."""
-        from mushin.__main__ import guide_text
-
         return guide_text()
 
     return mcp

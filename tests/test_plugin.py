@@ -13,6 +13,8 @@ import json
 import re
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parents[1]
 MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
 PLUGIN_DIR = REPO / "plugins" / "mushin"
@@ -22,18 +24,16 @@ FOR_AGENTS = REPO / "docs" / "for-agents.md"
 README = REPO / "README.md"
 
 GUIDE_COMMAND = "python -m mushin guide"
-# Claude Code shows the first 1,536 characters of a description; the skill's
-# stays well under that so the whole trigger is visible.
+# The Agent Skills specification (agentskills.io) caps `description` at 1,024
+# characters, and Claude Code lists the first 1,536 of description plus
+# when_to_use; the lower bound keeps the skill valid for every host.
 DESCRIPTION_LIMIT = 1024
 
 
-def _frontmatter(text: str) -> dict[str, str]:
+def _frontmatter(text: str) -> dict:
     m = re.match(r"\A---\n(.*?)\n---\n(.*)\Z", text, re.S)
     assert m, "SKILL.md must start with a YAML frontmatter block"
-    fields = {}
-    for line in m.group(1).splitlines():
-        key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
+    fields = yaml.safe_load(m.group(1))  # PyYAML comes with omegaconf
     fields["_body"] = m.group(2)
     return fields
 
@@ -72,8 +72,12 @@ def test_skill_prints_the_installed_guide_and_nothing_else():
     attempts = [part.split(" 2>")[0] for part in parts[:-1]]
     assert attempts == [GUIDE_COMMAND, GUIDE_COMMAND.replace("python", "python3")]
     assert parts[-1].startswith('echo "') and "see the note below" in parts[-1]
-    allowed = [a.strip() for a in fields["allowed-tools"].split(",")]
-    assert allowed == [f"Bash({s}:*)" for s in attempts] + ["Bash(echo:*)"]
+    allowed = fields["allowed-tools"]
+    if isinstance(allowed, str):  # the docs allow a list or a separated string
+        allowed = [a.strip() for a in allowed.split(",")]
+    # The echo is pre-approved exactly, not `echo:*`: a prefix rule would let
+    # any echo, redirections included, run unprompted for the rest of the turn.
+    assert allowed == [f"Bash({s}:*)" for s in attempts] + [f"Bash({parts[-1]})"]
     assert "mushin-py[eval]" in body  # the note the echo points at
     assert SKILL.read_text(encoding="utf-8").isascii()
 
@@ -89,5 +93,9 @@ def test_docs_install_commands_name_the_manifests():
     # the README names the version it needs and points at the two-step page.
     one_step = f"/plugin install {plugin['name']} --marketplace martinez-hub/mushin"
     readme = README.read_text(encoding="utf-8")
-    assert one_step in docs and one_step in readme
-    assert "2.1.275" in readme and "for-agents" in readme
+    # The README's Claude Code paragraph only: the page link above it predates
+    # this plugin and would satisfy a whole-file check.
+    paragraph = readme[readme.index("/mushin:guide") : readme.index("## What else")]
+    assert one_step in docs and one_step in paragraph
+    assert "2.1.275" in docs and "2.1.275" in paragraph
+    assert "for-agents/" in paragraph
