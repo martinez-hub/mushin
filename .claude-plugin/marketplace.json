@@ -1,0 +1,19 @@
+{
+  "name": "mushin",
+  "owner": {
+    "name": "Josue Martinez-Martinez",
+    "url": "https://github.com/martinez-hub"
+  },
+  "metadata": {
+    "description": "Plugins for mushin, the boilerplate-free sweep engine built on hydra-zen.",
+    "homepage": "https://martinez-hub.github.io/mushin/"
+  },
+  "plugins": [
+    {
+      "name": "mushin",
+      "source": "./plugins/mushin",
+      "description": "The mushin usage guide for AI coding agents, as the /mushin:guide skill. Prints the guide that matches the installed mushin (0.16 or later).",
+      "category": "development"
+    }
+  ]
+}

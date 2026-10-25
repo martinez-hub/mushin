@@ -1,0 +1,13 @@
+{
+  "name": "mushin",
+  "version": "0.1.0",
+  "description": "mushin's usage guide for AI coding agents, as the /mushin:guide skill. It prints the guide that matches the installed mushin, so it never goes stale.",
+  "author": {
+    "name": "Josue Martinez-Martinez",
+    "url": "https://github.com/martinez-hub"
+  },
+  "homepage": "https://martinez-hub.github.io/mushin/for-agents/",
+  "repository": "https://github.com/martinez-hub/mushin",
+  "license": "MIT",
+  "keywords": ["mushin", "hydra-zen", "experiments", "sweeps", "machine-learning"]
+}
