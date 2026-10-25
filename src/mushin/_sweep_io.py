@@ -112,20 +112,27 @@ def read_metrics_sidecar(job_dir) -> dict | None:
         return None
 
 
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
     # Unique temp name: a fixed `<path>.tmp` would let two concurrent writers
     # (e.g. two resume runs on the same working_dir) truncate each other
     # mid-write and rename half-written content over the target.
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        # Normalize every sidecar to strict-JSON-native values (nested numpy,
-        # non-finite floats -> None, non-native -> str) so a write never emits
-        # the invalid `NaN`/`Infinity` literals nor crashes on an exotic value.
-        tmp.write_text(json.dumps(_json_normalize(payload), indent=2, allow_nan=False))
+        tmp.write_text(text)
         tmp.replace(path)  # atomic on POSIX/Windows
     finally:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    # Normalize every sidecar to strict-JSON-native values (nested numpy,
+    # non-finite floats -> None, non-native -> str) so a write never emits
+    # the invalid `NaN`/`Infinity` literals nor crashes on an exotic value.
+    _atomic_write_text(
+        path, json.dumps(_json_normalize(payload), indent=2, allow_nan=False)
+    )
 
 
 class Manifest:

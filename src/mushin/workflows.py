@@ -466,7 +466,7 @@ class _TaskRunner:
         import warnings
         from pathlib import Path
 
-        from ._provenance import write_provenance
+        from ._provenance import NOT_WRITTEN, record_accelerator, write_provenance
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
@@ -651,8 +651,9 @@ class _TaskRunner:
                 # resilience guide's pattern), so the checkpoint is looked for
                 # after it, as it was when the hook ran first.
                 rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
+            written = NOT_WRITTEN
             try:
-                write_provenance(cwd, cfg, base=self.base_provenance)
+                written = write_provenance(cwd, cfg, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             # Set the contextvar AFTER the (fallible) status write, so a failed
@@ -675,6 +676,11 @@ class _TaskRunner:
             finally:
                 if token is not None:
                     _CURRENT_RESUME.reset(token)
+                # The accelerator comes from this process, after the task that
+                # may have imported torch or initialized CUDA has returned or
+                # raised; the record written above carries this process's view
+                # from before the task.
+                record_accelerator(cwd, written)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)
                 # Store the freshly-computed cell in the content-addressed cache
@@ -1764,18 +1770,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     @property
     def provenance(self) -> dict | None:
         """Best-effort per-run provenance (git/versions/config) read from one
-        job's ``mushin_provenance.json``. ``None`` if no record is found."""
-        import json
+        job's ``mushin_provenance.json``: the first that has an accelerator,
+        else the first. ``None`` if no record is found."""
+        from ._provenance import representative_record
 
         dirs = self.multirun_working_dirs or []
-        for d in dirs:
-            p = Path(d) / "mushin_provenance.json"
-            if p.exists():
-                try:
-                    return json.loads(p.read_text())
-                except Exception:  # noqa: BLE001 - best-effort
-                    return None
-        return None
+        return representative_record(Path(d) / "mushin_provenance.json" for d in dirs)
 
     # TODO: add target_job_dirs example
     #      Document .swap_dims({"job_dir": <...>}) and .set_index(job_dir=[...]).unstack("job_dir")

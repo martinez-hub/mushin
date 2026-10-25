@@ -388,7 +388,8 @@ def _get_provenance(
     root: str | Path | None = None,
     include_config: bool = False,
 ) -> dict:
-    """Per-run ``mushin_provenance.json`` records (git/packages/accelerator).
+    """Per-run ``mushin_provenance.json`` records (git/packages, and the
+    accelerator when the cell's process imported torch).
 
     The per-run resolved config is omitted unless ``include_config``; it is
     the bulky part and ``get_config`` already serves it."""
@@ -523,7 +524,8 @@ def create_server(root: str | Path | None = None):
 
     @mcp.tool()
     def get_provenance(path: str, include_config: bool = False) -> dict:
-        """Per-run provenance (git SHA, package versions, accelerator)."""
+        """Per-run provenance (git SHA, package versions, accelerator when the
+        cell's process imported torch)."""
         return _get_provenance(path, rootp, include_config)
 
     return mcp

@@ -323,22 +323,15 @@ def _render(columns: list[str], rows: list[dict]) -> str:
 
 def _read_provenance(root) -> dict | None:
     """A representative provenance record for a sweep (the first cell's
-    ``mushin_provenance.json``), or None if none is readable."""
-    import json
+    ``mushin_provenance.json`` that has an accelerator, else the first), or
+    None if none is readable."""
+    from ._provenance import representative_record
 
-    for d in sorted(
+    dirs = sorted(
         (p for p in Path(root).iterdir() if p.is_dir()),
         key=lambda p: _numeric_dir_key(p.name),
-    ):
-        p = d / "mushin_provenance.json"
-        if p.exists():
-            try:
-                data = json.loads(p.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(data, dict):
-                return data
-    return None
+    )
+    return representative_record(d / "mushin_provenance.json" for d in dirs)
 
 
 # Fields that vary per cell / per run rather than describing the environment;
@@ -357,13 +350,29 @@ def _flatten(d: dict, prefix: str = "") -> dict:
     return out
 
 
+def _accelerator_unrecorded(record: dict | None) -> bool:
+    # A record that is missing altogether reports every field as (None, value),
+    # the accelerator among them; the rule is for a record that has none.
+    return record is not None and not isinstance(record.get("accelerator"), dict)
+
+
 def _diff_provenance(a: dict | None, b: dict | None) -> dict:
     """Flattened field-by-field diff of two provenance records, excluding
-    volatile fields. Returns ``{dotted_key: (a_value, b_value)}`` for every field
-    whose value differs (a field present on only one side reads as ``None`` on
-    the other)."""
-    fa = _flatten({k: v for k, v in (a or {}).items() if k not in _PROV_VOLATILE})
-    fb = _flatten({k: v for k, v in (b or {}).items() if k not in _PROV_VOLATILE})
+    volatile fields and an accelerator that either side did not record.
+    Returns ``{dotted_key: (a_value, b_value)}`` for every field whose value
+    differs (a field present on only one side reads as ``None`` on the
+    other)."""
+    skip = set(_PROV_VOLATILE)
+    # A null accelerator means "not recorded": the cell's process never
+    # imported torch, so a torch sweep against a scikit-learn sweep on the same
+    # box is no hardware change. A dict is recorded whenever torch was loaded
+    # (its cuda and cudnn are the wheel's build, its device None until the
+    # task initialized CUDA) and still compares, so a CPU-only torch build
+    # against a GPU box is reported, as it always was.
+    if _accelerator_unrecorded(a) or _accelerator_unrecorded(b):
+        skip.add("accelerator")
+    fa = _flatten({k: v for k, v in (a or {}).items() if k not in skip})
+    fb = _flatten({k: v for k, v in (b or {}).items() if k not in skip})
     changed = {}
     for k in sorted(set(fa) | set(fb)):
         va, vb = fa.get(k), fb.get(k)
@@ -401,7 +410,7 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     cell may carry a stale sidecar from a prior attempt; its row appears with
     empty ``deltas``). Cells present in only one sweep are reported separately,
     along with a diff of the two runs' environment provenance
-    (git/packages/python/accelerator).
+    (git/packages/python, and the accelerator when both runs recorded one).
 
     Returns
     -------

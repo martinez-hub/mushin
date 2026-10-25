@@ -152,7 +152,15 @@ different cell. Tasks that don't declare `mushin_resume` are unaffected.
 Every run (fail-soft or not) writes a per-job provenance record,
 `mushin_provenance.json`, into each job directory *before* the task executes, so
 even a failing cell leaves its lineage behind. It captures the git SHA, key
-package versions, and the resolved config:
+package versions, the resolved config and, once the task has returned, the
+accelerator as the cell's process saw it (CUDA and cuDNN build, and the device
+once the task initialized CUDA or when MPS is available). It is `null` when
+that process never imported torch. With torch loaded, `cuda` and `cudnn` are
+the wheel's build (`null` on a CPU-only build) and `device` is `null` until the
+task initializes CUDA; records from before 0.17 named a present GPU even for a
+task that stayed on the CPU, so `diff` against such a sweep reports a device
+change once. A cell killed during its task keeps the view its process had
+before the task:
 
 ```python
 wf.provenance  # dict: {"git": {"sha": ...}, "packages": {...}, "config": {...}, ...}
