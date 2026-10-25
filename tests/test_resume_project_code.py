@@ -1545,6 +1545,15 @@ from mushin.workflows import MultiRunMetricsWorkflow
 OFFSET = {offset}
 
 
+def _mark(calls):
+    # One file per call: two worker processes appending to one file can
+    # lose a write on Windows.
+    import os, uuid
+
+    os.makedirs(calls, exist_ok=True)
+    open(os.path.join(calls, uuid.uuid4().hex), "w").close()
+
+
 def helper(a):
     return a + OFFSET
 
@@ -1552,8 +1561,7 @@ def helper(a):
 class W(MultiRunMetricsWorkflow):
     @staticmethod
     def task(a):
-        with open({calls!r}, "a") as f:
-            f.write("x")
+        _mark({calls!r})
         return dict(v=float(helper(a)))
 
 
@@ -1568,6 +1576,11 @@ if __name__ == "__main__":
 """
 
 
+def _count(calls):
+    """How many task calls left a marker in ``calls``."""
+    return len(list(calls.iterdir())) if calls.exists() else 0
+
+
 @pytest.mark.parametrize("second", ["joblib", "basic"])
 def test_a_script_task_under_joblib_records_the_code_its_workers_run(tmp_path, second):
     """In a loky worker, sys.modules['__main__'] is loky's own module, while the
@@ -1577,7 +1590,7 @@ def test_a_script_task_under_joblib_records_the_code_its_workers_run(tmp_path, s
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
     root = tmp_path / "jl"
     root.mkdir()
-    calls = root / "calls.txt"
+    calls = root / "calls"
     script = root / "jl_script.py"
 
     def write(offset):
@@ -1598,14 +1611,14 @@ def test_a_script_task_under_joblib_records_the_code_its_workers_run(tmp_path, s
 
     write(0)
     run("joblib")
-    assert calls.read_text() == "xx"
+    assert _count(calls) == 2
     err = run(second, "resume")
     assert "fingerprint mismatch" not in err, err
-    assert calls.read_text() == "xx"  # unchanged: reused
+    assert _count(calls) == 2  # unchanged: reused
     write(100)
     err = run(second, "resume")
     assert "code the task reaches (jl_script:OFFSET)" in err, err
-    assert calls.read_text() == "xxxx"
+    assert _count(calls) == 4
 
 
 # --- round 7: the walk is bounded and prefers missing an edit to a re-run ------
@@ -1987,6 +2000,15 @@ from mushin.workflows import MultiRunMetricsWorkflow
 DEVICE = "cpu"
 
 
+def _mark(calls):
+    # One file per call: two worker processes appending to one file can
+    # lose a write on Windows.
+    import os, uuid
+
+    os.makedirs(calls, exist_ok=True)
+    open(os.path.join(calls, uuid.uuid4().hex), "w").close()
+
+
 def configure(dev):
     global DEVICE
     DEVICE = dev
@@ -2003,8 +2025,7 @@ class Mode(enum.Enum):
 class W(MultiRunMetricsWorkflow):
     @staticmethod
     def task(a):
-        with open({calls!r}, "a") as f:
-            f.write("x")
+        _mark({calls!r})
         cfg = mx_lib.TrainConfig()
         mx_lib.log_name("run")
         v = mx_lib.scale(a) * HP.LR + Mode.TRAIN.value + len(DEVICE) + cfg.lr
@@ -2033,7 +2054,7 @@ class _Matrix:
 
     def __init__(self, root):
         self.root = root
-        self.calls = root / "calls.txt"
+        self.calls = root / "calls"
         self.write()
 
     def write(self, lr=0.1, mode=1, scale=2):
@@ -2076,10 +2097,10 @@ def test_matrix_unchanged_code_is_reused_across_launchers_and_processes(
     _needs_joblib(first, second)
     mx = _Matrix(tmp_path)
     mx.run(first)
-    assert mx.calls.read_text() == "xx"
+    assert _count(mx.calls) == 2
     err = mx.run(second, "resume", cuda="0")
     assert "fingerprint mismatch" not in err, err
-    assert mx.calls.read_text() == "xx"
+    assert _count(mx.calls) == 2
 
 
 def test_matrix_unchanged_code_is_reused_in_the_same_process(tmp_path):
@@ -2088,7 +2109,7 @@ def test_matrix_unchanged_code_is_reused_in_the_same_process(tmp_path):
     mx = _Matrix(tmp_path)
     err = mx.run("twice")
     assert "fingerprint mismatch" not in err, err
-    assert mx.calls.read_text() == "xx"
+    assert _count(mx.calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -2107,7 +2128,7 @@ def test_matrix_an_edit_is_caught_under_every_launcher(tmp_path, launcher, edit,
     mx.write(**edit)
     err = mx.run(launcher, "resume")
     assert f"code the task reaches ({key})" in err, err
-    assert mx.calls.read_text() == "xxxx"
+    assert _count(mx.calls) == 4
 
 
 # --- final head: the last review's cases, one by one ---------------------------
