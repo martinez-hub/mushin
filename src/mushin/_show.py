@@ -299,10 +299,10 @@ def _is_candidate(cell: dict, metric: str) -> bool:
     return cell["status"] == "completed" and _finite_number(cell["metrics"].get(metric))
 
 
-def _over_names(over, cells: list[dict]) -> list[str]:
-    """Validate ``best(over=...)``: the swept params to average over, deduplicated
-    in the caller's order. A name no cell sweeps raises (a typo would otherwise
-    silently average over nothing and return the best single cell)."""
+def _over_names(over) -> list[str]:
+    """The ``over`` argument of ``best`` as a list of distinct names, in the
+    caller's order. Checked before the sweep is read, like ``mode``, so a wrong
+    argument is not masked by a sweep that has no finite metric yet."""
     if isinstance(over, str):
         names = [over]
     else:
@@ -314,88 +314,102 @@ def _over_names(over, cells: list[dict]) -> list[str]:
         raise ValueError(
             f"`over` must be a swept-param name or a sequence of them, got {over!r}"
         )
-    names = list(dict.fromkeys(names))
+    return list(dict.fromkeys(names))
+
+
+def _check_swept(over: list[str], cells: list[dict]) -> None:
+    """A name no cell sweeps raises: a typo would otherwise silently average
+    over nothing and return the best single cell."""
     swept = _ordered_union([c["combo"] for c in cells])
-    unknown = [n for n in names if n not in swept]
+    unknown = [n for n in over if n not in swept]
     if unknown:
         raise ValueError(
             f"`over` names {', '.join(map(repr, unknown))}, which the sweep does "
             f"not vary; swept params: {', '.join(swept) or '(none)'}"
         )
-    return names
 
 
 def _best_group(
-    cells: list[dict], candidates: list[dict], metric: str, mode: str, over: list[str]
+    root, cells: list[dict], metric: str, mode: str, over: list[str]
 ) -> BestResult:
     """``best(over=...)``: group cells by their combo minus ``over``, average
     ``metric`` within each group and pick the best mean.
 
-    A group counts only when it is complete: it holds every ``over`` value
-    (every seed) that any cell of the sweep has, each completed with a finite
-    ``metric``. "Every cell present completed" would not do: a cell that has
-    not started yet has no job dir at all, so mid-sweep, or after a kill, a
-    configuration still missing seeds would pass and could win on one lucky
-    seed. The manifest that lists the grid is written when the sweep ends, so
-    the values the other groups reached are the best stand-in before then.
-    Skipped groups, and cells whose combo lacks an ``over`` param (a sweep in
-    flight with another grid in a reused ``working_dir``), are reported with a
-    warning; a sweep with no complete group raises."""
+    Means are comparable only over the same seeds, so a group counts only when
+    it is complete: it has a result (a completed cell with a finite ``metric``)
+    at every ``over`` value where any group has one, and one result per value.
+    That bar, rather than "every cell present completed", is what makes the
+    rule hold: a cell that has not started has no job dir at all, so a
+    configuration still missing seeds would otherwise pass mid-sweep, or after
+    a kill, and could win on one lucky seed. And rather than "every value any
+    cell has", so that a seed that failed for every configuration drops out
+    instead of making the sweep unanswerable. The manifest that lists the grid
+    is written when the sweep ends, so before then the bar is provisional (the
+    seeds reached so far) and the result says so. Skipped groups, and cells
+    whose combo lacks an ``over`` param (another grid in flight in a reused
+    ``working_dir``), are reported with a warning; no complete group raises."""
     import warnings
     from statistics import fmean
 
-    from ._sweep_io import combo_key
-
-    is_candidate = {id(c) for c in candidates}
-    lacking = [c for c in cells if any(k not in c["combo"] for k in over)]
-    lacking_ids = {id(c) for c in lacking}
+    from ._sweep_io import MANIFEST_FILE, combo_key
 
     def over_key(c: dict) -> str:
         return combo_key({k: c["combo"][k] for k in over})
 
+    lacking = 0
     groups: dict[str, list[dict]] = {}
-    seen_over: set[str] = set()
     for c in cells:
-        if id(c) in lacking_ids:
+        if any(k not in c["combo"] for k in over):
+            lacking += 1
             continue
         key = combo_key({k: v for k, v in c["combo"].items() if k not in over})
         groups.setdefault(key, []).append(c)
-        seen_over.add(over_key(c))
 
+    results = {
+        key: [c for c in g if _is_candidate(c, metric)] for key, g in groups.items()
+    }
+    bar = {over_key(c) for rs in results.values() for c in rs}
     complete = [
-        g
-        for g in groups.values()
-        if {over_key(c) for c in g} == seen_over
-        and all(id(c) in is_candidate for c in g)
+        rs
+        for rs in results.values()
+        if len(rs) == len(bar) and {over_key(c) for c in rs} == bar
     ]
+
     names = ", ".join(map(repr, over))
-    left_out = (
-        f" {len(lacking)} cell(s) whose params do not include {names} were left out."
-        if lacking
-        else ""
-    )
+    notes = []
+    if not (Path(root) / MANIFEST_FILE).is_file():
+        notes.append(
+            "the sweep has no manifest yet (still running, or stopped early), so "
+            f"the bar is the values of {names} reached so far, and a "
+            "configuration whose other cells have not started looks complete"
+        )
+    skipped = len(groups) - len(complete)
+    if skipped:
+        notes.append(
+            f"skipped {skipped} of {len(groups)} groups that lack a result (a "
+            f"completed cell with a finite {metric!r}) at a value of {names} where "
+            f"another group has one, or hold two cells at one value"
+        )
+    if lacking:
+        notes.append(
+            f"{lacking} cell(s) whose params do not include {names} were left out"
+        )
     if not complete:
         raise ValueError(
             f"no group of cells that share their params other than {names} is "
-            f"complete: each lacks a value of {names} that another group has, or "
-            f"holds a cell that is not completed with a finite {metric!r} (failed, "
-            f"still running, or a hole of a sample= sweep), so no mean is "
-            f"comparable.{left_out} `best()` without `over=` still returns the "
-            f"best single cell."
+            f"complete, so no mean is comparable: {'; '.join(notes)}. `best()` "
+            f"without `over=` still returns the best single cell."
         )
-    skipped = len(groups) - len(complete)
-    if skipped or lacking:
+    if notes:
         warnings.warn(
-            f"best(over={over!r}): skipped {skipped} of {len(groups)} groups that "
-            f"lack a value of {names} another group has, or hold a cell not "
-            f"completed with a finite {metric!r}; the result compares only the "
-            f"{len(complete)} complete group(s).{left_out}",
+            f"best(over={over!r}): {'; '.join(notes)}; the result compares the "
+            f"{len(complete)} complete group(s).",
             UserWarning,
             stacklevel=3,
         )
 
     pick = (max if mode == "max" else min)(
-        complete, key=lambda g: fmean(c["metrics"][metric] for c in g)
+        complete, key=lambda rs: fmean(c["metrics"][metric] for c in rs)
     )
     shared = [
         m
@@ -436,13 +450,15 @@ def best(
         Swept params to average over, typically ``"seed"``. The default picks
         the single best cell, which is one seed; ``over="seed"`` groups the
         cells that share every other param, averages ``metric`` within each
-        group and returns the best group, so a lucky seed cannot win. Only a
-        complete group counts: one that has every seed any cell of the sweep
-        has, each completed with a finite ``metric``. The others (a failed
-        cell, a ``sample=`` sweep's holes, a configuration whose seeds have not
-        all run) are skipped with a warning, since a mean over fewer seeds is
-        not comparable. On a sweep still running the seeds reached so far set
-        the bar, so the definitive answer comes once the sweep has finished.
+        group and returns the best group, so a lucky seed cannot win. Means
+        are comparable only over the same seeds, so only a complete group
+        counts: one with a result (a completed cell with a finite ``metric``)
+        at every seed where any group has one. The others (a failed cell, a
+        ``sample=`` sweep's holes, a configuration whose seeds have not all
+        run) are skipped with a warning; a seed that failed for every
+        configuration drops out instead. On a sweep still running the seeds
+        reached so far set the bar, and the warning says so; the definitive
+        answer comes once the sweep has finished.
 
     Returns
     -------
@@ -456,12 +472,14 @@ def best(
     ValueError
         If ``mode`` is invalid, no completed cell has ``metric`` as a finite
         scalar (the error lists the scalar metrics that are available), ``over``
-        names a param the sweep does not vary, or no group is complete.
+        is not a name or names, names a param the sweep does not vary, or no
+        group is complete.
     FileNotFoundError
         If ``root`` is not a directory.
     """
     if mode not in ("max", "min"):
         raise ValueError(f"`mode` must be 'max' or 'min', got {mode!r}")
+    names = None if over is None else _over_names(over)
 
     cells = _read_cells(root)
     candidates = [c for c in cells if _is_candidate(c, metric)]
@@ -480,8 +498,9 @@ def best(
             f"Available scalar metrics: {', '.join(available) or '(none)'}."
         )
 
-    if over is not None:
-        return _best_group(cells, candidates, metric, mode, _over_names(over, cells))
+    if names is not None:
+        _check_swept(names, cells)
+        return _best_group(root, cells, metric, mode, names)
 
     pick = (max if mode == "max" else min)(
         candidates, key=lambda c: c["metrics"][metric]

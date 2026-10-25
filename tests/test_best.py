@@ -87,8 +87,8 @@ def _run_seeded(wd, *, fail=()):
     """A 2 x 3 (lr x seed) grid where the best SINGLE cell belongs to the
     configuration with the worse MEAN: lr=0.1 scores -5, -5, 10 (mean 0.0) and
     lr=0.2 scores 1, 1, 1 (mean 1.0). ``only0`` is finite at seed 0 only and
-    ``signed_inf`` is infinite at seeds 0 and 1, so their means are undefined. ``fail`` lists (lr, seed) cells that raise, which
-    ``on_error="nan"`` records as failed."""
+    ``signed_inf`` is infinite at seeds 0 and 1. ``fail`` lists (lr, seed)
+    cells that raise, which ``on_error="nan"`` records as failed."""
     scores = {0.1: [-5.0, -5.0, 10.0], 0.2: [1.0, 1.0, 1.0]}
 
     class W(MultiRunMetricsWorkflow):
@@ -113,9 +113,33 @@ def _run_seeded(wd, *, fail=()):
     )
 
 
-def test_best_over_seed_picks_the_best_mean_not_the_lucky_cell(tmp_path):
+def _combos(dirs):
     from mushin._resume import read_cell_status
 
+    return [read_cell_status(d)["combo"] for d in dirs]
+
+
+def _cell_dir(wd, **combo):
+    for c in mushin._show._read_cells(wd):
+        if all(c["combo"].get(k) == v for k, v in combo.items()):
+            return c["dir"]
+    raise AssertionError(f"no cell dir for {combo}")
+
+
+def _touch_newer_than_manifest(wd, path):
+    """_read_cells keeps a dir the manifest does not list only when its status
+    sidecar is NEWER than the manifest, and a coarse-mtime filesystem can give
+    both the same second, so bump it by one."""
+    import os
+
+    from mushin._resume import STATUS_FILE
+    from mushin._sweep_io import MANIFEST_FILE
+
+    newer = (wd / MANIFEST_FILE).stat().st_mtime + 1
+    os.utime(path / STATUS_FILE, (newer, newer))
+
+
+def test_best_over_seed_picks_the_best_mean_not_the_lucky_cell(tmp_path):
     wd = tmp_path / "s"
     _run_seeded(wd)
     single = mushin.best(wd, "score")
@@ -130,9 +154,7 @@ def test_best_over_seed_picks_the_best_mean_not_the_lucky_cell(tmp_path):
     assert r.n == 3
     assert r.dir is None
     # the winning group's own cells, in job order
-    assert [read_cell_status(d)["combo"] for d in r.dirs] == [
-        {"lr": 0.2, "seed": s} for s in (0, 1, 2)
-    ]
+    assert _combos(r.dirs) == [{"lr": 0.2, "seed": s} for s in (0, 1, 2)]
     # means of the metrics finite in every cell; `only0` is NaN at seeds 1, 2
     # and `signed_inf` is infinite at seeds 0, 1
     assert r.metrics == {"score": pytest.approx(1.0), "loss": pytest.approx(-1.0)}
@@ -157,8 +179,9 @@ def test_best_over_several_params_averages_everything(tmp_path):
 
 
 def test_best_over_skips_incomplete_groups_with_a_warning(tmp_path):
-    # lr=0.2 has a failed seed, so its mean is over fewer cells and must not
-    # compete; the complete lr=0.1 group wins even though its mean is lower.
+    # lr=0.2 has a failed seed where lr=0.1 has a result, so its mean is over
+    # fewer cells and must not compete; the complete lr=0.1 group wins even
+    # though its mean is lower.
     wd = tmp_path / "s"
     with pytest.warns(UserWarning, match="fail"):
         _run_seeded(wd, fail={(0.2, 1)})
@@ -167,45 +190,37 @@ def test_best_over_skips_incomplete_groups_with_a_warning(tmp_path):
     assert r.combo == {"lr": 0.1}
     assert r.value == pytest.approx(0.0)
     assert r.n == 3
-    assert all(w.filename == __file__ for w in rec if "skipped" in str(w.message))
+    ours = [w for w in rec if "skipped" in str(w.message)]
+    assert all(w.filename == __file__ for w in ours)
+    assert "no manifest" not in str(ours[0].message)  # the sweep finished
 
 
-def test_best_over_with_no_complete_group_raises(tmp_path):
+def test_best_over_drops_a_seed_that_failed_everywhere(tmp_path):
+    """Means are comparable over the SAME seeds, not necessarily all of them:
+    with seed 0 failed for both configurations, both are complete over seeds
+    1 and 2 (lr=0.1: (-5 + 10) / 2 = 2.5 beats lr=0.2's 1.0)."""
     wd = tmp_path / "s"
     with pytest.warns(UserWarning, match="fail"):
         _run_seeded(wd, fail={(0.1, 0), (0.2, 0)})
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # nothing to warn about
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.1}
+    assert r.value == pytest.approx(2.5)
+    assert r.n == 2
+    assert _combos(r.dirs) == [{"lr": 0.1, "seed": 1}, {"lr": 0.1, "seed": 2}]
+
+
+def test_best_over_with_no_complete_group_raises(tmp_path):
+    # each configuration lacks a result at a seed where the other has one
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="fail"):
+        _run_seeded(wd, fail={(0.1, 0), (0.2, 1)})
     assert mushin.best(wd, "score").combo == {"lr": 0.1, "seed": 2}  # still works
-    with pytest.raises(ValueError, match="without `over=`"):
+    with pytest.raises(ValueError, match="skipped 2 of 2 groups.*without `over=`"):
         mushin.best(wd, "score", over="seed")
-
-
-def test_best_over_unknown_param_raises_with_swept_params(tmp_path):
-    wd = tmp_path / "s"
-    _run_seeded(wd)
-    with pytest.raises(ValueError, match="'sed'.*lr, seed"):
-        mushin.best(wd, "score", over="sed")
-    with pytest.raises(ValueError, match="`over`"):
-        mushin.best(wd, "score", over=5)
-    with pytest.raises(ValueError, match="`over`"):
-        mushin.best(wd, "score", over=[])
-
-
-def test_best_over_unknown_metric_raises_the_usual_error(tmp_path):
-    wd = tmp_path / "s"
-    _run_seeded(wd)
-    with pytest.raises(ValueError, match="no completed cell has a finite scalar"):
-        mushin.best(wd, "nope", over="seed")
-
-
-def _cell_dir(wd, **combo):
-    import json
-
-    for d in wd.iterdir():
-        if d.is_dir() and (d / "mushin_cell_status.json").exists():
-            c = json.loads((d / "mushin_cell_status.json").read_text())["combo"]
-            if all(c.get(k) == v for k, v in combo.items()):
-                return d
-    raise AssertionError(f"no cell dir for {combo}")
 
 
 def test_best_over_treats_missing_seeds_as_incomplete(tmp_path):
@@ -225,6 +240,41 @@ def test_best_over_treats_missing_seeds_as_incomplete(tmp_path):
     assert r.n == 3
 
 
+def test_best_over_warns_that_a_running_sweep_sets_a_provisional_bar(tmp_path):
+    """Mid-sweep at a seed boundary (seed the outer loop, or a batch launcher)
+    every configuration has the same single seed, so every group IS complete
+    at n=1 and only the missing manifest tells that the bar is provisional."""
+    import shutil
+
+    from mushin._sweep_io import MANIFEST_FILE
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    (wd / MANIFEST_FILE).unlink()
+    for lr in (0.1, 0.2):
+        for seed in (1, 2):
+            shutil.rmtree(_cell_dir(wd, lr=lr, seed=seed))
+    with pytest.warns(UserWarning, match="no manifest yet") as rec:
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2} and r.n == 1
+    assert "skipped" not in str(rec[0].message)  # only what happened
+
+
+def test_best_over_rejects_a_group_with_two_cells_at_one_seed(tmp_path):
+    """A reused working_dir can hold a stale cell and a newer one at the same
+    combo; averaging both would double-weight that seed."""
+    import shutil
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    extra = wd / "99"
+    shutil.copytree(_cell_dir(wd, lr=0.2, seed=0), extra)
+    _touch_newer_than_manifest(wd, extra)
+    with pytest.warns(UserWarning, match="two cells at one value"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.1}
+
+
 def test_best_over_leaves_out_cells_without_the_param(tmp_path):
     """A newer sweep in flight in a reused working_dir can have another grid;
     its cells, lacking `seed`, are reported and left out rather than competing
@@ -238,31 +288,48 @@ def test_best_over_leaves_out_cells_without_the_param(tmp_path):
     extra = wd / "99"
     shutil.copytree(_cell_dir(wd, lr=0.1, seed=2), extra)  # score 10.0, no seed
     write_cell_status(extra, status="completed", combo={"lr": 0.3}, attempt=1)
+    _touch_newer_than_manifest(wd, extra)
     assert any(c["combo"] == {"lr": 0.3} for c in mushin._show._read_cells(wd))
 
-    with pytest.warns(UserWarning, match=r"1 cell\(s\) whose params do not include"):
+    with pytest.warns(UserWarning, match=r"1 cell\(s\) whose params") as rec:
         r = mushin.best(wd, "score", over="seed")
     assert r.combo == {"lr": 0.2}
     assert r.value == pytest.approx(1.0)
+    assert "skipped" not in str(rec[0].message)  # no group was skipped
 
 
-def test_best_result_without_dir_has_no_dirs():
-    from mushin._show import BestResult
-
-    r = BestResult({}, "completed", {}, 0.0, None)
-    assert r.dirs == [] and r.n == 0
-    assert "n=0" in repr(r)
-
-
-def test_best_over_non_finite_metrics_make_a_group_incomplete(tmp_path):
-    """The other half of the completeness rule: a completed cell whose metric
-    is NaN or infinite leaves its group incomplete; +inf and -inf in one group
-    must raise the usual error, not fsum's."""
+def test_best_over_unknown_param_raises_with_swept_params(tmp_path):
     wd = tmp_path / "s"
     _run_seeded(wd)
-    for metric in ("only0", "signed_inf"):
-        with pytest.raises(ValueError, match="no group of cells"):
-            mushin.best(wd, metric, over="seed")
+    with pytest.raises(ValueError, match="'sed'.*lr, seed"):
+        mushin.best(wd, "score", over="sed")
+    with pytest.raises(ValueError, match="`over`"):
+        mushin.best(wd, "score", over=5)
+    with pytest.raises(ValueError, match="`over`"):
+        mushin.best(wd, "score", over=[])
+    # a wrong `over` is reported even when no cell has the metric yet
+    with pytest.raises(ValueError, match="`over`"):
+        mushin.best(wd, "nope", over=5)
+
+
+def test_best_over_unknown_metric_raises_the_usual_error(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    with pytest.raises(ValueError, match="no completed cell has a finite scalar"):
+        mushin.best(wd, "nope", over="seed")
+
+
+def test_best_over_non_finite_values_are_not_results(tmp_path):
+    """A completed cell whose metric is NaN or infinite is no result: `only0`
+    has one at seed 0 only and `signed_inf` at seed 2 only, in every group, so
+    the bar is that one seed and +inf/-inf never reach fmean."""
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    r = mushin.best(wd, "only0", over="seed")
+    assert r.n == 1 and r.value == pytest.approx(1.0)
+    r = mushin.best(wd, "signed_inf", over="seed")
+    assert r.n == 1 and r.value == pytest.approx(1.0)
+    assert _combos(r.dirs)[0]["seed"] == 2
 
 
 def test_best_never_picks_an_infinite_cell(tmp_path):
@@ -272,3 +339,11 @@ def test_best_never_picks_an_infinite_cell(tmp_path):
     assert r.combo["seed"] == 2 and r.value == pytest.approx(1.0)
     r = mushin.best(wd, "signed_inf", mode="min")  # nor is -inf at seed 1
     assert r.combo["seed"] == 2
+
+
+def test_best_result_without_dir_has_no_dirs():
+    from mushin._show import BestResult
+
+    r = BestResult({}, "completed", {}, 0.0, None)
+    assert r.dirs == [] and r.n == 0
+    assert "n=0" in repr(r)
