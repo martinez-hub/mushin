@@ -11,7 +11,7 @@ registry.
 
 ::: mushin.benchmark.IncompleteSweepError
 
-::: mushin.compare
+::: mushin.benchmark.compare.compare
 
 ::: mushin.benchmark.BenchmarkResult
 
