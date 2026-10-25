@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from importlib import metadata, resources
 from pathlib import Path
 
-from ._console import echo
+from ._console import echo, for_console
 
 GUIDE = "agent_guide.md"
 
@@ -31,6 +32,42 @@ def guide_text() -> str:
     MCP server's ``guide`` prompt and ``mushin://guide`` resource return the
     same string, so every route to the guide shows the installed version."""
     return f"<!-- mushin {_version()} -->\n" + _guide_path().read_text(encoding="utf-8")
+
+
+def _print_path(path: str) -> int:
+    """Print ``path`` for a caller that reads it by machine (CI runs
+    ``test -s "$(python -m mushin guide --path)"``), so the output is the real
+    path or nothing: never the escaped text ``echo`` would write.
+
+    The install path can hold a character the console cannot encode (an
+    accented Windows user name). Then the path's own bytes go to stdout's
+    byte layer, which is what a shell's ``$(...)`` captures on POSIX; on
+    Windows ``os.fsencode`` gives UTF-8, which a caller decoding in the code
+    page misreads, so ``PYTHONUTF8=1`` is still the fix there. Without a byte
+    layer the command fails with a message instead."""
+    stream = sys.stdout
+    if stream is None:  # pythonw.exe: print() would write nowhere too
+        return 0
+    if for_console(path, stream) == path:
+        try:
+            stream.write(path + "\n")
+            return 0
+        except UnicodeEncodeError:
+            pass  # its .encoding did not describe it: try the bytes
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        echo(
+            "python -m mushin guide --path: the guide's path holds a character "
+            "this console cannot encode, and stdout takes no bytes; run with "
+            "PYTHONUTF8=1, or print the guide itself with `python -m mushin guide`",
+            file=sys.stderr,
+        )
+        return 1
+    stream.flush()  # keep the order of anything already written as text
+    buffer.write(os.fsencode(path))
+    buffer.flush()
+    stream.write("\n")  # through the text layer, translated as print() would
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,11 +96,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        # The install path can hold any character (an accented Windows user
-        # name), so it goes through echo, which escapes what the console
-        # cannot encode instead of failing the command.
-        echo(str(path))
-        return 0
+        return _print_path(str(path))
     # The guide is ASCII (tests/test_agent_guide.py checks); echo is here so
     # every console route of mushin shares one write path.
     echo(guide_text(), end="")

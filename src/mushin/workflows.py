@@ -725,7 +725,16 @@ class _TaskRunner:
                 import traceback
 
                 try:
-                    Path("mushin_error.txt").write_text(traceback.format_exc())
+                    # UTF-8, not the locale's encoding: under cp1252 a message
+                    # with a character the code page lacks raised
+                    # UnicodeEncodeError, which no OSError handler catches, and
+                    # ended the fail-soft sweep. backslashreplace takes the one
+                    # thing UTF-8 cannot encode, a lone surrogate.
+                    Path("mushin_error.txt").write_text(
+                        traceback.format_exc(),
+                        encoding="utf-8",
+                        errors="backslashreplace",
+                    )
                 except OSError:
                     pass  # a full disk must not break fail-soft itself
                 return _FailedRun(exc)
@@ -2027,9 +2036,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
             target_job_dirs = [Path(s).resolve() for s in target_job_dirs]
             for d in target_job_dirs:
-                if not d.is_dir() or not d.exists():
+                if not d.is_dir():
+                    # FileNotFoundError for both, as before, so a caller that
+                    # catches it still does; the message tells them apart.
+                    why = "is not a directory" if d.exists() else "does not exist"
                     raise FileNotFoundError(
-                        f"The specified target directory does not exist: {d}"
+                        f"The specified target directory {why}: {d}"
                     )
             target_job_dirs = multirun([str(s) for s in target_job_dirs])
             workflow_overrides[self._JOBDIR_NAME] = target_job_dirs

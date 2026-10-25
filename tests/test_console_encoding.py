@@ -6,14 +6,15 @@ A Windows pipe writes in the ANSI code page (cp1252 on Western systems), and
 ``PYTHONIOENCODING=ascii`` or an ASCII locale makes stdout ASCII; ``print()``
 of a character outside the encoding then raises ``UnicodeEncodeError`` and the
 whole command fails. mushin's own text is ASCII, so it cannot hit that, and the
-user data it prints (swept values, metric names, paths) is written as
-backslash escapes instead."""
+user data it prints (metric names, swept values) is written as backslash
+escapes instead."""
 
 from __future__ import annotations
 
 import ast
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,19 +57,29 @@ def sweeps(tmp_path_factory) -> tuple[Path, Path]:
     return a, b
 
 
-def _on_ascii_stdout(monkeypatch, fn, *args, **kwargs):
+def _stream(
+    encoding: str, errors: str = "strict"
+) -> tuple[io.BytesIO, io.TextIOWrapper]:
+    """A text stream over bytes the test can read. ``newline=""`` keeps "\\n"
+    as written: the default would write os.linesep, "\\r\\n" on Windows."""
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding=encoding, errors=errors, newline="")
+    return raw, stream
+
+
+def _on_ascii_stdout(monkeypatch, fn, *args, **kwargs) -> tuple[object, bytes]:
     """Call ``fn`` with ``sys.stdout`` a strict ASCII stream, as on a console
-    that cannot encode anything else, and return its result and what it wrote.
+    that cannot encode anything else, and return its result and the bytes it
+    wrote.
 
     The swap happens in the test body, not a fixture: pytest's capture sets
     ``sys.stdout`` again once fixture setup is over."""
-    raw = io.BytesIO()
-    stream = io.TextIOWrapper(raw, encoding="ascii", errors="strict")
+    raw, stream = _stream("ascii")
     with monkeypatch.context() as m:
         m.setattr(sys, "stdout", stream)
         result = fn(*args, **kwargs)
     stream.flush()
-    return result, raw.getvalue().decode("ascii")
+    return result, raw.getvalue()
 
 
 def _subprocess_env(encoding: str, **extra: str) -> dict[str, str]:
@@ -78,26 +89,61 @@ def _subprocess_env(encoding: str, **extra: str) -> dict[str, str]:
     return env
 
 
+def _non_ascii_guide(tmp_path: Path) -> Path:
+    guide = tmp_path / f"site-{ALPHA}" / "agent_guide.md"
+    guide.parent.mkdir()
+    guide.write_text("# guide\n", encoding="utf-8")
+    return guide
+
+
+def _assert_columns_line_up(lines: list[str]) -> None:
+    """``_render`` pads every cell, the last one included, so the lines of a
+    table whose widths were measured on the text it prints are of one length,
+    and every header and row cell starts where its run of dashes does."""
+    header, sep, *body = lines
+    assert {len(line) for line in lines} == {len(sep)}, "\n".join(lines)
+    starts = [m.start() for m in re.finditer(r"-+", sep)]
+    for line in (header, *body):
+        for start in starts[1:]:
+            assert line[start - 2 : start] == "  " and line[start] != " ", line
+
+
 # --- In process: each printing function on a strict ASCII stdout ----------
 
 
 def test_show_prints_user_data_it_cannot_encode_as_escapes(sweeps, monkeypatch):
     a, _ = sweeps
-    result, out = _on_ascii_stdout(monkeypatch, mushin.show, a)
+    result, raw = _on_ascii_stdout(monkeypatch, mushin.show, a)
+    out = raw.decode("ascii")
     assert f"{ESCAPED}_score" in out
     assert "completed" in out
     # Only the console copy is escaped; the returned table keeps the name.
     assert METRIC in result.table
 
 
+def test_show_aligns_the_columns_of_an_escaped_table(sweeps, monkeypatch):
+    # The escape is longer than the name: widths measured on the name would
+    # leave the header wider than its column.
+    # The escaped column comes before another, which a misfit would shift.
+    a, _ = sweeps
+    result, raw = _on_ascii_stdout(monkeypatch, mushin.show, a, metrics=[METRIC, "acc"])
+    lines = raw.decode("ascii").splitlines()
+    assert lines[0].split() == ["lr", "seed", "status", f"{ESCAPED}_score", "acc"]
+    _assert_columns_line_up(lines)
+    _assert_columns_line_up(result.table.splitlines())
+
+
 def test_diff_prints_ascii_headers_and_escapes_user_data(sweeps, monkeypatch):
     a, b = sweeps
-    result, out = _on_ascii_stdout(monkeypatch, mushin.diff, a, b)
+    result, raw = _on_ascii_stdout(monkeypatch, mushin.diff, a, b)
+    out = raw.decode("ascii")
     assert "acc (b-a)" in out
     assert f"{ESCAPED}_score (b-a)" in out
     assert f"{METRIC} (b-a)" in result.table
     row = next(r for r in result.rows if r["lr"] == 0.1 and r["seed"] == 0)
     assert row["deltas"][METRIC][2] == pytest.approx(0.5)
+    # The table part (header, dashes, one line per shared cell) lines up.
+    _assert_columns_line_up(out.splitlines()[: 2 + len(result.rows)])
 
 
 def test_dry_run_preview_escapes_a_swept_value(tmp_path, monkeypatch):
@@ -106,7 +152,7 @@ def test_dry_run_preview_escapes_a_swept_value(tmp_path, monkeypatch):
         def task(name, seed):
             return {"v": 1.0}
 
-    summary, out = _on_ascii_stdout(
+    summary, raw = _on_ascii_stdout(
         monkeypatch,
         W().run,
         name=multirun([f"{ALPHA}lpha", "b"]),
@@ -114,19 +160,64 @@ def test_dry_run_preview_escapes_a_swept_value(tmp_path, monkeypatch):
         working_dir=str(tmp_path / "dry"),
         dry_run=True,
     )
+    out = raw.decode("ascii")
     assert out.startswith("Dry run: 4 cells, no jobs launched.")
     assert f"'{ESCAPED}lpha'" in out
     assert summary["axes"]["name"] == [f"{ALPHA}lpha", "b"]
 
 
-def test_guide_path_with_a_character_the_console_lacks(tmp_path, monkeypatch):
-    guide = tmp_path / f"site-{ALPHA}" / "agent_guide.md"
-    guide.parent.mkdir()
-    guide.write_text("# guide\n", encoding="utf-8")
+def test_guide_path_writes_the_bytes_of_a_path_the_console_cannot_encode(
+    tmp_path, monkeypatch
+):
+    # Callers read --path by machine (`test -s "$(... --path)"`), so the output
+    # must be the real path: its bytes, not an escape that names no file.
+    guide = _non_ascii_guide(tmp_path)
     monkeypatch.setattr(cli, "_guide_path", lambda: guide)
-    code, out = _on_ascii_stdout(monkeypatch, cli.main, ["guide", "--path"])
+    code, raw = _on_ascii_stdout(monkeypatch, cli.main, ["guide", "--path"])
     assert code == 0
-    assert f"site-{ESCAPED}" in out
+    assert raw == os.fsencode(str(guide)) + b"\n"
+
+
+class _TextOnly:
+    """A strict ASCII text stream with no byte layer (no ``.buffer``)."""
+
+    encoding = "ascii"
+    errors = "strict"
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+
+    def write(self, s: str) -> int:
+        s.encode(self.encoding)
+        self.parts.append(s)
+        return len(s)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_guide_path_fails_rather_than_print_an_escaped_path(
+    tmp_path, monkeypatch, capsys
+):
+    guide = _non_ascii_guide(tmp_path)
+    monkeypatch.setattr(cli, "_guide_path", lambda: guide)
+    stdout = _TextOnly()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert cli.main(["guide", "--path"]) == 1
+    assert stdout.parts == []
+    assert "cannot encode" in capsys.readouterr().err
+
+
+def test_a_missing_stderr_drops_the_message_instead_of_moving_it_to_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    # With fd 2 closed, sys.stderr is None. The guide's error then goes
+    # nowhere, as print(file=None) does; on stdout `$(... --path)` would
+    # capture it as the path.
+    monkeypatch.setattr(cli, "_guide_path", lambda: tmp_path / "missing.md")
+    monkeypatch.setattr(sys, "stderr", None)
+    assert cli.main(["guide", "--path"]) == 1
+    assert capsys.readouterr().out == ""
 
 
 # --- Subprocess: the real interpreter on a console of each encoding --------
@@ -201,7 +292,7 @@ def test_guide_command_survives_the_console(
         encoding, PYTHONPATH=os.pathsep.join(p for p in path_entries if p)
     )
 
-    def run(*args: str) -> str:
+    def run(*args: str) -> bytes:
         result = subprocess.run(
             [sys.executable, "-m", "mushin", "guide", *args],
             capture_output=True,
@@ -214,22 +305,71 @@ def test_guide_command_survives_the_console(
         stderr = result.stderr.decode(encoding, errors="replace")
         assert result.returncode == 0, stderr[-3000:]
         assert "UnicodeEncodeError" not in stderr
-        return result.stdout.decode(encoding)
+        return result.stdout
 
-    assert run().startswith("<!-- mushin ")
-    path = run("--path").strip()
-    assert path.endswith("agent_guide.md")
-    assert f"site-{ESCAPED}" in path
+    assert run().decode(encoding).startswith("<!-- mushin ")
+    # The output names the real file, as `test -s "$(... --path)"` needs.
+    path = Path(os.fsdecode(run("--path").strip()))
+    assert path.is_file()
+    assert path.samefile(mushin_on_a_non_ascii_path / "mushin" / "agent_guide.md")
+
+
+_FAIL_SOFT = """
+import locale
+import sys
+
+# The C locale stands in for a Windows code page: open() without an encoding
+# then writes in an encoding without the alpha. Where the fallback locale is
+# UTF-8 anyway there is nothing to test.
+try:
+    "\\u03b1".encode(locale.getpreferredencoding(False))
+except UnicodeEncodeError:
+    pass
+else:
+    sys.exit(77)
+
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(seed):
+        if seed == 1:
+            raise ValueError("bad \\u03b1")
+        return {"v": 1.0}
+
+
+W().run(seed=multirun([0, 1]), working_dir=sys.argv[1], on_error="nan")
+"""
+
+
+def test_fail_soft_survives_an_error_message_the_locale_cannot_encode(tmp_path):
+    # LC_ALL=C with UTF-8 mode and locale coercion off gives an ASCII locale on
+    # Linux and macOS; Windows ignores LC_ALL and keeps its ANSI code page.
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+    }
+    env.pop("PYTHONIOENCODING", None)
+    wd = tmp_path / "s"
+    result = subprocess.run(
+        [sys.executable, "-c", _FAIL_SOFT, str(wd)],
+        capture_output=True,
+        env=env,
+        timeout=300,
+    )
+    if result.returncode == 77:
+        pytest.skip("this platform's C locale encodes the test character")
+    assert result.returncode == 0, result.stderr.decode(errors="replace")[-3000:]
+    (error_file,) = wd.glob("*/mushin_error.txt")
+    assert f"ValueError: bad {ALPHA}" in error_file.read_text(encoding="utf-8")
 
 
 # --- The helper ------------------------------------------------------------
-
-
-def _stream(
-    encoding: str, errors: str = "strict"
-) -> tuple[io.BytesIO, io.TextIOWrapper]:
-    raw = io.BytesIO()
-    return raw, io.TextIOWrapper(raw, encoding=encoding, errors=errors)
 
 
 def test_echo_escapes_only_what_the_encoding_lacks():
@@ -254,6 +394,60 @@ def test_echo_leaves_a_lenient_error_handler_in_charge():
     echo("\udcff", file=stream)
     stream.flush()
     assert raw.getvalue() == b"\xff\n"
+
+
+def test_echo_escapes_only_what_a_lenient_handler_cannot_take():
+    # The handler takes the surrogate but not the alpha: the surrogate must
+    # still come out as its byte, with only the alpha escaped.
+    raw, stream = _stream("ascii", errors="surrogateescape")
+    echo(f"\udcff {ALPHA}", file=stream)
+    stream.flush()
+    assert raw.getvalue() == b"\xff \\u03b1\n"
+
+
+class _Tee:
+    """Writes to a terminal, then to a cp1252 log, as a tee-style
+    ``sys.stdout`` does: the log raises after the terminal has the text."""
+
+    encoding = "cp1252"
+    errors = "strict"
+
+    def __init__(self, terminal: io.StringIO, log: io.TextIOWrapper) -> None:
+        self.terminal, self.log = terminal, log
+
+    def write(self, s: str) -> int:
+        self.terminal.write(s)
+        return self.log.write(s)
+
+
+def test_echo_writes_a_tee_once():
+    terminal = io.StringIO()
+    raw, log = _stream("cp1252")
+    echo(f"{ALPHA} done", file=_Tee(terminal, log))
+    log.flush()
+    assert terminal.getvalue() == f"{ESCAPED} done\n"
+    assert raw.getvalue() == b"\\u03b1 done\n"
+
+
+class _Forward:
+    """Reports UTF-8 but forwards to a narrower sink, as Jupyter's output
+    stream (copying to a cp1252 echo stream) and pytest's ``tee-sys`` do."""
+
+    encoding = "utf-8"
+    errors = "strict"
+
+    def __init__(self, sink: io.TextIOWrapper) -> None:
+        self.sink = sink
+
+    def write(self, s: str) -> int:
+        return self.sink.write(s)
+
+
+def test_echo_survives_a_stream_whose_encoding_is_wider_than_its_sink():
+    raw, sink = _stream("ascii")
+    echo(METRIC, file=_Forward(sink))
+    sink.flush()
+    assert raw.getvalue() == b"\\u03b1_score\n"
 
 
 def test_echo_without_stdout_is_a_no_op(monkeypatch):

@@ -2475,3 +2475,21 @@ def test_working_dir_with_equals_or_comma_in_name(tmp_path):
         wf.run(a=multirun([1.0]), working_dir=str(wd))
         assert wf.is_complete
         assert (wd / "0" / "mushin_metrics.json").exists()
+
+
+def test_target_job_dirs_tells_a_file_from_a_missing_dir(tmp_path):
+    """A target that exists but is a file is reported as not a directory; one
+    that is missing, as not existing. Both stay FileNotFoundError, as before."""
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(job_dir):
+            return dict(m=1.0)
+
+    a_file = tmp_path / "metrics.json"
+    a_file.write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="is not a directory"):
+        W().run(target_job_dirs=[a_file], working_dir=str(tmp_path / "s"))
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        W().run(target_job_dirs=[tmp_path / "gone"], working_dir=str(tmp_path / "s"))

@@ -203,9 +203,9 @@ rules:
   another has (older versions: `ds["score"].mean("seed")`).
 - **On Windows, set `PYTHONUTF8=1`** (or run `python -X utf8`) when output is
   captured: a pipe then writes in the ANSI code page (cp1252 on Western
-  systems), and `print()` of a character it lacks fails. mushin's own output
-  survives it (a swept value or metric name outside the code page prints as
-  an escape such as `\u03b1`), but your script's `print()` calls do not.
+  systems), and printing a character it lacks fails. mushin's own console
+  output does not fail there, but the rest of a run (your code, the
+  libraries it calls, their logs) still can, so set it anyway.
 
 ## Running long sweeps from an agent
 

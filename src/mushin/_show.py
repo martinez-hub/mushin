@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ._console import echo
+from ._console import echo, for_console
 
 
 def _ordered_union(dicts: list[dict]) -> list[str]:
@@ -231,10 +231,20 @@ def show(
     elif param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))
     table = _render(columns, rows)
-    # The table holds user data (swept values, metric names), so it goes
-    # through echo: a console that cannot encode it gets escapes, not a crash.
-    echo(table)
+    # The table holds user data (swept values, metric names), so a console
+    # that cannot encode it gets escapes, not a crash.
+    echo(_console_copy(table, lambda cell: _render(columns, rows, cell)))
     return ShowResult(rows, table)
+
+
+def _console_copy(table: str, render) -> str:
+    """``table`` as stdout should get it: itself when stdout can encode it,
+    else ``render(for_console)``, the table laid out again from cells escaped
+    for stdout. Escaping the finished table instead would leave each column
+    as wide as its unescaped text and push the rest out of line."""
+    if for_console(table) == table:
+        return table
+    return render(for_console)
 
 
 def _sortable(v: Any):
@@ -613,15 +623,18 @@ def best(
     )
 
 
-def _render(columns: list[str], rows: list[dict]) -> str:
+def _render(columns: list[str], rows: list[dict], cell=str) -> str:
+    """The table as text. ``cell`` maps each header and formatted value
+    before the column widths are measured (``show`` and ``diff`` pass
+    ``for_console`` for a console that cannot encode a value as it is)."""
     if not rows:
         return "(no cells found)"
-    cells = [[_fmt(r.get(c)) for c in columns] for r in rows]
+    head = [cell(c) for c in columns]
+    cells = [[cell(_fmt(r.get(c))) for c in columns] for r in rows]
     widths = [
-        max(len(columns[i]), *(len(row[i]) for row in cells))
-        for i in range(len(columns))
+        max(len(head[i]), *(len(row[i]) for row in cells)) for i in range(len(head))
     ]
-    header = "  ".join(columns[i].ljust(widths[i]) for i in range(len(columns)))
+    header = "  ".join(head[i].ljust(widths[i]) for i in range(len(head)))
     sep = "  ".join("-" * widths[i] for i in range(len(columns)))
     body = "\n".join(
         "  ".join(row[i].ljust(widths[i]) for i in range(len(columns))) for row in cells
@@ -756,30 +769,33 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
 
     provenance = _diff_provenance(_read_provenance(a), _read_provenance(b))
     table = _render_diff(rows, only_in_a, only_in_b, provenance)
-    echo(table)  # user data, as in show()
+    # User data, as in show(); only the table part is laid out in columns.
+    echo(
+        _console_copy(
+            table,
+            lambda cell: _render_diff(rows, only_in_a, only_in_b, provenance, cell),
+        )
+    )
     return DiffResult(rows, only_in_a, only_in_b, provenance, table)
 
 
-def _delta_column(metric: str) -> str:
-    # "(b-a)" rather than a Greek delta: cp1252 and cp437, the code pages of a
-    # Western Windows pipe and console, have no capital delta, and the header
-    # also says which way the subtraction goes.
-    return f"{metric} (b-a)"
-
-
-def _render_diff(rows, only_in_a, only_in_b, provenance) -> str:
+def _render_diff(rows, only_in_a, only_in_b, provenance, cell=str) -> str:
     param_cols = _ordered_union(
         [{k: v for k, v in r.items() if k != "deltas"} for r in rows]
     )
     metric_cols = _ordered_union([r["deltas"] for r in rows])
-    columns = [*param_cols, *(_delta_column(m) for m in metric_cols)]
+    # "(b-a)" rather than a Greek delta: cp1252 and cp437, the code pages of a
+    # Western Windows pipe and console, have no capital delta, and the header
+    # also says which way the subtraction goes.
+    delta = {m: f"{m} (b-a)" for m in metric_cols}
+    columns = [*param_cols, *delta.values()]
     flat_rows = []
     for r in rows:
         fr = {p: r.get(p) for p in param_cols}
         for m in metric_cols:
-            fr[_delta_column(m)] = r["deltas"][m][2] if m in r["deltas"] else None
+            fr[delta[m]] = r["deltas"][m][2] if m in r["deltas"] else None
         flat_rows.append(fr)
-    parts = [_render(columns, flat_rows) if rows else "(no shared cells)"]
+    parts = [_render(columns, flat_rows, cell) if rows else "(no shared cells)"]
     if only_in_a:
         parts.append(f"only in a ({len(only_in_a)}): {only_in_a}")
     if only_in_b:
