@@ -1846,3 +1846,53 @@ def test_a_walk_past_its_bound_warns_once(project, monkeypatch):
             project_fingerprints(mod.task)
     finally:
         sys.modules.pop("mushin_t_bound2", None)
+
+
+def test_a_literal_another_module_changes_at_runtime_is_not_an_edit(project):
+    """`STEP = 0` bumped by another module (`state.STEP += 1`) as the task runs:
+    the value no longer equals its literal, so it is not compared."""
+    root, _ = project
+    _module(root, "mushin_t_state2", "STEP = 0\n")
+    src = "import mushin_t_state2 as state\n\n\ndef bump():\n    state.STEP += 1\n\n\ndef task(a):\n    bump()\n    return dict(v=float(a + state.STEP))\n"
+    mod = _module(root, "mushin_t_bumper", src)
+    try:
+        before = project_fingerprints(mod.task)
+        mod.task(1)
+        assert _changed(before, mod.task) == []
+    finally:
+        for n in ("mushin_t_state2", "mushin_t_bumper"):
+            sys.modules.pop(n, None)
+
+
+def test_an_attribute_of_a_plain_module_is_not_taken_for_a_submodule(project):
+    """`from model import train` where model is a module, not a package: a
+    top-level train.py elsewhere on the path is not what the task imports."""
+    root, _ = project
+    (root / "mushin_t_plainmod.py").write_text("def train(x):\n    return x\n")
+    (root / "train.py").write_text("UNRELATED = 1\n")
+    mod = _module(
+        root,
+        "mushin_t_plainuser",
+        "def task(a):\n    from mushin_t_plainmod import train\n\n    return dict(v=train(a))\n",
+    )
+    try:
+        code = project_fingerprints(mod.task)["code"]
+        assert "mushin_t_plainmod (file)" in code
+        assert not any(k.startswith("mushin_t_plainmod.train") for k in code)
+    finally:
+        for n in ("mushin_t_plainmod", "mushin_t_plainuser", "train"):
+            sys.modules.pop(n, None)
+
+
+def test_a_secret_captured_in_a_closure_is_never_hashed(project):
+    from mushin._resume import _SECRET
+
+    root, _ = project
+    src = "def make(api_key):\n    def call(x):\n        return x if api_key else 0\n\n    return call\n\n\nCALL = make('hunter2')\n\n\ndef task(a):\n    return dict(v=CALL(a))\n"
+    mod = _module(root, "mushin_t_closecret", src)
+    try:
+        code = project_fingerprints(mod.task)["code"]
+        closure = [v for k, v in code.items() if k.endswith(".<api_key>")]
+        assert closure == [_SECRET]
+    finally:
+        sys.modules.pop("mushin_t_closecret", None)

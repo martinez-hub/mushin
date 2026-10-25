@@ -2014,9 +2014,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             code), a class the config names from the driver script itself
             (``__main__``; covered when the task's code uses it), and code
             reached only through some other string. A module imported in the
-            task's body, or named by the config, is read from its file, so
-            editing it in a running process without reloading records the
-            edit. Where in doubt the guard misses an edit rather than re-running
+            task's body, or named by the config, is compared as a whole file
+            (any code change in it counts, a moved definition included, though
+            not its comments, docstrings or main block), and is read from
+            disk, so editing it in a running process without reloading records
+            the edit. Where in doubt the guard misses an edit rather than re-running
             unchanged cells, and the walk has a fixed size limit, so a very
             large project is covered only as far as it reaches (with a
             warning). A resume under another Python version does not compare

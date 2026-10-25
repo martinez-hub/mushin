@@ -562,6 +562,11 @@ def _find_file(name: str) -> str | None:
     spec = None
     for i in range(len(parts)):
         dotted = ".".join(parts[: i + 1])
+        if i > 0 and path is None:
+            # The parent is a plain module, not a package: `from model import
+            # train` names an attribute, and searching sys.path for `train`
+            # would find an unrelated top-level file.
+            return None
         loaded = sys.modules.get(dotted)
         if loaded is not None:
             path = getattr(loaded, "__path__", None)
@@ -792,7 +797,12 @@ def _source_index(file: str, module_name: str):
         dumped = _canonical_dump(_sanitized(node))
         prior = bindings.get(name)
         entries = prior if isinstance(prior, list) else []
-        bindings[name] = entries + [(literal(node), dumped)]
+        value = _NO_LITERAL
+        if literal(node) and isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if all(isinstance(t, ast.Name) for t in targets):
+                value = ast.literal_eval(node.value)
+        bindings[name] = entries + [(value, dumped)]
 
     def visit(body, prefix: str) -> None:
         for node in body:
@@ -865,9 +875,13 @@ def _source_index(file: str, module_name: str):
     return out
 
 
-#: _source_constant's answer for a name assigned only literals (``SCALE =
-#: 10``): its value is what runs, and is hashed as such.
+#: _source_constant's answer for a name assigned one literal (``SCALE =
+#: 10``), with the literal's value: the value that runs is hashed while it
+#: equals the literal. When it does not, the process changed it at runtime
+#: (another module's ``state.STEP += 1``) or the file was edited and not
+#: reloaded: either way no entry, rather than a re-run of unchanged cells.
 _LITERAL = "<literal>"
+_NO_LITERAL = object()
 
 
 def _sanitized(node):
@@ -930,8 +944,10 @@ def _source_constant(file: str, module_name: str, name: str, depth: int = 0):
         return None
     binding = bindings.get(name)
     if isinstance(binding, list):
-        if all(is_literal for is_literal, _ in binding):
-            return _LITERAL  # the caller hashes the value, which is what runs
+        if len(binding) == 1 and binding[0][0] is not _NO_LITERAL:
+            # The caller hashes the value, which is what runs, while it still
+            # equals this literal.
+            return (_LITERAL, binding[0][0])
         return _short_hash("|".join(dumped for _, dumped in binding).encode())
     if isinstance(binding, tuple) and depth < 5:
         _, module, attr = binding
@@ -975,7 +991,8 @@ def _secret_name(name: str, value) -> bool:
 
 
 def _secret(key: str, value) -> bool:
-    name = key.rpartition(":")[2].rpartition(".")[2]
+    # The last name in the key: `mod:f.<api_key>` for a closure cell.
+    name = key.rpartition(":")[2].rpartition(".")[2].strip("<>")
     if _secret_name(name, value):
         return True
     return isinstance(value, str) and _secret_value(value)
@@ -1007,6 +1024,7 @@ class _CodeWalk:
         self._stack: list[tuple] = []
         self._ops = 0
         self.truncated = False
+        self._file_memo: dict[str, dict[str, str]] = {}
 
     def run(self) -> None:
         # The walk runs for every sweep, so it must end: at most _WALK_MAX_OPS
@@ -1214,7 +1232,10 @@ class _CodeWalk:
             module = ".".join(parts[:i])
             if _find_file(module) is None:
                 continue
-            for key, digest in _file_entries(module).items():
+            entries = self._file_memo.get(module)
+            if entries is None:
+                entries = self._file_memo[module] = _file_entries(module)
+            for key, digest in entries.items():
                 self._record(key, digest)
             return
 
@@ -1314,7 +1335,11 @@ class _CodeWalk:
         # Imports inside the body are recorded by their files, the same in a
         # process that has imported them and one that has not.
         for name in _resolve_imports(imports, package):
-            for key, digest in _file_entries(name).items():
+            entries = self._file_memo.get(name)
+            if entries is None:
+                entries = self._file_memo[name] = _file_entries(name)
+                self._ops += len(entries)  # file work counts against the bound
+            for key, digest in entries.items():
                 self._record(key, digest)
 
     def _walk_module(self, module, attrs: set[str]) -> None:
@@ -1369,7 +1394,15 @@ class _CodeWalk:
             and isinstance(module_name, str)
         ):
             digest = _source_constant(file, module_name, name)
-            if digest != _LITERAL:
+            if isinstance(digest, tuple):
+                _, written = digest
+                try:
+                    same = type(value) is type(written) and value == written
+                except Exception:  # noqa: BLE001 - a comparison that raises
+                    same = False
+                if not same:
+                    return  # changed at runtime, or edited and not reloaded
+            else:
                 if digest is not None:
                     self._record(key, _SECRET if _secret(key, value) else digest)
                 # The code the value holds, without a value entry.
