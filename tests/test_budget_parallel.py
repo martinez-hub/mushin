@@ -116,25 +116,80 @@ def test_budget_holds_across_joblib_workers(tmp_path):
         assert float(ds2["started"].sel(seed=s)) == started
 
 
+class _GridWF(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a, b):
+        import time
+
+        time.sleep(_CELL_SECONDS)
+        return dict(v=float(10 * a + b))
+
+
 def test_budget_holds_under_a_nested_sweep_subdir(tmp_path):
-    """With `hydra.sweep.subdir` two levels deep, a cell dir's parent is not
-    the sweep root: every cell must still find the one start in the root."""
+    """With `hydra.sweep.subdir=a_${a}/b_${b}` a cell dir's parent is its `a`
+    group, not the sweep root: every cell must still share the one start in
+    the root, and the cleanup must find it there. No `working_dir`, so the
+    cleanup has only the job dirs to search from."""
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
     root = tmp_path / "s"
 
-    wf = _SleepyWF()
-    with pytest.warns(UserWarning, match="not run"):
-        wf.run(
-            seed=multirun(list(range(8))),
+    try:
+        _GridWF().run(
+            a=multirun([0, 1]),
+            b=multirun([0, 1, 2, 3]),
             max_total_seconds=_BUDGET,
-            working_dir=str(root),
-            overrides=["hydra.sweep.subdir=${hydra.job.num}/cell"],
+            overrides=[
+                f"hydra.sweep.dir='{root.as_posix()}'",
+                "hydra.sweep.subdir=a_${a}/b_${b}",
+            ],
             **_JOBLIB,
         )
-    assert 1 <= len(_computed(wf.to_xarray())) <= _N_JOBS
-    assert wf.working_dir == root  # the sweep root, not the first job's group
-    assert (root / "multirun.yaml").exists()
+    except FileNotFoundError as e:
+        # Post-processing does not support a nested subdir (as on main: it
+        # looks for multirun.yaml in the first job's parent), so run() can
+        # raise once the launch has returned; the budget and its cleanup are
+        # done by then.
+        assert "multirun.yaml" in str(e)
+    status = {
+        d.relative_to(root).as_posix(): read_cell_status(d)["status"]
+        for d in root.glob("a_*/b_*")
+    }
+    completed = sorted(k for k, v in status.items() if v == "completed")
+    assert len(status) == 8
+    assert sorted(k for k, v in status.items() if v != "completed") == sorted(
+        k for k, v in status.items() if v == "skipped"
+    )
+    # One budget for the sweep. Before the deadline each worker starts one
+    # cell, the first two dispatched (a_0's); with a start per `a` group, the
+    # first a_1 cell would start a second clock and run.
+    assert completed and set(completed) <= {"a_0/b_0", "a_0/b_1"}, status
     assert sorted(root.rglob(".mushin_budget_start.*")) == []
+
+
+def test_a_cell_finds_the_sweep_root_under_a_nested_subdir(tmp_path):
+    """The cell reads the depth of `hydra.sweep.subdir` from its live job
+    config, which resolves the job's own keys (`a_${a}`), so it climbs to the
+    sweep root, not to its `a` group. (In the joblib test above, each worker
+    keeps the deadline of its first cell, which can hide a wrong root.)"""
+    root = tmp_path / "s"
+    roots = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            roots.append(wf_mod._cell_sweep_root())
+            return dict(v=float(10 * a + b))
+
+    try:
+        W().run(
+            a=multirun([0, 1]),
+            b=multirun([0, 1]),
+            working_dir=str(root),
+            overrides=["hydra.sweep.subdir=a_${a}/b_${b}"],
+        )
+    except FileNotFoundError as e:  # post-processing, as above
+        assert "multirun.yaml" in str(e)
+    assert roots == [root] * 4
 
 
 def test_a_run_without_working_dir_removes_its_start(tmp_path):
@@ -170,22 +225,25 @@ def test_a_failed_run_leaves_its_start_and_a_resume_starts_afresh(tmp_path):
     kwargs = dict(
         seed=multirun(list(range(8))),
         marker=str(tmp_path / "failed-once"),
-        max_total_seconds=_BUDGET,
         working_dir=str(root),
         **_JOBLIB,
     )
 
+    # A budget no cell reaches, so the cell meant to fail always runs: seed 1
+    # fails under on_error="raise", after the other seven completed.
     with pytest.raises(RuntimeError, match="boom"):
-        _FailsOnceWF().run(**kwargs)  # seed 1 fails under on_error="raise"
+        _FailsOnceWF().run(max_total_seconds=60, **kwargs)
     stale = _start_files(root)
     assert len(stale) == 1
-    done = _completed_cells(root)
+    assert len(_completed_cells(root)) == 7
 
-    with pytest.warns(UserWarning, match="not run"):
-        _FailsOnceWF().run(resume=True, **kwargs)
-    # The stale start is older than the budget; had the resume read it, every
-    # cell it did not reuse would have been skipped.
-    assert len(_completed_cells(root)) > len(done)
+    # The stale start is older than this run's budget (seven half-second cells
+    # on two workers ran since): had the resume read it, it would have skipped
+    # seed 1, the one cell it has to run.
+    wf = _FailsOnceWF()
+    wf.run(max_total_seconds=_BUDGET, resume=True, **kwargs)
+    assert wf.is_complete
+    assert len(_completed_cells(root)) == 8
     # The resume returned normally, so it removed its own start, not the stale.
     assert _start_files(root) == stale
 
@@ -370,34 +428,166 @@ def test_an_empty_start_file_is_dated_by_its_mtime(tmp_path, monkeypatch):
     assert isinstance(_copy(runner)(cfg), _SkippedRun)
 
 
-def test_a_start_far_from_the_files_mtime_is_not_believed(tmp_path):
+def _record(value):
+    """A start record as its creator writes it: the value and a newline."""
+    return f"{value!r}\n"
+
+
+def test_the_start_record_written_by_a_cell_is_complete(tmp_path, monkeypatch):
+    root = tmp_path / "s"
+    _cell(root, 0, monkeypatch)
+    copy = _copy(_runner(max_total_seconds=60))
+    before = time.time()
+    assert copy._start_budget() is True
+    text = copy.budget_start_path(root).read_text(encoding="ascii")
+    assert text.endswith("\n") and before <= float(text) <= time.time()
+
+
+def test_a_complete_plausible_record_is_trusted_over_the_mtime(tmp_path):
+    """The file is named by the run's uuid, so a complete record in it is this
+    run's start. On NFS the mtime comes from the server's clock: a minute of
+    server skew must not move the budget. Only a record no clock could have
+    written falls back to the mtime."""
     path = tmp_path / ".mushin_budget_start.x"
-    path.write_text(repr(1.0))  # finite, but not a start this run wrote
+    start = time.time() - 60  # a minute off the mtime the write sets
+    path.write_text(_record(start))
+    assert wf_mod._read_budget_start(path) == start
+
+    implausible = (1.0, time.time() + 3 * 86400, float("inf"), float("nan"))
+    for text in [_record(v) for v in implausible] + ["x\n"]:
+        path.write_text(text)
+        assert wf_mod._read_budget_start(path) == path.stat().st_mtime, text
+
+
+def test_an_incomplete_record_is_not_trusted(tmp_path):
+    """Without its newline a record may be cut short (``1761400000`` of
+    ``1761400000.25``): after the retries, the mtime stands in."""
+    path = tmp_path / ".mushin_budget_start.x"
+    path.write_text(repr(time.time() - 2.0))  # plausible, but no newline
     assert wf_mod._read_budget_start(path) == path.stat().st_mtime
 
-    mtime = time.time() - 10
-    os.utime(path, (mtime, mtime))
-    path.write_text(repr(mtime - 1.5))  # within the tolerance: believed
-    os.utime(path, (mtime, mtime))
-    assert wf_mod._read_budget_start(path) == mtime - 1.5
 
-
-def test_an_empty_read_is_retried_before_the_mtime(tmp_path, monkeypatch):
-    """Caught between the creator's create and write, a reader retries for a
-    few milliseconds: the mtime may be truncated to the second, which would
-    shorten a sub-second budget."""
+def test_an_incomplete_read_is_retried_before_the_mtime(tmp_path, monkeypatch):
+    """Caught between the creator's create and write, or in the middle of the
+    write, a reader retries for a few milliseconds: the mtime may be truncated
+    to the second, which would shorten a sub-second budget."""
     path = tmp_path / ".mushin_budget_start.x"
     path.touch()
-    start = path.stat().st_mtime - 2.0  # within the tolerance of the mtime
-    reads = []
+    start = path.stat().st_mtime - 2.0  # the start, unlike the mtime
+    reads = iter(["", repr(start)[:5], _record(start)])  # empty, partial, done
     real_read_text = Path.read_text
 
     def read_text(self, *args, **kwargs):
         if self == path:
-            reads.append(self)
-            return "" if len(reads) == 1 else repr(start)
+            return next(reads)
         return real_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
     assert wf_mod._read_budget_start(path) == start
-    assert len(reads) == 2
+    assert next(reads, None) is None  # all three reads were needed
+
+
+def test_reading_a_missing_or_empty_start_wastes_no_sleep(tmp_path, monkeypatch):
+    """A retry cannot bring a missing file back, and no read follows the last
+    sleep: Windows' timer rounds each 2 ms sleep up to about 16 ms."""
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert wf_mod._read_budget_start(tmp_path / "gone") is None
+    assert sleeps == []
+
+    empty = tmp_path / ".mushin_budget_start.x"
+    empty.touch()
+    assert wf_mod._read_budget_start(empty) == empty.stat().st_mtime
+    assert len(sleeps) == wf_mod._BUDGET_START_READS - 1
+
+
+def test_an_undecodable_start_file_reads_as_its_mtime(tmp_path):
+    path = tmp_path / ".mushin_budget_start.x"
+    path.write_bytes(b"\x81\x8d\xff")  # not ASCII; every record is
+    assert wf_mod._read_budget_start(path) == path.stat().st_mtime
+
+
+def test_both_clocks_are_read_after_the_file_io(tmp_path, monkeypatch):
+    """The read's retries, or a slow NFS stat, must not be taken off the
+    budget: the deadline is the shared start plus the budget, however long
+    reading the start took."""
+    root = tmp_path / "s"
+    _cell(root, 0, monkeypatch)
+    copy = _copy(_runner(max_total_seconds=2.0))
+    copy.budget_start_path(root).write_text(_record(time.time()))  # another cell
+    real_read = wf_mod._read_budget_start
+
+    def slow_read(path):
+        time.sleep(1.2)
+        return real_read(path)
+
+    monkeypatch.setattr(wf_mod, "_read_budget_start", slow_read)
+    assert copy._start_budget() is False
+    remaining = copy._known_deadline() - time.monotonic()
+    assert 0.3 < remaining <= 0.8, remaining  # 2.0 s from the start, 1.2 s gone
+
+
+def test_a_vanished_start_file_falls_back_to_this_process(tmp_path, monkeypatch):
+    """A start file that exists at the create but is gone at the read is no
+    start to share: like an uncreatable one, the process times the budget
+    from this cell and warns; this cell did not start the sweep's clock."""
+    real_open = os.open
+
+    def open_finding_a_start(path, *args, **kwargs):
+        if ".mushin_budget_start." in os.fspath(path):
+            raise FileExistsError(17, "File exists", os.fspath(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_finding_a_start)
+    _cell(tmp_path / "s", 0, monkeypatch)
+    copy = _copy(_runner(max_total_seconds=60))
+    with pytest.warns(UserWarning, match="vanished"):
+        assert copy._start_budget() is False
+    assert copy._known_deadline() is not None
+    assert copy._budget_expired() is False
+
+
+def test_an_unexpected_budget_error_never_fails_the_cell(tmp_path, monkeypatch):
+    """The budget step runs before the runner's fail-soft guard: an error in it
+    falls back to this process's own deadline, with a warning, and the cell
+    runs."""
+
+    def broken_root():
+        raise IndexError("no sweep root above /")
+
+    monkeypatch.setattr(wf_mod, "_cell_sweep_root", broken_root)
+    root = tmp_path / "s"
+    runner = _runner(max_total_seconds=0.2)
+    with pytest.warns(UserWarning, match="shared budget failed"):
+        assert _copy(runner)(_cell(root, 0, monkeypatch)) == {"v": 0.0}
+    time.sleep(0.3)
+    assert isinstance(_copy(runner)(_cell(root, 1, monkeypatch)), _SkippedRun)
+
+
+def test_a_runner_pickled_by_an_earlier_mushin_keeps_its_own_budget(
+    tmp_path, monkeypatch
+):
+    """A runner pickled before the budget was shared (a submitit array queued
+    before an upgrade) has no `budget_id`: it must not fail before the
+    fail-soft guard, and it times a budget of its own, as it did."""
+    root = tmp_path / "s"
+    runner = _runner(max_total_seconds=0.2)
+    del runner.budget_id, runner._shared_budget
+    runner._deadline = None  # what that version kept on the runner
+    old = _copy(runner)
+    assert old(_cell(root, 0, monkeypatch)) == {"v": 0.0}
+    time.sleep(0.3)
+    assert isinstance(old(_cell(root, 1, monkeypatch)), _SkippedRun)
+    assert sorted(root.rglob(".mushin_budget_start.*")) == []
+
+
+def test_the_deadline_table_keeps_only_recent_runs(monkeypatch):
+    """loky keeps its worker processes across run() calls, so the per-process
+    table of deadlines keeps only the most recent runs."""
+    monkeypatch.setattr(wf_mod, "_BUDGET_DEADLINES", {})
+    kept = wf_mod._BUDGET_DEADLINES_KEPT
+    for i in range(kept + 10):
+        wf_mod._remember_deadline(f"run{i}", float(i))
+    assert len(wf_mod._BUDGET_DEADLINES) == kept
+    assert "run0" not in wf_mod._BUDGET_DEADLINES
+    assert f"run{kept + 9}" in wf_mod._BUDGET_DEADLINES
