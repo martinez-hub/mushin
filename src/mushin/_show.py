@@ -292,7 +292,12 @@ class BestResult:
 def _finite_number(v: Any) -> bool:
     # isfinite, not just `v == v`: an inf metric must not be "best", and a group
     # holding +inf and -inf would make fmean raise instead of being incomplete.
-    return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # an int beyond float range (JSON allows it): no float
+        return False
 
 
 def _is_candidate(cell: dict, metric: str) -> bool:
@@ -472,8 +477,8 @@ def best(
     ValueError
         If ``mode`` is invalid, no completed cell has ``metric`` as a finite
         scalar (the error lists the scalar metrics that are available), ``over``
-        is not a name or names, names a param the sweep does not vary, or no
-        group is complete.
+        is not a swept-param name or a sequence of them, names a param the
+        sweep does not vary, or no group is complete.
     FileNotFoundError
         If ``root`` is not a directory.
     """

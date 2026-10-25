@@ -347,3 +347,17 @@ def test_best_result_without_dir_has_no_dirs():
     r = BestResult({}, "completed", {}, 0.0, None)
     assert r.dirs == [] and r.n == 0
     assert "n=0" in repr(r)
+
+
+def test_best_skips_an_int_metric_beyond_float_range(tmp_path):
+    """JSON carries ints of any size and math.isfinite raises OverflowError on
+    one beyond float range; such a value is no result, not a crash."""
+    import json
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    lucky = _cell_dir(wd, lr=0.1, seed=2)  # score 10.0, the single best
+    (lucky / "mushin_metrics.json").write_text(json.dumps({"score": 10**400}))
+    assert mushin.best(wd, "score").combo["lr"] == 0.2
+    with pytest.warns(UserWarning, match="skipped 1 of 2"):
+        assert mushin.best(wd, "score", over="seed").combo == {"lr": 0.2}
