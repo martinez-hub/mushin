@@ -86,6 +86,8 @@ def test_diff_provenance_compares_the_accelerator_only_when_both_recorded_one():
     assert _diff_provenance(gpu, unrecorded) == {}
     assert _diff_provenance(unrecorded, gpu) == {}
     assert _diff_provenance(gpu, {}) == {}  # a record with no accelerator at all
+    # A sweep with no provenance record at all reports every field, this one too.
+    assert "accelerator.device" in _diff_provenance(None, gpu)
     cpu = {"accelerator": {"cuda": None, "cudnn": None, "device": None}}
     assert _diff_provenance(cpu, gpu) == {
         "accelerator.cuda": (None, "13.0"),

@@ -358,7 +358,9 @@ def _flatten(d: dict, prefix: str = "") -> dict:
 
 
 def _accelerator_unrecorded(record: dict | None) -> bool:
-    return not isinstance((record or {}).get("accelerator"), dict)
+    # A record that is missing altogether reports every field as (None, value),
+    # the accelerator among them; the rule is for a record that has none.
+    return record is not None and not isinstance(record.get("accelerator"), dict)
 
 
 def _is_accelerator_key(key: str) -> bool:

@@ -466,7 +466,7 @@ class _TaskRunner:
         import warnings
         from pathlib import Path
 
-        from ._provenance import record_accelerator, write_provenance
+        from ._provenance import NOT_WRITTEN, record_accelerator, write_provenance
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
@@ -651,8 +651,9 @@ class _TaskRunner:
                 # resilience guide's pattern), so the checkpoint is looked for
                 # after it, as it was when the hook ran first.
                 rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
+            written = NOT_WRITTEN
             try:
-                write_provenance(cwd, cfg, base=self.base_provenance)
+                written = write_provenance(cwd, cfg, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             # Set the contextvar AFTER the (fallible) status write, so a failed
@@ -678,7 +679,7 @@ class _TaskRunner:
                 # The accelerator comes from this process, after the task that
                 # may have imported torch has returned or raised; the record
                 # written above carries the parent's view from before any cell.
-                record_accelerator(cwd)
+                record_accelerator(cwd, written)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)
                 # Store the freshly-computed cell in the content-addressed cache
