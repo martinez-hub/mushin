@@ -1563,7 +1563,7 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import code_fingerprint
+        from ._resume import _unwrap_task, code_fingerprint
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -1586,7 +1586,10 @@ class BaseWorkflow:
             on_error=on_error,
             inject_resume=_wants_resume,
             prior_manifest=_prior_manifest,
-            code_hash=code_fingerprint(self.task),
+            # A partial task has no source of its own; its function's body is
+            # what runs (main recorded None for it, so older sweeps still
+            # resume), and its bound arguments are in the project-code record.
+            code_hash=code_fingerprint(_unwrap_task(self.task)),
             max_total_seconds=max_total_seconds,
             sampled_indices=sampled_indices,
             cache_dir=cache_dir,
@@ -1990,10 +1993,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             as the cell's process has loaded them, which is the code that runs:
             a helper it calls, a constant it reads (``from consts import
             THRESH`` included), a class in a registry dict it indexes, a
-            function in a notebook or in a script's main block. Helpers are
-            hashed by their bytecode, so a comment or a moved definition in one
-            is not an edit (the task function's own source is compared as
-            text, so a comment in its body is). A changed non-swept value, an
+            function in a notebook or in a script's main block, a module it
+            imports inside its body (with the project modules that module
+            imports), a settings dataclass it reads. Helpers are hashed by their
+            bytecode, so a comment, a docstring or a moved definition in one is
+            not an edit (the task function's own source is compared as text, so
+            a comment in its body is). A changed non-swept value, an
             edited task body or an edited helper re-runs that cell, with a
             warning naming where the change is (``helpers:scale``). Not
             covered: installed packages other than editable ones, data files,
@@ -2063,9 +2068,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
             edited task body or an edited helper is a cache miss, and so is a
-            change of Python version for a cell that reaches project code. When
-            the project code cannot be fingerprinted, the cache is not used for
-            that cell.
+            change of Python version for a cell that reaches project code. The
+            key covers every name the cell reaches, so code that becomes
+            reachable as the task runs (a registry its first run fills) misses
+            the cache once. When the project code cannot be fingerprinted, the
+            cache is not used for that cell.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for

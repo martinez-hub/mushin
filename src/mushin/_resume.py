@@ -262,35 +262,53 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
 
 
 @functools.cache
-def _is_foreign_module(name: str) -> bool:
+def _foreign_by_path(file: str, top: str) -> bool:
+    try:
+        path = Path(file).resolve()
+    except OSError:
+        return True
+    try:
+        installed = _installed_roots().get(top, ())
+    except Exception:  # noqa: BLE001 - unreadable metadata: by path alone
+        installed = ()
+    return any(path.is_relative_to(root) for root in _foreign_roots() + installed)
+
+
+def _is_foreign_module(name: str, file: str | None = None) -> bool:
     """True for a module that is not the project's own: the standard library,
     mushin, a file under the interpreter's library directories, or a file
     inside the install directory of a non-editable distribution that provides
     the module's top-level name. A module with a file elsewhere is the
     project's, even when an installed distribution has the same top-level name
     (a checkout's ``src`` or ``utils``, or a project installed non-editable and
-    run from its checkout). Decided once per process."""
+    run from its checkout). ``__main__`` is the user's program, never foreign:
+    in a parallel worker ``sys.modules["__main__"]`` is the launcher's own
+    module, while the task's functions keep ``__main__`` as their module.
+    ``file`` overrides the file looked up in ``sys.modules`` (a function's
+    ``__globals__`` knows its own). Answers by file are cached; a module not
+    imported yet is decided by name each time, so a later import is seen."""
     import sys
 
+    if name == "__main__":
+        return False
     top = name.partition(".")[0]
     if top in sys.stdlib_module_names or top in sys.builtin_module_names:
         return True
     if top == "mushin":
         return True
-    module = sys.modules.get(name)
-    file = getattr(module, "__file__", None) if module is not None else None
-    try:
-        installed = _installed_roots().get(top, ())
-    except Exception:  # noqa: BLE001 - unreadable metadata: by path alone
-        installed = ()
+    if file is None:
+        module = sys.modules.get(name)
+        file = getattr(module, "__file__", None) if module is not None else None
     if isinstance(file, str) and file:
-        try:
-            path = Path(file).resolve()
-        except OSError:
-            return True
-        roots = _foreign_roots() + installed
-        return any(path.is_relative_to(root) for root in roots)
-    return bool(installed)
+        return _foreign_by_path(file, top)
+    try:
+        return bool(_installed_roots().get(top, ()))
+    except Exception:  # noqa: BLE001 - unreadable metadata
+        return False
+
+
+# Tests reset the by-file answers through the old name.
+_is_foreign_module.cache_clear = _foreign_by_path.cache_clear  # type: ignore[attr-defined]
 
 
 #: Values hashed by their repr when the task reads them. Mutable containers
@@ -303,14 +321,29 @@ _CONSTANT_TYPES = (int, float, complex, str, bytes, bool, type(None))
 def _constant_repr(value, depth: int = 0) -> str | None:
     """``repr`` of an immutable constant (tuples and frozensets of them too, in
     a sorted order for frozensets, whose iteration order follows string
-    hashing; and an enum member with its value), or None for anything else."""
+    hashing; an enum member with its value; a path; a dataclass instance by its
+    fields, a settings object), or None for anything else. A secret-shaped
+    string becomes a marker, so its hash is never written anywhere."""
+    import dataclasses
     import enum
+    import pathlib
 
     if isinstance(value, enum.Enum):
         inner = _constant_repr(value.value, depth + 1)
         return f"{type(value).__qualname__}.{value.name}={inner}" if inner else None
+    if isinstance(value, str) and _secret_value(value):
+        return "<secret>"
     if isinstance(value, _CONSTANT_TYPES):
         return repr(value)
+    if isinstance(value, pathlib.PurePath):
+        return f"path({value.as_posix()!r})"
+    if dataclasses.is_dataclass(value) and not isinstance(value, type) and depth < 4:
+        fields = []
+        for f in dataclasses.fields(value):
+            v = getattr(value, f.name)
+            c = "<secret>" if _secret_name(f.name, v) else _constant_repr(v, depth + 1)
+            fields.append(f"{f.name}={c if c is not None else type(v).__qualname__}")
+        return f"{type(value).__qualname__}({','.join(fields)})"
     if isinstance(value, (tuple, frozenset)) and depth < 4 and len(value) <= 1000:
         items = [_constant_repr(v, depth + 1) for v in value]
         if any(i is None for i in items):
@@ -321,12 +354,13 @@ def _constant_repr(value, depth: int = 0) -> str | None:
     return None
 
 
-def _code_hash(code) -> str:
+def _code_hash(code, doc: str | None = None) -> str:
     """The hash of what a code object does: its bytecode, names, constants and
-    nested code, not its file name or line numbers, so a comment, a blank line
-    or a moved function is not an edit. Bytecode is stable within a Python
-    minor version; the record carries the version, and a resume under another
-    one does not compare."""
+    nested code, not its file name, line numbers or docstring (``doc``, the
+    function's ``__doc__``), so a comment, a docstring, a blank line or a moved
+    function is not an edit. Bytecode is stable within a Python minor version;
+    the record carries the version, and a resume under another one does not
+    compare."""
     import types
 
     parts = [
@@ -337,7 +371,10 @@ def _code_hash(code) -> str:
         repr(code.co_cellvars).encode(),
         repr((code.co_argcount, code.co_kwonlyargcount, code.co_flags)).encode(),
     ]
-    for const in code.co_consts:
+    consts = list(code.co_consts)
+    if doc is not None and consts and consts[0] == doc:
+        consts = consts[1:]
+    for const in consts:
         if isinstance(const, types.CodeType):
             parts.append(_code_hash(const).encode())
         else:
@@ -404,6 +441,13 @@ def _code_names(code) -> tuple[set[str], set[str], list[tuple[str, int]]]:
                     arg = instructions[i - 2].argval
                     level = arg if isinstance(arg, int) else 0
                 imports.append((name, level))
+                # `from pkg import sub`: sub may be a submodule, named only in
+                # the fromlist loaded just before.
+                fromlist = instructions[i - 1].argval if i >= 1 else None
+                if isinstance(fromlist, tuple):
+                    for item in fromlist:
+                        if isinstance(item, str) and item != "*":
+                            imports.append((f"{name}.{item}" if name else item, level))
     return globals_, attrs, imports
 
 
@@ -431,20 +475,28 @@ def _resolve_imports(imports, package: str | None) -> list[str]:
     return found
 
 
-def _module_label(module_name: str) -> str:
+def _module_label(module_name: str, namespace: dict | None = None) -> str:
     """How a module is named in a key: by its import name, except a script run
     as ``__main__``, which is named as ``python -m`` names it (its spec) or by
     its file, so the run and a later ``import`` of the same file agree. A
-    notebook's ``__main__`` has neither and stays ``__main__``."""
+    notebook's ``__main__`` has neither and stays ``__main__``. ``namespace``
+    (a function's ``__globals__``) says which ``__main__``: in a parallel worker
+    ``sys.modules["__main__"]`` is the launcher's module, while the task's
+    functions carry their script's globals."""
     import sys
 
     if module_name != "__main__":
         return module_name
-    main = sys.modules.get("__main__")
-    spec = getattr(main, "__spec__", None)
+    if namespace is None:
+        main = sys.modules.get("__main__")
+        namespace = getattr(main, "__dict__", {}) or {}
+        file = namespace.get("__file__")
+        if isinstance(file, str) and file and _foreign_by_path(file, "__main__"):
+            return "__main__"  # the launcher's module, not the user's script
+    spec = namespace.get("__spec__")
     if spec is not None and getattr(spec, "name", None):
         return spec.name
-    file = getattr(main, "__file__", None)
+    file = namespace.get("__file__")
     return Path(file).stem if isinstance(file, str) and file else "__main__"
 
 
@@ -499,11 +551,12 @@ def _find_file(name: str) -> str | None:
     return spec.origin
 
 
-def _file_entry(name: str) -> tuple[str, str] | None:
-    """A project module imported inside a function's body, by its file: the
-    same entry whether or not this process has imported it yet, so the key
-    does not change between processes. A Python file is hashed as its syntax
-    tree (a comment is not an edit), anything else by its bytes."""
+def _file_entry(name: str):
+    """``(key, hash, tree)`` for a project module imported inside a function's
+    body, by its file: the same entry whether or not this process has
+    imported it yet, so the key does not change between processes. A Python
+    file is hashed as its syntax tree (a comment is not an edit), anything
+    else by its bytes (``tree`` is then None)."""
     import ast
 
     if _is_foreign_module(name):
@@ -513,21 +566,64 @@ def _file_entry(name: str) -> tuple[str, str] | None:
         return None
     try:
         path = Path(file).resolve()
-        top = name.partition(".")[0]
-        roots = _foreign_roots() + _installed_roots().get(top, ())
-        if any(path.is_relative_to(root) for root in roots):
+        if _foreign_by_path(str(path), name.partition(".")[0]):
             return None
         data = path.read_bytes()
     except (OSError, ValueError):
         return None
     if path.suffix == ".py":
         try:
-            return f"{name} (file)", _short_hash(
-                _canonical_dump(ast.parse(data)).encode()
-            )
+            tree = ast.parse(data)
+            return f"{name} (file)", _short_hash(_canonical_dump(tree).encode()), tree
         except (SyntaxError, ValueError, RecursionError):
             pass
-    return f"{name} (file)", _short_hash(data)
+    return f"{name} (file)", _short_hash(data), None
+
+
+def _file_imports(tree, name: str, is_package: bool) -> list[str]:
+    """The modules a file imports, at any depth, with ``from pkg import sub``
+    naming the submodule too, relative imports resolved against the file's own
+    package."""
+    import ast
+
+    package = name if is_package else name.rpartition(".")[0]
+    pairs: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            pairs.extend((alias.name, 0) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            pairs.append((base, node.level))
+            for alias in node.names:
+                if alias.name != "*":
+                    pairs.append(
+                        (f"{base}.{alias.name}" if base else alias.name, node.level)
+                    )
+    return _resolve_imports([(n, lv) for n, lv in pairs if n], package or None)
+
+
+def _file_entries(name: str) -> dict[str, str]:
+    """Entries for a module imported inside a function's body and, through
+    their files, every project module it imports in turn: a helper imported
+    lazily that itself imports the constants it uses."""
+    out: dict[str, str] = {}
+    pending = [name]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        found = _file_entry(current)
+        if found is None:
+            continue
+        key, digest, tree = found
+        out[key] = digest
+        if tree is not None:
+            file = _find_file(current) or ""
+            is_package = Path(file).name == "__init__.py"
+            pending.extend(_file_imports(tree, current, is_package))
+    return out
 
 
 #: A stand-in for a module-level name the project's own code rebinds (a
@@ -538,13 +634,25 @@ _STATE = _short_hash(b"<state>")
 _SECRET = _short_hash(b"<secret>")
 
 
-def _secret(key: str, value) -> bool:
-    from ._provenance import _REDACT_KEY_RE, _REDACT_VALUE_RE
+def _secret_value(value: str) -> bool:
+    from ._provenance import _REDACT_VALUE_RE
 
-    name = key.rpartition(":")[2]
-    if _REDACT_KEY_RE.search(name):
+    return bool(_REDACT_VALUE_RE.search(value))
+
+
+def _secret_name(name: str, value) -> bool:
+    """A string under a secret-shaped name (``api_key``): a number under one
+    (``MAX_TOKENS = 512``) is a setting, and is hashed."""
+    from ._provenance import _REDACT_KEY_RE
+
+    return isinstance(value, (str, bytes)) and bool(_REDACT_KEY_RE.search(name))
+
+
+def _secret(key: str, value) -> bool:
+    name = key.rpartition(":")[2].rpartition(".")[2]
+    if _secret_name(name, value):
         return True
-    return isinstance(value, str) and bool(_REDACT_VALUE_RE.search(value))
+    return isinstance(value, str) and _secret_value(value)
 
 
 class _CodeWalk:
@@ -578,11 +686,29 @@ class _CodeWalk:
 
     # -- helpers ------------------------------------------------------------
     def _project(self, value) -> bool:
+        import types
+
         try:
+            if isinstance(value, types.FunctionType):
+                # A function knows its own module from its globals; a
+                # functools.wraps wrapper copies __module__ from what it wraps.
+                g = value.__globals__
+                name, file = g.get("__name__"), g.get("__file__")
+                return isinstance(name, str) and not _is_foreign_module(
+                    name, file if isinstance(file, str) else None
+                )
             module = getattr(value, "__module__", None)
         except Exception:  # noqa: BLE001 - a descriptor that raises
             return False
         return isinstance(module, str) and not _is_foreign_module(module)
+
+    def _here(self, fn) -> str:
+        """The label of the module a function's globals belong to."""
+        g = getattr(fn, "__globals__", None) or {}
+        name = g.get("__name__")
+        if not isinstance(name, str):
+            name = fn.__module__ if isinstance(fn.__module__, str) else "?"
+        return _module_label(name, g)
 
     def _record(self, key: str | None, digest: str) -> None:
         if key is not None:
@@ -598,41 +724,42 @@ class _CodeWalk:
             return _short_hash(f"<{t.__qualname__} {module}.{name}>".encode())
         return _short_hash(f"<{t.__module__}.{t.__qualname__}>".encode())
 
-    def _state(self, module_name: str) -> frozenset[str]:
+    def _state(self, namespace: dict) -> frozenset[str]:
         """The module-level names the module's own functions and methods rebind
-        (``global x; x = ...``): state, whose value changes as the code runs."""
-        import sys
+        (``global x; x = ...``), through decorators: state, whose value changes
+        as the code runs. ``namespace`` is the module's globals."""
+        import dis
         import types
 
-        module = sys.modules.get(module_name)
-        if module is None:
-            return frozenset()
-        cached = self._state_names.get(id(module))
+        cached = self._state_names.get(id(namespace))
         if cached is not None:
             return cached
-        names: set[str] = set()
-        try:
-            values = list(vars(module).values())
-        except TypeError:
-            values = []
+        module_name = namespace.get("__name__")
         codes = []
-        for value in values:
+        for value in list(namespace.values()):
             try:
                 if not isinstance(value, (types.FunctionType, type)):
-                    continue  # never touch other objects: a proxy may raise
-                if value.__module__ != module_name:
-                    continue
+                    # A decorated function may be a C wrapper: what it wraps.
+                    value = getattr(value, "__wrapped__", None)
+                    if not isinstance(value, types.FunctionType):
+                        continue
                 if isinstance(value, types.FunctionType):
-                    codes.append(value.__code__)
-                else:
+                    layer, seen = value, set()
+                    while (
+                        isinstance(layer, types.FunctionType) and id(layer) not in seen
+                    ):
+                        seen.add(id(layer))
+                        if layer.__globals__ is namespace:
+                            codes.append(layer.__code__)
+                        layer = getattr(layer, "__wrapped__", None)
+                elif value.__module__ == module_name:
                     for member in vars(value).values():
                         func = getattr(member, "__func__", member)
                         if isinstance(getattr(func, "__code__", None), types.CodeType):
                             codes.append(func.__code__)
             except Exception:  # noqa: BLE001 - a class whose attributes raise
                 continue
-        import dis
-
+        names: set[str] = set()
         while codes:
             code = codes.pop()
             codes.extend(k for k in code.co_consts if isinstance(k, types.CodeType))
@@ -640,7 +767,7 @@ class _CodeWalk:
                 if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
                     names.add(ins.argval)
         out = frozenset(names)
-        self._state_names[id(module)] = out
+        self._state_names[id(namespace)] = out
         return out
 
     # -- roots --------------------------------------------------------------
@@ -649,6 +776,13 @@ class _CodeWalk:
 
         layer = root
         while isinstance(layer, functools.partial):
+            # A partial task's bound arguments are part of what runs.
+            inner = layer.func
+            while isinstance(inner, functools.partial):
+                inner = inner.func
+            name = getattr(inner, "__qualname__", type(inner).__qualname__)
+            label = self._here(inner) if hasattr(inner, "__globals__") else "?"
+            self._record(f"{label}:{name}.<partial>", self._partial_digest(layer))
             layer = layer.func
         # A project decorator around the task is code it runs: each wrapper
         # layer is recorded with its body; the innermost function is the
@@ -681,6 +815,8 @@ class _CodeWalk:
         import sys
 
         parts = path.split(".")
+        if _is_foreign_module(parts[0]):
+            return  # never touch an installed package: getattr may import
         for i in range(len(parts) - 1, 0, -1):
             module = sys.modules.get(".".join(parts[:i]))
             if module is None:
@@ -702,9 +838,11 @@ class _CodeWalk:
         code object)."""
         digest = self._object_hash.get(id(fn))
         if digest is None:
-            extras = [
-                f"{_module_label(fn.__module__)}.{fn.__qualname__}",
-                _code_hash(fn.__code__),
+            extras: list[str] = [
+                f"{self._here(fn)}.{fn.__qualname__}",
+                _code_hash(
+                    fn.__code__, fn.__doc__ if isinstance(fn.__doc__, str) else None
+                ),
             ]
             for value in (fn.__defaults__ or ()) + tuple(
                 (fn.__kwdefaults__ or {}).values()
@@ -714,12 +852,33 @@ class _CodeWalk:
             self._object_hash[id(fn)] = digest
         return digest
 
+    def _partial_digest(self, value) -> str:
+        parts = []
+        for a in value.args:
+            parts.append(_constant_repr(a) or self._kind(a))
+        for k, v in sorted((value.keywords or {}).items()):
+            c = "<secret>" if _secret_name(k, v) else _constant_repr(v)
+            parts.append(f"{k}={c or self._kind(v)}")
+        return _short_hash("|".join(parts).encode())
+
+    def _item_key(self, value) -> str:
+        """A key for an item in a set or dict whose repr would show a memory
+        address (a function, a class): its module and name, the same in every
+        process."""
+        const = _constant_repr(value)
+        if const is not None:
+            return const
+        name = getattr(value, "__qualname__", None)
+        if isinstance(name, str):
+            module = getattr(value, "__module__", "?")
+            return f"{module}.{name}"
+        return f"<{type(value).__qualname__}>"
+
     def _walk_function(self, fn, record_as: str | None) -> None:
         code = fn.__code__
         self._record(record_as, self._function_digest(fn))
         globals_, attrs, imports = _code_names(code)
-        module = fn.__module__ if isinstance(fn.__module__, str) else "?"
-        here = _module_label(module)
+        here = self._here(fn)
         # Closure cells and callable defaults belong to this function object,
         # so they are keyed under where it was reached: two closures from one
         # factory differ.
@@ -746,7 +905,7 @@ class _CodeWalk:
             return
         self._walked.add(id(fn))
         namespace = getattr(fn, "__globals__", {}) or {}
-        state = self._state(module)
+        state = self._state(namespace)
         for name in sorted(globals_):
             if name not in namespace:
                 continue
@@ -760,9 +919,8 @@ class _CodeWalk:
         # Imports inside the body are recorded by their files, the same in a
         # process that has imported them and one that has not.
         for name in _resolve_imports(imports, package):
-            found = _file_entry(name)
-            if found is not None:
-                self._record(*found)
+            for key, digest in _file_entries(name).items():
+                self._record(key, digest)
 
     def _walk_module(self, module, attrs: set[str]) -> None:
         """The attributes of a project module that the reaching code uses. A
@@ -779,8 +937,8 @@ class _CodeWalk:
             namespace = vars(module)
         except TypeError:
             return
-        here = _module_label(module.__name__)
-        state = self._state(module.__name__)
+        here = _module_label(module.__name__, namespace)
+        state = self._state(namespace)
         for name in sorted(new):
             if name not in namespace:
                 continue
@@ -867,19 +1025,16 @@ class _CodeWalk:
     def _walk_value(
         self, value, key: str, globals_: set[str], attrs: set[str], depth: int
     ) -> None:
-        import dataclasses
         import types
 
         if isinstance(value, types.ModuleType):
+            # The name says which module it is (`import impl_a as impl`): an
+            # alias pointed at another module is a change.
+            self._record(key, _short_hash(f"<module {value.__name__}>".encode()))
             self._walk_module(value, attrs)
             return
         if isinstance(value, functools.partial):
-            parts = [_constant_repr(a) or self._kind(a) for a in value.args]
-            parts += [
-                f"{k}={_constant_repr(v) or self._kind(v)}"
-                for k, v in sorted((value.keywords or {}).items())
-            ]
-            self._record(key, _short_hash("|".join(parts).encode()))
+            self._record(key, self._partial_digest(value))
             self._push(
                 self._walk_value, value.func, key + ".func", globals_, attrs, depth
             )
@@ -908,6 +1063,9 @@ class _CodeWalk:
             self._record(
                 key, _SECRET if _secret(key, value) else _short_hash(const.encode())
             )
+            if self._project(type(value)):
+                # A dataclass settings object: its fields above, its class too.
+                self._push(self._walk_class, type(value), f"{key}.__class__")
             return
         if isinstance(value, (dict, list, tuple, set, frozenset)):
             # A registry such as {"cnn": CNN, "mlp": mlp}: its type is recorded
@@ -915,17 +1073,25 @@ class _CodeWalk:
             # code it holds is walked.
             self._record(key, self._kind(value))
             if depth < 2 and len(value) <= 1000:
-                items = (
-                    sorted(value.items(), key=lambda kv: repr(kv[0]))
-                    if isinstance(value, dict)
-                    else enumerate(value)
-                )
+                if isinstance(value, dict):
+                    items = sorted(
+                        ((self._item_key(k), v) for k, v in value.items()),
+                        key=lambda kv: kv[0],
+                    )
+                elif isinstance(value, (set, frozenset)):
+                    # A set iterates in hash order, which for functions and
+                    # classes follows their addresses: key items by name.
+                    items = sorted(
+                        ((self._item_key(v), v) for v in value), key=lambda kv: kv[0]
+                    )
+                else:
+                    items = list(enumerate(value))
                 for k, v in items:
                     if callable(v) or isinstance(v, (dict, list, tuple)):
                         self._push(
                             self._walk_value,
                             v,
-                            f"{key}[{k!r}]",
+                            f"{key}[{k if isinstance(k, str) else repr(k)}]",
                             globals_,
                             attrs,
                             depth + 1,
@@ -933,21 +1099,9 @@ class _CodeWalk:
             return
         if self._project(type(value)):
             # An instance of a project class (a model, a settings object): its
-            # class is code the task runs. A frozen dataclass of constants is a
-            # settings value, hashed by its fields; other state is not hashed.
+            # class is code the task runs; a dataclass instance (a settings
+            # object) was hashed by its fields above, other state is not.
             self._push(self._walk_class, type(value), f"{key}.__class__")
-            if (
-                dataclasses.is_dataclass(value)
-                and type(value).__dataclass_params__.frozen
-            ):
-                fields = []
-                for f in dataclasses.fields(value):
-                    v = getattr(value, f.name)
-                    c = _constant_repr(v)
-                    if c is None:
-                        return
-                    fields.append(f"{f.name}={_SECRET if _secret(f.name, v) else c}")
-                self._record(key, _short_hash("|".join(fields).encode()))
             return
         self._record(key, self._kind(value))
 
@@ -1035,6 +1189,13 @@ _ROOT_RECORDS: dict[str, dict | None] = {}
 _ROOT_RECORDS_MAX = 64
 
 
+#: Each ``_target_``'s walk per (run token, target), in this process: every
+#: cell of a sweep that names the same classes shares it. Bounded like the
+#: roots' records.
+_TARGET_RECORDS: dict[tuple[str, str], dict[str, str]] = {}
+_TARGET_RECORDS_MAX = 4096
+
+
 def cell_project_record(token: str, roots, with_body, cfg) -> dict | None:
     """The project-code record of one cell, taken in the process that runs it:
     the roots' walk (cached per process for the run ``token``) plus the
@@ -1052,30 +1213,34 @@ def cell_project_record(token: str, roots, with_body, cfg) -> dict | None:
     targets = _config_targets(cfg) if cfg is not None else []
     if not targets:
         return base
-    try:
-        walk = _CodeWalk()
-        for target in targets:
-            walk.walk_target(target)
-    except Exception:  # noqa: BLE001 - best effort: the roots' record stands
-        return base
-    return {"python": base["python"], "code": {**base["code"], **walk.hashes}}
+    code = dict(base["code"])
+    for target in targets:
+        entries = _TARGET_RECORDS.get((token, target))
+        if entries is None:
+            try:
+                walk = _CodeWalk()
+                walk.walk_target(target)
+                entries = walk.hashes
+            except Exception:  # noqa: BLE001 - best effort: the roots' record stands
+                entries = {}
+            while len(_TARGET_RECORDS) >= _TARGET_RECORDS_MAX:
+                _TARGET_RECORDS.pop(next(iter(_TARGET_RECORDS)))
+            _TARGET_RECORDS[(token, target)] = entries
+        code.update(entries)
+    return {"python": base["python"], "code": code}
 
 
 def merge_project_records(prior, current):
-    """The record to keep for a cell reused under ``current``: its prior keys
-    as well as the current ones, so a name only one kind of process reaches
-    (a module imported lazily, hashed by file in a fresh process) stays
-    comparable for a later resume. Under another Python version, or when
-    either record is missing, the current one (or else the prior) is kept."""
-    if current is None:
-        return prior if isinstance(prior, dict) else None
-    if (
-        not isinstance(prior, dict)
-        or not isinstance(prior.get("code"), dict)
-        or prior.get("python") != current.get("python")
-    ):
-        return current
-    return {"python": current["python"], "code": {**prior["code"], **current["code"]}}
+    """The record to keep for a cell reused under ``current``. A cell keeps its
+    prior record when it has one: only the keys both records share were
+    compared, so writing keys only ``current`` has would declare the cell
+    computed by code it was never checked against (a name reached lazily, an
+    alias pointed elsewhere, another Python version). A cell with no record
+    (written before the field) takes the current one: reusing it already
+    trusted it."""
+    if isinstance(prior, dict) and isinstance(prior.get("code"), dict):
+        return prior
+    return current
 
 
 def _unwrap_task(fn):
