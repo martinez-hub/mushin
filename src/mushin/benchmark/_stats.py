@@ -177,12 +177,33 @@ def available_corrections() -> list[str]:
     return list(_CORRECTIONS)
 
 
-def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
+#: Corrections whose smallest adjusted p-value is ``m * p`` for a family of
+#: ``m``: the bar a pair must clear is ``alpha / m``, so the family size raises
+#: the seed floor. Benjamini-Hochberg's step-up leaves a family of equally
+#: extreme p-values unchanged, and ``"none"`` adjusts nothing, so for those the
+#: bar stays ``alpha`` however many pairs there are.
+_FAMILY_SCALED_CORRECTIONS = frozenset({"holm", "bonferroni"})
+
+
+def warn_if_underpowered(
+    test: str,
+    n_seeds: int,
+    alpha: float,
+    n_comparisons: int = 1,
+    correction: str = "holm",
+) -> None:
     """Warn if ``test`` cannot reach ``alpha`` at ``n_seeds`` seeds.
 
     Determined empirically: run the test on maximally-separated samples of size
     ``n_seeds`` and check whether the best-case p-value clears ``alpha``. (A
-    paired Wilcoxon over 3 seeds, for example, can never go below p=0.25.)"""
+    paired Wilcoxon over 3 seeds, for example, can never go below p=0.25.)
+
+    ``n_comparisons`` is the size of the family that ``correction`` adjusts
+    together. Under Holm or Bonferroni the smallest p-value is multiplied by the
+    family size, so the best case must clear ``alpha / n_comparisons``: Wilcoxon
+    needs 6 seeds for one pair but 7 for the three pairs of three methods. The
+    other corrections leave the bar at ``alpha``.
+    """
     if test not in _TESTS:
         return
     func, _ = _TESTS[test]
@@ -198,10 +219,24 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
             _, p = func(a, b)
     except ValueError:
         return  # test could not even run at this n; nothing useful to say
-    if float(p) > alpha:
+    p = float(p)
+    family = n_comparisons if correction in _FAMILY_SCALED_CORRECTIONS else 1
+    if family > 1 and p <= alpha < p * family:
+        # The test alone could reach alpha; the correction over the family is
+        # what puts it out of reach, so say so, and offer the remedies that act
+        # on the family too.
+        warnings.warn(
+            f"test={test!r} cannot reach alpha={alpha} with {n_seeds} seeds over "
+            f"{family} method pairs under correction={correction!r} (best-case "
+            f"p={p:.4g}, corrected {min(p * family, 1.0):.4g}); use more seeds, "
+            f"compare fewer methods, or a parametric test such as test='welch'.",
+            UserWarning,
+            stacklevel=3,
+        )
+    elif p > alpha:
         warnings.warn(
             f"test={test!r} cannot reach alpha={alpha} with {n_seeds} seeds "
-            f"(best-case p={float(p):.4g}); use more seeds or a parametric test "
+            f"(best-case p={p:.4g}); use more seeds or a parametric test "
             f"such as test='welch'.",
             UserWarning,
             stacklevel=3,
@@ -252,7 +287,9 @@ def compare_methods(
     ``False``, rather than reporting a duplicated-point p-value of ~0 and a
     meaningless ±huge effect size; Holm is then applied over the surviving pairs.
     Emits a warning when ``test`` cannot reach ``alpha`` at the dataset's seed
-    count, and when a method is constant across seeds in *every* metric.
+    count for the family of pairs that ``correction`` adjusts (under Holm, the
+    three pairs of three methods need a seventh Wilcoxon seed), and when a
+    method is constant across seeds in *every* metric.
 
     ``allow_incomplete`` (default ``False``): when ``True``, an incomplete sweep
     is compared anyway (with a warning) instead of raising, computing stats over
@@ -313,13 +350,17 @@ def compare_methods(
         )
     correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])
-    warn_if_underpowered(test, n_seeds, alpha)
     func, is_paired = _TESTS[test]
     methods = [str(m) for m in ds["method"].values]
 
     rows = []
     constant_metric_count: dict[str, int] = {}  # method -> #metrics it is constant in
     n_metrics = 0
+    # The largest family any metric's correction adjusted: masked pairs (NaN p)
+    # are outside the family, so a constant method shrinks it. The underpowered
+    # warning is judged on this family after the loop, since with k methods the
+    # smallest p-value must clear alpha / m for the m pairs, not alpha.
+    max_family = 0
     for metric in ds.data_vars:
         n_metrics += 1
         vals = {m: ds[metric].sel({"method": m}).values for m in methods}
@@ -400,10 +441,15 @@ def compare_methods(
             )
             pvals.append(p)
         corrected = correct(pvals) if len(pvals) > 1 else pvals
+        max_family = max(max_family, sum(1 for p in pvals if not np.isnan(p)))
         for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)
             rows.append(rec)
+
+    # A family of 0 (every pair masked, or no metrics) falls back to the single
+    # pair's floor, which is what the seed count alone can say.
+    warn_if_underpowered(test, n_seeds, alpha, max(max_family, 1), correction)
 
     # Warn for methods constant across seeds in *every* metric (they ignore the
     # seed): the seeds are duplicated points, not independent samples.

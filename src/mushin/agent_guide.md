@@ -170,8 +170,9 @@ rules:
 - **Seeds.** With `k` methods there are `m = k * (k - 1) / 2` pairs, and with
   Wilcoxon a pair can only be significant at 0.05 if
   `m * 2 ** (1 - n) < 0.05` for `n` seeds. So use at least 6 seeds for 2
-  methods, 7 for 3 and 8 for 4. These are floors, not enough power: a real but
-  small difference needs more seeds.
+  methods, 7 for 3 and 8 for 4; `compare_methods` warns when the seed count
+  cannot reach significance for the pairs it corrects over. These are floors,
+  not enough power: a real but small difference needs more seeds.
 - **Make each seed an independent repeat.** The statistics treat seeds as
   independent. If each seed only re-splits one small dataset into train and
   validation, the runs share most of their data and the p-values come out too

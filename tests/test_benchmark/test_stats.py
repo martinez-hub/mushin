@@ -180,6 +180,99 @@ def test_compare_methods_warns_when_test_underpowered():
         compare_methods(ds, test="wilcoxon", alpha=0.05)
 
 
+def _underpowered(test: str, n_seeds: int, **kwargs) -> list[str]:
+    """The "cannot reach" warnings of one warn_if_underpowered call."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warn_if_underpowered(test, n_seeds=n_seeds, alpha=0.05, **kwargs)
+    return [str(c.message) for c in caught if "cannot reach" in str(c.message)]
+
+
+def test_warn_if_underpowered_counts_the_holm_family():
+    """Wilcoxon's best case at 6 seeds is p=0.03125: one pair clears alpha=0.05,
+    but Holm multiplies the smallest of three pairs' p-values by 3."""
+    assert _underpowered("wilcoxon", 6) == []
+    (msg,) = _underpowered("wilcoxon", 6, n_comparisons=3)
+    assert "with 6 seeds over 3 method pairs under correction='holm'" in msg
+    assert "best-case p=0.03125, corrected 0.09375" in msg
+    assert "compare fewer methods" in msg
+    # 3 * 2 ** (1 - 7) = 0.047 clears alpha: the floor is 7 seeds, exactly.
+    assert _underpowered("wilcoxon", 7, n_comparisons=3) == []
+    # Four methods, six pairs: 6 * 2 ** (1 - 7) = 0.094 does not, 8 seeds do.
+    assert _underpowered("wilcoxon", 7, n_comparisons=6)
+    assert _underpowered("wilcoxon", 8, n_comparisons=6) == []
+
+
+def test_warn_if_underpowered_blames_the_seeds_when_one_pair_cannot_reach_alpha():
+    """Below the single-pair floor the family is not the reason, so the warning
+    keeps the single-pair wording the statistics guide quotes."""
+    (msg,) = _underpowered("wilcoxon", 3, n_comparisons=3)
+    assert "with 3 seeds (best-case p=0.25)" in msg
+    assert "method pairs" not in msg
+
+
+@pytest.mark.parametrize(
+    "correction, warns",
+    [("holm", True), ("bonferroni", True), ("fdr_bh", False), ("none", False)],
+)
+def test_only_family_scaled_corrections_raise_the_seed_floor(correction, warns):
+    """Benjamini-Hochberg leaves a family of equally extreme p-values as they
+    are, and "none" adjusts nothing, so neither raises the bar above alpha."""
+    msgs = _underpowered("wilcoxon", 6, n_comparisons=3, correction=correction)
+    assert bool(msgs) is warns, msgs
+
+
+def _separated(n_methods: int, n_seeds: int, metrics=("score",)) -> xr.Dataset:
+    """Methods that are perfectly separated, each varying across seeds."""
+    scores = np.array([(np.arange(n_seeds) + 1.0) * (i + 1) for i in range(n_methods)])
+    return xr.Dataset(
+        # One buffer per metric, so masking a method in one leaves the other.
+        {m: (("method", "seed"), scores.copy()) for m in metrics},
+        coords={
+            "method": [f"m{i}" for i in range(n_methods)],
+            "seed": np.arange(n_seeds),
+        },
+    )
+
+
+def _compare_underpowered(ds: xr.Dataset, **kwargs) -> list[str]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        compare_methods(ds, **kwargs)
+    return [str(c.message) for c in caught if "cannot reach" in str(c.message)]
+
+
+def test_compare_methods_warns_for_three_methods_at_six_seeds():
+    (msg,) = _compare_underpowered(_separated(3, 6))
+    assert "over 3 method pairs under correction='holm'" in msg
+    assert _compare_underpowered(_separated(3, 7)) == []
+    assert _compare_underpowered(_separated(2, 6)) == []
+
+
+def test_compare_methods_without_a_family_correction_keeps_the_single_pair_floor():
+    assert _compare_underpowered(_separated(3, 6), correction="none") == []
+    assert _compare_underpowered(_separated(3, 6), correction="fdr_bh") == []
+    assert _compare_underpowered(_separated(3, 6), correction="bonferroni")
+
+
+def test_compare_methods_judges_the_family_without_masked_pairs():
+    """A method constant across seeds is masked (NaN p), which takes its pairs
+    out of the Holm family: three methods with one constant correct one pair."""
+    ds = _separated(3, 6)
+    ds["score"].loc[{"method": "m2"}] = 1.0
+    assert _compare_underpowered(ds) == []
+
+
+@pytest.mark.parametrize("order", [("full", "masked"), ("masked", "full")])
+def test_compare_methods_judges_the_largest_family_across_metrics(order):
+    """One metric masks a method (family of one pair), the other corrects all
+    three pairs: the warning follows the largest family, in either order."""
+    ds = _separated(3, 6, metrics=order)
+    ds["masked"].loc[{"method": "m2"}] = 1.0
+    (msg,) = _compare_underpowered(ds)
+    assert "over 3 method pairs" in msg
+
+
 def test_compare_methods_masks_zero_variance_methods():
     """Two methods each constant-across-seeds at different means have no sampling
     distribution -> masked (NaN p/effect, not significant), not a catastrophic-

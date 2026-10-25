@@ -10,7 +10,7 @@ Pass `test=` to `compare` or `Study` to select the pairwise significance test:
 
 | `test=` | Underlying scipy call | Paired? | When to use |
 |---|---|---|---|
-| `"wilcoxon"` | `scipy.stats.wilcoxon` | Yes | Default. Non-normal distributions, ordinal metrics. Needs 6+ seeds to reach `alpha=0.05`: see [below](#underpowered-test-warning) |
+| `"wilcoxon"` | `scipy.stats.wilcoxon` | Yes | Default. Non-normal distributions, ordinal metrics. Needs 6+ seeds to reach `alpha=0.05` for two methods, more for more: see [below](#underpowered-test-warning) |
 | `"ttest_rel"` | `scipy.stats.ttest_rel` | Yes | Paired t-test; approximately normal data, equal variance assumed |
 | `"welch"` | `scipy.stats.ttest_ind(equal_var=False)` | No | Gaussian metrics, unequal variance; good general choice |
 | `"ttest_ind"` | `scipy.stats.ttest_ind(equal_var=True)` | No | Independent t-test, equal variance assumed |
@@ -87,6 +87,22 @@ UserWarning: test='wilcoxon' cannot reach alpha=0.05 with 3 seeds
 - Increase the number of seeds. A paired Wilcoxon's best-case two-sided p-value
   is `2 ** (1 - n_seeds)`, so it first clears `alpha=0.05` at **6** seeds
   (0.0313); 5 seeds still bottom out at 0.0625 and keep the warning.
+
+That floor is for one pair. With `k` methods there are `m = k * (k - 1) / 2`
+pairs, and the Holm (or Bonferroni) correction makes the smallest p-value clear
+`alpha / m`, so Wilcoxon needs at least 6 seeds for 2 methods, 7 for 3 and 8
+for 4. The warning counts the pairs the correction adjusts (a method that is
+constant across seeds is masked and leaves the family), and names them when they
+are what puts `alpha` out of reach:
+
+```
+UserWarning: test='wilcoxon' cannot reach alpha=0.05 with 6 seeds over 3 method
+pairs under correction='holm' (best-case p=0.03125, corrected 0.09375); use more
+seeds, compare fewer methods, or a parametric test such as test='welch'.
+```
+
+`correction="fdr_bh"` and `correction="none"` leave the bar at `alpha`, so the
+single-pair floor applies however many methods there are.
 
 ## Interpreting the summary table
 
