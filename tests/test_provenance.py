@@ -438,9 +438,14 @@ def test_representative_record_prefers_a_cell_with_an_accelerator(tmp_path):
         "git": {"sha": "10"},
         "accelerator": None,
     }
-    # Cells without a record count toward that bound too.
+    # Cells without a record do not count toward that bound: a sampled sweep
+    # has none in the cells it did not run, and its records are still found.
     missing = [tmp_path / "3" / "mushin_provenance.json"] * 10
-    assert representative_record(missing + [paths[2]]) is None
+    assert representative_record(missing + [paths[2]]) == gpu
+    assert representative_record(missing + [paths[0]]) == {
+        "git": {"sha": "a"},
+        "accelerator": None,
+    }
     assert representative_record([]) is None
     assert representative_record(missing[:1]) is None
 

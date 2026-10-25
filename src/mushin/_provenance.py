@@ -215,12 +215,13 @@ def representative_record(paths) -> dict | None:
     """The record that stands for a sweep (``wf.provenance``, ``show``,
     ``diff``): the first readable one that has an accelerator, since a first
     cell that failed before its task imported torch has none, else the first
-    readable one. Looks a few cells ahead at most, so a sweep without torch is
-    not read whole for a record it does not have."""
+    readable one. The search for a readable record is not bounded (a sampled
+    or budget-skipped sweep has no record in the cells it did not run); the
+    look for one with an accelerator reads a few more records at most, so a
+    sweep without torch is not read whole for a record it does not have."""
     first = None
-    for i, p in enumerate(paths):
-        if i >= 8:  # cells looked at, readable or not
-            break
+    readable = 0
+    for p in paths:
         try:
             data = json.loads(Path(p).read_text())
         except (OSError, ValueError):
@@ -231,6 +232,9 @@ def representative_record(paths) -> dict | None:
             return data
         if first is None:
             first = data
+        readable += 1
+        if readable >= 8:
+            break
     return first
 
 
