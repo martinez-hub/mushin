@@ -520,7 +520,7 @@ def compare_methods(
         if families and constant_metric_count.get(m, 0) == len(families):
             warnings.warn(
                 f"method {m!r} produced identical scores across all {n_seeds} "
-                "seeds — it is deterministic or ignores the seed, so seed-based "
+                "seeds: it is deterministic or ignores the seed, so seed-based "
                 "significance involving it is not meaningful (the seeds are "
                 "duplicated points, not independent samples).",
                 UserWarning,

@@ -88,7 +88,7 @@ def compare(
     if isinstance(data, Iterator):
         raise TypeError(
             "`data` must be re-iterable (e.g. a DataLoader), not a one-shot "
-            "iterator/generator — it is iterated once per model."
+            "iterator/generator, as it is iterated once per model."
         )
 
     if metrics is not None:

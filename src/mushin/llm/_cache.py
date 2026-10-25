@@ -53,8 +53,15 @@ class OutputCache:
         if not path.exists():
             return {}
         out: dict[str, Any] = {}
-        for line in path.read_text().splitlines():
-            if not line.strip():
+        # errors="replace": a stray byte (a torn write) must spoil only its own
+        # line, not raise UnicodeDecodeError here and block the whole (system,
+        # seed) file.
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            # put_many writes ASCII (json.dumps escapes everything else), so a
+            # line holding any other character, the U+FFFD of a stray byte
+            # included, is damage: skip it like a torn line rather than replay
+            # an output with a replacement character in it.
+            if not line.strip() or not line.isascii():
                 continue
             try:
                 rec = json.loads(line)
@@ -83,7 +90,7 @@ class OutputCache:
         """Append (input, output) pairs to the cache."""
         path = self._path(system, seed)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as f:
+        with path.open("a", encoding="utf-8") as f:
             for inp, output in pairs:
                 try:
                     record = json.dumps({"key": _key(inp), "output": output})

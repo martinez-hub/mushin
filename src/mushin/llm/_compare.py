@@ -124,7 +124,7 @@ def _score(
                 raise ValueError(
                     f"metric battery produced colliding output name(s) "
                     f"{sorted(clash)}; a dict-returning metric expands to "
-                    "`<name>_<subkey>` — rename the battery key(s) to avoid the clash."
+                    "`<name>_<subkey>`. Rename the battery key(s) to avoid the clash."
                 )
             row.update(scored)
             items.update(per_item)
@@ -236,7 +236,7 @@ def compare_llms(
     if len(set(seeds)) != len(seeds):
         raise ValueError(
             f"`seeds` contains duplicates ({seeds}); each seed is one trial and "
-            "must be unique — repeats are not independent samples."
+            "must be unique, as repeats are not independent samples."
         )
 
     sysmap = {name: as_system(v) for name, v in systems.items()}

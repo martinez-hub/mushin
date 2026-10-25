@@ -23,6 +23,7 @@ from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._launch import _NotSet
 
+from ._console import echo
 from ._validate import value_check
 
 LoadedValue: TypeAlias = str | int | float | bool | list[Any] | dict[str, Any]
@@ -144,7 +145,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
     axes = summary.get("axes", {})
     fixed = summary.get("fixed", {})
     n = summary.get("num_cells", 0)
-    lines = [f"Dry run — {n} cell{'s' if n != 1 else ''}, no jobs launched."]
+    lines = [f"Dry run: {n} cell{'s' if n != 1 else ''}, no jobs launched."]
     wd = summary.get("working_dir")
     lines.append(f"  working_dir: {wd if wd else '(Hydra default)'}")
     if "sample" in summary:
@@ -156,7 +157,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
         for k, v in axes.items():
             lines.append(f"    {k:<{width}} = {list(v)!r}")
     else:
-        lines.append("  swept axes: (none — a single cell)")
+        lines.append("  swept axes: none (a single cell)")
     if fixed:
         width = max(len(k) for k in fixed)
         lines.append("  fixed:")
@@ -1105,7 +1106,16 @@ class _TaskRunner:
                 import traceback
 
                 try:
-                    Path("mushin_error.txt").write_text(traceback.format_exc())
+                    # UTF-8, not the locale's encoding: under cp1252 a message
+                    # with a character the code page lacks raised
+                    # UnicodeEncodeError, which no OSError handler catches, and
+                    # ended the fail-soft sweep. backslashreplace takes the one
+                    # thing UTF-8 cannot encode, a lone surrogate.
+                    Path("mushin_error.txt").write_text(
+                        traceback.format_exc(),
+                        encoding="utf-8",
+                        errors="backslashreplace",
+                    )
                 except OSError:
                     pass  # a full disk must not break fail-soft itself
                 return _FailedRun(exc)
@@ -1167,13 +1177,27 @@ def _write_env_snapshot(working_dir: Path) -> None:
             n += 1
         out = working_dir / f"mushin_env.{n}.txt"
 
+    # uv writes UTF-8, so its output is decoded as such ("replace" for any
+    # byte that is not) and the snapshot is written in UTF-8. Earlier, it was
+    # decoded and re-encoded in the locale's codec: where that decode worked
+    # the file kept uv's bytes, but where it raised (any non-ASCII byte under
+    # an ASCII locale; under cp1252 a UTF-8 byte the code page leaves
+    # undefined, 0x81, 0x8D, 0x8F, 0x90 or 0x9D, as in "A" or "I" with an
+    # acute accent and some CJK characters) the snapshot silently fell back
+    # to the bare package list below.
     for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
         except Exception:  # noqa: BLE001 - uv may be absent
             continue
         if res.returncode == 0 and res.stdout.strip():
-            out.write_text(res.stdout)
+            out.write_text(res.stdout, encoding="utf-8")
             return
 
     # Fallback: dump installed distributions via importlib.metadata.
@@ -1185,7 +1209,7 @@ def _write_env_snapshot(working_dir: Path) -> None:
             for d in distributions()
             if d.metadata["Name"]
         )
-        out.write_text("\n".join(lines) + "\n")
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except Exception:  # noqa: BLE001 - env capture is best-effort
         pass
 
@@ -1290,7 +1314,7 @@ class BaseWorkflow:
                     raise ValueError(
                         f"unsupported sweep override for {param_name!r}: "
                         f"{type(val).__name__}. mushin assembles a Cartesian "
-                        "grid, so sweep axes must be discrete — use "
+                        "grid, so sweep axes must be discrete: use "
                         "`param=a,b,c`, `choice(...)`, or `range(...)`; "
                         "`interval(...)`/adaptive-sweeper syntax is not "
                         "supported."
@@ -1580,7 +1604,7 @@ class BaseWorkflow:
         if launcher_config is not None:
             if launcher is None:
                 raise ValueError(
-                    "`launcher_config` requires `launcher=` — its fields "
+                    "`launcher_config` requires `launcher=`: its fields "
                     "configure that launcher (e.g. launcher='submitit_slurm' "
                     "with mushin.submitit_slurm_config(...))."
                 )
@@ -1805,7 +1829,9 @@ class BaseWorkflow:
             }
             if sample is not None:
                 summary["sample"] = effective_cells
-            print(_format_dry_run(summary))
+            # Axis values, fixed values and the path are user data: echo
+            # escapes what the console cannot encode instead of crashing.
+            echo(_format_dry_run(summary))
             return summary
 
         # Pre-launch cell-count gate: refuse an over-large sweep before it
@@ -1830,7 +1856,7 @@ class BaseWorkflow:
                 ""
                 if sample is None
                 else f" `sample={sample}` limits compute but does not reduce the "
-                f"number of launched Hydra jobs — all {num_cells} cells would "
+                f"number of launched Hydra jobs: all {num_cells} cells would "
                 "still be launched."
             )
             raise ValueError(
@@ -2242,22 +2268,39 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # Sniff the content (not the extension): a JSON metrics sidecar starts
         # with `{`/`[`; a torch pickle/zip starts with other bytes. This lets
         # the default loader read the JSON sidecar written by dict-returning
-        # tasks without the caller overriding metric_load_fn.
+        # tasks without the caller overriding metric_load_fn. The first bytes
+        # are decoded before the check (the encoding json detects consumes a
+        # byte-order mark), so a JSON file with one or in UTF-16/32, as
+        # Windows tools write, is not taken for a pickle.
+        import json
+
         try:
             with open(file_path, "rb") as f:
-                head = f.read(64).lstrip()
+                head = f.read(64)
         except OSError:
             head = b""
-        if head[:1] in (b"{", b"["):
-            import json
+        # "replace", not "ignore": a byte that is not text must not vanish
+        # and leave a "{" behind it at the start.
+        start = head.decode(json.detect_encoding(head), errors="replace")
+        if start.lstrip()[:1] in ("{", "["):
+            from ._sweep_io import _restore_nonfinite, decode_legacy
 
-            from ._sweep_io import _restore_nonfinite
+            with open(file_path, "rb") as f:
+                data = f.read()
 
-            with open(file_path) as f:
-                # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
-                # as a tagged marker) so an offline reload yields the same
-                # float values the in-process run produced.
-                return _restore_nonfinite(json.load(f))
+            # mushin's sidecar is UTF-8 (ASCII, in fact), but this loader
+            # also reads a JSON file the user names (load_metrics("my.json")),
+            # which an earlier release decoded in the locale's encoding: the
+            # encoding json detects (UTF-8, UTF-16 or UTF-32, with or without
+            # a byte-order mark) first, then the locale's, strictly, so a file
+            # in neither raises rather than load with replaced characters.
+            loaded = json.loads(
+                decode_legacy(data, encoding=json.detect_encoding(data))
+            )
+            # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
+            # as a tagged marker) so an offline reload yields the same
+            # float values the in-process run produced.
+            return _restore_nonfinite(loaded)
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
         import torch as tr
@@ -2441,9 +2484,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
             target_job_dirs = [Path(s).resolve() for s in target_job_dirs]
             for d in target_job_dirs:
-                if not d.is_dir() or not d.exists():
+                if not d.is_dir():
+                    # FileNotFoundError for both, as before, so a caller that
+                    # catches it still does; the message tells them apart.
+                    why = "is not a directory" if d.exists() else "does not exist"
                     raise FileNotFoundError(
-                        f"The specified target directory – {d} – does not exist."
+                        f"The specified target directory {why}: {d}"
                     )
             target_job_dirs = multirun([str(s) for s in target_job_dirs])
             workflow_overrides[self._JOBDIR_NAME] = target_job_dirs

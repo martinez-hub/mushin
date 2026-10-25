@@ -21,7 +21,12 @@ from omegaconf import OmegaConf
 from mushin.__main__ import guide_text
 from mushin._hydra_yaml import read_hydra_job
 from mushin._resume import STATUS_FILE, sidecar_job_fields
-from mushin._sweep_io import MANIFEST_FILE, METRICS_FILE, read_metrics_sidecar
+from mushin._sweep_io import (
+    MANIFEST_FILE,
+    METRICS_FILE,
+    decode_legacy,
+    read_metrics_sidecar,
+)
 from mushin._utils import Experiment
 
 # Globals an MCP-loaded metrics file may legitimately reference. Everything here
@@ -349,6 +354,17 @@ def _get_metrics(
     return result
 
 
+def _read_traceback(path: Path) -> str:
+    """A cell's ``mushin_error.txt``. Runs now write it in UTF-8 on every
+    platform; earlier releases wrote it in the machine's locale encoding
+    (cp1252 on Western Windows), where an accented path is not valid UTF-8.
+    ``decode_legacy`` tries both, the locale's being the right guess when the
+    run and this server share a machine; "replace" keeps whatever is left
+    readable rather than failing the tool."""
+
+    return decode_legacy(path.read_bytes(), errors="replace")
+
+
 def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     """Failed sweep cells from the manifest, with each cell's on-disk
     traceback (``mushin_error.txt``) when present."""
@@ -365,7 +381,7 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     cells: dict = {}
     if mf.exists() and _within_root(mf, rootp):
         try:
-            loaded = _json.loads(mf.read_text())
+            loaded = _json.loads(mf.read_text(encoding="utf-8"))
             raw = loaded.get("cells", {}) if isinstance(loaded, dict) else {}
             cells = raw if isinstance(raw, dict) else {}
         except (ValueError, OSError):
@@ -377,7 +393,7 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
         tb = p / str(v.get("dir") or "") / "mushin_error.txt"
         if v.get("dir") and tb.exists() and _within_root(tb, rootp):
             try:
-                entry["traceback"] = tb.read_text()[:4000]
+                entry["traceback"] = _read_traceback(tb)[:4000]
             except OSError:
                 pass
         failures.append(entry)
@@ -405,7 +421,7 @@ def _get_provenance(
         if not _within_root(f, rootp):
             continue
         try:
-            rec = _json.loads(f.read_text())
+            rec = _json.loads(f.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             continue
         if not isinstance(rec, dict):
