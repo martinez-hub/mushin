@@ -323,22 +323,15 @@ def _render(columns: list[str], rows: list[dict]) -> str:
 
 def _read_provenance(root) -> dict | None:
     """A representative provenance record for a sweep (the first cell's
-    ``mushin_provenance.json``), or None if none is readable."""
-    import json
+    ``mushin_provenance.json`` that has an accelerator, else the first), or
+    None if none is readable."""
+    from ._provenance import representative_record
 
-    for d in sorted(
+    dirs = sorted(
         (p for p in Path(root).iterdir() if p.is_dir()),
         key=lambda p: _numeric_dir_key(p.name),
-    ):
-        p = d / "mushin_provenance.json"
-        if p.exists():
-            try:
-                data = json.loads(p.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(data, dict):
-                return data
-    return None
+    )
+    return representative_record(d / "mushin_provenance.json" for d in dirs)
 
 
 # Fields that vary per cell / per run rather than describing the environment;
@@ -372,9 +365,10 @@ def _diff_provenance(a: dict | None, b: dict | None) -> dict:
     skip = set(_PROV_VOLATILE)
     # A null accelerator means "not recorded": the cell's process never
     # imported torch, so a torch sweep against a scikit-learn sweep on the same
-    # box is no hardware change. A dict of None values is recorded (torch was
-    # loaded and found no CUDA or MPS device) and still compares, so a CPU-only
-    # torch build against a GPU box is reported, as it always was.
+    # box is no hardware change. A dict is recorded whenever torch was loaded
+    # (its cuda and cudnn are the wheel's build, its device None until the
+    # task initialized CUDA) and still compares, so a CPU-only torch build
+    # against a GPU box is reported, as it always was.
     if _accelerator_unrecorded(a) or _accelerator_unrecorded(b):
         skip.add("accelerator")
     fa = _flatten({k: v for k, v in (a or {}).items() if k not in skip})

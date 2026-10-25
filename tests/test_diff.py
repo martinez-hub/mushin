@@ -76,9 +76,9 @@ def test_diff_provenance_helper_flattens_and_excludes_volatile():
 def test_diff_provenance_compares_the_accelerator_only_when_both_recorded_one():
     """A null accelerator is "not recorded" (the cell's process never imported
     torch), not a different machine: a scikit-learn sweep against a torch sweep
-    reports no hardware change. A record of None values is recorded (torch was
-    loaded and found no device), so a CPU-only torch build against a GPU box is
-    reported, as it always was."""
+    reports no hardware change. A dict is recorded whenever torch was loaded
+    (all None on a CPU-only build), so a CPU-only torch build against a GPU box
+    is reported, as it always was."""
     from mushin._show import _diff_provenance
 
     gpu = {"accelerator": {"cuda": "13.0", "cudnn": 92400, "device": "NVIDIA A100"}}

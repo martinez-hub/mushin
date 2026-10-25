@@ -1,5 +1,6 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+import pytest
 
 
 def test_provenance_written_per_job(tmp_path):
@@ -187,6 +188,16 @@ def test_record_accelerator_rewrites_only_that_field(tmp_path, monkeypatch):
 
     monkeypatch.setattr(torch.cuda, "get_device_name", get_device_name)
     monkeypatch.setattr(torch.cuda, "is_available", is_available)
+    # A plain write leaves no residue either; the atomic one is observed by
+    # the writer it goes through.
+    atomic = []
+    real_atomic_write_text = _provenance._atomic_write_text
+
+    def atomic_write_text(path, text, **kwargs):
+        atomic.append(path)
+        real_atomic_write_text(path, text, **kwargs)
+
+    monkeypatch.setattr(_provenance, "_atomic_write_text", atomic_write_text)
     before = {"git": {"sha": "x"}, "accelerator": None}
     (tmp_path / "mushin_provenance.json").write_text(json.dumps(before))
     _provenance.record_accelerator(tmp_path, None)
@@ -208,7 +219,8 @@ def test_record_accelerator_rewrites_only_that_field(tmp_path, monkeypatch):
     assert after["accelerator"]["device"] == "NVIDIA H100 #0"
     assert named == [0]
     assert _provenance._ACCELERATOR_SEEN[True] == after["accelerator"]
-    assert not list(tmp_path.glob("*.tmp"))  # atomic write, no residue
+    assert atomic == [tmp_path / "mushin_provenance.json"] * 2  # both rewrites
+    assert not list(tmp_path.glob("*.tmp"))  # and no residue
 
     # Cached: a later cell reuses the answer without querying torch again...
     (tmp_path / "mushin_provenance.json").write_text(json.dumps(before))
@@ -217,7 +229,11 @@ def test_record_accelerator_rewrites_only_that_field(tmp_path, monkeypatch):
     assert after["accelerator"]["device"] == "NVIDIA H100 #0"
     assert named == [0]
     # ...gets it at its first write, so there is nothing to rewrite...
-    assert _provenance.capture(base=before)["accelerator"] == after["accelerator"]
+    record = _provenance.capture(base=before)
+    assert record["accelerator"] == after["accelerator"]
+    # The record is the caller's to change; the cache is not.
+    record["accelerator"]["device"] = "changed by the caller"
+    assert _provenance._ACCELERATOR_SEEN[True]["device"] == "NVIDIA H100 #0"
     # ...and told so, does not even read the record back.
     stale = json.dumps({**before, "accelerator": {"device": "stale"}})
     (tmp_path / "mushin_provenance.json").write_text(stale)
@@ -270,7 +286,7 @@ def test_sweep_records_the_accelerator_the_cell_saw_after_its_task(
         assert "sha" in prov["git"]
 
 
-def test_provenance_keeps_non_finite_config_values(tmp_path):
+def test_provenance_keeps_non_finite_config_values(tmp_path, monkeypatch):
     """The record is written atomically but as plain JSON, not through the
     metrics normalizer: a config value of inf stays `Infinity` and reads back
     as inf, as it always did (the normalizer would store a marker dict)."""
@@ -279,7 +295,17 @@ def test_provenance_keeps_non_finite_config_values(tmp_path):
     import torch  # noqa: F401 - so record_accelerator has something to record
     from omegaconf import OmegaConf
 
+    from mushin import _provenance
     from mushin._provenance import record_accelerator, write_provenance
+
+    atomic = []
+    real_atomic_write_text = _provenance._atomic_write_text
+
+    def atomic_write_text(path, text, **kwargs):
+        atomic.append(path)
+        real_atomic_write_text(path, text, **kwargs)
+
+    monkeypatch.setattr(_provenance, "_atomic_write_text", atomic_write_text)
 
     path = tmp_path / "mushin_provenance.json"
     cfg = OmegaConf.create({"clip": float("inf"), "lr": 0.1})
@@ -295,7 +321,13 @@ def test_provenance_keeps_non_finite_config_values(tmp_path):
     prov = json.loads(path.read_text())
     assert prov["accelerator"] is not None
     assert prov["config"]["clip"] == float("inf")
+    assert atomic == [path, path]  # the write and the rewrite, both atomic
     assert not list(tmp_path.glob("*.tmp"))
+    # A cell directory that is not there is not invented: the write raises
+    # into the runner's best-effort guard, as it always did.
+    with pytest.raises(FileNotFoundError):
+        write_provenance(tmp_path / "gone", config=cfg)
+    assert not (tmp_path / "gone").exists()
 
 
 def test_cell_in_a_worker_without_torch_records_null_even_if_the_driver_has_it(
@@ -320,6 +352,12 @@ def test_cell_in_a_worker_without_torch_records_null_even_if_the_driver_has_it(
 
             return dict(torch_loaded=float("torch" in sys.modules))
 
+    # loky keeps its worker processes across Parallel calls in this process,
+    # so an earlier joblib test with a torch-importing task would hand over
+    # workers that already loaded torch. Start from fresh ones.
+    from joblib.externals.loky import get_reusable_executor
+
+    get_reusable_executor().shutdown(wait=True, kill_workers=True)
     wf = W()
     wf.run(
         x=multirun([0, 1]),
@@ -332,6 +370,44 @@ def test_cell_in_a_worker_without_torch_records_null_even_if_the_driver_has_it(
         assert metrics["torch_loaded"] == 0.0, "the worker loaded torch; test moot"
         prov = json.loads((d / "mushin_provenance.json").read_text())
         assert prov["accelerator"] is None, d
+
+
+def test_representative_record_prefers_a_cell_with_an_accelerator(tmp_path):
+    """wf.provenance, show and diff stand one cell's record for the sweep. The
+    accelerator varies per cell now (a first cell that failed before its task
+    imported torch has none), so the first record with one is preferred, within
+    the first few cells; a sweep without any keeps its first record."""
+    import json
+
+    from mushin._provenance import representative_record
+    from mushin._show import _read_provenance
+
+    def cell(i, record):
+        d = tmp_path / str(i)
+        d.mkdir()
+        (d / "mushin_provenance.json").write_text(json.dumps(record))
+        return d / "mushin_provenance.json"
+
+    gpu = {"git": {"sha": "b"}, "accelerator": {"cuda": "12.8", "device": "H100"}}
+    paths = [
+        cell(0, {"git": {"sha": "a"}, "accelerator": None}),
+        cell(1, ["not a record"]),
+        cell(2, gpu),
+    ]
+    (tmp_path / "3").mkdir()  # a cell without a record
+    assert representative_record(paths) == gpu
+    assert _read_provenance(tmp_path) == gpu
+    # Only the first few cells are looked at: a sweep without torch is not
+    # read whole for a record it does not have.
+    far = [
+        cell(i, {"git": {"sha": str(i)}, "accelerator": None}) for i in range(10, 30)
+    ]
+    assert representative_record(far + [paths[2]]) == {
+        "git": {"sha": "10"},
+        "accelerator": None,
+    }
+    assert representative_record([]) is None
+    assert representative_record([tmp_path / "3" / "mushin_provenance.json"]) is None
 
 
 def test_env_snapshot_never_overwrites_prior_run(tmp_path):
@@ -440,7 +516,7 @@ def test_accelerator_records_mps_when_available(monkeypatch):
 
     from mushin import _provenance
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True, raising=False)
     out = _provenance._accelerator()
     assert out["device"] is not None and out["device"].startswith("mps")
@@ -488,7 +564,7 @@ def test_accelerator_mps_labels(monkeypatch):
 
     from mushin import _provenance
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True, raising=False)
 
     monkeypatch.setattr(_provenance, "_apple_chip", lambda: "Apple M3")
@@ -503,7 +579,7 @@ def test_accelerator_device_none_without_cuda_or_mps(monkeypatch):
 
     from mushin import _provenance
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(
         torch.backends.mps, "is_available", lambda: False, raising=False
     )

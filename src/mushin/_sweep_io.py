@@ -112,8 +112,9 @@ def read_metrics_sidecar(job_dir) -> dict | None:
         return None
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
     # Unique temp name: a fixed `<path>.tmp` would let two concurrent writers
     # (e.g. two resume runs on the same working_dir) truncate each other
     # mid-write and rename half-written content over the target.

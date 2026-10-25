@@ -97,9 +97,10 @@ def _accelerator() -> dict | None:
     """Accelerator identity: the part of GPU numerics the torch wheel version
     alone cannot reconstruct: CUDA/cuDNN build + device name on NVIDIA, the MPS
     device on Apple Silicon. ``None`` (not recorded) in a process that has not
-    imported torch; all-None values when torch is loaded but found no device.
-    Makes no CUDA call unless the task already initialized CUDA: the device is
-    named once the task has."""
+    imported torch. With torch loaded, ``cuda`` and ``cudnn`` are the wheel's
+    build (None on a CPU-only build) and ``device`` is None until the task
+    initializes CUDA, unless MPS is available. Makes no CUDA call unless the
+    task already initialized CUDA: the device is named once the task has."""
     torch = sys.modules.get("torch")
     if torch is None:
         # Never import torch here. Importing it is the dominant cost of a
@@ -152,9 +153,9 @@ def _cuda_initialized(torch) -> bool:
 
 
 # This process's accelerator, per CUDA state (False: before any task
-# initialized CUDA, when no device is named; True: after). Each answer can only
-# be queried once: the query costs about 10 ms, which a 1000-cell sweep would
-# otherwise pay per cell.
+# initialized CUDA, when no device is named; True: after). Each answer is
+# queried once: the MPS branch spawns a sysctl subprocess (about 10 ms, see
+# _apple_chip), which a 1000-cell sweep would otherwise pay per cell.
 _ACCELERATOR_SEEN: dict[bool, dict] = {}
 
 
@@ -168,7 +169,8 @@ def _seen_accelerator() -> dict | None:
     seen = _ACCELERATOR_SEEN.get(state)
     if seen is None:
         seen = _ACCELERATOR_SEEN[state] = _accelerator()
-    return seen
+    # A copy: the record is the caller's to change, the cache is not.
+    return dict(seen)
 
 
 NOT_WRITTEN = object()  # record_accelerator: the record's first write failed
@@ -198,9 +200,32 @@ def record_accelerator(job_dir, written: Any) -> None:
         if record.get("accelerator") == seen:
             return
         record["accelerator"] = seen
-        _atomic_write_text(path, json.dumps(record, indent=2))
+        _atomic_write_text(path, json.dumps(record, indent=2), mkdir=False)
     except Exception:  # noqa: BLE001 - provenance is best-effort
         pass
+
+
+def representative_record(paths) -> dict | None:
+    """The record that stands for a sweep (``wf.provenance``, ``show``,
+    ``diff``): the first readable one that has an accelerator, since a first
+    cell that failed before its task imported torch has none, else the first
+    readable one. Looks a few cells ahead at most, so a sweep without torch is
+    not read whole for a record it does not have."""
+    first = None
+    for i, p in enumerate(paths):
+        try:
+            data = json.loads(Path(p).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if isinstance(data.get("accelerator"), dict):
+            return data
+        if first is None:
+            first = data
+        if i >= 7:
+            break
+    return first
 
 
 def capture_base() -> dict:
@@ -242,9 +267,13 @@ def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> A
     # Atomic: under an external multi-rank launch every rank writes the same
     # cell's record, and a reader (show, the MCP server, record_accelerator)
     # must never see a torn file. Plain json.dumps, not the metrics
-    # normalizer: a config value of inf stays `Infinity`, as it always was.
+    # normalizer: a config value of inf stays `Infinity`, as it always was. No
+    # mkdir: the cell directory exists, and a write to one that does not
+    # raises into the runner's best-effort guard rather than inventing it.
     _atomic_write_text(
-        Path(job_dir) / "mushin_provenance.json", json.dumps(record, indent=2)
+        Path(job_dir) / "mushin_provenance.json",
+        json.dumps(record, indent=2),
+        mkdir=False,
     )
     return record["accelerator"]
 
