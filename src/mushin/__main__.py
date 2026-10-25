@@ -11,7 +11,9 @@ import sys
 from importlib import metadata, resources
 from pathlib import Path
 
-from ._console import echo
+# Absolute, not relative: `python path/to/mushin/__main__.py` runs this file
+# as a top-level script, where a relative import has no package to resolve.
+from mushin._console import codec, echo
 
 GUIDE = "agent_guide.md"
 
@@ -48,29 +50,31 @@ def _print_path(path: str) -> int:
     real path or an error, never a path with escapes or replacements.
 
     The install path can hold a character the console cannot encode (an
-    accented Windows user name). Encodability is judged strictly, not with
-    the stream's own handler: ``backslashreplace`` or ``replace`` never fail,
-    and would write a path that names no file. ``surrogateescape`` is the
-    exception, because it writes an undecodable path back as its bytes. A
-    path that fails the strict test goes out as its own bytes
-    (``os.fsencode``) only when stdout's encoding is the file system's, which
-    is how the reader will decode them; otherwise, on a Windows pipe in the
-    code page for one, the command fails and says to set ``PYTHONUTF8=1``."""
+    accented Windows user name). Whether it fits is decided as for every
+    console write (``mushin._console.codec``): strictly, so that a handler
+    that never fails cannot pass a path it would rewrite, and with the path
+    as it is for a stream that reports no known encoding. A path that does
+    not fit goes out as its own bytes (``os.fsencode``) only when stdout's
+    encoding is the file system's, which is how the reader will decode them;
+    otherwise, on a Windows pipe in the code page for one, the command fails
+    and says how to widen stdout."""
     stream = sys.stdout
     if stream is None:  # pythonw.exe: print() would write nowhere too
         return 0
-    encoding = getattr(stream, "encoding", None)
-    if not isinstance(encoding, str) or not encoding:
-        stream.write(path + "\n")  # a stream that takes any str (io.StringIO)
-        return 0
-    errors = getattr(stream, "errors", None)
-    lossless = "surrogateescape" if errors == "surrogateescape" else "strict"
-    try:
-        path.encode(encoding, lossless)
-        stream.write(path + "\n")
-        return 0
-    except (UnicodeEncodeError, LookupError):
-        pass  # not encodable, or not verifiably: the bytes, or the error
+    judged = codec(stream)
+    if judged is not None:
+        encoding, errors = judged
+        try:
+            path.encode(encoding, errors)
+        except UnicodeEncodeError:
+            return _print_path_bytes(path, stream, encoding)
+    # Outside the try: a tee that wrote part of the line and then raised must
+    # not get the path a second time, as bytes.
+    stream.write(path + "\n")
+    return 0
+
+
+def _print_path_bytes(path: str, stream, encoding: str) -> int:
     buffer = getattr(stream, "buffer", None)
     if buffer is not None and _same_codec(encoding, sys.getfilesystemencoding()):
         stream.flush()  # keep the order of anything already written as text
@@ -78,10 +82,13 @@ def _print_path(path: str) -> int:
         buffer.flush()
         stream.write("\n")  # through the text layer, translated as print() would
         return 0
+    # PYTHONUTF8=1 alone does not help when PYTHONIOENCODING is what narrowed
+    # stdout, since that variable wins: name both.
     echo(
         "python -m mushin guide --path: the guide's path holds a character "
         f"this console's encoding ({encoding}) cannot represent; run with "
-        "PYTHONUTF8=1, or print the guide itself with `python -m mushin guide`",
+        "PYTHONUTF8=1 and with PYTHONIOENCODING unset (or set to utf-8), or "
+        "print the guide itself with `python -m mushin guide`",
         file=sys.stderr,
     )
     return 1

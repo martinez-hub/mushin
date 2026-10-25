@@ -59,3 +59,23 @@ def test_truncated_trailing_line_is_skipped_not_fatal(tmp_path):
     cached, missing = c.partition("sys", 0, ["a", "b", "c"])
     assert cached == {0: "A", 1: "B"}  # the two good records still load
     assert [m[1] for m in missing] == ["c"]  # corrupt/absent -> recompute
+
+
+def test_a_stray_byte_spoils_only_its_own_line(tmp_path):
+    """A byte that is not UTF-8 (a torn or foreign write) must not make the
+    whole (system, seed) file unreadable, and a record it lands in must not be
+    replayed with a replacement character in its output."""
+    import json
+
+    from mushin.llm._cache import OutputCache, _key
+
+    c = OutputCache(tmp_path)
+    c.put_many("sys", 0, [("a", "A"), ("b", "B")])
+    record = json.dumps({"key": _key("c"), "output": "C"}).encode("ascii")
+    with c._path("sys", 0).open("ab") as f:
+        f.write(b"\xff\n")  # a line that is only a stray byte
+        f.write(record.replace(b'"C"', b'"C\xff"') + b"\n")  # one inside a record
+
+    cached, missing = c.partition("sys", 0, ["a", "b", "c"])
+    assert cached == {0: "A", 1: "B"}
+    assert [m[1] for m in missing] == ["c"]

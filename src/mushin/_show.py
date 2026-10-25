@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ._console import echo, for_console
+from ._console import echo
 
 
 def _ordered_union(dicts: list[dict]) -> list[str]:
@@ -231,11 +231,10 @@ def show(
     elif param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))
     table = _render(columns, rows)
-    # The table holds user data (swept values, metric names). The console copy
-    # is laid out from cells escaped for stdout (each unchanged when stdout
-    # can encode it), so a console that cannot gets escapes in aligned
-    # columns, not a crash.
-    echo(_render(columns, rows, for_console))
+    # The table holds user data (swept values, metric names). A console that
+    # cannot encode it gets escapes, laid out again from escaped cells so the
+    # columns still line up; one that can gets the table as it is.
+    echo(table, relayout=lambda cell: _render(columns, rows, cell))
     return ShowResult(rows, table)
 
 
@@ -617,8 +616,9 @@ def best(
 
 def _render(columns: list[str], rows: list[dict], cell=str) -> str:
     """The table as text. ``cell`` maps each header and formatted value
-    before the column widths are measured (``show`` and ``diff`` pass
-    ``for_console`` for their console copy)."""
+    before the column widths are measured (``echo`` passes one that escapes
+    for the console, when ``show`` or ``diff`` cannot print the table as it
+    is)."""
     if not rows:
         return "(no cells found)"
     lines = [[cell(c) for c in columns]]
@@ -760,9 +760,13 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
 
     provenance = _diff_provenance(_read_provenance(a), _read_provenance(b))
     table = _render_diff(rows, only_in_a, only_in_b, provenance)
-    # User data, laid out for the console as in show(); echo escapes the
-    # lines after the table, which are not in columns.
-    echo(_render_diff(rows, only_in_a, only_in_b, provenance, for_console))
+    # User data, laid out for the console as in show().
+    echo(
+        table,
+        relayout=lambda cell: _render_diff(
+            rows, only_in_a, only_in_b, provenance, cell
+        ),
+    )
     return DiffResult(rows, only_in_a, only_in_b, provenance, table)
 
 
@@ -773,8 +777,9 @@ def _render_diff(rows, only_in_a, only_in_b, provenance, cell=str) -> str:
     metric_cols = _ordered_union([r["deltas"] for r in rows])
     # "(b-a)" rather than a Greek delta: cp1252 and cp437, the code pages of a
     # Western Windows pipe and console, have no capital delta, and the header
-    # also says which way the subtraction goes.
-    delta = {m: f"{m} (b-a)" for m in metric_cols}
+    # also says which way the subtraction goes. No space, so a header splits
+    # on whitespace into one token per column, as the Greek-delta one did.
+    delta = {m: f"{m}(b-a)" for m in metric_cols}
     columns = [*param_cols, *delta.values()]
     flat_rows = []
     for r in rows:

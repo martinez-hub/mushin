@@ -796,10 +796,11 @@ def _write_env_snapshot(working_dir: Path) -> None:
             n += 1
         out = working_dir / f"mushin_env.{n}.txt"
 
-    # The snapshot is UTF-8 on every platform: under a cp1252 locale a path or
-    # name the code page lacks made the write raise, and the caller's
-    # best-effort guard then left no snapshot at all. uv writes UTF-8, so its
-    # output is decoded as such ("replace" for anything that is not).
+    # uv writes UTF-8, so its output is decoded as such ("replace" for any
+    # byte that is not) and the snapshot is written in UTF-8. Decoded in the
+    # locale's encoding, as before, a non-ASCII path in uv's output came out
+    # garbled, or, where the decode raised, the snapshot silently fell back to
+    # the bare package list below.
     for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
         try:
             res = subprocess.run(
@@ -1880,11 +1881,24 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
             from ._sweep_io import _restore_nonfinite
 
-            with open(file_path, encoding="utf-8") as f:
-                # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
-                # as a tagged marker) so an offline reload yields the same
-                # float values the in-process run produced.
-                return _restore_nonfinite(json.load(f))
+            with open(file_path, "rb") as f:
+                data = f.read()
+            # mushin's sidecar is UTF-8 (ASCII, in fact), but this loader also
+            # reads a JSON file the user names (load_metrics("my.json")), which
+            # an earlier release decoded in the locale's encoding. json.loads
+            # on bytes reads UTF-8, UTF-16 and UTF-32; a file that is none of
+            # them (cp1252 on Windows) is read in the locale's encoding, as
+            # before.
+            try:
+                loaded = json.loads(data)
+            except UnicodeDecodeError:
+                import locale
+
+                loaded = json.loads(data.decode(locale.getpreferredencoding(False)))
+            # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
+            # as a tagged marker) so an offline reload yields the same
+            # float values the in-process run produced.
+            return _restore_nonfinite(loaded)
         # weights_only=False: workflow-produced metrics files are trusted and
         # contain numpy arrays/dicts. torch 2.6 flipped this default to True.
         import torch as tr

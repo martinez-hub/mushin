@@ -30,12 +30,16 @@ _REDACT_VALUE_RE = re.compile(
 
 
 def _git() -> dict:
+    # git writes ref names and paths in UTF-8 whatever the locale: decoding
+    # them in the locale's encoding recorded a non-ASCII branch as mojibake on
+    # Windows, or as None where the decode raised. "replace" keeps a stray
+    # byte from losing the field.
+    utf8 = {"encoding": "utf-8", "errors": "replace"}
+
     def run(*a):
         try:
             return (
-                subprocess.run(
-                    a, capture_output=True, text=True, timeout=5
-                ).stdout.strip()
+                subprocess.run(a, capture_output=True, timeout=5, **utf8).stdout.strip()
                 or None
             )
         except Exception:
@@ -50,7 +54,7 @@ def _git() -> dict:
     # timed out (plausible on a large repo / slow cluster filesystem).
     try:
         st = subprocess.run(
-            ("git", "status", "--porcelain"), capture_output=True, text=True, timeout=5
+            ("git", "status", "--porcelain"), capture_output=True, timeout=5, **utf8
         )
         dirty = bool(st.stdout.strip()) if st.returncode == 0 else None
     except Exception:  # noqa: BLE001 - unknown, never "clean"

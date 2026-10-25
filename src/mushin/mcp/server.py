@@ -349,6 +349,22 @@ def _get_metrics(
     return result
 
 
+def _read_traceback(path: Path) -> str:
+    """A cell's ``mushin_error.txt``. Runs now write it in UTF-8 on every
+    platform; releases before that wrote it in the machine's locale encoding
+    (cp1252 on Western Windows), where an accented path would not be valid
+    UTF-8. So UTF-8 first, then the locale's encoding, which is the right
+    guess when the run and this server share a machine; "replace" keeps
+    whatever is left readable rather than failing the tool."""
+    import locale
+
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
 def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     """Failed sweep cells from the manifest, with each cell's on-disk
     traceback (``mushin_error.txt``) when present."""
@@ -377,12 +393,8 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
         tb = p / str(v.get("dir") or "") / "mushin_error.txt"
         if v.get("dir") and tb.exists() and _within_root(tb, rootp):
             try:
-                # The run writes this file in UTF-8 on every platform. "replace"
-                # keeps a file from an older run, written in that machine's
-                # locale encoding, readable rather than failing the whole tool.
-                text = tb.read_text(encoding="utf-8", errors="replace")
-                entry["traceback"] = text[:4000]
-            except (OSError, ValueError):
+                entry["traceback"] = _read_traceback(tb)[:4000]
+            except OSError:
                 pass
         failures.append(entry)
     return {"path": str(p), "count": len(failures), "failures": failures}
