@@ -14,14 +14,14 @@ seeds, 0.0625 at 5, 0.0313 at 6. Only the last clears ``alpha=0.05``.
 
 from __future__ import annotations
 
+import functools
 import re
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pytest
-import xarray as xr
 
+from _separated import separated, underpowered_warnings
 from mushin.benchmark import compare_methods
 from mushin.benchmark._stats import warn_if_underpowered
 
@@ -32,10 +32,9 @@ ALPHA = 0.05
 
 
 def _warns(test: str, n_seeds: int, alpha: float = ALPHA) -> bool:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        warn_if_underpowered(test, n_seeds=n_seeds, alpha=alpha)
-    return any("cannot reach alpha" in str(c.message) for c in caught)
+    return bool(
+        underpowered_warnings(warn_if_underpowered, test, n_seeds=n_seeds, alpha=alpha)
+    )
 
 
 def _seed_floor(test: str, alpha: float = ALPHA) -> int:
@@ -172,27 +171,14 @@ AGENT_GUIDE = (
 )
 
 
-def _separated(n_methods: int, n_seeds: int) -> xr.Dataset:
-    """Methods separated perfectly. Each method's scores vary across seeds (a
-    method constant across seeds gets NaN), and each pair's differences are
-    distinct and nonzero (tied differences make the Wilcoxon p approximate)."""
-    scores = np.array([(np.arange(n_seeds) + 1.0) * (i + 1) for i in range(n_methods)])
-    return xr.Dataset(
-        {"score": (("method", "seed"), scores)},
-        coords={
-            "method": [f"m{i}" for i in range(n_methods)],
-            "seed": np.arange(n_seeds),
-        },
-    )
-
-
+@functools.cache  # a brute-force search, asked for the same three counts repeatedly
 def _holm_floor(n_methods: int, alpha: float = ALPHA) -> int:
     """Seeds at which compare_methods first calls every pair significant on data
     that separates the methods perfectly."""
     for n in range(2, 32):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # the underpowered warning, below the floor
-            if compare_methods(_separated(n_methods, n), alpha=alpha)[
+            if compare_methods(separated(n_methods, n), alpha=alpha)[
                 "significant"
             ].all():
                 return n
@@ -200,10 +186,11 @@ def _holm_floor(n_methods: int, alpha: float = ALPHA) -> int:
 
 
 def _compare_warns(n_methods: int, n_seeds: int, alpha: float = ALPHA) -> bool:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        compare_methods(_separated(n_methods, n_seeds), alpha=alpha)
-    return any("cannot reach alpha" in str(c.message) for c in caught)
+    return bool(
+        underpowered_warnings(
+            compare_methods, separated(n_methods, n_seeds), alpha=alpha
+        )
+    )
 
 
 @pytest.mark.parametrize("n_methods, floor", [(2, 6), (3, 7), (4, 8)])

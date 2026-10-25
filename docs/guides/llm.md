@@ -69,9 +69,13 @@ them; how many you need depends on the effect size and the seed-to-seed
 variance, not on a fixed threshold. What a given seed count can rule out is
 fixed, though: the parametric tests (`welch`, the default, and `ttest_rel`) can
 reach `alpha` at 3 seeds, while the rank tests have a floor below which no
-effect size reaches it. `wilcoxon` needs 6 seeds and `mannwhitney` 4, because a
-paired Wilcoxon bottoms out at p = 0.25 over 3 seeds. `compare_llms` warns when
-the test you chose cannot reach `alpha` at the given seed count.
+effect size reaches it. `wilcoxon` needs 6 seeds and `mannwhitney` 4 for two
+systems, because a paired Wilcoxon bottoms out at p = 0.25 over 3 seeds; with
+more systems the default Holm correction raises the floor (7 Wilcoxon seeds for
+3 systems, 8 for 4; see
+[Understanding the statistics](statistics.md#underpowered-test-warning)).
+`compare_llms` warns when the test you chose cannot reach `alpha` for the system
+pairs it corrects over.
 
 !!! warning "Paired tests need a *shared* per-seed random effect"
     `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the
@@ -405,9 +409,10 @@ the metric and re-run without re-calling the systems.
   (temperature, a provider seed) to get real variance, or treat that system's
   score as a single point estimate rather than a distribution.
 - **Too few seeds for the chosen test.** The rank tests can't reach p < 0.05
-  below their floor (`wilcoxon` needs 6 seeds, `mannwhitney` 4; a paired
-  Wilcoxon bottoms out at p = 0.25 over 3 seeds); `compare_llms` warns when the
-  test you picked cannot reach `alpha` at the given seed count. The parametric
+  below their floor (`wilcoxon` needs 6 seeds and `mannwhitney` 4 for two
+  systems, more under Holm for more systems; a paired Wilcoxon bottoms out at
+  p = 0.25 over 3 seeds); `compare_llms` warns when the test you picked cannot
+  reach `alpha` for the system pairs it corrects over. The parametric
   tests (`welch`, the default, and `ttest_rel`) can reach `alpha` at 3 seeds,
   but how many seeds you actually need depends on the effect size and the
   seed-to-seed variance.

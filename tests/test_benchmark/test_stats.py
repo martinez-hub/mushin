@@ -6,6 +6,7 @@ import xarray as xr
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from _separated import separated, underpowered_warnings
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
@@ -180,12 +181,11 @@ def test_compare_methods_warns_when_test_underpowered():
         compare_methods(ds, test="wilcoxon", alpha=0.05)
 
 
-def _underpowered(test: str, n_seeds: int, **kwargs) -> list[str]:
+def _underpowered(test: str, n_seeds: int, alpha: float = 0.05, **kwargs) -> list[str]:
     """The "cannot reach" warnings of one warn_if_underpowered call."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        warn_if_underpowered(test, n_seeds=n_seeds, alpha=0.05, **kwargs)
-    return [str(c.message) for c in caught if "cannot reach" in str(c.message)]
+    return underpowered_warnings(
+        warn_if_underpowered, test, n_seeds=n_seeds, alpha=alpha, **kwargs
+    )
 
 
 def test_warn_if_underpowered_counts_the_holm_family():
@@ -222,55 +222,78 @@ def test_only_family_scaled_corrections_raise_the_seed_floor(correction, warns):
     assert bool(msgs) is warns, msgs
 
 
-def _separated(n_methods: int, n_seeds: int, metrics=("score",)) -> xr.Dataset:
-    """Methods that are perfectly separated, each varying across seeds."""
-    scores = np.array([(np.arange(n_seeds) + 1.0) * (i + 1) for i in range(n_methods)])
-    return xr.Dataset(
-        # One buffer per metric, so masking a method in one leaves the other.
-        {m: (("method", "seed"), scores.copy()) for m in metrics},
-        coords={
-            "method": [f"m{i}" for i in range(n_methods)],
-            "seed": np.arange(n_seeds),
-        },
-    )
+def test_warn_if_underpowered_matches_significance_at_exact_equality():
+    """A pair is significant when its corrected p is strictly below alpha, so a
+    best case that lands exactly on alpha cannot reach it and must warn."""
+    assert _underpowered("wilcoxon", 4, alpha=0.125)  # 2 ** (1 - 4) == 0.125
+    assert _underpowered("wilcoxon", 6, alpha=0.09375, n_comparisons=3)
+    ds = separated(3, 6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert not compare_methods(ds, alpha=0.09375)["significant"].any()
 
 
 def _compare_underpowered(ds: xr.Dataset, **kwargs) -> list[str]:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        compare_methods(ds, **kwargs)
-    return [str(c.message) for c in caught if "cannot reach" in str(c.message)]
+    return underpowered_warnings(compare_methods, ds, **kwargs)
 
 
 def test_compare_methods_warns_for_three_methods_at_six_seeds():
-    (msg,) = _compare_underpowered(_separated(3, 6))
-    assert "over 3 method pairs under correction='holm'" in msg
-    assert _compare_underpowered(_separated(3, 7)) == []
-    assert _compare_underpowered(_separated(2, 6)) == []
+    (msg,) = _compare_underpowered(separated(3, 6))
+    assert "over 3 method pairs under correction='holm' (best-case" in msg
+    assert "for metric" not in msg  # it holds for every metric: none is named
+    assert _compare_underpowered(separated(3, 7)) == []
+    assert _compare_underpowered(separated(2, 6)) == []
 
 
 def test_compare_methods_without_a_family_correction_keeps_the_single_pair_floor():
-    assert _compare_underpowered(_separated(3, 6), correction="none") == []
-    assert _compare_underpowered(_separated(3, 6), correction="fdr_bh") == []
-    assert _compare_underpowered(_separated(3, 6), correction="bonferroni")
+    assert _compare_underpowered(separated(3, 6), correction="none") == []
+    assert _compare_underpowered(separated(3, 6), correction="fdr_bh") == []
+    assert _compare_underpowered(separated(3, 6), correction="bonferroni")
 
 
 def test_compare_methods_judges_the_family_without_masked_pairs():
     """A method constant across seeds is masked (NaN p), which takes its pairs
     out of the Holm family: three methods with one constant correct one pair."""
-    ds = _separated(3, 6)
+    ds = separated(3, 6)
     ds["score"].loc[{"method": "m2"}] = 1.0
     assert _compare_underpowered(ds) == []
 
 
 @pytest.mark.parametrize("order", [("full", "masked"), ("masked", "full")])
-def test_compare_methods_judges_the_largest_family_across_metrics(order):
-    """One metric masks a method (family of one pair), the other corrects all
-    three pairs: the warning follows the largest family, in either order."""
-    ds = _separated(3, 6, metrics=order)
+def test_compare_methods_judges_the_family_per_metric(order):
+    """One metric masks a method (family of one pair, which can reach alpha),
+    the other corrects all three pairs (which cannot): the warning names the
+    metric it holds for, in either order, and the masked metric's pair is
+    still significant."""
+    ds = separated(3, 6, metrics=order)
+    ds["masked"].loc[{"method": "m2"}] = 1.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = compare_methods(ds)
+    msgs = [str(c.message) for c in caught if "cannot reach alpha" in str(c.message)]
+    (msg,) = msgs
+    assert "over 3 method pairs under correction='holm' for metric 'full' (" in msg
+    assert "'masked'" not in msg
+    masked = df[(df["metric"] == "masked") & (df["method_b"] == "m1")]
+    assert masked["significant"].tolist() == [True]
+
+
+def test_compare_methods_names_every_metric_a_family_puts_out_of_reach():
+    """Two metrics share one family that cannot reach alpha while a third's can:
+    one warning names the two, not one warning per metric."""
+    ds = separated(3, 6, metrics=("a", "b", "masked"))
     ds["masked"].loc[{"method": "m2"}] = 1.0
     (msg,) = _compare_underpowered(ds)
-    assert "over 3 method pairs" in msg
+    assert "for metrics 'a', 'b' (" in msg
+
+
+def test_compare_methods_blames_the_seeds_once_for_every_metric():
+    """Below the single-pair floor the family does not matter, so metrics with
+    different families share one unnamed warning."""
+    ds = separated(3, 3, metrics=("full", "masked"))
+    ds["masked"].loc[{"method": "m2"}] = 1.0
+    (msg,) = _compare_underpowered(ds)
+    assert "with 3 seeds (best-case p=0.25)" in msg
 
 
 def test_compare_methods_masks_zero_variance_methods():

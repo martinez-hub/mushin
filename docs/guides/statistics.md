@@ -79,7 +79,7 @@ mushin warns you:
 
 ```
 UserWarning: test='wilcoxon' cannot reach alpha=0.05 with 3 seeds
-(best-case p=0.2500); use more seeds or a parametric test such as test='welch'.
+(best-case p=0.25); use more seeds or a parametric test such as test='welch'.
 ```
 
 **Solutions:**
@@ -91,9 +91,11 @@ UserWarning: test='wilcoxon' cannot reach alpha=0.05 with 3 seeds
 That floor is for one pair. With `k` methods there are `m = k * (k - 1) / 2`
 pairs, and the Holm (or Bonferroni) correction makes the smallest p-value clear
 `alpha / m`, so Wilcoxon needs at least 6 seeds for 2 methods, 7 for 3 and 8
-for 4. The warning counts the pairs the correction adjusts (a method that is
-constant across seeds is masked and leaves the family), and names them when they
-are what puts `alpha` out of reach:
+for 4. The warning counts the pairs the correction adjusts, per metric: a method
+that is constant across seeds in one metric is masked there and leaves that
+metric's family, so the warning names the metrics it holds for when it does not
+hold for all of them. When the pairs are what puts `alpha` out of reach, it says
+so:
 
 ```
 UserWarning: test='wilcoxon' cannot reach alpha=0.05 with 6 seeds over 3 method
