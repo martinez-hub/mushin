@@ -626,6 +626,11 @@ class _TaskRunner:
                 uuid.uuid4().hex if state.get("max_total_seconds") is not None else None
             )
         self.__dict__.setdefault("_shipped", False)
+        # Such a runner has no code roots either: it records no project code
+        # and its cells are compared as that version compared them.
+        self.__dict__.setdefault("code_roots", ())
+        self.__dict__.setdefault("code_body_roots", ())
+        self.__dict__.setdefault("_code_token", "")
 
     def budget_start_path(self, root) -> Path:
         """The file in sweep root ``root`` that holds this run's budget start."""

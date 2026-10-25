@@ -606,7 +606,14 @@ def _as_pickled_by_an_earlier_mushin(runner):
     """``runner`` as an earlier mushin pickled and a worker unpickles it: its
     state has none of the fields this one added, and the per-copy `_deadline`
     that version kept (pickle calls `__new__`, then `__setstate__`)."""
-    added = {"budget_id", "_shared_budget", "_shipped"}
+    added = {
+        "budget_id",
+        "_shared_budget",
+        "_shipped",
+        "code_roots",
+        "code_body_roots",
+        "_code_token",
+    }
     state = {k: v for k, v in vars(runner).items() if k not in added}
     state["_deadline"] = None
     old = _TaskRunner.__new__(_TaskRunner)
