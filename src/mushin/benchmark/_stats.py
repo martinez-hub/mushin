@@ -277,13 +277,15 @@ def warn_if_underpowered(
 ) -> None:
     """Warn if ``test`` cannot reach ``alpha`` at ``n_seeds`` seeds.
 
-    Determined empirically: run the test on maximally-separated samples of size
-    ``n_seeds`` and check whether the best-case p-value, corrected over a
-    family of ``n_comparisons`` p-values with ``correction``, is below
+    A probe on maximally-separated samples of size ``n_seeds`` decides whether
+    the test can run at all (NaN or an error means there is nothing to say).
+    For a rank test the probe's p-value is the floor no separation gets under;
+    a parametric test that runs has a floor of 0. The floor, corrected over a
+    family of ``n_comparisons`` p-values with ``correction``, must be below
     ``alpha`` (the comparison that decides significance). Under Holm or
-    Bonferroni the family raises the floor: Wilcoxon needs 6 seeds for one pair
-    but 7 for the three pairs of three methods. ``"fdr_bh"`` and ``"none"``
-    leave it at the single pair's.
+    Bonferroni the family raises it: Wilcoxon needs 6 seeds for one pair but 7
+    for the three pairs of three methods. ``"fdr_bh"`` and ``"none"`` leave it
+    at the single pair's.
     """
     reason = _underpowered(test, n_seeds, alpha, n_comparisons, correction)
     if reason is not None:
