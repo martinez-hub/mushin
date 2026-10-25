@@ -105,7 +105,7 @@ def _to_override_element(item: Any) -> str:
 def _scalar_repr(item: Any) -> Any:
     """A stable, type-aware key for detecting duplicate sweep-axis values.
 
-    Unwraps 0-d numpy/torch scalars (as :func:`_to_override_element` does) and
+    Unwraps 0-d numpy/torch scalars (as ``_to_override_element`` does) and
     tags the value with its type so ``1`` and ``"1"`` (distinct coordinates)
     do not compare equal while ``1`` and ``1`` do.
     """
@@ -1902,7 +1902,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
 
-        Extends :meth:`BaseWorkflow.run` (see it for the launcher/sweeper/
+        Extends ``BaseWorkflow.run`` (see it for the launcher/sweeper/
         Hydra parameters) with metrics-workflow behavior:
 
         Parameters
@@ -2657,13 +2657,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         return value  # type: ignore
 
     def to_dataframe(self, **to_xarray_kwargs):
-        """The sweep results as a tidy long-form :class:`pandas.DataFrame`.
+        """The sweep results as a tidy long-form ``pandas.DataFrame``.
 
         One row per sweep cell (times any extra metric dimensions), with the
         sweep parameters and metrics as plain columns: the pandas view of
-        :meth:`to_xarray` (``to_xarray(...).to_dataframe().reset_index()``),
+        ``to_xarray`` (``to_xarray(...).to_dataframe().reset_index()``),
         for when you'd rather not touch xarray at all. Keyword arguments
-        forward to :meth:`to_xarray`. Dataset-level ``attrs`` (provenance,
+        forward to ``to_xarray``. Dataset-level ``attrs`` (provenance,
         failure records) live only on the xarray form.
         """
         return self.to_xarray(**to_xarray_kwargs).to_dataframe().reset_index()

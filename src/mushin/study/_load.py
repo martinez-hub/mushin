@@ -49,7 +49,7 @@ def evaluate_checkpoints(
     """Regroup checkpoints into ``{method: models}`` (loaded lazily, one at a
     time, via ``load_fn``) and run ``compare`` (which warns if the test is
     underpowered for the seed count). ``predict_fn``/``metrics``/
-    ``prob_metrics``/``correction`` forward to :func:`mushin.benchmark.compare`."""
+    ``prob_metrics``/``correction`` forward to ``mushin.benchmark.compare``."""
     from mushin.benchmark import compare  # local import: see module-level note above
 
     if not checkpoints:

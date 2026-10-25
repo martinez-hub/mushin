@@ -297,7 +297,7 @@ class HydraDDP(_HydraReattachMixin, DDPStrategy):  # type: ignore
 class HydraFSDP(_HydraReattachMixin, FSDPStrategy):  # type: ignore
     """Fully-Sharded Data Parallel strategy that works under Hydra ``--multirun``.
 
-    Like :class:`HydraDDP`, but for sharded training: it replaces Lightning's
+    Like ``HydraDDP``, but for sharded training: it replaces Lightning's
     stock ``FSDPStrategy`` subprocess launcher (which re-execs the script with
     ``sys.argv`` and, in a sweep, spawns the wrong job) with mushin's launcher,
     which reattaches each rank via the job's saved ``config.yaml``. FSDP shards
@@ -305,7 +305,7 @@ class HydraFSDP(_HydraReattachMixin, FSDPStrategy):  # type: ignore
     significance analysis are unchanged from a single-GPU run.
 
     Requires Hydra to save a ``config.yaml`` (with ``trainer`` and ``module``
-    keys) in the job's output dir: the same contract as :class:`HydraDDP`.
+    keys) in the job's output dir: the same contract as ``HydraDDP``.
     Configure it with hydra-zen, e.g. ``strategy=builds(HydraFSDP)`` on a
     ``builds(pl.Trainer, ...)`` config.
     """

@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class BatchPin:
-    """Result of :func:`tune_batch_size`. The effective batch is always exact."""
+    """Result of ``tune_batch_size``. The effective batch is always exact."""
 
     device_batch: int
     accumulate_grad_batches: int
@@ -28,7 +28,7 @@ class BatchPin:
 
 @dataclass(frozen=True)
 class LRPin:
-    """Result of :func:`tune_learning_rate`."""
+    """Result of ``tune_learning_rate``."""
 
     learning_rate: float
 
@@ -84,7 +84,7 @@ def _set_attr(target, name: str, value) -> None:
     ``pytorch_lightning.utilities.parsing.lightning_setattr`` requires a
     ``_trainer`` attribute (it is designed for attached modules); this helper
     provides the same hparams-awareness for standalone objects, used by
-    :func:`tune_batch_size` and :func:`tune_learning_rate` when applying the
+    ``tune_batch_size`` and ``tune_learning_rate`` when applying the
     found value before training begins.
     """
     setattr(target, name, value)

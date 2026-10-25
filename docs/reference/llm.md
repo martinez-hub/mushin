@@ -1,12 +1,12 @@
 # llm
 
-Evaluation of LLM systems with the same statistics as `compare_methods`; the
-[LLM evaluation guide](../guides/llm.md) walks through it. Needs the `eval`
-extra.
+Evaluation of LLM systems, built on `compare_methods` with an item-level
+bootstrap on top; the [LLM evaluation guide](../guides/llm.md) walks through
+it. Needs the `eval` extra.
 
 ## Types
 
-Three aliases name what `compare_llms` and `llm_judge` take:
+Three aliases name what `compare_llms` takes; `llm_judge` returns a `Metric`:
 
 - `System`: a callable `(inputs, seed) -> outputs`. It maps a batch of inputs
   and an integer seed to a batch of outputs in the same order.

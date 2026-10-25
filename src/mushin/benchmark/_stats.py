@@ -73,7 +73,7 @@ def cohens_dz(a, b) -> float:
     """Paired-samples Cohen's :math:`d_z`: ``mean(a - b) / std(a - b)``.
 
     The effect size matching the paired tests (``wilcoxon``, ``ttest_rel``);
-    the pooled-variance :func:`cohens_d` ignores the pairing and understates
+    the pooled-variance ``cohens_d`` ignores the pairing and understates
     the effect when the per-seed differences are consistent.
     """
     d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
@@ -149,10 +149,10 @@ def bonferroni_correction(pvalues) -> list[float]:
 def bh_correction(pvalues) -> list[float]:
     """Benjamini-Hochberg (FDR) adjusted p-values, returned in original order.
 
-    Delegates to :func:`scipy.stats.false_discovery_control` (scipy >= 1.11;
+    Delegates to ``scipy.stats.false_discovery_control`` (scipy >= 1.11;
     our floor is 1.13) rather than reimplementing the step-up. scipy has no NaN
     handling, so NaN p-values are held out of the family and restored as NaN,
-    matching :func:`holm_correction`."""
+    matching ``holm_correction``."""
     pvalues = np.asarray(pvalues, dtype=float)
     corrected = np.full(pvalues.shape, np.nan)
     valid = ~np.isnan(pvalues)
@@ -240,7 +240,7 @@ def compare_methods(
 ) -> pd.DataFrame:
     """Pairwise comparison of methods for every metric in ``ds``.
 
-    ``correction`` (one of :func:`available_corrections`: ``"holm"`` default,
+    ``correction`` (one of ``available_corrections``: ``"holm"`` default,
     ``"bonferroni"``, ``"fdr_bh"`` for Benjamini-Hochberg FDR, ``"none"`` for
     raw p-values) is applied **per metric** across the method pairs; the
     family is one metric's pairs, not the whole battery, so scanning for
@@ -489,7 +489,7 @@ def paired_item_bootstraps(
     seed: int = 0,
     _stacklevel: int = 3,
 ) -> list[tuple[float, float, float, float]]:
-    """:func:`paired_item_bootstrap` for every ``(a, b)`` in ``pairs``, over the
+    """``paired_item_bootstrap`` for every ``(a, b)`` in ``pairs``, over the
     per-item scores in ``systems``, in one pass over the resamples.
 
     Every system must score the same eval set (one score per item, in the same

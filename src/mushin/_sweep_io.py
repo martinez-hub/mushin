@@ -81,7 +81,7 @@ def _json_normalize(v: Any) -> Any:
 
 
 def _restore_nonfinite(v: Any) -> Any:
-    """Inverse of the non-finite mapping in :func:`_json_normalize`: a ``None``
+    """Inverse of the non-finite mapping in ``_json_normalize``: a ``None``
     in a metrics payload marks a value that was NaN on write (restored to NaN so
     metric columns stay float rather than object dtype on resume), and a tagged
     ``{"__mushin_nonfinite__": "inf"|"-inf"}`` marker restores to signed Inf."""

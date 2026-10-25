@@ -299,7 +299,7 @@ jobs:
       # test_docs_claims imports the stats code. --group docs: the agent
       # guide's render test needs the Markdown extensions.
       - name: Docs-pinning tests
-        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py -p no:cacheprovider
+        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py tests/test_reference_pages.py -p no:cacheprovider
 
   core-only:
     # Guards the eval-extra split: a core install (NO extras) must import, run a
