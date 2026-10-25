@@ -19,6 +19,15 @@ def _version() -> str:
         return "unknown"
 
 
+def guide_text() -> str:
+    """The guide as ``python -m mushin guide`` prints it: a version comment
+    (valid Markdown, invisible when rendered), then the shipped file. The
+    MCP server's ``guide`` prompt and ``mushin://guide`` resource return the
+    same string, so every route to the guide shows the installed version."""
+    path = resources.files("mushin") / GUIDE
+    return f"<!-- mushin {_version()} -->\n" + path.read_text(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m mushin",
@@ -47,9 +56,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(path)
         return 0
-    # An HTML comment: valid Markdown, invisible when rendered.
-    sys.stdout.write(f"<!-- mushin {_version()} -->\n")
-    sys.stdout.write(path.read_text(encoding="utf-8"))
+    sys.stdout.write(guide_text())
     return 0
 
 
