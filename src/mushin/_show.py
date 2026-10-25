@@ -228,18 +228,54 @@ def _sortable(v: Any):
 
 
 class BestResult:
-    """The winning cell of a sweep (see ``best``): its swept-param ``combo``,
-    the optimized metric ``value``, the full ``metrics`` dict, its ``status``,
-    and its job ``dir`` (for locating checkpoints/artifacts)."""
+    """The winner of a sweep (see ``best``).
 
-    def __init__(self, combo: dict, status: str, metrics: dict, value: float, dir):
+    Attributes
+    ----------
+    combo : dict
+        The winning cell's swept parameters. With ``best(..., over=...)`` the
+        averaged parameters are omitted, so it names a configuration.
+    status : str
+        The cell's status, always ``"completed"``.
+    metrics : dict
+        Every metric of the cell. With ``over=`` the mean of every metric that
+        is a finite scalar in each cell of the group; the others are omitted.
+    value : float
+        The optimized metric (its mean over the group with ``over=``).
+    dir : Path | None
+        The cell's job dir, for locating checkpoints and artifacts. ``None``
+        with ``over=``, since the winner is then a group of cells.
+    dirs : list[Path]
+        The job dirs of every cell behind the result (``[dir]`` for a single
+        cell), in job order.
+    n : int
+        How many cells the result averages; 1 without ``over=``.
+    """
+
+    def __init__(
+        self,
+        combo: dict,
+        status: str,
+        metrics: dict,
+        value: float,
+        dir,
+        *,
+        dirs: list | None = None,
+    ):
         self.combo = combo
         self.status = status
         self.metrics = metrics
         self.value = value
         self.dir = dir
+        self.dirs = list(dirs) if dirs is not None else [dir]
+        self.n = len(self.dirs)
 
     def __repr__(self) -> str:
+        if self.dir is None:
+            return (
+                f"BestResult(combo={self.combo!r}, value={self.value!r}, "
+                f"n={self.n}, dirs={self.dirs!r})"
+            )
         return (
             f"BestResult(combo={self.combo!r}, value={self.value!r}, dir={self.dir!r})"
         )
@@ -249,8 +285,96 @@ def _finite_number(v: Any) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool) and v == v
 
 
-def best(root, metric: str, *, mode: str = "max") -> BestResult:
-    """Return the completed cell that optimizes ``metric`` across the sweep.
+def _is_candidate(cell: dict, metric: str) -> bool:
+    return cell["status"] == "completed" and _finite_number(cell["metrics"].get(metric))
+
+
+def _over_names(over, cells: list[dict]) -> list[str]:
+    """Validate ``best(over=...)``: the swept params to average over, deduplicated
+    in the caller's order. A name no cell sweeps raises (a typo would otherwise
+    silently average over nothing and return the best single cell)."""
+    if isinstance(over, str):
+        names = [over]
+    else:
+        try:
+            names = list(over)
+        except TypeError:
+            names = []
+    if not names or not all(isinstance(n, str) for n in names):
+        raise ValueError(
+            f"`over` must be a swept-param name or a sequence of them, got {over!r}"
+        )
+    names = list(dict.fromkeys(names))
+    swept = _ordered_union([c["combo"] for c in cells])
+    unknown = [n for n in names if n not in swept]
+    if unknown:
+        raise ValueError(
+            f"`over` names {', '.join(map(repr, unknown))}, which the sweep does "
+            f"not vary; swept params: {', '.join(swept) or '(none)'}"
+        )
+    return names
+
+
+def _best_group(cells: list[dict], metric: str, mode: str, over: list[str]):
+    """``best(over=...)``: group cells by their combo minus ``over``, average
+    ``metric`` within each group and pick the best mean.
+
+    Only a group whose every cell completed with a finite ``metric`` counts,
+    so a mean over fewer seeds than its neighbours (a failed cell, a sweep
+    still running, a ``sample=`` sweep's holes) cannot win by luck. Skipped
+    groups are reported with a warning; a sweep with no complete group raises."""
+    import warnings
+    from statistics import fmean
+
+    from ._sweep_io import combo_key
+
+    groups: dict[str, list[dict]] = {}
+    for c in cells:
+        key = combo_key({k: v for k, v in c["combo"].items() if k not in over})
+        groups.setdefault(key, []).append(c)
+
+    complete = [g for g in groups.values() if all(_is_candidate(c, metric) for c in g)]
+    if not complete:
+        raise ValueError(
+            f"every group of cells that share their params other than "
+            f"{', '.join(map(repr, over))} has a cell that is not completed with a "
+            f"finite {metric!r} (failed, pending, or a hole of a sample= sweep), "
+            f"so no mean is comparable. `best()` without `over=` still returns "
+            f"the best single cell."
+        )
+    skipped = len(groups) - len(complete)
+    if skipped:
+        warnings.warn(
+            f"best(over={over!r}): skipped {skipped} of {len(groups)} groups whose "
+            f"cells are not all completed with a finite {metric!r}; the result "
+            f"compares only the {len(complete)} complete group(s).",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    pick = (max if mode == "max" else min)(
+        complete, key=lambda g: fmean(c["metrics"][metric] for c in g)
+    )
+    shared = [
+        m
+        for m in _ordered_union([c["metrics"] for c in pick])
+        if all(_finite_number(c["metrics"].get(m)) for c in pick)
+    ]
+    means = {m: fmean(c["metrics"][m] for c in pick) for m in shared}
+    return BestResult(
+        combo={k: v for k, v in pick[0]["combo"].items() if k not in over},
+        status="completed",
+        metrics=means,
+        value=means[metric],
+        dir=None,
+        dirs=[c["dir"] for c in pick],
+    )
+
+
+def best(root, metric: str, *, mode: str = "max", over=None) -> BestResult:
+    """Return the completed cell that optimizes ``metric`` across the sweep, or,
+    with ``over=``, the configuration whose mean ``metric`` over the named
+    swept params is best.
 
     Parameters
     ----------
@@ -260,12 +384,28 @@ def best(root, metric: str, *, mode: str = "max") -> BestResult:
         The metric to optimize; it must be a finite scalar in each cell.
     mode : str
         ``"max"`` (default) or ``"min"``.
+    over : str | Sequence[str] | None
+        Swept params to average over, typically ``"seed"``. The default picks
+        the single best cell, which is one seed; ``over="seed"`` groups the
+        cells that share every other param, averages ``metric`` within each
+        group and returns the best group, so a lucky seed cannot win. Only a
+        group whose every cell completed with a finite ``metric`` counts; the
+        others are skipped with a warning, since a mean over fewer seeds is not
+        comparable.
+
+    Returns
+    -------
+    BestResult
+        With ``over=``, its ``combo`` omits the averaged params, ``value`` and
+        ``metrics`` are means, ``n`` counts the cells, ``dirs`` lists their job
+        dirs and ``dir`` is ``None``.
 
     Raises
     ------
     ValueError
-        If ``mode`` is invalid, or no completed cell has ``metric`` as a finite
-        scalar (the error lists the scalar metrics that are available).
+        If ``mode`` is invalid, no completed cell has ``metric`` as a finite
+        scalar (the error lists the scalar metrics that are available), ``over``
+        names a param the sweep does not vary, or no group is complete.
     FileNotFoundError
         If ``root`` is not a directory.
     """
@@ -273,11 +413,7 @@ def best(root, metric: str, *, mode: str = "max") -> BestResult:
         raise ValueError(f"`mode` must be 'max' or 'min', got {mode!r}")
 
     cells = _read_cells(root)
-    candidates = [
-        c
-        for c in cells
-        if c["status"] == "completed" and _finite_number(c["metrics"].get(metric))
-    ]
+    candidates = [c for c in cells if _is_candidate(c, metric)]
     if not candidates:
         available = sorted(
             {
@@ -292,6 +428,9 @@ def best(root, metric: str, *, mode: str = "max") -> BestResult:
             f"no completed cell has a finite scalar metric {metric!r}. "
             f"Available scalar metrics: {', '.join(available) or '(none)'}."
         )
+
+    if over is not None:
+        return _best_group(cells, metric, mode, _over_names(over, cells))
 
     pick = (max if mode == "max" else min)(
         candidates, key=lambda c: c["metrics"][metric]

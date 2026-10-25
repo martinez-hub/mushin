@@ -81,3 +81,107 @@ def test_best_invalid_mode_raises(tmp_path):
 def test_best_missing_dir_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         mushin.best(tmp_path / "nope", "score")
+
+
+def _run_seeded(wd, *, fail=()):
+    """A 2 x 3 (lr x seed) grid where the best SINGLE cell belongs to the
+    configuration with the worse MEAN: lr=0.1 scores -5, -5, 10 (mean 0.0) and
+    lr=0.2 scores 1, 1, 1 (mean 1.0). ``only0`` is finite at seed 0 only, so a
+    mean of it is undefined. ``fail`` lists (lr, seed) cells that raise, which
+    ``on_error="nan"`` records as failed."""
+    scores = {0.1: [-5.0, -5.0, 10.0], 0.2: [1.0, 1.0, 1.0]}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr, seed):
+            if (lr, seed) in fail:
+                raise RuntimeError("boom")
+            score = scores[lr][seed]
+            return dict(
+                score=score, loss=-score, only0=1.0 if seed == 0 else float("nan")
+            )
+
+    W().run(
+        lr=multirun([0.1, 0.2]),
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        on_error="nan" if fail else "raise",
+    )
+
+
+def test_best_over_seed_picks_the_best_mean_not_the_lucky_cell(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    single = mushin.best(wd, "score")
+    assert single.combo == {"lr": 0.1, "seed": 2}
+    assert single.n == 1
+    assert single.dirs == [single.dir]
+
+    r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2}
+    assert r.value == pytest.approx(1.0)
+    assert r.status == "completed"
+    assert r.n == 3
+    assert r.dir is None
+    assert len(r.dirs) == 3 and all(Path(d).is_dir() for d in r.dirs)
+    # means of the metrics finite in every cell; `only0` is NaN at seeds 1, 2
+    assert r.metrics == {"score": pytest.approx(1.0), "loss": pytest.approx(-1.0)}
+    assert "n=3" in repr(r)
+
+
+def test_best_over_mode_min(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    r = mushin.best(wd, "score", mode="min", over="seed")
+    assert r.combo == {"lr": 0.1}
+    assert r.value == pytest.approx(0.0)
+
+
+def test_best_over_several_params_averages_everything(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    r = mushin.best(wd, "score", over=["seed", "lr", "seed"])
+    assert r.combo == {}
+    assert r.n == 6
+    assert r.value == pytest.approx((-5 - 5 + 10 + 1 + 1 + 1) / 6)
+
+
+def test_best_over_skips_incomplete_groups_with_a_warning(tmp_path):
+    # lr=0.2 has a failed seed, so its mean is over fewer cells and must not
+    # compete; the complete lr=0.1 group wins even though its mean is lower.
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="fail"):
+        _run_seeded(wd, fail={(0.2, 1)})
+    with pytest.warns(UserWarning, match=r"skipped 1 of 2 groups") as rec:
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.1}
+    assert r.value == pytest.approx(0.0)
+    assert r.n == 3
+    assert all(w.filename == __file__ for w in rec if "skipped" in str(w.message))
+
+
+def test_best_over_with_no_complete_group_raises(tmp_path):
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="fail"):
+        _run_seeded(wd, fail={(0.1, 0), (0.2, 0)})
+    assert mushin.best(wd, "score").combo == {"lr": 0.1, "seed": 2}  # still works
+    with pytest.raises(ValueError, match="without `over=`"):
+        mushin.best(wd, "score", over="seed")
+
+
+def test_best_over_unknown_param_raises_with_swept_params(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    with pytest.raises(ValueError, match="'sed'.*lr, seed"):
+        mushin.best(wd, "score", over="sed")
+    with pytest.raises(ValueError, match="`over`"):
+        mushin.best(wd, "score", over=5)
+    with pytest.raises(ValueError, match="`over`"):
+        mushin.best(wd, "score", over=[])
+
+
+def test_best_over_unknown_metric_raises_the_usual_error(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    with pytest.raises(ValueError, match="no completed cell has a finite scalar"):
+        mushin.best(wd, "nope", over="seed")
