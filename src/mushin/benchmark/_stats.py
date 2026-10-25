@@ -7,7 +7,7 @@ from __future__ import annotations
 import itertools
 import json
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -394,7 +394,7 @@ def compare_methods(
     # outside it, so a constant method shrinks it. The underpowered warning is
     # judged on these after the loop, since with k methods the smallest p-value
     # must clear alpha / m for the m pairs, not alpha.
-    families: dict[str, int] = {}
+    families: dict[Hashable, int] = {}  # keyed by the data variable itself
     for metric in ds.data_vars:
         vals = {m: ds[metric].sel({"method": m}).values for m in methods}
         # A method with no within-group variance has no sampling distribution.
@@ -477,7 +477,7 @@ def compare_methods(
         # The same count the corrections use for their family size; a family of
         # 0 (every pair masked) is judged as the single pair, which is what the
         # seed count alone can say.
-        families[str(metric)] = max(_family_size(pvals), 1)
+        families[metric] = max(_family_size(pvals), 1)
         for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)
@@ -497,7 +497,7 @@ def compare_methods(
         scope = ""
         if families and len(named) < len(families):
             noun = "metric" if len(named) == 1 else "metrics"
-            scope = f" for {noun} " + ", ".join(repr(m) for m in named)
+            scope = f" for {noun} " + ", ".join(repr(str(m)) for m in named)
         warnings.warn(head + scope + tail, UserWarning, stacklevel=2)
 
     # Warn for methods constant across seeds in *every* metric (they ignore the

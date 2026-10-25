@@ -893,3 +893,16 @@ def test_cluster_label_shape_is_checked_against_the_scores_shape():
         ValueError, match=r"one label per item, got \(5,\) for \(5, 1\) items"
     ):
         paired_item_bootstrap(a, a + 1, clusters=[0, 1, 0, 1, 0])
+
+
+def test_compare_methods_counts_metrics_whose_names_stringify_alike():
+    """Two data variables named 1 and "1" are two metrics: a method constant in
+    both is constant in every metric and gets the deterministic-method warning,
+    which keying the metrics by their string once suppressed."""
+    scores = np.array([[1.0, 1.0, 1.0], [0.1, 0.2, 0.3]])
+    ds = xr.Dataset(
+        {1: (("method", "seed"), scores), "1": (("method", "seed"), scores.copy())},
+        coords={"method": ["a", "b"], "seed": [0, 1, 2]},
+    )
+    with pytest.warns(UserWarning, match="method 'a' produced identical scores"):
+        compare_methods(ds, test="welch")
