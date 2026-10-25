@@ -198,15 +198,18 @@ def test_best_over_skips_incomplete_groups_with_a_warning(tmp_path):
 def test_best_over_drops_a_seed_that_failed_everywhere(tmp_path):
     """Means are comparable over the SAME seeds, not necessarily all of them:
     with seed 0 failed for both configurations, both are complete over seeds
-    1 and 2 (lr=0.1: (-5 + 10) / 2 = 2.5 beats lr=0.2's 1.0)."""
+    1 and 2 (lr=0.1: (-5 + 10) / 2 = 2.5 beats lr=0.2's 1.0), and the result
+    says a seed was left out of every mean."""
     wd = tmp_path / "s"
     with pytest.warns(UserWarning, match="fail"):
         _run_seeded(wd, fail={(0.1, 0), (0.2, 0)})
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # nothing to warn about
+    with pytest.warns(
+        UserWarning, match=r"1 value\(s\) of 'seed' have no result"
+    ) as rec:
         r = mushin.best(wd, "score", over="seed")
+    assert "skipped" not in str(rec[0].message) and "not finished" not in str(
+        rec[0].message
+    )
     assert r.combo == {"lr": 0.1}
     assert r.value == pytest.approx(2.5)
     assert r.n == 2
@@ -465,8 +468,7 @@ def test_best_over_treats_a_corrupt_manifest_as_unfinished(tmp_path):
 def test_best_over_one_seed_on_a_finished_sweep_raises(tmp_path):
     """seed=multirun([0]) is swept in name only; over="seed" would silently be
     the per-cell pick with n=1, the lucky-seed answer the option exists to
-    avoid. Mid-sweep one seed is plausible and warns instead (see the
-    provisional-bar test)."""
+    avoid. The same holds mid-sweep (see the sibling test)."""
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod
@@ -531,3 +533,15 @@ def test_best_over_does_not_count_foreign_running_cells_as_unfinished(tmp_path):
         r = mushin.best(wd, "score", over="seed")
     assert r.combo == {"lr": 0.2} and r.n == 3
     assert "not finished" not in str(rec[0].message)
+
+
+def test_best_tolerates_a_metrics_sidecar_past_the_json_digit_limit(tmp_path):
+    """json.loads raises a plain ValueError, not JSONDecodeError, for an int
+    past its digit limit; the sidecar then reads as absent, like other corrupt
+    sidecars, instead of crashing every offline view."""
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    lucky = _cell_dir(wd, lr=0.1, seed=2)
+    (lucky / "mushin_metrics.json").write_text('{"score": 1' + "0" * 5000 + "}")
+    assert mushin.best(wd, "score").combo["lr"] == 0.2
+    assert len(mushin.show(wd).rows) == 6

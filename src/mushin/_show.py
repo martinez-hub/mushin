@@ -12,7 +12,6 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from statistics import fmean
 from typing import Any
 
 
@@ -358,6 +357,8 @@ def _mean(values: list[float]) -> float | None:
     """``fmean``, or None when it has no finite answer: fsum raises on
     intermediate overflow (two values near 1e308), and a mean of ``inf`` is no
     mean to compare."""
+    from statistics import fmean  # statistics costs `import mushin` about 4 ms
+
     try:
         m = fmean(values)
     except OverflowError:
@@ -467,6 +468,12 @@ def _best_group(
             f"{', or it has not finished: ' + why if why else ''}), so there is "
             f"nothing to average; `best()` without `over=` returns the best "
             f"single cell."
+        )
+    dropped = {over_key(c) for c in grouped} - bar
+    if dropped:
+        notes.append(
+            f"{len(dropped)} value(s) of {names} have no result in any group and "
+            f"are left out of every mean"
         )
     skipped = len(groups) - len(scored)
     if skipped:
