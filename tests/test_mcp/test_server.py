@@ -215,6 +215,38 @@ def test_server_end_to_end_in_memory(tmp_path):
     assert bad.is_error is True
 
 
+def test_server_serves_the_guide_as_prompt_and_resource(tmp_path):
+    """An MCP client gets the agent guide, matching the installed mushin,
+    without leaving the client: as the `guide` prompt (a slash command in
+    Claude Code) and as the `mushin://guide` resource."""
+    pytest.importorskip("mcp")
+    import anyio
+    from mcp import Client
+
+    from mushin.__main__ import guide_text
+    from mushin.mcp.server import create_server
+
+    server = create_server(root=tmp_path)
+    assert "guide" in server.instructions
+    assert "read-only" in server.instructions.lower()
+
+    async def scenario():
+        async with Client(server, raise_exceptions=True) as client:
+            prompts = await client.list_prompts()
+            prompt = await client.get_prompt("guide")
+            resources = await client.list_resources()
+            resource = await client.read_resource("mushin://guide")
+            return prompts, prompt, resources, resource
+
+    prompts, prompt, resources, resource = anyio.run(scenario)
+    assert [p.name for p in prompts.prompts] == ["guide"]
+    assert [m.content.text for m in prompt.messages] == [guide_text()]
+    assert [(str(r.uri), r.mime_type) for r in resources.resources] == [
+        ("mushin://guide", "text/markdown")
+    ]
+    assert [c.text for c in resource.contents] == [guide_text()]
+
+
 def test_main_builds_server_without_running(monkeypatch):
     pytest.importorskip("mcp")
     import mushin.mcp.__main__ as cli
