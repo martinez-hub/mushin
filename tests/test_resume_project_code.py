@@ -326,12 +326,12 @@ def test_an_installed_but_editable_distribution_is_the_project(monkeypatch):
     monkeypatch.setattr(
         r, "_installed_roots", lambda: {"clusterlib": (pathlib.Path("/x"),)}
     )
-    r._is_foreign_module.cache_clear()
+    r._foreign_by_path.cache_clear()
     try:
         assert r._is_foreign_module("clusterlib.ops")
         assert not r._is_foreign_module("mylab_project.models")
     finally:
-        r._is_foreign_module.cache_clear()
+        r._foreign_by_path.cache_clear()
 
 
 def test_changed_project_code_does_not_compare_across_python_versions():
@@ -800,11 +800,11 @@ def test_a_module_reached_by_two_functions_is_walked_for_both(project):
 
 
 def test_objects_containers_and_installed_code_get_no_entry(project):
-    """Only project code and constants are entries: a mutable container, an
-    object and an installed function or module may change as the code runs or
-    belong to provenance, so they are not compared (a helper replaced by an
-    installed function goes unseen, a documented limit). A task that reaches
-    nothing else keeps main's two-part cache key."""
+    """An installed module the task reaches gets no entry of its own, and a
+    container the task fills as it runs does not move the record: a project
+    file's literal names are hashed by value and the rest by the source of
+    their assignment, so `CACHE = {}` reads the same after a run fills it, and
+    `act = math.fabs` swapped for another installed function shows."""
     root, _ = project
     src = """
         import math
@@ -812,17 +812,22 @@ def test_objects_containers_and_installed_code_get_no_entry(project):
         import numpy as np
 
         LAYERS = [64, 64]
-        CACHE = {}
-        act = math.fabs
+        CACHE = {{}}
+        act = math.{fn}
 
 
         def task(a):
             CACHE[a] = 1
             return dict(v=act(a) * len(LAYERS) + float(np.mean([a])))
         """
-    mod = _module(root, "mushin_t_kinds", textwrap.dedent(src))
+    mod = _module(root, "mushin_t_kinds", textwrap.dedent(src).format(fn="fabs"))
     try:
-        assert project_fingerprints(mod.task)["code"] == {}
+        before = project_fingerprints(mod.task)
+        assert "mushin_t_kinds:np" not in before["code"]
+        mod.task(3)
+        assert project_fingerprints(mod.task) == before
+        mod = _module(root, "mushin_t_kinds", textwrap.dedent(src).format(fn="sqrt"))
+        assert _changed(before, mod.task) == ["mushin_t_kinds:act"]
     finally:
         sys.modules.pop("mushin_t_kinds", None)
 
@@ -981,14 +986,14 @@ def test_a_project_file_is_the_project_even_if_an_installed_name_matches(
     monkeypatch.setattr(
         r, "_installed_roots", lambda: {EXP: (elsewhere.resolve(),), "numpy": ()}
     )
-    r._is_foreign_module.cache_clear()
+    r._foreign_by_path.cache_clear()
     try:
         assert not r._is_foreign_module(EXP)  # its file is in the project
         monkeypatch.setattr(r, "_installed_roots", lambda: {EXP: (root.resolve(),)})
-        r._is_foreign_module.cache_clear()
+        r._foreign_by_path.cache_clear()
         assert r._is_foreign_module(EXP)  # its file is inside the install dir
     finally:
-        r._is_foreign_module.cache_clear()
+        r._foreign_by_path.cache_clear()
 
 
 def test_pre_task_and_config_targets_are_roots(project):
@@ -1043,8 +1048,10 @@ def test_a_reused_cell_keeps_its_prior_record():
     assert merge_project_records(prior, current) == prior
     assert merge_project_records(prior, None) == prior
     assert merge_project_records(None, current) == current
+    # A record from another Python version can never be compared again: the
+    # current one replaces it, so the cell is guarded from now on.
     other = {"python": "0.0", "code": {"m:f": "9"}}
-    assert merge_project_records(other, current) == other
+    assert merge_project_records(other, current) == current
 
 
 def test_a_method_default_is_part_of_its_class(project):
@@ -1153,7 +1160,7 @@ def test_a_legacy_develop_install_is_the_project(tmp_path, monkeypatch):
         assert roots["wheelpkg"] == (site.resolve(),)
     finally:
         r._installed_roots.cache_clear()
-        r._is_foreign_module.cache_clear()
+        r._foreign_by_path.cache_clear()
 
 
 def test_a_project_decorator_on_the_task_and_callable_defaults_are_code(project):
@@ -1499,7 +1506,7 @@ def test_a_project_module_seen_before_import_is_judged_again_after(
         "_installed_roots",
         lambda: {"mushin_t_late": ((root.parent / "elsewhere").resolve(),)},
     )
-    r._is_foreign_module.cache_clear()
+    r._foreign_by_path.cache_clear()
     try:
         assert r._is_foreign_module("mushin_t_late")  # not imported: by name
         (root / "mushin_t_late.py").write_text("X = 1\n")
@@ -1507,7 +1514,7 @@ def test_a_project_module_seen_before_import_is_judged_again_after(
         assert not r._is_foreign_module("mushin_t_late")  # now by its file
     finally:
         sys.modules.pop("mushin_t_late", None)
-        r._is_foreign_module.cache_clear()
+        r._foreign_by_path.cache_clear()
 
 
 JOBLIB_SCRIPT = """
@@ -1716,3 +1723,126 @@ def test_a_registry_holds_code_not_entries_for_its_other_contents(project):
         assert project_fingerprints(mod.task) == before
     finally:
         sys.modules.pop("mushin_t_reg2", None)
+
+
+# --- final round -----------------------------------------------------------
+
+
+def test_a_computed_constant_reads_the_same_on_every_host(project, monkeypatch):
+    """`N = os.cpu_count()` or `DEVICE = "cuda" if ... else "cpu"` differs from
+    node to node; it is recorded by its source, so a resume on another node
+    does not re-run unchanged cells, and editing the expression still shows."""
+    root, _ = project
+    src = 'import os\n\nN = os.cpu_count() {op} 1\nDEVICE = "cuda" if os.environ.get("MUSHIN_T_GPU") else "cpu"\n\n\ndef task(a):\n    return dict(v=float(a * N) + len(DEVICE))\n'
+    mod = _module(root, "mushin_t_host", src.format(op="+"))
+    try:
+        before = project_fingerprints(mod.task)
+        monkeypatch.setattr(os, "cpu_count", lambda: 999)
+        monkeypatch.setenv("MUSHIN_T_GPU", "1")
+        mod = _module(root, "mushin_t_host", src.format(op="+"))  # another node
+        assert _changed(before, mod.task) == []
+        mod = _module(root, "mushin_t_host", src.format(op="-"))
+        assert _changed(before, mod.task) == ["mushin_t_host:N"]
+    finally:
+        sys.modules.pop("mushin_t_host", None)
+
+
+def test_a_class_value_filled_at_runtime_is_not_an_edit(project):
+    """A class-level cache a classmethod fills on first use: the class body's
+    source is what is compared, so an in-process resume reuses the cells; an
+    edit to a class constant still shows."""
+    root, _ = project
+    src = "class Scaler:\n    FACTOR = {f}\n    _table = None\n\n    @classmethod\n    def scale(cls, x):\n        if cls._table is None:\n            cls._table = {{1: 2}}\n        return x * cls.FACTOR\n\n\ndef task(a):\n    return dict(v=Scaler.scale(a))\n"
+    mod = _module(root, "mushin_t_clscache", src.format(f=2))
+    try:
+        before = project_fingerprints(mod.task)
+        mod.task(1)
+        assert _changed(before, mod.task) == []
+        mod = _module(root, "mushin_t_clscache", src.format(f=3))
+        assert "mushin_t_clscache:Scaler" in _changed(before, mod.task)
+    finally:
+        sys.modules.pop("mushin_t_clscache", None)
+
+
+def test_hydra_zen_routes_classes_through_its_own_functions():
+    """just(Cls) names Cls under `path` of hydra_zen.funcs.get_obj, and
+    builds(..., zen_meta=...) under `_zen_target` of zen_processing."""
+    from mushin._resume import _config_targets
+
+    cfg = {
+        "m": {"_target_": "hydra_zen.funcs.get_obj", "path": "pkg.models.Net"},
+        "n": {
+            "_target_": "hydra_zen.funcs.zen_processing",
+            "_zen_target": "pkg.models.Head",
+        },
+    }
+    assert {"pkg.models.Net", "pkg.models.Head"} <= set(_config_targets(cfg))
+
+
+def test_a_driver_script_target_does_not_hash_the_script():
+    """builds(Net) in a script names __main__.Net; recording the whole script
+    would make an edit to its run block an edit."""
+    from mushin._resume import _CodeWalk
+
+    walk = _CodeWalk()
+    walk.walk_target("__main__.Net")
+    assert walk.hashes == {}
+
+
+def test_a_docstring_added_to_an_undocumented_helper_is_not_an_edit(project):
+    root, _ = project
+    src = "def helper(x):\n{doc}    return x * 2\n\n\ndef task(a):\n    return dict(v=helper(a))\n"
+    mod = _module(root, "mushin_t_doc2", src.format(doc=""))
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(
+            root, "mushin_t_doc2", src.format(doc='    """Now documented."""\n')
+        )
+        assert _changed(before, mod.task) == []
+    finally:
+        sys.modules.pop("mushin_t_doc2", None)
+
+
+def test_a_lazily_imported_module_named_like_an_installed_one_is_found(
+    project, monkeypatch
+):
+    """A body import of the checkout's module while an installed distribution
+    also provides that name: the file decides, before and after the import."""
+    import mushin._resume as r
+
+    root, _ = project
+    (root / "mushin_t_utils2.py").write_text("def helper(x):\n    return x\n")
+    monkeypatch.setattr(
+        r,
+        "_installed_roots",
+        lambda: {"mushin_t_utils2": ((root.parent / "elsewhere").resolve(),)},
+    )
+    r._foreign_by_path.cache_clear()
+    mod = _module(
+        root,
+        "mushin_t_lazyutil",
+        "def task(a):\n    from mushin_t_utils2 import helper\n\n    return dict(v=helper(a))\n",
+    )
+    try:
+        assert "mushin_t_utils2 (file)" in project_fingerprints(mod.task)["code"]
+    finally:
+        for n in ("mushin_t_utils2", "mushin_t_lazyutil"):
+            sys.modules.pop(n, None)
+        r._foreign_by_path.cache_clear()
+
+
+def test_a_walk_past_its_bound_warns_once(project, monkeypatch):
+    import mushin._resume as r
+
+    root, _ = project
+    lines = [f"def f{i}(x):\n    return f{i + 1}(x)\n" for i in range(50)]
+    lines.append("def f50(x):\n    return x\n")
+    lines.append("def task(a):\n    return dict(v=f0(a))\n")
+    mod = _module(root, "mushin_t_bound2", "\n\n".join(lines))
+    monkeypatch.setattr(r, "_WALK_MAX_OPS", 10)
+    monkeypatch.setattr(r, "_TRUNCATION_WARNED", [])
+    try:
+        with pytest.warns(UserWarning, match="larger than the fingerprint walks"):
+            project_fingerprints(mod.task)
+    finally:
+        sys.modules.pop("mushin_t_bound2", None)

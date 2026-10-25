@@ -154,9 +154,11 @@ rules:
   helpers, classes and constants the task (and `pre_task`) uses, followed
   through the project's own modules as the running process has loaded them
   (a notebook's functions, a script's main block and a registry dict of
-  classes included), and the config's `_target_` classes once their module is
-  imported. A comment in a helper is not an edit (one in the task function's
-  own body is). It does not see an installed package,
+  classes included), and the classes the config names as `_target_` (by
+  their module's file). A comment or docstring in a helper is not an edit
+  (one in the task function's own body is), and a value computed on import
+  (`os.cpu_count()`) is compared by its source, so it reads alike on every
+  node. It does not see an installed package,
   data files, or code reached only through some other string. After such a
   change, use a new
   `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still

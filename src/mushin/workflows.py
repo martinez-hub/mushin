@@ -613,10 +613,11 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         cwd = Path.cwd()
                         write_metrics_sidecar(cwd, cached)
-                        # Keep the reused cell's prior record merged with this
-                        # one: dropping a key (or the whole record, when this
-                        # run has none) would let a later resume reuse the cell
-                        # unchecked.
+                        # Keep the reused cell's prior record (see
+                        # merge_project_records): writing this run's keys would
+                        # declare it checked against code it was not compared
+                        # with, and dropping the record would let a later resume
+                        # reuse the cell unchecked.
                         write_status(
                             cwd,
                             status="completed",
@@ -1987,35 +1988,41 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             cell is reused only if its swept-parameter combination AND
             fingerprints of its resolved config, its task source and the
             project code the cell reaches still match. The project code is
-            found from the names the task's code uses (and ``pre_task``'s, and
-            the classes the cell's config names as ``_target_``), followed
-            through the project's own functions, classes, modules and constants
-            as the cell's process has loaded them, which is the code that runs:
-            a helper it calls, a constant it reads (``from consts import
-            THRESH`` included), a class in a registry dict it indexes, a
+            found from the names the task's code uses (and ``pre_task``'s),
+            followed through the project's own functions, classes, modules and
+            constants as the cell's process has loaded them, which is the code
+            that runs: a helper it calls, a constant it reads (``from consts
+            import THRESH`` included), a class in a registry dict it indexes, a
             function in a notebook or in a script's main block, a module it
-            imports inside its body (with the project modules that module
-            imports), a frozen settings dataclass it reads. Helpers are hashed by their
+            imports inside its body (by its file, with the project modules that
+            file imports), a frozen settings dataclass, and the classes the
+            cell's config names (``_target_``, or hydra-zen's ``just()`` and
+            ``zen_meta``), by their module's file. Helpers are hashed by their
             bytecode, so a comment, a docstring or a moved definition in one is
             not an edit (the task function's own source is compared as text, so
-            a comment in its body is). A changed non-swept value, an
-            edited task body or an edited helper re-runs that cell, with a
-            warning naming where the change is (``helpers:scale``). Not
+            a comment in its body is). A module-level value computed on import
+            (``os.cpu_count()``, ``"cuda" if ... else "cpu"``) is compared by
+            the source of its assignment, and a class's constants by its body's
+            source, so they read alike on every node. A changed non-swept
+            value, an edited task body or an edited helper re-runs that cell,
+            with a warning naming where the change is (``helpers:scale``). Not
             covered: installed packages other than editable ones (a helper
             replaced by an installed function is not seen), data files, the
             environment, objects and mutable containers (beyond the project
             code a container holds), a module-level name the project's own code
             rebinds (a lazily created object, a warn-once flag: state, not
-            code), and code reached only through a string other than a
-            ``_target_``. Where in doubt the guard misses an edit rather than
-            re-running unchanged cells, and the walk has a fixed size limit, so
-            a very large project is covered only as far as it reaches. A module-level value
-            computed at import (from the clock, the environment, the host) is
-            hashed by its value, so if it differs from process to process the
-            cells re-run. A resume under another Python
-            version does not compare project code (its bytecode differs).
-            After upgrading a dependency, changing the data or editing such
-            code, re-run from a fresh ``working_dir`` rather than resuming.
+            code), a class the config names from the driver script itself
+            (``__main__``; covered when the task's code uses it), and code
+            reached only through some other string. A module imported in the
+            task's body, or named by the config, is read from its file, so
+            editing it in a running process without reloading records the
+            edit. Where in doubt the guard misses an edit rather than re-running
+            unchanged cells, and the walk has a fixed size limit, so a very
+            large project is covered only as far as it reaches (with a
+            warning). A resume under another Python version does not compare
+            project code (its bytecode differs). After upgrading a dependency,
+            changing the data or editing such code, re-run from a fresh
+            ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
