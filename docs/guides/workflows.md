@@ -288,7 +288,9 @@ tasks, including lambdas and nested functions. Some backends (joblib's
 library's `pickle`, which requires your `task` (and any custom `pre_task`) to be
 importable (module-level). Keeping tasks module-level is the portable choice.
 Resilience (`on_error="nan"`, `resume=True`) and provenance behave identically
-out-of-process.
+out-of-process. So does `max_total_seconds`: every worker honors the sweep's one
+deadline, so it bounds the sweep's elapsed time, not the compute summed over the
+workers.
 
 ### Two axes of parallelism: launchers vs. `HydraDDP`
 

@@ -4,6 +4,7 @@
 
 import dataclasses
 import functools
+import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from inspect import getattr_static
@@ -355,6 +356,180 @@ def _group_choices_of_job(job) -> dict | None:
     return hydra_choices(hydra)
 
 
+# Prefix of the file, in the sweep root, through which a parallel launcher's
+# workers share a run's `max_total_seconds` start; the run's
+# `_TaskRunner.budget_id` completes the name. Hidden: it means nothing once its
+# run is over.
+_BUDGET_START_PREFIX = ".mushin_budget_start."
+
+# The start record is self-validating: its creator writes `repr(start)` and a
+# newline in one write, so a record that ends with the newline is complete.
+# The file is named by the run's uuid, so only this run wrote it, and a
+# complete record is trusted when it parses as finite and falls inside this
+# range: after 2020-01-01 UTC and no more than a day ahead of the reader's
+# clock, which only rejects a value no clock could have produced. The file's
+# mtime is no check on it: on NFS the mtime comes from the server's clock, and
+# the server's skew would become a budget error. (Publishing the record with
+# `os.link` from a temp file would close the incomplete-read window instead,
+# but hard links fail on FAT and many SMB shares, and an NFS link whose reply
+# is lost can report EEXIST to the process that made it.)
+_BUDGET_START_FLOOR = 1577836800.0
+_BUDGET_START_LEAD_S = 86400.0
+
+# How many times a reader reads an incomplete start record (its creator
+# between the create and the write), 2 ms apart, before the mtime stands in.
+_BUDGET_START_READS = 5
+
+# This process's monotonic deadline per run (`budget_id`), for the runner
+# run() built and for every copy a parallel launcher unpickles: joblib
+# unpickles a fresh copy for every job inside the same worker process, so a
+# deadline kept on the copy would restart with each job. loky keeps its
+# workers across run() calls, so only the `_BUDGET_DEADLINES_KEPT` most recent
+# runs are kept, far more than a process runs cells of at once.
+_BUDGET_DEADLINES: dict[str, float] = {}
+_BUDGET_DEADLINES_KEPT = 64
+
+
+def _remember_deadline(budget_id: str, deadline: float) -> None:
+    """Record this process's deadline for a run, as its most recent entry."""
+    _BUDGET_DEADLINES.pop(budget_id, None)
+    _BUDGET_DEADLINES[budget_id] = deadline
+    while len(_BUDGET_DEADLINES) > _BUDGET_DEADLINES_KEPT:
+        del _BUDGET_DEADLINES[next(iter(_BUDGET_DEADLINES))]
+
+
+def _subdir_depth(hydra) -> int:
+    """How many levels below the sweep root `hydra.sweep.subdir` puts a job's
+    dir: 1 for Hydra's default (``${hydra.job.num}``), 2 for ``a_${a}/b_${b}``.
+
+    Counted on the resolved subdir when the config resolves it: a running
+    job's live config does, while a launched job's detached config cannot
+    resolve the job's own keys (``${a}``), so there the unresolved text is
+    counted instead. Climbing from a job dir needs no read of
+    `hydra.sweep.dir`, whose default holds a ``${now:...}``."""
+    try:
+        return max(len(Path(str(hydra.sweep.subdir)).parts), 1)
+    except Exception:  # noqa: BLE001 - not resolvable here: count the text
+        pass
+    try:
+        from omegaconf import OmegaConf
+
+        raw = OmegaConf.to_container(hydra.sweep, resolve=False)["subdir"]
+        return max(len(Path(str(raw)).parts), 1)
+    except Exception:  # noqa: BLE001 - no subdir at all: Hydra's default
+        return 1
+
+
+def _job_dir(job) -> Path:
+    """A launched job's dir: the `working_dir` Hydra reports for it, resolved
+    against the original cwd."""
+    return Path(job.hydra_cfg.hydra.runtime.cwd) / job.working_dir
+
+
+def _cell_sweep_root() -> Path:
+    """The sweep root of the cell running in this process: its dir, the cwd
+    (Hydra chdirs into it, and every sidecar write in the runner relies on
+    that), climbed `_subdir_depth` levels. Outside a Hydra job (a runner
+    called directly), the cwd's parent."""
+    depth = 1
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        if HydraConfig.initialized():
+            depth = _subdir_depth(HydraConfig.get())
+    except Exception:  # noqa: BLE001 - no usable job config: the default depth
+        pass
+    cwd = Path.cwd()
+    parents = cwd.parents
+    return parents[min(depth, len(parents)) - 1] if parents else cwd
+
+
+def _read_budget_start(path: Path) -> float | None:
+    """The start recorded in the budget start file ``path``, as a
+    ``time.time()`` value, or None when the file is gone.
+
+    A complete record (it ends with the newline its creator writes) is
+    trusted when it parses as a finite float in the range `_BUDGET_START_FLOOR`
+    describes. The creator may be between its create and its write, so an
+    incomplete read is retried for a few milliseconds; a file that stays
+    incomplete or unparsable stands for its creation time, its mtime, which,
+    kept at 1 s resolution, would shorten a sub-second budget.
+    """
+    import math
+    import time
+
+    text = ""
+    for attempt in range(_BUDGET_START_READS):
+        try:
+            text = path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            return None  # gone: no retry brings it back
+        except ValueError:
+            text = ""
+            break  # undecodable, so not a record: the mtime stands in
+        except OSError:
+            text = ""
+        if text.endswith("\n") or attempt == _BUDGET_START_READS - 1:
+            break
+        time.sleep(0.002)
+    value = math.nan
+    if text.endswith("\n"):
+        try:
+            value = float(text)
+        except ValueError:
+            pass
+    if (
+        math.isfinite(value)
+        and _BUDGET_START_FLOOR <= value <= time.time() + _BUDGET_START_LEAD_S
+    ):
+        return value
+    mtime = _mtime(path)  # infinity when the file is gone
+    return mtime if math.isfinite(mtime) else None
+
+
+def _remove_budget_start(runner, jobs, working_dir) -> None:
+    """Delete the start file of the run that ``runner`` dispatched, and this
+    process's deadline for it, once its launch has returned normally.
+
+    Only a runner a launcher pickled has workers that write the file, so the
+    sequential launcher's run looks for none. The file sits in the sweep root,
+    `_subdir_depth` levels above every job dir; it is looked for by climbing
+    from each distinct job-dir parent, at most one level further than that
+    depth and never past ``working_dir``, rather than at a derived root, and
+    the search stops at the first file found: its name holds the run's uuid,
+    so no other file can match. Best-effort."""
+    if runner.budget_id is None:
+        return
+    _BUDGET_DEADLINES.pop(runner.budget_id, None)
+    if not runner._shipped:
+        return
+    import os
+
+    stop = None if working_dir is None else Path(os.getcwd(), working_dir)
+    name = f"{_BUDGET_START_PREFIX}{runner.budget_id}"
+    seen: set[Path] = set()
+    for job in jobs:
+        try:
+            parent = _job_dir(job).parent
+            depth = _subdir_depth(job.hydra_cfg.hydra)
+        except Exception:  # noqa: BLE001 - a job without a hydra config
+            continue
+        if parent in seen:
+            continue
+        seen.add(parent)
+        d = parent
+        for _ in range(depth + 1):
+            try:
+                if (d / name).exists():
+                    (d / name).unlink()
+                    return
+            except OSError:
+                pass
+            if d == stop or d.parent == d:
+                break
+            d = d.parent
+
+
 class _TaskRunner:
     """Picklable per-cell dispatch. Collapses the old closure chain
     (_task_calls / _instrument_task / _fail_soft / _resume_short_circuit) into one
@@ -395,13 +570,196 @@ class _TaskRunner:
         # (config fingerprint, code fingerprint). A cell whose config AND task
         # source match a cached entry reuses it instead of recomputing.
         self.cache_dir = cache_dir
-        # Wall-clock budget: the deadline is set lazily at the first COMPUTED
-        # cell (below), so launch/import overhead and resume cache hits don't
-        # consume it. None resets on pickle -> each worker process observes its
-        # own budget (the feature targets the default sequential launcher).
+        # Wall-clock budget: one deadline for the whole sweep, however many
+        # processes run its cells. It starts at the first COMPUTED cell in any
+        # process (`_start_budget`), so launch/import overhead and resume cache
+        # hits don't consume it. Each process keeps its deadline for the run in
+        # `_BUDGET_DEADLINES`, keyed by `budget_id`. The runner run() built,
+        # which the default sequential launcher calls directly, times the
+        # budget there on its own and writes no file. A parallel launcher
+        # pickles the runner to its workers (joblib once per job), so the
+        # copies share the start through a file in the sweep root that the
+        # first computing cell creates; `budget_id` names it. Every copy
+        # carries the same id, so they share one start; the next run() (a
+        # resume) builds a new runner with a new id, so a start that an
+        # earlier run left behind is never read.
         self.max_total_seconds = max_total_seconds
-        self._deadline = None
+        self.budget_id = uuid.uuid4().hex if max_total_seconds is not None else None
+        # True only in an unpickled copy (`__setstate__`).
+        self._shared_budget = False
+        # True once a launcher has pickled this runner (`__getstate__`): only
+        # then can a worker have written a start file for run() to remove.
+        self._shipped = False
         self._budget_rank_warned = False
+
+    def __getstate__(self):
+        self._shipped = True
+        return self.__dict__.copy()
+
+    def __setstate__(self, state):
+        # Being unpickled means a launcher shipped this runner to a worker, so
+        # the deadline comes from the sweep's shared start. A runner pickled by
+        # an earlier mushin (a submitit array queued before an upgrade) has no
+        # `budget_id` to share a start by, and an old per-copy `_deadline`
+        # that means nothing here: it gets an id of its own and times a budget
+        # of its own, as that version did. The budget fields are normalized
+        # here, once, so every later read can trust them.
+        self.__dict__.update(state)
+        self.__dict__.pop("_deadline", None)
+        self._shared_budget = "budget_id" in state
+        if not self._shared_budget:
+            self.budget_id = (
+                uuid.uuid4().hex if state.get("max_total_seconds") is not None else None
+            )
+        self.__dict__.setdefault("_shipped", False)
+
+    def budget_start_path(self, root) -> Path:
+        """The file in sweep root ``root`` that holds this run's budget start."""
+        return Path(root) / f"{_BUDGET_START_PREFIX}{self.budget_id}"
+
+    def _known_deadline(self) -> float | None:
+        """This process's monotonic deadline for the run, or None before
+        `_start_budget` has fixed it."""
+        return _BUDGET_DEADLINES.get(self.budget_id)
+
+    def _start_budget(self) -> bool:
+        """Fix this process's deadline for the cell about to compute: the one
+        place the clock starts. Returns True when this cell fixed it, so it
+        runs whatever the clock says: it started the sweep's clock, or, when no
+        start can be shared, this process's own. A no-op returning False once
+        the deadline is known.
+
+        The runner run() built times the budget from this cell on the
+        monotonic clock, so a wall-clock step (NTP) mid-sweep cannot move it.
+        An unpickled copy takes the sweep's start from the start file in the
+        sweep root, creating the file, and so starting the clock, if no cell
+        has, and turns that start into a deadline on its own process's
+        monotonic clock. When no start can be shared, the process times the
+        budget from this cell, with a warning (`_budget_fallback`).
+        """
+        import time
+
+        if self._known_deadline() is not None:
+            return False
+        if not self._shared_budget:
+            _remember_deadline(
+                self.budget_id, time.monotonic() + self.max_total_seconds
+            )
+            return True
+        shared = self._shared_budget_start(_cell_sweep_root())
+        if shared is None:
+            return True  # `_budget_fallback` started this process's clock here
+        start, created = shared
+        # Both clocks are read after the file I/O (the read's retries, a slow
+        # NFS stat), so its time is not taken off the budget.
+        wall, now = time.time(), time.monotonic()
+        _remember_deadline(self.budget_id, now + start + self.max_total_seconds - wall)
+        return created
+
+    def _budget_expired(self) -> bool:
+        """Whether this process's deadline for the run has passed. Pure: False
+        before `_start_budget` has fixed a deadline, so a stray call cannot
+        start the clock."""
+        import time
+
+        deadline = self._known_deadline()
+        return deadline is not None and time.monotonic() >= deadline
+
+    def _budget_fallback(self, reason: str, *, stacklevel: int) -> None:
+        """Time the budget from this process's first cell when the sweep's
+        start cannot be shared, and warn that it may not hold across
+        processes. ``stacklevel`` is the one `warnings.warn` would take at the
+        call site, counted so the warning names the caller of `__call__`.
+        """
+        import time
+        import warnings
+
+        # The deadline first, so a warning that raises cannot leave the
+        # process without one.
+        if self._known_deadline() is None:
+            _remember_deadline(
+                self.budget_id, time.monotonic() + self.max_total_seconds
+            )
+        # Raised in the worker process that runs this cell, so it reaches that
+        # process's stderr (the console under joblib, the job's log under
+        # submitit), never the warning filters of the process that called
+        # run(); the deadline above makes it once per process and run. A
+        # filter that turns it into an error (PYTHONWARNINGS=error, which the
+        # workers inherit) must not fail the cell over a degraded budget, so
+        # the error is dropped.
+        try:
+            warnings.warn(
+                f"`max_total_seconds`: {reason}; this worker process times the "
+                "budget from its own first cell, so the budget may not hold "
+                "across worker processes.",
+                UserWarning,
+                stacklevel=stacklevel + 1,
+            )
+        except Warning:
+            pass
+
+    def _shared_budget_start(self, root: Path) -> tuple[float, bool] | None:
+        """``(start, created)``: the sweep's budget start as a ``time.time()``
+        value, and whether this call started the clock by creating the start
+        file (the first cell to compute in any process). None when no start
+        can be shared: `_budget_fallback` has then fixed this process's own.
+
+        ``os.O_EXCL`` makes the creation first-writer-wins across processes
+        (and across nodes on a shared filesystem, as submitit needs anyway).
+        The start is a ``time.time()`` value because ``time.monotonic`` is per
+        process; the wall clock is the only clock that worker processes, and
+        nodes, share.
+        """
+        import os
+        import time
+
+        path = self.budget_start_path(root)
+        start = time.time()
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            read = _read_budget_start(path)  # another cell started the clock
+            if read is None:
+                # warn <- here <- _start_budget <- __call__ <- its caller
+                self._budget_fallback(
+                    f"the budget start file {str(path)!r} vanished before it "
+                    "could be read",
+                    stacklevel=4,
+                )
+                return None
+            return read, False
+        except OSError as exc:
+            self._budget_fallback(
+                f"could not create the budget start file {str(path)!r} ({exc})",
+                stacklevel=4,
+            )
+            return None
+        # One write of the whole record: its newline tells a reader it is
+        # complete (`_read_budget_start`). A failed write or close leaves an
+        # incomplete record, and readers fall back to the file's mtime.
+        try:
+            os.write(fd, f"{start!r}\n".encode("ascii"))
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return start, True
+
+    def _began_under_this_budget(self, cell_dir) -> bool:
+        """Whether this cell already started under this run's budget: its own
+        status sidecar says 'running' with this run's `budget_id`. A cell that
+        a scheduler preempted and requeued (SLURM `requeue`) enters again in a
+        new process, possibly after the deadline; it started before the
+        deadline, and a running cell is never cut short, so it runs on."""
+        from ._resume import read_cell_status
+
+        status = read_cell_status(cell_dir) or {}
+        return (
+            status.get("status") == "running"
+            and status.get("budget_id") == self.budget_id
+        )
 
     def _cache_key(self, config_hash) -> str | None:
         """The content-address for this cell: a hash of its resolved-config and
@@ -590,36 +948,51 @@ class _TaskRunner:
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
         # cells (no compute) so a long sweep ends gracefully instead of running
-        # to completion. The clock starts at THIS, the first computed cell (cache
-        # hits above returned before here), so at least one cell always runs. A
-        # skipped cell is 'skipped', not 'completed', so a later resume with more
-        # time finishes it. A cell already running is never interrupted.
+        # to completion. The clock starts at the sweep's first computed cell, in
+        # whichever process runs it (cache hits above returned before here), so
+        # at least one cell always runs. A skipped cell is 'skipped', not
+        # 'completed', so a later resume with more time finishes it. A cell
+        # already running is never interrupted.
         if self.max_total_seconds is not None and self._multi_rank_world():
             # Under an external multi-rank launch (submitit DDP/FSDP: every
-            # rank runs this task with its OWN deadline), a budget that expires
-            # on one rank but not its siblings would leave the training ranks
-            # hanging at NCCL rendezvous. Disable the budget rather than risk
-            # the hang; the scheduler's own time limit still bounds the job.
+            # rank runs this task and checks the deadline at its own moment),
+            # a budget that expires on one rank but not its siblings would
+            # leave the training ranks hanging at NCCL rendezvous. Disable the
+            # budget rather than risk the hang; the scheduler's own time limit
+            # still bounds the job.
             if not self._budget_rank_warned:
                 warnings.warn(
                     "`max_total_seconds` is disabled for this cell: it runs "
                     "under a multi-rank launch (WORLD_SIZE/SLURM_NTASKS > 1), "
-                    "where per-rank deadlines could diverge and hang DDP at "
-                    "rendezvous. Use the scheduler's time limit (e.g. "
-                    "submitit's `timeout_min`) to bound multi-rank jobs.",
+                    "where ranks checking the deadline at different moments "
+                    "could diverge and hang DDP at rendezvous. Use the "
+                    "scheduler's time limit (e.g. submitit's `timeout_min`) "
+                    "to bound multi-rank jobs.",
                     UserWarning,
                     stacklevel=2,
                 )
                 self._budget_rank_warned = True
         elif self.max_total_seconds is not None:
-            import time
-
-            # Monotonic: a wall-clock step (NTP/DST) mid-sweep must neither
-            # extend the budget nor expire it early.
-            now = time.monotonic()
-            if self._deadline is None:
-                self._deadline = now + self.max_total_seconds
-            elif now >= self._deadline:
+            # Start the clock first (a no-op once this process knows the
+            # deadline): the cell that starts it always runs. A cell that a
+            # scheduler requeued after the deadline started before it, so it
+            # runs on (its 'running' record below carries this run's id).
+            try:
+                skip = (
+                    not self._start_budget()
+                    and self._budget_expired()
+                    and not self._began_under_this_budget(Path.cwd())
+                )
+            except Exception as exc:  # noqa: BLE001 - the budget never fails a cell
+                # This step runs before the fail-soft guard below, so an
+                # unexpected error here would escape on_error="nan": time the
+                # budget per process instead, and run this cell.
+                # warn <- here (__call__) <- its caller
+                self._budget_fallback(
+                    f"the shared budget failed ({exc!r})", stacklevel=2
+                )
+                skip = False
+            if skip:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
                 write_status(cwd, status="skipped", combo=combo, attempt=1)
@@ -644,7 +1017,15 @@ class _TaskRunner:
             # 'completed' status and metrics for this cell's, and its job
             # number and choices (`load_from_dir` checks their age against
             # hydra.yaml, but a record of this job is what makes it certain).
-            write_status(cwd, status="running", combo=combo, attempt=rc.attempt)
+            # It names this run's budget, so a requeued cell started under it
+            # is not skipped (`_began_under_this_budget`).
+            write_status(
+                cwd,
+                status="running",
+                combo=combo,
+                attempt=rc.attempt,
+                budget_id=self.budget_id,
+            )
             self.pre_task(cfg)
             if rc.is_resume:
                 # pre_task may stage a checkpoint into the cell dir (the
@@ -1119,8 +1500,11 @@ class BaseWorkflow:
         max_total_seconds : float | None (default: None)
             Graceful wall-clock budget: once exhausted, remaining cells are
             skipped (NaN, ``self.skipped``) and a later ``resume=True`` finishes
-            them. Disabled (with a warning) for cells running under an external
-            multi-rank launch, because per-rank deadlines could diverge and
+            them. One deadline for the whole sweep, timed from its first
+            computed cell: under a parallel launcher (joblib, submitit) every
+            worker stops starting cells once it passes. Disabled (with a
+            warning) for cells running under an external multi-rank launch,
+            because ranks checking it at different moments could diverge and
             hang DDP.
 
         sample : int | None (default: None)
@@ -1601,6 +1985,17 @@ class BaseWorkflow:
             # ensure jobs are always sorted by job-num
             jobs = _sort_x_by_k(jobs, _job_nums)
 
+        # launch() returned, so every cell of this run is done with its budget
+        # start: remove it from the sweep root. Only on a normal return of the
+        # launch: when launch() raises (a failed cell under on_error="raise",
+        # Ctrl-C, a submitit timeout), jobs a scheduler still holds can start
+        # after this process is gone, and they must find the same start, not
+        # create a fresh one. A start left behind is inert: no later run has
+        # its id. Before the post-processing, which can raise on its own.
+        _remove_budget_start(
+            task_call, jobs if isinstance(jobs, list) else [jobs], working_dir
+        )
+
         self.jobs = jobs
         self.jobs_post_process()
 
@@ -1952,15 +2347,37 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             A graceful wall-clock budget. Once it is exhausted the remaining
             cells are skipped (recorded ``'skipped'``, NaN in the dataset,
             surfaced in ``self.skipped``) instead of the sweep running to the
-            end. The clock starts at the first computed cell, so at least one
-            cell always runs and resume cache hits do not consume it; a cell
-            already running is never interrupted. Skipped cells are not
-            completed, so a later ``resume=True`` with more time finishes them.
-            Measured per launcher process, best with the default sequential
-            launcher. Disabled (with a warning) for cells running under a
-            multi-rank launch (submitit DDP/FSDP): per-rank deadlines could
-            diverge and hang the ranks at rendezvous; use the scheduler's
-            time limit for those jobs instead.
+            end. The clock starts when the sweep's first computed cell starts,
+            so at least one cell always runs and resume cache hits do not
+            consume it; a cell already running is never interrupted, so the
+            sweep can end up to one cell's duration past the deadline (a cell
+            that a scheduler preempts and requeues after the deadline still
+            runs, since it started before it). Skipped cells are not
+            completed, so a later ``resume=True`` with more time finishes
+            them; pass ``max_total_seconds`` again to time-box that run too,
+            and its clock starts afresh. The budget is one deadline for the
+            whole sweep, whatever the launcher, as long as every worker sees
+            the same sweep directory (a filesystem they share, as submitit
+            needs anyway) and, on several nodes, synchronized clocks: under a
+            parallel launcher (``launcher="joblib"``, submitit) no worker
+            starts a cell after it passes, so it bounds elapsed time, not
+            compute summed over the workers, and each worker can finish one
+            cell it started just before it. The default sequential launcher
+            keeps the deadline in memory; a parallel launcher's workers share
+            the start through a hidden file in the sweep directory
+            (``.mushin_budget_start.<id>``), compared across processes on the
+            wall clock. ``run`` removes the file when its launch returns
+            normally; a launch that raises leaves it, so jobs a scheduler
+            still holds keep the same deadline, and it is inert afterwards
+            because each run has its own id. If no start can be shared (the
+            file cannot be created, or is gone when read) or the budget step
+            fails, each worker process times the budget from its own first
+            cell, which runs, with a warning raised in that worker (on its
+            stderr, not through the caller's warning filters). Disabled (with
+            a warning) for cells running under a multi-rank launch (submitit
+            DDP/FSDP): ranks checking the deadline at different moments could
+            diverge and hang at rendezvous; use the scheduler's time limit for
+            those jobs instead.
         sample : int | None (default: None)
             Run only a random subset of ``sample`` cells from the full grid for
             fast exploration; the remaining cells are skipped (NaN, and
@@ -2134,9 +2551,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             _hydra_cfg = job.hydra_cfg
             assert _hydra_cfg is not None
             assert job.working_dir is not None
-            _cwd = _hydra_cfg.hydra.runtime.cwd
-            working_dir = Path(_cwd) / job.working_dir
-            self.multirun_working_dirs.append(working_dir)
+            self.multirun_working_dirs.append(_job_dir(job))
 
         # set working directory of this workflow
         self.working_dir = self.multirun_working_dirs[0].parent
