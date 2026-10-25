@@ -213,9 +213,11 @@ def test_a_notebook_task_reaches_its_own_helpers_and_only_what_it_uses(project):
 
 
 def test_an_import_inside_the_task_is_followed(project):
-    """A loaded module imported in the task's body is walked like a global; one
-    this process has not imported yet is hashed by its file, without importing
-    it. A relative import resolves against the task's package."""
+    """A module imported in the task's body is recorded by its file, found
+    without importing it, and keyed the same whether or not the process has
+    imported it: a fresh process and a notebook that already ran the task
+    compare. A relative import resolves against the task's package, and a
+    comment in that file is not an edit."""
     root, exp = project
     pkg = root / "mushin_t_pkg"
     pkg.mkdir()
@@ -233,23 +235,43 @@ def test_an_import_inside_the_task_is_followed(project):
         sys.modules.pop(name, None)
     mod = importlib.import_module("mushin_t_pkg.exp")
     try:
-        unloaded = _code(mod.task)
-        assert "mushin_t_pkg.lazy (file)" in unloaded
+        unloaded = project_fingerprints(mod.task)
+        assert "mushin_t_pkg.lazy (file)" in unloaded["code"]
         assert "mushin_t_pkg.lazy" not in sys.modules  # found without importing
         importlib.import_module("mushin_t_pkg.lazy")
-        loaded = _code(mod.task)
-        assert "mushin_t_pkg.lazy:K" in loaded
-        # A process that had imported it and one that had not share no key for
-        # it, so neither reads as a change to the other.
-        assert (
-            changed_project_code(
-                {"python": PY, "code": unloaded}, {"python": PY, "code": loaded}
-            )
-            == []
-        )
+        assert project_fingerprints(mod.task) == unloaded
+        (pkg / "lazy.py").write_text("# a comment\nK = 3\n")
+        assert project_fingerprints(mod.task) == unloaded
+        (pkg / "lazy.py").write_text("K = 4\n")
+        assert _changed(unloaded, mod.task) == ["mushin_t_pkg.lazy (file)"]
     finally:
         for name in ("mushin_t_pkg", "mushin_t_pkg.lazy", "mushin_t_pkg.exp"):
             sys.modules.pop(name, None)
+
+
+def test_a_submodule_of_an_unloaded_package_is_found_without_importing(project):
+    """`from otherpkg.sub import g` inside the task, with nothing importing
+    otherpkg: the submodule's file is located through the package's search
+    path, not just the package's __init__."""
+    root, _ = project
+    pkg = root / "mushin_t_other"
+    (pkg / "inner").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "inner" / "__init__.py").write_text("")
+    (pkg / "inner" / "sub.py").write_text("G = 1\n")
+    mod = _module(
+        root,
+        "mushin_t_lazyuser",
+        "def task(a):\n    from mushin_t_other.inner.sub import G\n\n    return dict(v=a * G)\n",
+    )
+    try:
+        code = project_fingerprints(mod.task)["code"]
+        assert "mushin_t_other.inner.sub (file)" in code
+        assert "mushin_t_other" not in sys.modules
+    finally:
+        for n in list(sys.modules):
+            if n.startswith(("mushin_t_other", "mushin_t_lazyuser")):
+                sys.modules.pop(n, None)
 
 
 def test_the_walk_survives_cycles_and_globals_that_resist_inspection(project):
@@ -1037,3 +1059,181 @@ def test_a_method_default_is_part_of_its_class(project):
         assert "mushin_t_defaults:Scaler" in _changed(before, mod.task)
     finally:
         sys.modules.pop("mushin_t_defaults", None)
+
+
+# --- round 5 --------------------------------------------------------------------
+
+
+def test_names_the_project_rebinds_are_state_not_code(project):
+    """A lazily created singleton (`_model = None`, set on first use) and a
+    warn-once flag change as the code runs: hashing them would re-run every
+    cell on an in-process resume."""
+    root, _ = project
+    src = """
+        _model = None
+        _warned = False
+
+
+        def get_model():
+            global _model
+            if _model is None:
+                _model = object()
+            return _model
+
+
+        def warn_once():
+            global _warned
+            _warned = True
+
+
+        def task(a):
+            get_model()
+            warn_once()
+            return dict(v=float(a) + (_model is not None) + _warned)
+        """
+    mod = _module(root, "mushin_t_state", src)
+    try:
+        before = project_fingerprints(mod.task)
+        mod.task(1)  # runs: _model and _warned change
+        assert _changed(before, mod.task) == []
+        assert {"mushin_t_state:_model", "mushin_t_state:_warned"} <= set(
+            before["code"]
+        )
+    finally:
+        sys.modules.pop("mushin_t_state", None)
+
+
+def test_secret_shaped_names_and_values_are_never_hashed(project):
+    """A sidecar never holds a hash of a secret, which a dictionary attack on
+    a short one could undo."""
+    from mushin._resume import _SECRET
+
+    root, _ = project
+    src = 'API_KEY = "hunter2"\nURL = "https://x"\nTOKENISH = "sk-abcdefghijklmnop"\n\n\ndef task(a):\n    return dict(v=len(API_KEY + URL + TOKENISH) * a)\n'
+    mod = _module(root, "mushin_t_secret", src)
+    try:
+        code = project_fingerprints(mod.task)["code"]
+        assert code["mushin_t_secret:API_KEY"] == _SECRET
+        assert code["mushin_t_secret:TOKENISH"] == _SECRET  # secret-shaped value
+        assert code["mushin_t_secret:URL"] != _SECRET
+    finally:
+        sys.modules.pop("mushin_t_secret", None)
+
+
+def test_a_legacy_develop_install_is_the_project(tmp_path, monkeypatch):
+    """`setup.py develop` leaves an .egg-info in the project's own tree; its
+    package must not be taken for an installed one."""
+    import importlib.metadata as md
+
+    import mushin._resume as r
+
+    tree = tmp_path / "checkout"
+    (tree / "devpkg").mkdir(parents=True)
+    (tree / "devpkg" / "__init__.py").write_text("")
+    egg = tree / "devpkg.egg-info"
+    egg.mkdir()
+    (egg / "PKG-INFO").write_text(
+        "Metadata-Version: 2.1\nName: devpkg\nVersion: 0.0.1\n"
+    )
+    (egg / "top_level.txt").write_text("devpkg\n")
+    site = tmp_path / "site-packages"
+    (site / "wheelpkg").mkdir(parents=True)
+    dist_info = site / "wheelpkg-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: wheelpkg\nVersion: 1.0\n"
+    )
+    (dist_info / "top_level.txt").write_text("wheelpkg\n")
+    dists = [md.PathDistribution(egg), md.PathDistribution(dist_info)]
+    monkeypatch.setattr(md, "distributions", lambda: iter(dists))
+    r._installed_roots.cache_clear()
+    try:
+        roots = r._installed_roots()
+        assert "devpkg" not in roots
+        assert roots["wheelpkg"] == (site.resolve(),)
+    finally:
+        r._installed_roots.cache_clear()
+        r._is_foreign_module.cache_clear()
+
+
+def test_a_project_decorator_on_the_task_and_callable_defaults_are_code(project):
+    root, _ = project
+    src = """
+        import functools
+
+
+        def timed(fn):
+            @functools.wraps(fn)
+            def wrapper(*a, **k):
+                return fn(*a, **k) * {mult}
+
+            return wrapper
+
+
+        def double(x):
+            return x * {d}
+
+
+        @timed
+        def task(a, post=double):
+            return dict(v=post(a))
+        """
+    mod = _module(root, "mushin_t_deco", textwrap.dedent(src).format(mult=1, d=2))
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(root, "mushin_t_deco", textwrap.dedent(src).format(mult=3, d=2))
+        # functools.wraps gives the wrapper the task's name: the layer is keyed
+        # as the task, and its body (the decorator's code) is what changed.
+        assert "mushin_t_deco:task" in _changed(before, mod.task)
+        mod = _module(root, "mushin_t_deco", textwrap.dedent(src).format(mult=1, d=5))
+        assert any("<default" in k for k in _changed(before, mod.task))
+    finally:
+        sys.modules.pop("mushin_t_deco", None)
+
+
+def test_a_frozen_settings_dataclass_is_hashed_by_its_fields(project):
+    root, _ = project
+    src = "import dataclasses\n\n\n@dataclasses.dataclass(frozen=True)\nclass Settings:\n    lr: float = 0.1\n\n\nSETTINGS = Settings(lr={lr})\n\n\ndef task(a):\n    return dict(v=a * SETTINGS.lr)\n"
+    mod = _module(root, "mushin_t_settings", src.format(lr=0.1))
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(root, "mushin_t_settings", src.format(lr=0.5))
+        assert "mushin_t_settings:SETTINGS" in _changed(before, mod.task)
+    finally:
+        sys.modules.pop("mushin_t_settings", None)
+
+
+def test_the_same_body_from_another_module_is_a_change(project):
+    """`from a import f` switched to `from b import f`, both `return x * 2`:
+    where the function is defined is part of what is called."""
+    root, _ = project
+    _module(root, "mushin_t_fa", "def f(x):\n    return x * 2\n")
+    _module(root, "mushin_t_fb", "def f(x):\n    return x * 2\n")
+    src = "from {m} import f\n\n\ndef task(a):\n    return dict(v=f(a))\n"
+    mod = _module(root, "mushin_t_swap", src.format(m="mushin_t_fa"))
+    try:
+        before = project_fingerprints(mod.task)
+        mod = _module(root, "mushin_t_swap", src.format(m="mushin_t_fb"))
+        assert _changed(before, mod.task) == ["mushin_t_swap:f"]
+    finally:
+        for n in ("mushin_t_fa", "mushin_t_fb", "mushin_t_swap"):
+            sys.modules.pop(n, None)
+
+
+def test_a_call_chain_deeper_than_the_recursion_limit_is_walked(project):
+    """The walk is iterative: a project with a call chain of thousands of
+    functions is fingerprinted in full, not cut off where the stack ends."""
+    root, _ = project
+    n = sys.getrecursionlimit() + 200
+    lines = [f"def f{i}(x):\n    return f{i + 1}(x)\n" for i in range(n)]
+    lines.append(f"def f{n}(x):\n    return x * {{k}}\n")
+    lines.append("def task(a):\n    return dict(v=f0(a))\n")
+    src = "\n\n".join(lines)
+    mod = _module(root, "mushin_t_deep", src.format(k=2))
+    try:
+        before = project_fingerprints(mod.task)
+        assert f"mushin_t_deep:f{n}" in before["code"]
+        mod = _module(root, "mushin_t_deep", src.format(k=3))
+        assert _changed(before, mod.task) == [f"mushin_t_deep:f{n}"]
+    finally:
+        sys.modules.pop("mushin_t_deep", None)

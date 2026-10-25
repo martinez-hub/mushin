@@ -239,6 +239,13 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
             direct = dist.read_text("direct_url.json")
             if direct and json.loads(direct).get("dir_info", {}).get("editable"):
                 continue
+            # A legacy develop install (setup.py develop, an .egg-link) keeps its
+            # .egg-info in the project's own tree, not in a site directory:
+            # editable too.
+            meta = getattr(dist, "_path", None)
+            if meta is not None and str(meta).endswith(".egg-info"):
+                if not {"site-packages", "dist-packages"} & set(Path(str(meta)).parts):
+                    continue
             where = Path(str(dist.locate_file(""))).resolve()
             tops = (dist.read_text("top_level.txt") or "").split()
             if not tops:
@@ -424,33 +431,6 @@ def _resolve_imports(imports, package: str | None) -> list[str]:
     return found
 
 
-def _unloaded_module_hash(name: str) -> tuple[str, str] | None:
-    """A project module the task imports in its body but this process has not
-    imported yet: its file's hash, found without importing it. None when it is
-    foreign, already loaded, or cannot be located."""
-    import importlib.util
-    import sys
-
-    if name in sys.modules or _is_foreign_module(name):
-        return None
-    parent = name.rpartition(".")[0]
-    if parent and parent not in sys.modules:
-        return None  # finding a submodule would import its parent
-    try:
-        spec = importlib.util.find_spec(name)
-    except (ImportError, AttributeError, ValueError):
-        return None
-    if spec is None or not spec.has_location or not spec.origin:
-        return None
-    try:
-        path = Path(spec.origin).resolve()
-        if any(path.is_relative_to(root) for root in _foreign_roots()):
-            return None
-        return f"{name} (file)", _short_hash(path.read_bytes())
-    except OSError:
-        return None
-
-
 def _module_label(module_name: str) -> str:
     """How a module is named in a key: by its import name, except a script run
     as ``__main__``, which is named as ``python -m`` names it (its spec) or by
@@ -468,6 +448,105 @@ def _module_label(module_name: str) -> str:
     return Path(file).stem if isinstance(file, str) and file else "__main__"
 
 
+def _canonical_dump(node) -> str:
+    """A syntax tree as text, leaving out empty and None fields, so the same
+    source dumps alike on Python 3.11 to 3.14 (``ast.dump`` prints every field,
+    and the fields grow across minors)."""
+    import ast
+
+    if isinstance(node, ast.AST):
+        fields = [
+            f"{name}={_canonical_dump(value)}"
+            for name, value in ast.iter_fields(node)
+            if value is not None and value != []
+        ]
+        return f"{type(node).__name__}({','.join(fields)})"
+    if isinstance(node, list):
+        return "[" + ",".join(_canonical_dump(item) for item in node) + "]"
+    return repr(node)
+
+
+def _find_file(name: str) -> str | None:
+    """The file a module name denotes, without importing anything: the loaded
+    module's, or the one the path finders would load, walking a dotted name's
+    packages by their search locations."""
+    import importlib.machinery
+    import sys
+
+    loaded = sys.modules.get(name)
+    if loaded is not None:
+        file = getattr(loaded, "__file__", None)
+        return file if isinstance(file, str) and file else None
+    parts = name.split(".")
+    path = None
+    spec = None
+    for i in range(len(parts)):
+        dotted = ".".join(parts[: i + 1])
+        loaded = sys.modules.get(dotted)
+        if loaded is not None:
+            path = getattr(loaded, "__path__", None)
+            spec = getattr(loaded, "__spec__", None)
+            continue
+        try:
+            spec = importlib.machinery.PathFinder.find_spec(dotted, path)
+        except (ImportError, AttributeError, ValueError):
+            return None
+        if spec is None:
+            return None
+        path = spec.submodule_search_locations
+    if spec is None or not spec.has_location or not spec.origin:
+        return None
+    return spec.origin
+
+
+def _file_entry(name: str) -> tuple[str, str] | None:
+    """A project module imported inside a function's body, by its file: the
+    same entry whether or not this process has imported it yet, so the key
+    does not change between processes. A Python file is hashed as its syntax
+    tree (a comment is not an edit), anything else by its bytes."""
+    import ast
+
+    if _is_foreign_module(name):
+        return None
+    file = _find_file(name)
+    if file is None:
+        return None
+    try:
+        path = Path(file).resolve()
+        top = name.partition(".")[0]
+        roots = _foreign_roots() + _installed_roots().get(top, ())
+        if any(path.is_relative_to(root) for root in roots):
+            return None
+        data = path.read_bytes()
+    except (OSError, ValueError):
+        return None
+    if path.suffix == ".py":
+        try:
+            return f"{name} (file)", _short_hash(
+                _canonical_dump(ast.parse(data)).encode()
+            )
+        except (SyntaxError, ValueError, RecursionError):
+            pass
+    return f"{name} (file)", _short_hash(data)
+
+
+#: A stand-in for a module-level name the project's own code rebinds (a
+#: lazily created object, a warn-once flag): state, not code, so its value is
+#: not hashed; and for a secret-shaped name or value, which is never written
+#: to a sidecar even as a hash.
+_STATE = _short_hash(b"<state>")
+_SECRET = _short_hash(b"<secret>")
+
+
+def _secret(key: str, value) -> bool:
+    from ._provenance import _REDACT_KEY_RE, _REDACT_VALUE_RE
+
+    name = key.rpartition(":")[2]
+    if _REDACT_KEY_RE.search(name):
+        return True
+    return isinstance(value, str) and bool(_REDACT_VALUE_RE.search(value))
+
+
 class _CodeWalk:
     """Walks from the roots through the names their code uses, recording a hash
     for every project function, class and constant reached, keyed by where the
@@ -475,13 +554,27 @@ class _CodeWalk:
     another function is seen as a change. A name that resolves to something not
     hashed (a mutable container, a foreign function) gets an entry naming what
     it is, so an edit that turns a recorded value into one of those still
-    shows."""
+    shows. The walk is iterative: a large project's call graph would exceed the
+    recursion limit."""
 
     def __init__(self):
         self.hashes: dict[str, str] = {}
         self._object_hash: dict[int, str] = {}
         self._walked: set[int] = set()
         self._module_names: dict[int, set[str]] = {}
+        self._state_names: dict[int, frozenset[str]] = {}
+        self._stack: list[tuple] = []
+
+    def run(self) -> None:
+        while self._stack:
+            op, *args = self._stack.pop()
+            try:
+                op(*args)
+            except Exception:  # noqa: BLE001 - a value that resists inspection
+                continue
+
+    def _push(self, op, *args) -> None:
+        self._stack.append((op, *args))
 
     # -- helpers ------------------------------------------------------------
     def _project(self, value) -> bool:
@@ -505,25 +598,82 @@ class _CodeWalk:
             return _short_hash(f"<{t.__qualname__} {module}.{name}>".encode())
         return _short_hash(f"<{t.__module__}.{t.__qualname__}>".encode())
 
+    def _state(self, module_name: str) -> frozenset[str]:
+        """The module-level names the module's own functions and methods rebind
+        (``global x; x = ...``): state, whose value changes as the code runs."""
+        import sys
+        import types
+
+        module = sys.modules.get(module_name)
+        if module is None:
+            return frozenset()
+        cached = self._state_names.get(id(module))
+        if cached is not None:
+            return cached
+        names: set[str] = set()
+        try:
+            values = list(vars(module).values())
+        except TypeError:
+            values = []
+        codes = []
+        for value in values:
+            try:
+                if not isinstance(value, (types.FunctionType, type)):
+                    continue  # never touch other objects: a proxy may raise
+                if value.__module__ != module_name:
+                    continue
+                if isinstance(value, types.FunctionType):
+                    codes.append(value.__code__)
+                else:
+                    for member in vars(value).values():
+                        func = getattr(member, "__func__", member)
+                        if isinstance(getattr(func, "__code__", None), types.CodeType):
+                            codes.append(func.__code__)
+            except Exception:  # noqa: BLE001 - a class whose attributes raise
+                continue
+        import dis
+
+        while codes:
+            code = codes.pop()
+            codes.extend(k for k in code.co_consts if isinstance(k, types.CodeType))
+            for ins in dis.get_instructions(code):
+                if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
+                    names.add(ins.argval)
+        out = frozenset(names)
+        self._state_names[id(module)] = out
+        return out
+
     # -- roots --------------------------------------------------------------
     def walk_root(self, root, *, with_body: bool = False) -> None:
-        target = _unwrap_task(root)
-        if isinstance(target, functools.partial):
-            target = target.func
-        code = getattr(target, "__code__", None)
-        if code is not None:
-            # The task's own body is covered by code_fingerprint, and Study's
-            # training functions' by its methods fingerprint, so only what they
-            # use is walked; a root nothing else covers (pre_task) is recorded
-            # with its body.
-            key = None
-            if with_body and self._project(target):
-                key = f"{_module_label(target.__module__)}:{target.__qualname__}"
-            self._walk_function(target, record_as=key)
-        elif isinstance(target, type):
-            self._walk_class(target, record_as=None)
-        elif target is not None:
-            self._walk_class(type(target), record_as=None)
+        import types
+
+        layer = root
+        while isinstance(layer, functools.partial):
+            layer = layer.func
+        # A project decorator around the task is code it runs: each wrapper
+        # layer is recorded with its body; the innermost function is the
+        # task itself, covered by code_fingerprint (or by Study's methods
+        # fingerprint), unless with_body (pre_task).
+        layers = [layer]
+        seen = {id(layer)}
+        while True:
+            inner = getattr(layers[-1], "__wrapped__", None)
+            if inner is None or id(inner) in seen:
+                break
+            seen.add(id(inner))
+            layers.append(inner)
+        for i, target in enumerate(layers):
+            innermost = i == len(layers) - 1
+            if isinstance(getattr(target, "__code__", None), types.CodeType):
+                key = None
+                if (not innermost or with_body) and self._project(target):
+                    key = f"{_module_label(target.__module__)}:{target.__qualname__}"
+                self._push(self._walk_function, target, key)
+            elif innermost and isinstance(target, type):
+                self._push(self._walk_class, target, None)
+            elif innermost and target is not None:
+                self._push(self._walk_class, type(target), None)
+        self.run()
 
     def walk_target(self, path: str) -> None:
         """A class or function the config names as ``_target_``: resolved from
@@ -541,16 +691,21 @@ class _CodeWalk:
                     value = getattr(value, attr)
             except Exception:  # noqa: BLE001 - not there, or raises
                 return
-            self._walk_value(value, f"target:{path}", set(), set())
+            self._push(self._walk_value, value, f"target:{path}", set(), set(), 0)
+            self.run()
             return
 
     # -- values -------------------------------------------------------------
     def _function_digest(self, fn) -> str:
-        """A function's code and its default arguments (a default is part of
-        what the function does, and lives outside its code object)."""
+        """A function's code, where it is defined, and its default arguments
+        (a default is part of what the function does, and lives outside its
+        code object)."""
         digest = self._object_hash.get(id(fn))
         if digest is None:
-            extras = [_code_hash(fn.__code__)]
+            extras = [
+                f"{_module_label(fn.__module__)}.{fn.__qualname__}",
+                _code_hash(fn.__code__),
+            ]
             for value in (fn.__defaults__ or ()) + tuple(
                 (fn.__kwdefaults__ or {}).values()
             ):
@@ -560,15 +715,14 @@ class _CodeWalk:
         return digest
 
     def _walk_function(self, fn, record_as: str | None) -> None:
-        import sys
-
         code = fn.__code__
         self._record(record_as, self._function_digest(fn))
         globals_, attrs, imports = _code_names(code)
         module = fn.__module__ if isinstance(fn.__module__, str) else "?"
         here = _module_label(module)
-        # Closure cells belong to this function object, so they are keyed
-        # under where it was reached: two closures from one factory differ.
+        # Closure cells and callable defaults belong to this function object,
+        # so they are keyed under where it was reached: two closures from one
+        # factory differ.
         owner = record_as or f"{here}:{fn.__qualname__}"
         for cell_name, cell in zip(
             code.co_freevars, fn.__closure__ or (), strict=False
@@ -577,24 +731,38 @@ class _CodeWalk:
                 value = cell.cell_contents
             except ValueError:  # an empty cell
                 continue
-            self._walk_value(value, f"{owner}.<{cell_name}>", globals_, attrs)
+            self._push(
+                self._walk_value, value, f"{owner}.<{cell_name}>", globals_, attrs, 0
+            )
+        defaults = list(fn.__defaults__ or ()) + list(
+            (fn.__kwdefaults__ or {}).values()
+        )
+        for i, value in enumerate(defaults):
+            if callable(value):
+                self._push(
+                    self._walk_value, value, f"{owner}.<default {i}>", set(), attrs, 0
+                )
         if id(fn) in self._walked:
             return
         self._walked.add(id(fn))
         namespace = getattr(fn, "__globals__", {}) or {}
+        state = self._state(module)
         for name in sorted(globals_):
-            if name in namespace:
-                self._walk_value(namespace[name], f"{here}:{name}", globals_, attrs)
+            if name not in namespace:
+                continue
+            key = f"{here}:{name}"
+            if name in state:
+                self._record(key, _STATE)
+                continue
+            self._push(self._walk_value, namespace[name], key, globals_, attrs, 0)
         package = namespace.get("__package__")
         package = package if isinstance(package, str) else None
+        # Imports inside the body are recorded by their files, the same in a
+        # process that has imported them and one that has not.
         for name in _resolve_imports(imports, package):
-            loaded = sys.modules.get(name)
-            if loaded is not None:
-                self._walk_module(loaded, attrs)
-            else:
-                found = _unloaded_module_hash(name)
-                if found is not None:
-                    self._record(*found)
+            found = _file_entry(name)
+            if found is not None:
+                self._record(*found)
 
     def _walk_module(self, module, attrs: set[str]) -> None:
         """The attributes of a project module that the reaching code uses. A
@@ -612,9 +780,15 @@ class _CodeWalk:
         except TypeError:
             return
         here = _module_label(module.__name__)
+        state = self._state(module.__name__)
         for name in sorted(new):
-            if name in namespace:
-                self._walk_value(namespace[name], f"{here}:{name}", set(), attrs)
+            if name not in namespace:
+                continue
+            key = f"{here}:{name}"
+            if name in state:
+                self._record(key, _STATE)
+                continue
+            self._push(self._walk_value, namespace[name], key, set(), attrs, 0)
 
     def _class_members(self, cls):
         """``(name, kind, value)`` for each member that is code: functions,
@@ -667,7 +841,7 @@ class _CodeWalk:
                     parts.append(f"{attr}=class {value.__qualname__}")
                 else:
                     const = _constant_repr(value)
-                    if const is not None:
+                    if const is not None and not _secret(attr, value):
                         parts.append(f"{attr}={const}")
             parts.extend(
                 f"base={_module_label(b.__module__)}.{b.__qualname__}"
@@ -681,79 +855,101 @@ class _CodeWalk:
         self._walked.add(id(cls))
         for _attr, kind, value in members:
             if kind == "function" and self._project(value):
-                self._walk_function(value, record_as=None)
+                self._push(self._walk_function, value, None)
             elif kind == "class" and self._project(value):
                 key = f"{_module_label(value.__module__)}:{value.__qualname__}"
-                self._walk_class(value, record_as=key)
+                self._push(self._walk_class, value, key)
         for base in cls.__bases__:
             if self._project(base):
                 key = f"{_module_label(base.__module__)}:{base.__qualname__}"
-                self._walk_class(base, record_as=key)
+                self._push(self._walk_class, base, key)
 
     def _walk_value(
-        self, value, key: str, globals_: set[str], attrs: set[str], depth: int = 0
+        self, value, key: str, globals_: set[str], attrs: set[str], depth: int
     ) -> None:
+        import dataclasses
         import types
 
-        try:
-            if isinstance(value, types.ModuleType):
-                self._walk_module(value, attrs)
-                return
-            if isinstance(value, functools.partial):
-                parts = [_constant_repr(a) or self._kind(a) for a in value.args]
-                parts += [
-                    f"{k}={_constant_repr(v) or self._kind(v)}"
-                    for k, v in sorted((value.keywords or {}).items())
-                ]
-                self._record(key, _short_hash("|".join(parts).encode()))
-                self._walk_value(value.func, key + ".func", globals_, attrs, depth)
-                return
-            if isinstance(value, types.MethodType):
-                value = value.__func__
-            wrapped = getattr(value, "__wrapped__", None)
-            if wrapped is not None and wrapped is not value:
-                # A decorated function (functools.lru_cache, functools.wraps):
-                # the wrapper may be foreign or a C object; the code that runs
-                # is what it wraps.
-                self._walk_value(wrapped, key + ".__wrapped__", globals_, attrs, depth)
-            if isinstance(value, types.FunctionType):
-                if self._project(value):
-                    self._walk_function(value, record_as=key)
-                else:
-                    self._record(key, self._kind(value))
-                return
-            if isinstance(value, type):
-                self._walk_class(value, record_as=key)
-                return
-            const = _constant_repr(value)
-            if const is not None:
-                self._record(key, _short_hash(const.encode()))
-                return
-            if isinstance(value, (dict, list, tuple, set, frozenset)):
-                # A registry such as {"cnn": CNN, "mlp": mlp}: its type is
-                # recorded (not its contents, which may change at runtime), and
-                # the project code it holds is walked.
-                self._record(key, self._kind(value))
-                if depth < 2 and len(value) <= 1000:
-                    items = (
-                        sorted(value.items(), key=lambda kv: repr(kv[0]))
-                        if isinstance(value, dict)
-                        else enumerate(value)
-                    )
-                    for k, v in items:
-                        if callable(v) or isinstance(v, (dict, list, tuple)):
-                            self._walk_value(
-                                v, f"{key}[{k!r}]", globals_, attrs, depth + 1
-                            )
-                return
-            # An instance of a project class (a model, a config object): its
-            # class is code the task runs; its state is not hashed.
-            if self._project(type(value)):
-                self._walk_class(type(value), record_as=f"{key}.__class__")
+        if isinstance(value, types.ModuleType):
+            self._walk_module(value, attrs)
+            return
+        if isinstance(value, functools.partial):
+            parts = [_constant_repr(a) or self._kind(a) for a in value.args]
+            parts += [
+                f"{k}={_constant_repr(v) or self._kind(v)}"
+                for k, v in sorted((value.keywords or {}).items())
+            ]
+            self._record(key, _short_hash("|".join(parts).encode()))
+            self._push(
+                self._walk_value, value.func, key + ".func", globals_, attrs, depth
+            )
+            return
+        if isinstance(value, types.MethodType):
+            value = value.__func__
+        wrapped = getattr(value, "__wrapped__", None)
+        if wrapped is not None and wrapped is not value:
+            # A decorated function (functools.lru_cache, functools.wraps): the
+            # wrapper may be foreign or a C object; the code that runs is what
+            # it wraps.
+            self._push(
+                self._walk_value, wrapped, key + ".__wrapped__", globals_, attrs, depth
+            )
+        if isinstance(value, types.FunctionType):
+            if self._project(value):
+                self._walk_function(value, key)
             else:
                 self._record(key, self._kind(value))
-        except Exception:  # noqa: BLE001 - a global that resists inspection
             return
+        if isinstance(value, type):
+            self._walk_class(value, key)
+            return
+        const = _constant_repr(value)
+        if const is not None:
+            self._record(
+                key, _SECRET if _secret(key, value) else _short_hash(const.encode())
+            )
+            return
+        if isinstance(value, (dict, list, tuple, set, frozenset)):
+            # A registry such as {"cnn": CNN, "mlp": mlp}: its type is recorded
+            # (not its contents, which may change at runtime), and the project
+            # code it holds is walked.
+            self._record(key, self._kind(value))
+            if depth < 2 and len(value) <= 1000:
+                items = (
+                    sorted(value.items(), key=lambda kv: repr(kv[0]))
+                    if isinstance(value, dict)
+                    else enumerate(value)
+                )
+                for k, v in items:
+                    if callable(v) or isinstance(v, (dict, list, tuple)):
+                        self._push(
+                            self._walk_value,
+                            v,
+                            f"{key}[{k!r}]",
+                            globals_,
+                            attrs,
+                            depth + 1,
+                        )
+            return
+        if self._project(type(value)):
+            # An instance of a project class (a model, a settings object): its
+            # class is code the task runs. A frozen dataclass of constants is a
+            # settings value, hashed by its fields; other state is not hashed.
+            self._push(self._walk_class, type(value), f"{key}.__class__")
+            if (
+                dataclasses.is_dataclass(value)
+                and type(value).__dataclass_params__.frozen
+            ):
+                fields = []
+                for f in dataclasses.fields(value):
+                    v = getattr(value, f.name)
+                    c = _constant_repr(v)
+                    if c is None:
+                        return
+                    fields.append(f"{f.name}={_SECRET if _secret(f.name, v) else c}")
+                self._record(key, _short_hash("|".join(fields).encode()))
+            return
+        self._record(key, self._kind(value))
 
 
 def _config_targets(cfg) -> list[str]:

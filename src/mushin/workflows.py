@@ -1990,15 +1990,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             as the cell's process has loaded them, which is the code that runs:
             a helper it calls, a constant it reads (``from consts import
             THRESH`` included), a class in a registry dict it indexes, a
-            function in a notebook or in a script's main block. Functions are
-            hashed by their bytecode, so a comment or a moved definition is not
-            an edit. A changed non-swept value, an edited task body or an
-            edited helper re-runs that cell, with a warning naming where the
-            change is (``helpers:scale``). Not covered: installed packages
-            other than editable ones, data files, the environment, the contents
-            of a mutable container (beyond the code it holds), a ``_target_``
-            whose module the cell's process has not imported, and code reached
-            only through some other string. A resume under another Python
+            function in a notebook or in a script's main block. Helpers are
+            hashed by their bytecode, so a comment or a moved definition in one
+            is not an edit (the task function's own source is compared as
+            text, so a comment in its body is). A changed non-swept value, an
+            edited task body or an edited helper re-runs that cell, with a
+            warning naming where the change is (``helpers:scale``). Not
+            covered: installed packages other than editable ones, data files,
+            the environment, the contents of a mutable container (beyond the
+            code it holds), a module-level name the project's own code rebinds
+            (a lazily created object, a warn-once flag: state, not code), a
+            ``_target_`` whose module the cell's process has not imported, and
+            code reached only through some other string. A module-level value
+            computed at import (from the clock, the environment, the host) is
+            hashed by its value, so if it differs from process to process the
+            cells re-run. A resume under another Python
             version does not compare project code (its bytecode differs).
             After upgrading a dependency, changing the data or editing such
             code, re-run from a fresh ``working_dir`` rather than resuming.
@@ -2057,8 +2063,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
             edited task body or an edited helper is a cache miss, and so is a
-            change of Python version. When the project code cannot be
-            fingerprinted, the cache is not used for that run.
+            change of Python version for a cell that reaches project code. When
+            the project code cannot be fingerprinted, the cache is not used for
+            that cell.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for
