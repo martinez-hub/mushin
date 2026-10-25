@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 
 
@@ -81,9 +82,12 @@ def _read_cells(root) -> list[dict]:
     return _scan(root)[0]
 
 
-def _scan(root) -> tuple[list[dict], float]:
+def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
     """``_read_cells`` plus the mtime of the manifest that scoped the scan
-    (0.0 when none did), read once so the two never disagree."""
+    (0.0 when none did), read once so the two never disagree. ``mtimes``
+    records every cell's ``status_mtime``; otherwise only the cells the
+    manifest does not list are stat'ed, as the stale-dir rule needs, and the
+    field is 0.0 (``show`` and ``export`` never read it)."""
     from ._resume import STATUS_FILE, read_cell_status
     from ._sweep_io import combo_key, read_metrics_sidecar
 
@@ -101,13 +105,15 @@ def _scan(root) -> tuple[list[dict], float]:
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
-        try:
-            status_mtime = (d / STATUS_FILE).stat().st_mtime
-        except OSError:
-            status_mtime = 0.0
+        status_mtime = 0.0
         if manifest_cells:
             entry = manifest_cells.get(combo_key(s["combo"]))
             in_grid = isinstance(entry, dict) and entry.get("dir") == d.name
+            if mtimes or not in_grid:
+                try:
+                    status_mtime = (d / STATUS_FILE).stat().st_mtime
+                except OSError:
+                    status_mtime = 0.0
             if not in_grid and status_mtime <= manifest_mtime:
                 continue  # stale cell from a previous sweep of this dir
         m = read_metrics_sidecar(d) or {}
@@ -235,7 +241,10 @@ def _sortable(v: Any):
     if isinstance(v, bool):
         return (1, str(v))
     if isinstance(v, int | float):
-        f = float(v)
+        try:
+            f = float(v)
+        except OverflowError:  # an int beyond float range sorts at that end
+            f = math.inf if v > 0 else -math.inf
         if f != f:  # NaN
             return (2, 0.0)
         return (0, f)
@@ -338,7 +347,7 @@ def _check_swept(over: list[str], cells: list[dict]) -> None:
     over nothing and return the best single cell."""
     swept = _ordered_union([c["combo"] for c in cells])
     unknown = [n for n in over if n not in swept]
-    if unknown:
+    if unknown and cells:  # no cell yet: the "no completed cell" error says so
         raise ValueError(
             f"`over` names {', '.join(map(repr, unknown))}, which the sweep does "
             f"not vary; swept params: {', '.join(swept) or '(none)'}"
@@ -349,8 +358,6 @@ def _mean(values: list[float]) -> float | None:
     """``fmean``, or None when it has no finite answer: fsum raises on
     intermediate overflow (two values near 1e308), and a mean of ``inf`` is no
     mean to compare."""
-    from statistics import fmean
-
     try:
         m = fmean(values)
     except OverflowError:
@@ -378,9 +385,9 @@ def _best_group(
     cell has", so that a seed that failed for every configuration drops out
     instead of making the sweep unanswerable. While the sweep is unfinished
     (a cell running, a sidecar newer than the manifest that ``run()`` writes
-    last, or no usable manifest) the bar is provisional and the result says
-    so; once finished, a single value of ``over`` means there is nothing to
-    average, and raises. Skipped groups, and cells whose combo lacks an
+    last, a cell recorded as skipped, or no usable manifest) the bar is
+    provisional and the result says so. A single value of ``over`` means
+    there is nothing to average, and raises. Skipped groups, and cells whose combo lacks an
     ``over`` param (another grid in flight in a reused ``working_dir``), are
     reported with a warning; no complete group raises."""
     import warnings
@@ -426,11 +433,17 @@ def _best_group(
     # last), or no usable manifest (never written, corrupt, or a sweep that
     # predates it).
     in_flight = sum(c["status"] in ("running", "pending") for c in grouped)
+    not_run = sum(c["status"] == "skipped" for c in grouped)
 
     if in_flight:
         why = (
-            f"{in_flight} cell(s) recorded as running; a killed sweep leaves them "
-            "so, and resume=True reruns them"
+            f"{in_flight} cell(s) recorded as running or without a status; a "
+            "killed sweep leaves them so, and resume=True reruns them"
+        )
+    elif not_run:
+        why = (
+            f"{not_run} cell(s) recorded as skipped (sample=, or a budget ran "
+            "out), which resume=True would run"
         )
     elif not manifest_mtime:
         why = "no usable manifest: it is written when run() ends, or predates it"
@@ -447,11 +460,13 @@ def _best_group(
             f"{names} reached so far, and a configuration whose other cells have "
             "not started looks complete"
         )
-    elif len(bar) == 1:  # an empty bar is "no complete group", below
+    if len(bar) == 1:  # an empty bar is "no complete group", below
         raise ValueError(
             f"only one value of {names} has a result anywhere (the sweep has one, "
-            f"or the others failed everywhere), so there is nothing to average; "
-            f"`best()` without `over=` returns the best single cell."
+            f"the others failed or were skipped everywhere"
+            f"{', or it has not finished: ' + why if why else ''}), so there is "
+            f"nothing to average; `best()` without `over=` returns the best "
+            f"single cell."
         )
     skipped = len(groups) - len(scored)
     if skipped:
@@ -528,8 +543,8 @@ def best(
         run) are skipped with a warning; a seed that failed for every
         configuration drops out instead. On a sweep still running the seeds
         reached so far set the bar, and the warning says so; the definitive
-        answer comes once the sweep has finished. A finished sweep with one
-        value of ``over`` has nothing to average, and raises.
+        answer comes once the sweep has finished. One value of ``over`` has
+        nothing to average, and raises.
 
     Returns
     -------
@@ -544,8 +559,8 @@ def best(
         If ``mode`` is invalid, no completed cell has ``metric`` as a finite
         scalar (the error lists the scalar metrics that are available), ``over``
         is not a swept-param name or a sequence of them, names a param the
-        sweep does not vary, no group is complete, or a finished sweep has one
-        value of ``over``.
+        sweep does not vary, no group is complete, or one value of ``over``
+        has a result.
     FileNotFoundError
         If ``root`` is not a directory.
     """
@@ -553,7 +568,7 @@ def best(
         raise ValueError(f"`mode` must be 'max' or 'min', got {mode!r}")
     names = None if over is None else _over_names(over)
 
-    cells, manifest_mtime = _scan(root)
+    cells, manifest_mtime = _scan(root, mtimes=names is not None)
     if names is not None:
         _check_swept(names, cells)
     candidates = [c for c in cells if _is_candidate(c, metric)]

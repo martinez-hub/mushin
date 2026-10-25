@@ -242,8 +242,27 @@ def test_best_over_treats_missing_seeds_as_incomplete(tmp_path):
 
 def test_best_over_warns_that_a_running_sweep_sets_a_provisional_bar(tmp_path):
     """Mid-sweep at a seed boundary (seed the outer loop, or a batch launcher)
-    every configuration has the same single seed, so every group IS complete
-    at n=1 and only the missing manifest tells that the bar is provisional."""
+    every configuration has the same seeds, so every group IS complete and
+    only the missing manifest tells that the bar is provisional."""
+    import shutil
+
+    from mushin._sweep_io import MANIFEST_FILE
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    (wd / MANIFEST_FILE).unlink()
+    for lr in (0.1, 0.2):
+        shutil.rmtree(_cell_dir(wd, lr=lr, seed=2))
+    with pytest.warns(UserWarning, match="no usable manifest") as rec:
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2} and r.n == 2
+    assert "skipped" not in str(rec[0].message)  # only what happened
+
+
+def test_best_over_one_seed_raises_even_mid_sweep(tmp_path):
+    """One seed is never a mean, and the raise must not depend on the sweep
+    reading as finished: a copied directory or a skewed clock could make it
+    read as unfinished and let the lucky-seed n=1 answer through."""
     import shutil
 
     from mushin._sweep_io import MANIFEST_FILE
@@ -254,10 +273,30 @@ def test_best_over_warns_that_a_running_sweep_sets_a_provisional_bar(tmp_path):
     for lr in (0.1, 0.2):
         for seed in (1, 2):
             shutil.rmtree(_cell_dir(wd, lr=lr, seed=seed))
-    with pytest.warns(UserWarning, match="no usable manifest") as rec:
+    with pytest.raises(ValueError, match="only one value of 'seed'.*not finished"):
+        mushin.best(wd, "score", over="seed")
+
+
+def test_best_over_treats_skipped_cells_as_unfinished(tmp_path):
+    """A budget or sample= records the cells it did not run as skipped, with
+    the manifest written after; a seed skipped for every configuration must
+    not pass as a finished sweep over fewer seeds."""
+    from mushin._resume import write_cell_status
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    for lr in (0.1, 0.2):
+        d = _cell_dir(wd, lr=lr, seed=2)
+        write_cell_status(d, status="skipped", combo={"lr": lr, "seed": 2}, attempt=0)
+    with pytest.warns(UserWarning, match=r"2 cell\(s\) recorded as skipped"):
         r = mushin.best(wd, "score", over="seed")
-    assert r.combo == {"lr": 0.2} and r.n == 1
-    assert "skipped" not in str(rec[0].message)  # only what happened
+    assert r.n == 2
+
+
+def test_best_over_on_an_empty_sweep_dir_blames_the_metric_not_over(tmp_path):
+    (tmp_path / "s").mkdir()
+    with pytest.raises(ValueError, match="no completed cell"):
+        mushin.best(tmp_path / "s", "score", over="seed")
 
 
 def test_best_over_rejects_a_group_with_two_cells_at_one_seed(tmp_path):
