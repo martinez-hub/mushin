@@ -545,3 +545,53 @@ def test_best_tolerates_a_metrics_sidecar_past_the_json_digit_limit(tmp_path):
     (lucky / "mushin_metrics.json").write_text('{"score": 1' + "0" * 5000 + "}")
     assert mushin.best(wd, "score").combo["lr"] == 0.2
     assert len(mushin.show(wd).rows) == 6
+
+
+def test_best_over_rejects_a_duplicate_that_hides_a_missing_seed(tmp_path):
+    """The set half of the completeness rule: a stale duplicate at seed 0 plus
+    a missing seed 2 gives lr=0.2 three results over two seeds, the same COUNT
+    as the three-seed bar; the group must still be skipped."""
+    import shutil
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    extra = wd / "99"
+    shutil.copytree(_cell_dir(wd, lr=0.2, seed=0), extra)
+    _touch_newer_than_manifest(wd, extra)
+    shutil.rmtree(_cell_dir(wd, lr=0.2, seed=2))
+    with pytest.warns(UserWarning, match=r"skipped 1 of 2 groups"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.1} and r.n == 3
+
+
+def test_best_over_omits_a_secondary_metric_whose_mean_overflows(tmp_path):
+    import json
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    for seed in (0, 1, 2):
+        path = _cell_dir(wd, lr=0.2, seed=seed) / "mushin_metrics.json"
+        payload = json.loads(path.read_text())
+        payload["loss"] = 1e308
+        path.write_text(json.dumps(payload))
+    r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2} and r.metrics["score"] == pytest.approx(1.0)
+    assert "loss" not in r.metrics
+
+
+def test_best_over_takes_a_sidecar_as_old_as_the_manifest_as_finished(tmp_path):
+    """Only a sidecar strictly LATER than the manifest marks a re-run; the
+    same mtime (a coarse-mtime filesystem writing both in one tick) does not."""
+    import os
+    import warnings
+
+    from mushin._resume import STATUS_FILE
+    from mushin._sweep_io import MANIFEST_FILE
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    m = (wd / MANIFEST_FILE).stat().st_mtime
+    os.utime(_cell_dir(wd, lr=0.1, seed=0) / STATUS_FILE, (m, m))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert mushin.best(wd, "score", over="seed").combo == {"lr": 0.2}

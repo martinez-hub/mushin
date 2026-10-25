@@ -243,5 +243,12 @@ def test_show_sorts_an_int_metric_beyond_float_range(tmp_path):
     payload = json.loads((d / "mushin_metrics.json").read_text())
     payload["acc"] = 10**400
     (d / "mushin_metrics.json").write_text(json.dumps(payload))
+    other = next(
+        p for p in wd.iterdir() if p != d and (p / "mushin_metrics.json").exists()
+    )
+    payload = json.loads((other / "mushin_metrics.json").read_text())
+    payload["acc"] = -(10**400)
+    (other / "mushin_metrics.json").write_text(json.dumps(payload))
     rows = mushin.show(wd, sort="acc").rows
+    assert rows[0]["acc"] == -(10**400)
     assert rows[-1]["acc"] == 10**400
