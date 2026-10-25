@@ -173,23 +173,24 @@ In `src/mushin/mcp/server.py`, `create_server`, replace `mcp = MCPServer("mushin
 and before `return mcp` add:
 
 ```python
-    # The guide reaches an agent through the same connection it inspects runs
-    # with: a prompt (a slash command in Claude Code) and a resource (an
-    # @-mention). Both return what `python -m mushin guide` prints.
-    @mcp.prompt("guide")
-    def guide() -> str:
-        """mushin's usage guide for writing experiments, matching the
-        installed version (what `python -m mushin guide` prints)."""
-        from mushin.__main__ import guide_text
+# The guide reaches an agent through the same connection it inspects runs
+# with: a prompt (a slash command in Claude Code) and a resource (an
+# @-mention). Both return what `python -m mushin guide` prints.
+@mcp.prompt("guide")
+def guide() -> str:
+    """mushin's usage guide for writing experiments, matching the
+    installed version (what `python -m mushin guide` prints)."""
+    from mushin.__main__ import guide_text
 
-        return guide_text()
+    return guide_text()
 
-    @mcp.resource("mushin://guide", mime_type="text/markdown")
-    def guide_resource() -> str:
-        """mushin's usage guide for writing experiments (Markdown)."""
-        from mushin.__main__ import guide_text
 
-        return guide_text()
+@mcp.resource("mushin://guide", mime_type="text/markdown")
+def guide_resource() -> str:
+    """mushin's usage guide for writing experiments (Markdown)."""
+    from mushin.__main__ import guide_text
+
+    return guide_text()
 ```
 
 - [ ] **Step 4: Run the MCP tests**

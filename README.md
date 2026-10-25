@@ -97,7 +97,9 @@ On mushin 0.10 to 0.15, point the agent at the
 instead; before 0.10, upgrade first.
 
 In Claude Code, the guide is also a skill, `/mushin:guide`, installed from
-this repository's plugin marketplace:
+this repository's plugin marketplace (Claude Code 2.1.275 or later; the
+[For AI agents](https://martinez-hub.github.io/mushin/for-agents/) page has
+the two-step form for older versions):
 
 ```text
 /plugin install mushin --marketplace martinez-hub/mushin

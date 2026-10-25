@@ -19,8 +19,12 @@ PLUGIN_DIR = REPO / "plugins" / "mushin"
 PLUGIN = PLUGIN_DIR / ".claude-plugin" / "plugin.json"
 SKILL = PLUGIN_DIR / "skills" / "guide" / "SKILL.md"
 FOR_AGENTS = REPO / "docs" / "for-agents.md"
+README = REPO / "README.md"
 
 GUIDE_COMMAND = "python -m mushin guide"
+# Claude Code shows the first 1,536 characters of a description; the skill's
+# stays well under that so the whole trigger is visible.
+DESCRIPTION_LIMIT = 1024
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -52,17 +56,25 @@ def test_marketplace_and_plugin_manifests_agree():
 def test_skill_prints_the_installed_guide_and_nothing_else():
     fields = _frontmatter(SKILL.read_text(encoding="utf-8"))
     assert fields["name"] == "guide"
-    # Claude Code shows the first 1,536 characters of the description.
-    assert 0 < len(fields["description"]) <= 1024
+    assert 0 < len(fields["description"]) <= DESCRIPTION_LIMIT
     for word in ("mushin", "experiment", "installed"):
         assert word in fields["description"]
     body = fields["_body"]
-    # One shell command, run at invocation and pre-approved, so the skill
-    # never holds a copy of the guide that could go stale.
+    # One shell line, run at invocation and pre-approved, so the skill never
+    # holds a copy of the guide that could go stale. It tries `python`, then
+    # `python3` (the only interpreter name on many boxes), then prints a note,
+    # so the line never exits non-zero: a failed injected command aborts the
+    # whole invocation and the fallback paragraph would never be seen. Each
+    # subcommand is pre-approved, or the invocation stops at a prompt.
     assert body.count("!`") == 1
-    assert f"!`{GUIDE_COMMAND}`" in body
-    assert fields["allowed-tools"] == f"Bash({GUIDE_COMMAND}:*)"
-    assert "mushin-py[eval]" in body  # the fallback when the command fails
+    [command] = re.findall(r"!`([^`]*)`", body)
+    parts = [part.strip() for part in command.split("||")]
+    attempts = [part.split(" 2>")[0] for part in parts[:-1]]
+    assert attempts == [GUIDE_COMMAND, GUIDE_COMMAND.replace("python", "python3")]
+    assert parts[-1].startswith('echo "') and "see the note below" in parts[-1]
+    allowed = [a.strip() for a in fields["allowed-tools"].split(",")]
+    assert allowed == [f"Bash({s}:*)" for s in attempts] + ["Bash(echo:*)"]
+    assert "mushin-py[eval]" in body  # the note the echo points at
     assert SKILL.read_text(encoding="utf-8").isascii()
 
 
@@ -73,3 +85,9 @@ def test_docs_install_commands_name_the_manifests():
     assert "/plugin marketplace add martinez-hub/mushin" in docs
     assert f"/plugin install {plugin['name']}@{market['name']}" in docs
     assert f"/{plugin['name']}:guide" in docs
+    # The one-step form (Claude Code 2.1.275 or later) is on both pages, and
+    # the README names the version it needs and points at the two-step page.
+    one_step = f"/plugin install {plugin['name']} --marketplace martinez-hub/mushin"
+    readme = README.read_text(encoding="utf-8")
+    assert one_step in docs and one_step in readme
+    assert "2.1.275" in readme and "for-agents" in readme
