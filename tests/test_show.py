@@ -230,3 +230,25 @@ def test_metrics_filter_deduplicates_repeated_names(tmp_path):
 
     header = export.table(wd, metrics=["acc", "acc"]).strip().splitlines()[0]
     assert header.split(",").count("acc") == 1
+
+
+def test_show_sorts_an_int_metric_beyond_float_range(tmp_path):
+    """JSON carries ints of any size; float() of one raises OverflowError, so
+    sorting by that metric must place it at the far end instead of crashing."""
+    import json
+
+    wd = tmp_path / "s"
+    _run_sweep(wd)
+    d = next(p for p in wd.iterdir() if (p / "mushin_metrics.json").exists())
+    payload = json.loads((d / "mushin_metrics.json").read_text())
+    payload["acc"] = 10**400
+    (d / "mushin_metrics.json").write_text(json.dumps(payload))
+    other = next(
+        p for p in wd.iterdir() if p != d and (p / "mushin_metrics.json").exists()
+    )
+    payload = json.loads((other / "mushin_metrics.json").read_text())
+    payload["acc"] = -(10**400)
+    (other / "mushin_metrics.json").write_text(json.dumps(payload))
+    rows = mushin.show(wd, sort="acc").rows
+    assert rows[0]["acc"] == -(10**400)
+    assert rows[-1]["acc"] == 10**400

@@ -138,3 +138,25 @@ def test_diff_excludes_non_completed_cells(tmp_path):
     assert next(r for r in d.rows if r["seed"] == 2)["deltas"] == {}
     ok_row = next(r for r in d.rows if r["seed"] == 0)
     assert "acc" in ok_row["deltas"]
+
+
+def test_diff_prints_no_delta_for_an_infinite_metric(tmp_path):
+    """An infinite value on either side gives no delta (it used to print an inf
+    or NaN one); finite cells in the same sweep keep theirs."""
+    import json
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    _run(a, bump=0.0, seeds=(0, 1))
+    _run(b, bump=0.0, seeds=(0, 1))
+    target = next(
+        p
+        for p in sorted(b.glob("*/mushin_cell_status.json"))
+        if json.loads(p.read_text())["combo"] == {"seed": 1}
+    ).with_name("mushin_metrics.json")
+    payload = json.loads(target.read_text())
+    payload["acc"] = float("inf")
+    target.write_text(json.dumps(payload))
+
+    d = mushin.diff(a, b)
+    assert "acc" not in next(r for r in d.rows if r["seed"] == 1)["deltas"]
+    assert "acc" in next(r for r in d.rows if r["seed"] == 0)["deltas"]

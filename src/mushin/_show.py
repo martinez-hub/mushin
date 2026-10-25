@@ -9,6 +9,8 @@ before committing to the full ``to_xarray`` load."""
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +49,25 @@ def _numeric_dir_key(name: str):
         return (1, name)
 
 
+def _manifest_cells(root: Path) -> tuple[dict, float]:
+    """The latest sweep's manifest cells and the manifest's mtime, or
+    ``({}, 0.0)`` when none is usable (missing, corrupt, wrong shape): the scan
+    is then unscoped, and ``best(over=)`` cannot take the sweep as finished."""
+    from ._sweep_io import MANIFEST_FILE, Manifest
+
+    try:
+        cells = Manifest.load_or_new(root, []).cells
+        if not isinstance(cells, dict) or not cells:
+            return {}, 0.0
+        return cells, (root / MANIFEST_FILE).stat().st_mtime
+    except Exception:  # noqa: BLE001 - unreadable manifest -> unscoped scan
+        return {}, 0.0
+
+
 def _read_cells(root) -> list[dict]:
     """Scan a sweep ``root`` and return one dict per cell:
-    ``{"combo", "status", "metrics", "dir"}`` (``dir`` is the job dir Path).
+    ``{"combo", "status", "metrics", "dir", "status_mtime"}`` (``dir`` is the
+    job dir Path, ``status_mtime`` its status sidecar's mtime, 0.0 if unknown).
     Reads only the per-cell JSON sidecars: no Hydra/xarray. Raises
     ``FileNotFoundError`` if ``root`` is not a directory.
 
@@ -60,23 +78,23 @@ def _read_cells(root) -> list[dict]:
     which marks a cell of a newer sweep currently in flight (the mid-sweep
     view). Without a manifest (fresh dir mid-sweep, pre-manifest sweeps) every
     cell dir is kept."""
+    return _scan(root)[0]
+
+
+def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
+    """``_read_cells`` plus the mtime of the manifest that scoped the scan
+    (0.0 when none did), read once so the two never disagree. ``mtimes``
+    records every cell's ``status_mtime``; otherwise only the cells the
+    manifest does not list are stat'ed, as the stale-dir rule needs, and the
+    field is 0.0 (``show`` and ``export`` never read it)."""
     from ._resume import STATUS_FILE, read_cell_status
-    from ._sweep_io import MANIFEST_FILE, Manifest, combo_key, read_metrics_sidecar
+    from ._sweep_io import combo_key, read_metrics_sidecar
 
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f"sweep directory not found: {root}")
 
-    manifest_cells: dict = {}
-    manifest_mtime = 0.0
-    try:
-        manifest_cells = Manifest.load_or_new(root, []).cells
-        if not isinstance(manifest_cells, dict):
-            manifest_cells = {}
-        if manifest_cells:
-            manifest_mtime = (root / MANIFEST_FILE).stat().st_mtime
-    except Exception:  # noqa: BLE001 - unreadable manifest -> unscoped scan
-        manifest_cells = {}
+    manifest_cells, manifest_mtime = _manifest_cells(root)
 
     cells: list[dict] = []
     for d in sorted(
@@ -86,16 +104,17 @@ def _read_cells(root) -> list[dict]:
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
+        status_mtime = 0.0
         if manifest_cells:
             entry = manifest_cells.get(combo_key(s["combo"]))
             in_grid = isinstance(entry, dict) and entry.get("dir") == d.name
-            if not in_grid:
+            if mtimes or not in_grid:
                 try:
-                    newer = (d / STATUS_FILE).stat().st_mtime > manifest_mtime
+                    status_mtime = (d / STATUS_FILE).stat().st_mtime
                 except OSError:
-                    newer = False
-                if not newer:
-                    continue  # stale cell from a previous sweep of this dir
+                    status_mtime = 0.0
+            if not in_grid and status_mtime <= manifest_mtime:
+                continue  # stale cell from a previous sweep of this dir
         m = read_metrics_sidecar(d) or {}
         if not isinstance(m, dict):
             m = {}
@@ -105,9 +124,10 @@ def _read_cells(root) -> list[dict]:
                 "status": s.get("status", "pending"),
                 "metrics": m,
                 "dir": d,
+                "status_mtime": status_mtime,
             }
         )
-    return cells
+    return cells, manifest_mtime
 
 
 def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
@@ -220,7 +240,10 @@ def _sortable(v: Any):
     if isinstance(v, bool):
         return (1, str(v))
     if isinstance(v, int | float):
-        f = float(v)
+        try:
+            f = float(v)
+        except OverflowError:  # an int beyond float range sorts at that end
+            f = math.inf if v > 0 else -math.inf
         if f != f:  # NaN
             return (2, 0.0)
         return (0, f)
@@ -228,29 +251,284 @@ def _sortable(v: Any):
 
 
 class BestResult:
-    """The winning cell of a sweep (see ``best``): its swept-param ``combo``,
-    the optimized metric ``value``, the full ``metrics`` dict, its ``status``,
-    and its job ``dir`` (for locating checkpoints/artifacts)."""
+    """The winner of a sweep (see ``best``).
 
-    def __init__(self, combo: dict, status: str, metrics: dict, value: float, dir):
+    Attributes
+    ----------
+    combo : dict
+        The winning cell's swept parameters. With ``best(..., over=...)`` the
+        averaged parameters are omitted, so it names a configuration.
+    status : str
+        The cell's status, always ``"completed"``.
+    metrics : dict
+        Every metric of the cell. With ``over=`` the mean of every metric that
+        is a finite scalar in each cell of the group; the others are omitted.
+    value : float
+        The optimized metric (its mean over the group with ``over=``).
+    dir : Path | None
+        The cell's job dir, for locating checkpoints and artifacts. ``None``
+        with ``over=``, since the winner is then a group of cells.
+    dirs : list[Path]
+        The job dirs of every cell behind the result (``[dir]`` for a single
+        cell), in job order.
+    n : int
+        How many cells the result averages; 1 without ``over=``.
+    """
+
+    def __init__(
+        self,
+        combo: dict,
+        status: str,
+        metrics: dict,
+        value: float,
+        dir: Path | None,
+        *,
+        dirs: list[Path] | None = None,
+    ):
         self.combo = combo
         self.status = status
         self.metrics = metrics
         self.value = value
         self.dir = dir
+        # ``dir is None`` means "a group", which must say which cells it averages.
+        if dirs is None:
+            if dir is None:
+                raise TypeError("a BestResult without a dir needs dirs")
+            dirs = [dir]
+        self.dirs = list(dirs)
+        self.n = len(self.dirs)
 
     def __repr__(self) -> str:
+        if self.dir is None:
+            return (
+                f"BestResult(combo={self.combo!r}, value={self.value!r}, "
+                f"n={self.n}, dirs={self.dirs!r})"
+            )
         return (
             f"BestResult(combo={self.combo!r}, value={self.value!r}, dir={self.dir!r})"
         )
 
 
 def _finite_number(v: Any) -> bool:
-    return isinstance(v, int | float) and not isinstance(v, bool) and v == v
+    # isfinite, not just `v == v`: an inf metric must not be "best", and a group
+    # holding +inf and -inf would make fmean raise instead of being incomplete.
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # an int beyond float range (JSON allows it): no float
+        return False
 
 
-def best(root, metric: str, *, mode: str = "max") -> BestResult:
-    """Return the completed cell that optimizes ``metric`` across the sweep.
+def _is_candidate(cell: dict, metric: str) -> bool:
+    return cell["status"] == "completed" and _finite_number(cell["metrics"].get(metric))
+
+
+def _over_names(over) -> list[str]:
+    """The ``over`` argument of ``best`` as a list of distinct names, in the
+    caller's order. Checked before the sweep is read, like ``mode``, so a wrong
+    argument is not masked by a sweep that has no finite metric yet."""
+    if isinstance(over, str):
+        names = [over]
+    elif isinstance(over, Sequence):  # not a dict or set: their order is not ours
+        names = list(over)
+    else:
+        names = []
+    if not names or not all(isinstance(n, str) for n in names):
+        raise ValueError(
+            f"`over` must be a swept-param name or a sequence of them, got {over!r}"
+        )
+    return list(dict.fromkeys(names))
+
+
+def _check_swept(over: list[str], cells: list[dict]) -> None:
+    """A name no cell sweeps raises: a typo would otherwise silently average
+    over nothing and return the best single cell."""
+    swept = _ordered_union([c["combo"] for c in cells])
+    unknown = [n for n in over if n not in swept]
+    if unknown and cells:  # no cell yet: the "no completed cell" error says so
+        raise ValueError(
+            f"`over` names {', '.join(map(repr, unknown))}, which the sweep does "
+            f"not vary; swept params: {', '.join(swept) or '(none)'}"
+        )
+
+
+def _mean(values: list[float]) -> float | None:
+    """``fmean``, or None when it has no finite answer: fsum raises on
+    intermediate overflow (two values near 1e308), and a mean of ``inf`` is no
+    mean to compare."""
+    from statistics import fmean  # statistics costs `import mushin` about 4 ms
+
+    try:
+        m = fmean(values)
+    except OverflowError:
+        return None
+    return m if math.isfinite(m) else None
+
+
+def _best_group(
+    cells: list[dict],
+    manifest_mtime: float,
+    metric: str,
+    mode: str,
+    over: list[str],
+) -> BestResult:
+    """``best(over=...)``: group cells by their combo minus ``over``, average
+    ``metric`` within each group and pick the best mean.
+
+    Means are comparable only over the same seeds, so a group counts only when
+    it is complete: it has a result (a completed cell with a finite ``metric``)
+    at every ``over`` value where any group has one, and one result per value.
+    That bar, rather than "every cell present completed", is what makes the
+    rule hold: a cell that has not started has no job dir at all, so a
+    configuration still missing seeds would otherwise pass mid-sweep, or after
+    a kill, and could win on one lucky seed. And rather than "every value any
+    cell has", so that a seed that failed for every configuration drops out
+    instead of making the sweep unanswerable. While the sweep is unfinished
+    (a cell running, a sidecar newer than the manifest that ``run()`` writes
+    last, a cell recorded as skipped, or no usable manifest) the bar is
+    provisional and the result says so. A single value of ``over`` means
+    there is nothing to average, and raises. Skipped groups, and cells whose combo lacks an
+    ``over`` param (another grid in flight in a reused ``working_dir``), are
+    reported with a warning; no complete group raises."""
+    import warnings
+
+    from ._sweep_io import combo_key
+
+    def over_key(c: dict) -> str:
+        return combo_key({k: c["combo"][k] for k in over})
+
+    lacking = 0
+    groups: dict[str, list[dict]] = {}
+    for c in cells:
+        if any(k not in c["combo"] for k in over):
+            lacking += 1
+            continue
+        key = combo_key({k: v for k, v in c["combo"].items() if k not in over})
+        groups.setdefault(key, []).append(c)
+    grouped = [c for g in groups.values() for c in g]
+
+    results = {
+        key: [c for c in g if _is_candidate(c, metric)] for key, g in groups.items()
+    }
+    bar = {over_key(c) for rs in results.values() for c in rs}
+    # No bar (no grouped cell has a result) means no complete group, not every
+    # group complete over nothing.
+    complete = [
+        rs
+        for rs in results.values()
+        if bar and len(rs) == len(bar) and {over_key(c) for c in rs} == bar
+    ]
+    # A mean that overflows is no mean to compare: the group is skipped too.
+    scored = [
+        (m, rs)
+        for rs in complete
+        if (m := _mean([c["metrics"][metric] for c in rs])) is not None
+    ]
+
+    names = ", ".join(map(repr, over))
+    notes = []
+    # Unfinished: a grouped cell still running (a resume re-runs cells under the
+    # prior run's manifest), a status sidecar newer than the manifest (a re-run
+    # of the same grid overwrites cells in place, and run() writes the manifest
+    # last), or no usable manifest (never written, corrupt, or a sweep that
+    # predates it).
+    in_flight = sum(c["status"] in ("running", "pending") for c in grouped)
+    not_run = sum(c["status"] == "skipped" for c in grouped)
+
+    if in_flight:
+        why = (
+            f"{in_flight} cell(s) recorded as running or without a status; a "
+            "killed sweep leaves them so, and resume=True reruns them"
+        )
+    elif not_run:
+        why = (
+            f"{not_run} cell(s) recorded as skipped (sample=, or a budget ran "
+            "out), which resume=True would run"
+        )
+    elif not manifest_mtime:
+        why = "no usable manifest: it is written when run() ends, or predates it"
+    elif any(c["status_mtime"] > manifest_mtime for c in grouped):
+        why = (
+            "cells recorded later than the manifest, as when a re-run of the grid "
+            "is in flight (or the clocks that wrote them differ)"
+        )
+    else:
+        why = None
+    if why:
+        notes.append(
+            f"the sweep has not finished ({why}), so the bar is the values of "
+            f"{names} reached so far, and a configuration whose other cells have "
+            "not started looks complete"
+        )
+    if len(bar) == 1:  # an empty bar is "no complete group", below
+        raise ValueError(
+            f"only one value of {names} has a result anywhere (the sweep has one, "
+            f"the others failed or were skipped everywhere"
+            f"{', or it has not finished: ' + why if why else ''}), so there is "
+            f"nothing to average; `best()` without `over=` returns the best "
+            f"single cell."
+        )
+    dropped = {over_key(c) for c in grouped} - bar
+    if dropped:
+        notes.append(
+            f"{len(dropped)} value(s) of {names} have no result in any group and "
+            f"are left out of every mean"
+        )
+    skipped = len(groups) - len(scored)
+    if skipped:
+        notes.append(
+            f"skipped {skipped} of {len(groups)} groups that lack a result (a "
+            f"completed cell with a finite {metric!r}) at a value of {names} where "
+            f"another group has one, hold two cells at one value, or whose mean "
+            f"overflows"
+        )
+    if lacking:
+        notes.append(
+            f"{lacking} cell(s) whose params do not include {names} were left out "
+            f"(if they are the sweep you meant, it does not vary {names})"
+        )
+    if not scored:
+        raise ValueError(
+            f"no group of cells that share their params other than {names} is "
+            f"complete, so no mean is comparable: {'; '.join(notes)}. `best()` "
+            f"without `over=` still returns the best single cell."
+        )
+    if notes:
+        warnings.warn(
+            f"best(over={over!r}): {'; '.join(notes)}; the result compares the "
+            f"{len(scored)} complete group(s).",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    value, pick = (max if mode == "max" else min)(scored, key=lambda t: t[0])
+    means = {}
+    for m in _ordered_union([c["metrics"] for c in pick]):
+        if all(_finite_number(c["metrics"].get(m)) for c in pick):
+            mean = _mean([c["metrics"][m] for c in pick])
+            if mean is not None:
+                means[m] = mean
+    return BestResult(
+        combo={k: v for k, v in pick[0]["combo"].items() if k not in over},
+        status="completed",
+        metrics=means,
+        value=value,
+        dir=None,
+        dirs=[c["dir"] for c in pick],
+    )
+
+
+def best(
+    root,
+    metric: str,
+    *,
+    mode: str = "max",
+    over: str | Sequence[str] | None = None,
+) -> BestResult:
+    """Return the completed cell that optimizes ``metric`` across the sweep, or,
+    with ``over=``, the configuration whose mean ``metric`` over the named
+    swept params is best.
 
     Parameters
     ----------
@@ -260,24 +538,47 @@ def best(root, metric: str, *, mode: str = "max") -> BestResult:
         The metric to optimize; it must be a finite scalar in each cell.
     mode : str
         ``"max"`` (default) or ``"min"``.
+    over : str | Sequence[str] | None
+        Swept params to average over, typically ``"seed"``. The default picks
+        the single best cell, which is one seed; ``over="seed"`` groups the
+        cells that share every other param, averages ``metric`` within each
+        group and returns the best group, so a lucky seed cannot win. Means
+        are comparable only over the same seeds, so only a complete group
+        counts: one with a result (a completed cell with a finite ``metric``)
+        at every seed where any group has one. The others (a failed cell, a
+        ``sample=`` sweep's holes, a configuration whose seeds have not all
+        run) are skipped with a warning; a seed that failed for every
+        configuration drops out instead. On a sweep still running the seeds
+        reached so far set the bar, and the warning says so; the definitive
+        answer comes once the sweep has finished. One value of ``over`` has
+        nothing to average, and raises.
+
+    Returns
+    -------
+    BestResult
+        With ``over=``, its ``combo`` omits the averaged params, ``value`` and
+        ``metrics`` are means, ``n`` counts the cells, ``dirs`` lists their job
+        dirs and ``dir`` is ``None``.
 
     Raises
     ------
     ValueError
-        If ``mode`` is invalid, or no completed cell has ``metric`` as a finite
-        scalar (the error lists the scalar metrics that are available).
+        If ``mode`` is invalid, no completed cell has ``metric`` as a finite
+        scalar (the error lists the scalar metrics that are available), ``over``
+        is not a swept-param name or a sequence of them, names a param the
+        sweep does not vary, no group is complete, or one value of ``over``
+        has a result.
     FileNotFoundError
         If ``root`` is not a directory.
     """
     if mode not in ("max", "min"):
         raise ValueError(f"`mode` must be 'max' or 'min', got {mode!r}")
+    names = None if over is None else _over_names(over)
 
-    cells = _read_cells(root)
-    candidates = [
-        c
-        for c in cells
-        if c["status"] == "completed" and _finite_number(c["metrics"].get(metric))
-    ]
+    cells, manifest_mtime = _scan(root, mtimes=names is not None)
+    if names is not None:
+        _check_swept(names, cells)
+    candidates = [c for c in cells if _is_candidate(c, metric)]
     if not candidates:
         available = sorted(
             {
@@ -292,6 +593,9 @@ def best(root, metric: str, *, mode: str = "max") -> BestResult:
             f"no completed cell has a finite scalar metric {metric!r}. "
             f"Available scalar metrics: {', '.join(available) or '(none)'}."
         )
+
+    if names is not None:
+        return _best_group(cells, manifest_mtime, metric, mode, names)
 
     pick = (max if mode == "max" else min)(
         candidates, key=lambda c: c["metrics"][metric]

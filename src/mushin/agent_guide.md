@@ -195,9 +195,11 @@ rules:
   writes the full package list to `mushin_env.txt` in the sweep directory.
   Each cell's provenance lists only mushin's own stack (torch, numpy,
   Lightning, Hydra), not, for example, scikit-learn.
-- **`best()` is per cell.** `mushin.best(root, "score")` returns the single
-  best cell, which is one seed. To pick a configuration, average over seeds
-  first: `ds["score"].mean("seed")`.
+- **`best()` is per cell unless you pass `over=`.** `mushin.best(root, "score")` returns the single
+  best cell, which is one seed. To pick a configuration, average over seeds:
+  `mushin.best(root, "score", over="seed")` returns the configuration with
+  the best mean, counting only configurations with a result at every seed
+  another has (older versions: `ds["score"].mean("seed")`).
 - **On Windows, set `PYTHONUTF8=1`** (or run `python -X utf8`) when mushin's
   output is captured: `mushin.diff` and the dry-run preview print characters
   that a Windows console code page may lack.

@@ -106,9 +106,11 @@ def read_metrics_sidecar(job_dir) -> dict | None:
         return None
     # A corrupt/unreadable sidecar is treated like a missing one (return None ->
     # the cell re-runs) rather than aborting an otherwise-resumable sweep.
+    # ValueError, not just JSONDecodeError: an int past the parser's digit limit
+    # raises a plain ValueError, and RecursionError guards a deeply nested file.
     try:
         return _restore_nonfinite(json.loads(p.read_text()))
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError, RecursionError):
         return None
 
 
