@@ -185,3 +185,60 @@ def test_best_over_unknown_metric_raises_the_usual_error(tmp_path):
     _run_seeded(wd)
     with pytest.raises(ValueError, match="no completed cell has a finite scalar"):
         mushin.best(wd, "nope", over="seed")
+
+
+def _cell_dir(wd, **combo):
+    import json
+
+    for d in wd.iterdir():
+        if d.is_dir() and (d / "mushin_cell_status.json").exists():
+            c = json.loads((d / "mushin_cell_status.json").read_text())["combo"]
+            if all(c.get(k) == v for k, v in combo.items()):
+                return d
+    raise AssertionError(f"no cell dir for {combo}")
+
+
+def test_best_over_treats_missing_seeds_as_incomplete(tmp_path):
+    """A cell that has not started has no job dir at all, so a group with every
+    PRESENT cell completed can still be short of seeds. Removing two of lr=0.2's
+    seeds stands in for a sweep still running or killed: lr=0.2 holds one seed
+    (score 1.0), and must not beat lr=0.1's complete three (mean 0.0)."""
+    import shutil
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    for seed in (1, 2):
+        shutil.rmtree(_cell_dir(wd, lr=0.2, seed=seed))
+    with pytest.warns(UserWarning, match=r"skipped 1 of 2 groups"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.1}
+    assert r.n == 3
+
+
+def test_best_over_leaves_out_cells_without_the_param(tmp_path):
+    """A newer sweep in flight in a reused working_dir can have another grid;
+    its cells, lacking `seed`, are reported and left out rather than competing
+    as one-cell groups."""
+    import shutil
+
+    from mushin._resume import write_cell_status
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    extra = wd / "99"
+    shutil.copytree(_cell_dir(wd, lr=0.1, seed=2), extra)  # score 10.0, no seed
+    write_cell_status(extra, status="completed", combo={"lr": 0.3}, attempt=1)
+    assert any(c["combo"] == {"lr": 0.3} for c in mushin._show._read_cells(wd))
+
+    with pytest.warns(UserWarning, match=r"1 cell\(s\) whose params do not include"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2}
+    assert r.value == pytest.approx(1.0)
+
+
+def test_best_result_without_dir_has_no_dirs():
+    from mushin._show import BestResult
+
+    r = BestResult({}, "completed", {}, 0.0, None)
+    assert r.dirs == [] and r.n == 0
+    assert "n=0" in repr(r)

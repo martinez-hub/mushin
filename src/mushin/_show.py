@@ -10,7 +10,10 @@ before committing to the full ``to_xarray`` load."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _ordered_union(dicts: list[dict]) -> list[str]:
@@ -258,16 +261,20 @@ class BestResult:
         status: str,
         metrics: dict,
         value: float,
-        dir,
+        dir: Path | None,
         *,
-        dirs: list | None = None,
+        dirs: list[Path] | None = None,
     ):
         self.combo = combo
         self.status = status
         self.metrics = metrics
         self.value = value
         self.dir = dir
-        self.dirs = list(dirs) if dirs is not None else [dir]
+        # ``dir is None`` means "a group", so it must never smuggle a [None].
+        if dirs is not None:
+            self.dirs = list(dirs)
+        else:
+            self.dirs = [] if dir is None else [dir]
         self.n = len(self.dirs)
 
     def __repr__(self) -> str:
@@ -315,39 +322,71 @@ def _over_names(over, cells: list[dict]) -> list[str]:
     return names
 
 
-def _best_group(cells: list[dict], metric: str, mode: str, over: list[str]):
+def _best_group(
+    cells: list[dict], candidates: list[dict], metric: str, mode: str, over: list[str]
+) -> BestResult:
     """``best(over=...)``: group cells by their combo minus ``over``, average
     ``metric`` within each group and pick the best mean.
 
-    Only a group whose every cell completed with a finite ``metric`` counts,
-    so a mean over fewer seeds than its neighbours (a failed cell, a sweep
-    still running, a ``sample=`` sweep's holes) cannot win by luck. Skipped
-    groups are reported with a warning; a sweep with no complete group raises."""
+    A group counts only when it is complete: it holds every ``over`` value
+    (every seed) that any cell of the sweep has, each completed with a finite
+    ``metric``. "Every cell present completed" would not do: a cell that has
+    not started yet has no job dir at all, so mid-sweep, or after a kill, a
+    configuration still missing seeds would pass and could win on one lucky
+    seed. The manifest that lists the grid is written when the sweep ends, so
+    the values the other groups reached are the best stand-in before then.
+    Skipped groups, and cells whose combo lacks an ``over`` param (a sweep in
+    flight with another grid in a reused ``working_dir``), are reported with a
+    warning; a sweep with no complete group raises."""
     import warnings
     from statistics import fmean
 
     from ._sweep_io import combo_key
 
+    is_candidate = {id(c) for c in candidates}
+    lacking = [c for c in cells if any(k not in c["combo"] for k in over)]
+    lacking_ids = {id(c) for c in lacking}
+
+    def over_key(c: dict) -> str:
+        return combo_key({k: c["combo"][k] for k in over})
+
     groups: dict[str, list[dict]] = {}
+    seen_over: set[str] = set()
     for c in cells:
+        if id(c) in lacking_ids:
+            continue
         key = combo_key({k: v for k, v in c["combo"].items() if k not in over})
         groups.setdefault(key, []).append(c)
+        seen_over.add(over_key(c))
 
-    complete = [g for g in groups.values() if all(_is_candidate(c, metric) for c in g)]
+    complete = [
+        g
+        for g in groups.values()
+        if {over_key(c) for c in g} == seen_over
+        and all(id(c) in is_candidate for c in g)
+    ]
+    names = ", ".join(map(repr, over))
+    left_out = (
+        f" {len(lacking)} cell(s) whose params do not include {names} were left out."
+        if lacking
+        else ""
+    )
     if not complete:
         raise ValueError(
-            f"every group of cells that share their params other than "
-            f"{', '.join(map(repr, over))} has a cell that is not completed with a "
-            f"finite {metric!r} (failed, pending, or a hole of a sample= sweep), "
-            f"so no mean is comparable. `best()` without `over=` still returns "
-            f"the best single cell."
+            f"no group of cells that share their params other than {names} is "
+            f"complete: each lacks a value of {names} that another group has, or "
+            f"holds a cell that is not completed with a finite {metric!r} (failed, "
+            f"still running, or a hole of a sample= sweep), so no mean is "
+            f"comparable.{left_out} `best()` without `over=` still returns the "
+            f"best single cell."
         )
     skipped = len(groups) - len(complete)
-    if skipped:
+    if skipped or lacking:
         warnings.warn(
-            f"best(over={over!r}): skipped {skipped} of {len(groups)} groups whose "
-            f"cells are not all completed with a finite {metric!r}; the result "
-            f"compares only the {len(complete)} complete group(s).",
+            f"best(over={over!r}): skipped {skipped} of {len(groups)} groups that "
+            f"lack a value of {names} another group has, or hold a cell not "
+            f"completed with a finite {metric!r}; the result compares only the "
+            f"{len(complete)} complete group(s).{left_out}",
             UserWarning,
             stacklevel=3,
         )
@@ -371,7 +410,13 @@ def _best_group(cells: list[dict], metric: str, mode: str, over: list[str]):
     )
 
 
-def best(root, metric: str, *, mode: str = "max", over=None) -> BestResult:
+def best(
+    root,
+    metric: str,
+    *,
+    mode: str = "max",
+    over: str | Sequence[str] | None = None,
+) -> BestResult:
     """Return the completed cell that optimizes ``metric`` across the sweep, or,
     with ``over=``, the configuration whose mean ``metric`` over the named
     swept params is best.
@@ -389,9 +434,12 @@ def best(root, metric: str, *, mode: str = "max", over=None) -> BestResult:
         the single best cell, which is one seed; ``over="seed"`` groups the
         cells that share every other param, averages ``metric`` within each
         group and returns the best group, so a lucky seed cannot win. Only a
-        group whose every cell completed with a finite ``metric`` counts; the
-        others are skipped with a warning, since a mean over fewer seeds is not
-        comparable.
+        complete group counts: one that has every seed any cell of the sweep
+        has, each completed with a finite ``metric``. The others (a failed
+        cell, a ``sample=`` sweep's holes, a configuration whose seeds have not
+        all run) are skipped with a warning, since a mean over fewer seeds is
+        not comparable. On a sweep still running the seeds reached so far set
+        the bar, so the definitive answer comes once the sweep has finished.
 
     Returns
     -------
@@ -430,7 +478,7 @@ def best(root, metric: str, *, mode: str = "max", over=None) -> BestResult:
         )
 
     if over is not None:
-        return _best_group(cells, metric, mode, _over_names(over, cells))
+        return _best_group(cells, candidates, metric, mode, _over_names(over, cells))
 
     pick = (max if mode == "max" else min)(
         candidates, key=lambda c: c["metrics"][metric]

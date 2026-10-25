@@ -68,6 +68,12 @@ best("runs/explore-01", "accuracy")  # the winning cell + its config + its dir
 diff("runs/explore-01", "runs/explore-00")  # what moved since the last idea
 ```
 
+`best` names one cell, which is one seed. To pick a configuration rather than a
+lucky draw, `best(root, "accuracy", over="seed")` averages over seeds first; it
+counts only configurations whose every seed completed, so on this `sample=`d
+sweep, where most configurations have holes, it warns about the skipped ones
+or refuses, and the per-cell winner is a hint to run properly, not a result.
+
 Iterate: change the model, narrow the grid, re-run. With `cache_dir=` set, cells
 you have already computed stay free across every iteration.
 
