@@ -7,6 +7,8 @@ opts in via a ``mushin_resume`` parameter (see the resume-hardening design)."""
 from __future__ import annotations
 
 import contextvars
+import functools
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +49,7 @@ def write_cell_status(
     attempt: int,
     config_hash: str | None = None,
     code_hash: str | None = None,
+    code_deps: dict[str, str] | None = None,
     job_num: int | None = None,
     choices: dict[str, str | None] | None = None,
 ) -> None:
@@ -69,6 +72,8 @@ def write_cell_status(
         payload["config_hash"] = config_hash
     if code_hash is not None:
         payload["code_hash"] = code_hash
+    if code_deps is not None:
+        payload["code_deps"] = code_deps
     if _records_job_fields(job_num, choices):
         payload["job_num"] = job_num
         payload["choices"] = choices
@@ -152,9 +157,10 @@ def code_fingerprint(fn) -> str | None:
     Complements ``config_fingerprint`` in the resume guard: a task whose
     *body* was edited between runs (same config, same combo key) would
     otherwise have its stale cached metrics silently returned. Only the task
-    function's own source is hashed; helpers it calls and module-level
-    constants it reads are not covered, so a fresh ``working_dir`` is still the
-    safe choice for a larger refactor."""
+    function's own source is hashed; the project's other code the task reaches
+    (helpers, module-level constants) is covered by ``project_fingerprints``,
+    installed packages and data files by neither, so a fresh ``working_dir`` is
+    still the safe choice after upgrading a dependency or changing the data."""
     import inspect
 
     try:
@@ -166,6 +172,121 @@ def code_fingerprint(fn) -> str | None:
     import hashlib
 
     return hashlib.sha256(src.encode()).hexdigest()[:16]
+
+
+@functools.cache
+def _foreign_roots() -> tuple[Path, ...]:
+    """Directories whose Python files are not the project's own: the running
+    interpreter (its stdlib, site-packages and any venv prefix) and mushin
+    itself. Resolved once; a file under any of them is left out of
+    ``project_fingerprints``."""
+    import site
+    import sys
+    import sysconfig
+
+    roots: set[str] = set(sysconfig.get_paths().values())
+    roots.update((sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix))
+    try:
+        roots.update(site.getsitepackages())
+        roots.add(site.getusersitepackages())
+    except Exception:  # noqa: BLE001 - a restricted site module; nothing to add
+        pass
+    roots.add(str(Path(__file__).parent))  # mushin's own package
+    out = []
+    for r in roots:
+        if not r:
+            continue
+        try:
+            out.append(Path(r).resolve())
+        except OSError:
+            continue
+    return tuple(out)
+
+
+def _project_file(module) -> Path | None:
+    """The ``.py`` file ``module`` was loaded from when it is the project's own
+    (not under the interpreter or mushin), else None."""
+    f = getattr(module, "__file__", None)
+    if not isinstance(f, str) or not f.endswith(".py"):
+        return None
+    try:
+        path = Path(f).resolve()
+        if not path.is_file():
+            return None
+    except OSError:
+        return None
+    if any(path.is_relative_to(root) for root in _foreign_roots()):
+        return None
+    return path
+
+
+def project_fingerprints(fn) -> dict[str, str] | None:
+    """Hashes, by module name, of the project's own source files the task
+    reaches: the module that defines ``fn`` and, transitively, every project
+    module referenced from a reached module's globals (an imported module, or
+    the module of a function, class or object held there). None when ``fn``'s
+    module cannot be found (a function built at runtime); an empty dict when
+    the task reaches no project file (defined inside an installed package, or
+    in a notebook that imports none).
+
+    Complements ``code_fingerprint``, which covers the task's own body: an
+    edited helper, a changed module constant or a modified imported module of
+    the project changes this fingerprint, so a resume re-runs the cell and a
+    ``cache_dir`` lookup misses, instead of returning a result computed by code
+    that no longer exists. Files are hashed as they are on disk when ``run()``
+    starts, so an edit made since the module was imported counts (the re-run
+    then uses whatever code the process holds; a fresh process is the honest
+    way to pick up an edit). Installed packages are left out: a dependency
+    upgrade is provenance's job, and hashing site-packages would miss the cache
+    on every unrelated install."""
+    import inspect
+    import sys
+    import types
+
+    target = fn
+    while isinstance(target, functools.partial):
+        target = target.func
+    if callable(target):
+        try:
+            target = inspect.unwrap(target)
+        except ValueError:  # a __wrapped__ cycle: hash what we have
+            pass
+    module = inspect.getmodule(target)
+    if module is None and not isinstance(target, (types.FunctionType, type)):
+        module = inspect.getmodule(type(target))
+    if module is None:
+        return None
+    hashes: dict[str, str] = {}
+    visited: set[str] = set()
+    pending = [module]
+    while pending:
+        mod = pending.pop()
+        name = getattr(mod, "__name__", None)
+        if not isinstance(name, str) or name in visited:
+            continue
+        visited.add(name)
+        path = _project_file(mod)
+        if path is not None:
+            try:
+                hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            except OSError:
+                continue
+        elif mod is not module:
+            continue  # a foreign module: do not walk into site-packages
+        # The task's own module is walked whether or not it has a file (a
+        # notebook's __main__ reaches the project modules it imports).
+        for value in list(vars(mod).values()):
+            if isinstance(value, types.ModuleType):
+                pending.append(value)
+                continue
+            owner = (
+                value.__module__
+                if isinstance(value, (types.FunctionType, type))
+                else type(value).__module__
+            )
+            if isinstance(owner, str) and owner in sys.modules:
+                pending.append(sys.modules[owner])
+    return hashes
 
 
 def read_cell_status(cell_dir) -> dict | None:

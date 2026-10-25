@@ -377,6 +377,7 @@ class _TaskRunner:
         max_total_seconds=None,
         sampled_indices=None,
         cache_dir=None,
+        code_deps=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -386,14 +387,19 @@ class _TaskRunner:
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
         self.code_hash = code_hash  # hash of the task source (resume guard)
+        # Hashes, by module name, of the project's own source files the task
+        # reaches (its module, the helpers it imports); None when unknown. The
+        # other half of the code guard: an edited helper re-runs the cell.
+        self.code_deps = code_deps
         # Grid subsampling: the set of Hydra job numbers to actually run (None =
         # run every cell). A cell whose job.num is not selected is skipped
         # (NaN), keyed on the deterministic job index so it's launcher- and
         # axis-type-agnostic and identical across a resume.
         self.sampled_indices = sampled_indices
         # Content-addressed cross-working_dir cache: a directory keyed on
-        # (config fingerprint, code fingerprint). A cell whose config AND task
-        # source match a cached entry reuses it instead of recomputing.
+        # (config fingerprint, code fingerprint, project-code fingerprints). A
+        # cell whose config, task source AND the project code the task reaches
+        # match a cached entry reuses it instead of recomputing.
         self.cache_dir = cache_dir
         # Wall-clock budget: the deadline is set lazily at the first COMPUTED
         # cell (below), so launch/import overhead and resume cache hits don't
@@ -405,15 +411,19 @@ class _TaskRunner:
 
     def _cache_key(self, config_hash) -> str | None:
         """The content-address for this cell: a hash of its resolved-config and
-        task-source fingerprints, or None if either is unavailable (so an
-        unresolvable cell is simply never cached)."""
+        task-source fingerprints and of the project code the task reaches, or
+        None if the first two are unavailable (so an unresolvable cell is simply
+        never cached). A task that reaches no project file keeps the two-part
+        key, so its entries from before the third part are still found."""
         if not self.cache_dir or config_hash is None or self.code_hash is None:
             return None
         import hashlib
+        import json
 
-        return hashlib.sha256(f"{config_hash}:{self.code_hash}".encode()).hexdigest()[
-            :32
-        ]
+        payload = f"{config_hash}:{self.code_hash}"
+        if self.code_deps:
+            payload += ":" + json.dumps(self.code_deps, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     @staticmethod
     def _multi_rank_world() -> bool:
@@ -491,6 +501,7 @@ class _TaskRunner:
             write_cell_status,
             config_hash=chash,
             code_hash=self.code_hash,
+            code_deps=self.code_deps,
             job_num=job_num,
             choices=choices,
         )
@@ -529,10 +540,12 @@ class _TaskRunner:
                 prior = read_cell_status(cell_dir) or {}
                 prior_config = prior.get("config_hash")
                 prior_code = prior.get("code_hash")
-                # A completed cell is reused only if BOTH the resolved config
-                # and the task source still match. A missing prior hash (a
-                # pre-fingerprint sweep) can't be checked, so it isn't a reason
-                # to re-run — legacy sweeps still resume.
+                prior_deps = prior.get("code_deps")
+                # A completed cell is reused only if the resolved config, the
+                # task source AND the project code the task reaches all still
+                # match. A missing prior hash (a pre-fingerprint sweep) can't be
+                # checked, so it isn't a reason to re-run — legacy sweeps still
+                # resume.
                 config_changed = (
                     prior_config is not None
                     and chash is not None
@@ -543,14 +556,27 @@ class _TaskRunner:
                     and self.code_hash is not None
                     and prior_code != self.code_hash
                 )
-                if config_changed or code_changed:
-                    what = (
-                        "config and task code"
-                        if config_changed and code_changed
-                        else "config"
-                        if config_changed
-                        else "task code"
-                    )
+                deps_changed = (
+                    isinstance(prior_deps, dict)
+                    and self.code_deps is not None
+                    and prior_deps != self.code_deps
+                )
+                if config_changed or code_changed or deps_changed:
+                    parts = []
+                    if config_changed:
+                        parts.append("config")
+                    if code_changed:
+                        parts.append("task code")
+                    if deps_changed:
+                        # Name the modules that differ, so the user sees which
+                        # helper (or constant-holding module) the edit was in.
+                        names = sorted(
+                            m
+                            for m in set(prior_deps) | set(self.code_deps)
+                            if prior_deps.get(m) != self.code_deps.get(m)
+                        )
+                        parts.append(f"code the task reaches ({', '.join(names)})")
+                    what = " and ".join(parts)
                     warnings.warn(
                         f"resume: cell {key!r} was completed under a different "
                         f"{what} (fingerprint mismatch); re-running it instead "
@@ -573,7 +599,7 @@ class _TaskRunner:
                         return cached
 
         # (1.4) content-addressed cache: reuse a cell computed under the same
-        # resolved config AND task source in ANY working_dir. Keyed on the
+        # resolved config, task source AND project code in ANY working_dir. Keyed on the
         # fingerprints (not the combo/dir), so it survives a fresh working_dir.
         # The cache hit refreshes this job dir (metrics + completed status) so
         # the manifest and an offline load see a normal completed cell.
@@ -1508,7 +1534,7 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import code_fingerprint
+        from ._resume import code_fingerprint, project_fingerprints
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -1535,6 +1561,7 @@ class BaseWorkflow:
             max_total_seconds=max_total_seconds,
             sampled_indices=sampled_indices,
             cache_dir=cache_dir,
+            code_deps=project_fingerprints(self.task),
         )
 
         self._capture_env = capture_env
@@ -1922,12 +1949,15 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             Skip cells already recorded as completed in ``working_dir`` (their
             metrics are read from the sidecar) and re-run the rest. A completed
             cell is reused only if its swept-parameter combination AND
-            fingerprints of both its resolved config and its task source still
-            match; a changed non-swept value or an edited task body re-runs that
-            cell (with a warning). The fingerprint does not cover helper
-            functions the task calls, module-level constants, or the
-            environment. For a larger refactor, re-run from a fresh
-            ``working_dir`` rather than resuming.
+            fingerprints of its resolved config, its task source and the
+            project's own code the task reaches (the module defining it and the
+            project modules that module imports, transitively; their files as
+            they are on disk when ``run()`` starts) still match; a changed
+            non-swept value, an edited task body or an edited helper re-runs
+            that cell, with a warning that names the changed module. The
+            fingerprint does not cover installed packages, data files or the
+            environment. After upgrading a dependency or changing the data,
+            re-run from a fresh ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
@@ -1976,12 +2006,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             reproducible subset of the same grid.
         cache_dir : str | None (default: None)
             A content-addressed cache of completed cells, shared across
-            ``working_dir``\\ s. A cell whose resolved config AND task source
-            match a cached entry (keyed on the same fingerprints as resume)
-            reuses that result instead of recomputing, so a cell computed in one
-            sweep is free in another. Newly-computed cells are stored there.
-            Complements ``resume`` (which reuses within a single ``working_dir``);
-            a changed config value or edited task body is a cache miss.
+            ``working_dir``\\ s. A cell whose resolved config, task source and
+            the project code the task reaches match a cached entry (keyed on the
+            same fingerprints as resume) reuses that result instead of
+            recomputing, so a cell computed in one sweep is free in another.
+            Newly-computed cells are stored there. Complements ``resume`` (which
+            reuses within a single ``working_dir``); a changed config value, an
+            edited task body or an edited helper is a cache miss.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for

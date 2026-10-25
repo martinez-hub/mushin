@@ -150,12 +150,13 @@ rules:
   rest as skipped; a later run with `resume=True` and no `sample` fills them
   in.
 - **Resume.** `resume=True` with the same `working_dir` reruns the cells that
-  are incomplete or whose config or task function changed. It does not see an
-  edit to anything the task calls: the scientist's code, a helper, a constant
-  or an installed package. After such an edit, use a new `working_dir`.
-  `cache_dir=` has the same blind spot. Hydra still lists every cell when a
-  resume launches; the completed ones return their saved metrics without
-  running.
+  are incomplete or whose config, task function or project code changed: the
+  module that defines the task and the project modules it imports (a helper,
+  a constant), as their files are on disk when `run()` starts. It does not see
+  an edit to an installed package or to data files. After such a change, use a
+  new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
+  lists every cell when a resume launches; the completed ones return their
+  saved metrics without running.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string
   `method` values. Select or average away other dims on the Dataset first:
   `ds.sel(lr=0.01)`, or `ds.mean("lr", keep_attrs=True)` (older xarray drops
