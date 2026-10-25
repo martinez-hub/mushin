@@ -115,6 +115,13 @@ def _normalize_failures(val) -> list[str]:
     return [str(val)]
 
 
+def _family_size(pvalues) -> int:
+    """The pairs a correction adjusts together: NaN p-values (masked pairs) are
+    outside the family. The one definition the corrections and the underpowered
+    warning share."""
+    return int(np.count_nonzero(~np.isnan(np.asarray(pvalues, dtype=float))))
+
+
 def holm_correction(pvalues) -> list[float]:
     """Holm-Bonferroni step-down correction, returned in original order.
 
@@ -123,7 +130,7 @@ def holm_correction(pvalues) -> list[float]:
     pvalues = np.asarray(pvalues, dtype=float)
     m = len(pvalues)
     order = np.argsort(pvalues)  # NaNs sort to the end
-    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
+    n_valid = _family_size(pvalues)
     corrected = np.empty(m)
     running = 0.0
     for rank, idx in enumerate(order):
@@ -140,7 +147,7 @@ def bonferroni_correction(pvalues) -> list[float]:
     """Bonferroni correction (``p * n_valid``, capped at 1), original order.
     NaNs stay NaN and are excluded from the family size."""
     pvalues = np.asarray(pvalues, dtype=float)
-    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
+    n_valid = _family_size(pvalues)
     return [
         float("nan") if np.isnan(p) else float(min(p * n_valid, 1.0)) for p in pvalues
     ]
@@ -196,7 +203,10 @@ def _best_case_p(test: str, n_seeds: int) -> float | None:
             _, p = func(a, b)
     except ValueError:
         return None  # test could not even run at this n; nothing useful to say
-    return float(p)
+    p = float(p)
+    # A parametric test at one seed gives NaN: no sampling distribution, which
+    # compare_methods reports as not significant; a floor is nothing to say.
+    return None if np.isnan(p) else p
 
 
 def _underpowered(
@@ -217,7 +227,11 @@ def _underpowered(
     if p is None:
         return None
     family = max(int(n_comparisons), 1)
-    correct = _CORRECTIONS.get(correction, _no_correction)
+    if correction not in _CORRECTIONS:
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
+    correct = _CORRECTIONS[correction]
     best = min(correct([p] * family)) if family > 1 else p
     if best < alpha:
         return None
@@ -257,7 +271,7 @@ def warn_if_underpowered(
     """
     reason = _underpowered(test, n_seeds, alpha, n_comparisons, correction)
     if reason is not None:
-        warnings.warn("".join(reason), UserWarning, stacklevel=3)
+        warnings.warn("".join(reason), UserWarning, stacklevel=2)
 
 
 #: Below this many resampling UNITS (items, or clusters when grouped) the
@@ -461,8 +475,7 @@ def compare_methods(
         # The same count the corrections use for their family size; a family of
         # 0 (every pair masked) is judged as the single pair, which is what the
         # seed count alone can say.
-        n_valid = int(np.count_nonzero(~np.isnan(np.asarray(pvals, dtype=float))))
-        families[str(metric)] = max(n_valid, 1)
+        families[str(metric)] = max(_family_size(pvals), 1)
         for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)
@@ -473,10 +486,11 @@ def compare_methods(
     # distinct reason, naming its metrics unless it holds for all of them (or
     # there is no metric, when the single pair's floor is all there is to say).
     reasons: dict[tuple[str, str], list[str]] = {}
-    for metric, family in families.items() if families else [("", 1)]:
+    for family in sorted(set(families.values()) or {1}):  # one probe per family
         reason = _underpowered(test, n_seeds, alpha, family, correction)
         if reason is not None:
-            reasons.setdefault(reason, []).append(metric)
+            named = [m for m, f in families.items() if f == family]
+            reasons.setdefault(reason, []).extend(named)
     for (head, tail), named in reasons.items():
         scope = ""
         if families and len(named) < len(families):

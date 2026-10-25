@@ -222,6 +222,30 @@ def test_only_family_scaled_corrections_raise_the_seed_floor(correction, warns):
     assert bool(msgs) is warns, msgs
 
 
+def test_warn_if_underpowered_says_nothing_for_a_nan_best_case():
+    """A parametric test at one seed has no sampling distribution (NaN p), which
+    compare_methods reports as not significant; a floor of NaN is nothing to say,
+    and before the family bar the NaN never compared true."""
+    assert _underpowered("welch", 1) == []
+    ds = to_dataset({"a": [{"accuracy": 0.9}], "b": [{"accuracy": 0.7}]})
+    assert underpowered_warnings(compare_methods, ds, test="welch") == []
+
+
+def test_warn_if_underpowered_rejects_an_unknown_correction():
+    """A typo must not fall back to the laxer single-pair floor."""
+    with pytest.raises(ValueError, match="unknown correction 'Holm'"):
+        warn_if_underpowered("wilcoxon", 6, 0.05, n_comparisons=3, correction="Holm")
+
+
+def test_warn_if_underpowered_points_at_its_caller():
+    def caller():
+        warn_if_underpowered("wilcoxon", 3, 0.05)  # the line the warning names
+
+    with pytest.warns(UserWarning, match="cannot reach") as rec:
+        caller()
+    assert rec[0].lineno == caller.__code__.co_firstlineno + 1
+
+
 def test_warn_if_underpowered_matches_significance_at_exact_equality():
     """A pair is significant when its corrected p is strictly below alpha, so a
     best case that lands exactly on alpha cannot reach it and must warn."""
