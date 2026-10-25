@@ -104,7 +104,9 @@ Two multi-rank cautions:
   launch (each rank would check the deadline at its own moment; a rank that
   stops while its siblings train would hang DDP at rendezvous: a warning is
   emitted). Bound multi-rank jobs with the scheduler's own `timeout_min`
-  instead. Single-rank jobs, one per cell, share the sweep's deadline.
+  instead. Single-rank jobs, one per cell, share the sweep's deadline; one
+  that SLURM preempts and requeues after the deadline still runs, since it
+  started before it.
 - Every rank of a cell runs the task function, so per-cell files
   (status/metrics/provenance sidecars) are written once per rank; writes are
   atomic and carry the same values, so this is benign; `MetricsCallback`'s
