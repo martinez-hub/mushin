@@ -175,7 +175,7 @@ def read_cell_status(cell_dir) -> dict | None:
     if not p.exists():
         return None
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError, RecursionError):
         # ValueError covers JSONDecodeError, a non-UTF-8 file and an integer
         # past Python's digit limit; RecursionError a file nested too deep. All

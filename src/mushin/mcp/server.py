@@ -365,7 +365,7 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     cells: dict = {}
     if mf.exists() and _within_root(mf, rootp):
         try:
-            loaded = _json.loads(mf.read_text())
+            loaded = _json.loads(mf.read_text(encoding="utf-8"))
             raw = loaded.get("cells", {}) if isinstance(loaded, dict) else {}
             cells = raw if isinstance(raw, dict) else {}
         except (ValueError, OSError):
@@ -377,8 +377,12 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
         tb = p / str(v.get("dir") or "") / "mushin_error.txt"
         if v.get("dir") and tb.exists() and _within_root(tb, rootp):
             try:
-                entry["traceback"] = tb.read_text()[:4000]
-            except OSError:
+                # The run writes this file in UTF-8 on every platform. "replace"
+                # keeps a file from an older run, written in that machine's
+                # locale encoding, readable rather than failing the whole tool.
+                text = tb.read_text(encoding="utf-8", errors="replace")
+                entry["traceback"] = text[:4000]
+            except (OSError, ValueError):
                 pass
         failures.append(entry)
     return {"path": str(p), "count": len(failures), "failures": failures}
@@ -405,7 +409,7 @@ def _get_provenance(
         if not _within_root(f, rootp):
             continue
         try:
-            rec = _json.loads(f.read_text())
+            rec = _json.loads(f.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             continue
         if not isinstance(rec, dict):

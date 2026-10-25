@@ -13,12 +13,16 @@ escaped."""
 
 from __future__ import annotations
 
+import codecs
 import sys
 from typing import Any
 
 # The default of ``file=``: "sys.stdout as it is at call time". A sentinel
-# rather than None, so that ``file=sys.stderr`` with no stderr (fd 2 closed,
-# pythonw.exe) drops the text, as print() does, instead of moving it to stdout.
+# rather than None, so that ``file=None`` can mean "nowhere". That differs
+# from print() on purpose: print(file=None) writes to sys.stdout, so
+# print(msg, file=sys.stderr) with no stderr (fd 2 closed, pythonw.exe) moves
+# an error message onto stdout, where `$(python -m mushin guide --path)`
+# would capture it as the path.
 STDOUT: Any = object()
 
 
@@ -26,44 +30,61 @@ def _resolve(file: Any) -> Any:
     return sys.stdout if file is STDOUT else file
 
 
-def _escape(text: str, encoding: str, errors: str) -> str:
-    """``text`` with each run of characters that ``encoding`` cannot take
-    under the ``errors`` handler written as backslash escapes (``\\u03b1``).
+def _escaping(errors: str) -> str:
+    """The name of a codec error handler that gives each character the
+    stream's own ``errors`` handler first and writes it as a backslash escape
+    only if that handler rejects it. Registered on first use, once per
+    handler name, in the process-wide codecs registry (hence the prefix).
 
-    Only those characters change: what the handler itself takes, such as a
-    lone surrogate under ``surrogateescape`` (an undecodable path, which the
-    stream writes back as its original byte), is left for the stream."""
-    parts = []
-    rest = text
-    while True:
-        try:
-            rest.encode(encoding, errors)
-        except UnicodeEncodeError as exc:
-            start, end = exc.start, exc.end
-            if not 0 <= start < end <= len(rest):  # a codec reporting no range
-                start, end = 0, len(rest)
-            bad = rest[start:end]
-            parts += [rest[:start], bad.encode("ascii", "backslashreplace").decode()]
-            rest = rest[end:]
-        else:
-            parts.append(rest)
-            return "".join(parts)
+    One character at a time, so that in a run the codec reports as a whole
+    (a lone surrogate beside an alpha) the handler still takes what it can:
+    under ``surrogateescape`` the surrogate goes out as its original byte."""
+    name = f"mushin.console.{errors}"
+    try:
+        codecs.lookup_error(name)
+    except LookupError:
+        own = codecs.lookup_error(errors)  # LookupError for an unknown name
+
+        def handle(exc: UnicodeError):
+            if not isinstance(exc, UnicodeEncodeError):
+                raise exc
+            one = UnicodeEncodeError(
+                exc.encoding, exc.object, exc.start, exc.start + 1, exc.reason
+            )
+            try:
+                return own(one)
+            except UnicodeEncodeError:
+                return codecs.backslashreplace_errors(one)
+
+        codecs.register_error(name, handle)
+    return name
 
 
 def for_console(text: str, file: Any = STDOUT) -> str:
-    """``text`` as ``echo`` writes it to ``file``: unchanged when the stream's
-    ``encoding`` and ``errors`` take it, else with escapes for what they do not.
+    """``text`` as ``echo`` writes it to ``file``: ``text`` itself when the
+    stream's ``encoding`` and ``errors`` take it, else a copy with a
+    backslash escape (``\\u03b1``) for each character they do not.
 
-    Callers that lay text out in columns escape each cell with this before
-    measuring it, so the escapes do not push the columns out of line. A
-    stream that reports no usable encoding gets ``text`` unchanged here."""
+    One encode decides; only text that needs escapes is encoded again, in
+    one pass, and decoded back for the stream. Callers that lay text out in
+    columns escape each cell with this before measuring it, so the escapes
+    do not push the columns out of line. A stream that reports no usable
+    encoding gets ``text`` unchanged here."""
     stream = _resolve(file)
     encoding = getattr(stream, "encoding", None)
     if not isinstance(encoding, str) or not encoding:
         return text  # io.StringIO and the like: nothing to check against
     errors = getattr(stream, "errors", None)
+    if not isinstance(errors, str) or not errors:
+        errors = "strict"
     try:
-        return _escape(text, encoding, errors if isinstance(errors, str) else "strict")
+        text.encode(encoding, errors)
+        return text
+    except UnicodeEncodeError:
+        data = text.encode(encoding, _escaping(errors))
+        # The stream's own handler reverses what it wrote (surrogateescape's
+        # bytes come back as the surrogates the stream will write again).
+        return data.decode(encoding, errors)
     except LookupError:
         # `encoding` and `errors` are plain attributes, so a wrapper can name
         # something the codecs registry lacks: let the stream decide (echo).
@@ -71,29 +92,33 @@ def for_console(text: str, file: Any = STDOUT) -> str:
 
 
 def echo(text: str, *, end: str = "\n", file: Any = STDOUT) -> None:
-    """Write ``text + end`` to ``file`` (default: ``sys.stdout``, looked up at
-    call time so a redirect or pytest's capture applies), as ``print()`` does,
-    except that a character the stream cannot encode is written as a
-    backslash escape (``\\u03b1``) instead of raising.
+    """Write ``text`` and then ``end`` to ``file`` (default: ``sys.stdout``,
+    looked up at call time so a redirect or pytest's capture applies), as
+    ``print()`` does, except that a character the stream cannot encode is
+    written as a backslash escape (``\\u03b1``) instead of raising. ``end`` is
+    mushin's own text, ASCII.
 
     Escaping is what Python's own ``sys.stderr`` and the interactive prompt's
-    display of a result do on such a console. ``file=None`` writes nothing,
-    like ``print()`` with no stdout (pythonw.exe) or a closed stderr.
+    display of a result do on such a console. ``file=None`` writes nothing
+    (``print(file=None)`` would write to stdout; see ``STDOUT``), so
+    ``file=sys.stderr`` with stderr closed drops the text.
 
-    The line is checked against the stream's ``encoding`` and ``errors``
-    before anything is written, then written once. Only when the stream
-    raises anyway (it reports no encoding, or it forwards to a narrower sink
-    than its ``encoding`` says, as Jupyter's output stream and pytest's
-    ``--capture=tee-sys`` do) is the line written again, escaped to ASCII; a
-    stream that wrote part of the line before raising then shows it twice."""
+    ``text`` is checked against the stream's ``encoding`` and ``errors``
+    before anything is written. Only when the stream raises anyway (it
+    reports no encoding, or it forwards to a narrower sink than its
+    ``encoding`` says, as Jupyter's output stream and pytest's
+    ``--capture=tee-sys`` do) is the text written again, escaped to ASCII;
+    a stream that wrote part of it before raising then shows that part
+    twice, and a table escaped this way is not realigned."""
     stream = _resolve(file)
     if stream is None:
         return
-    line = for_console(text + end, stream)
+    text = for_console(text, stream)
     try:
-        stream.write(line)
+        stream.write(text)
     except UnicodeEncodeError:
         # The stream's encoding did not describe what it accepts, so no codec
         # name can be trusted here: ASCII escapes are the one form that
         # every console encoding mushin can meet takes.
-        stream.write(line.encode("ascii", "backslashreplace").decode("ascii"))
+        stream.write(text.encode("ascii", "backslashreplace").decode("ascii"))
+    stream.write(end)

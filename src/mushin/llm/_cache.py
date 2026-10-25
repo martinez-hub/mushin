@@ -53,7 +53,7 @@ class OutputCache:
         if not path.exists():
             return {}
         out: dict[str, Any] = {}
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             try:
@@ -83,7 +83,7 @@ class OutputCache:
         """Append (input, output) pairs to the cache."""
         path = self._path(system, seed)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as f:
+        with path.open("a", encoding="utf-8") as f:
             for inp, output in pairs:
                 try:
                     record = json.dumps({"key": _key(inp), "output": output})

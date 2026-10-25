@@ -1,23 +1,26 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""mushin's console output survives a console that cannot encode it.
+"""mushin's console output and files survive an encoding that is not UTF-8.
 
 A Windows pipe writes in the ANSI code page (cp1252 on Western systems), and
 ``PYTHONIOENCODING=ascii`` or an ASCII locale makes stdout ASCII; ``print()``
 of a character outside the encoding then raises ``UnicodeEncodeError`` and the
 whole command fails. mushin's own text is ASCII, so it cannot hit that, and the
 user data it prints (metric names, swept values) is written as backslash
-escapes instead."""
+escapes instead. The text files mushin writes are UTF-8 whatever the locale."""
 
 from __future__ import annotations
 
 import ast
+import codecs
 import io
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -25,7 +28,7 @@ import pytest
 import mushin
 import mushin.__main__ as cli
 from mushin import multirun
-from mushin._console import echo
+from mushin._console import echo, for_console
 from mushin.workflows import MultiRunMetricsWorkflow
 
 ALPHA = "\u03b1"  # Greek alpha: in neither ASCII nor cp1252
@@ -37,14 +40,21 @@ ESCAPED = "\\u03b1"
 ENCODINGS = ["ascii", "cp1252"]
 
 
-def _sweep(wd: Path, *, bump: float = 0.0) -> None:
+def _sweep(wd: Path, *, bump: float = 0.0, fail=None) -> None:
     class W(MultiRunMetricsWorkflow):
         @staticmethod
         def task(lr, seed):
+            if (lr, seed) == fail:
+                raise ValueError("this cell fails")
             # A metric name outside ASCII and cp1252 is user data mushin prints.
             return {"acc": float(lr) + seed + bump, METRIC: float(seed) + bump}
 
-    W().run(lr=multirun([0.1, 0.2]), seed=multirun([0, 1]), working_dir=str(wd))
+    W().run(
+        lr=multirun([0.1, 0.2]),
+        seed=multirun([0, 1]),
+        working_dir=str(wd),
+        on_error="nan",
+    )
 
 
 @pytest.fixture(scope="module")
@@ -57,6 +67,10 @@ def sweeps(tmp_path_factory) -> tuple[Path, Path]:
     return a, b
 
 
+def _same_codec(a: str, b: str) -> bool:
+    return codecs.lookup(a).name == codecs.lookup(b).name
+
+
 def _stream(
     encoding: str, errors: str = "strict"
 ) -> tuple[io.BytesIO, io.TextIOWrapper]:
@@ -67,19 +81,24 @@ def _stream(
     return raw, stream
 
 
-def _on_ascii_stdout(monkeypatch, fn, *args, **kwargs) -> tuple[object, bytes]:
-    """Call ``fn`` with ``sys.stdout`` a strict ASCII stream, as on a console
-    that cannot encode anything else, and return its result and the bytes it
-    wrote.
-
-    The swap happens in the test body, not a fixture: pytest's capture sets
-    ``sys.stdout`` again once fixture setup is over."""
-    raw, stream = _stream("ascii")
+def _on_stdout(monkeypatch, stream, fn, *args, **kwargs):
+    """Call ``fn`` with ``sys.stdout`` set to ``stream``, then put the real
+    one back. The swap happens in the test body and is undone before the test
+    ends: pytest's capture sets ``sys.stdout`` again once fixture setup is
+    over, and a swap undone only at teardown could restore a closed capture
+    stream when capture is off (``pytest -s``)."""
     with monkeypatch.context() as m:
         m.setattr(sys, "stdout", stream)
         result = fn(*args, **kwargs)
     stream.flush()
-    return result, raw.getvalue()
+    return result
+
+
+def _on_ascii_stdout(monkeypatch, fn, *args, **kwargs) -> tuple[object, bytes]:
+    """``fn``'s result and the bytes it wrote to a strict ASCII stdout, as on
+    a console that cannot encode anything else."""
+    raw, stream = _stream("ascii")
+    return _on_stdout(monkeypatch, stream, fn, *args, **kwargs), raw.getvalue()
 
 
 def _subprocess_env(encoding: str, **extra: str) -> dict[str, str]:
@@ -97,15 +116,19 @@ def _non_ascii_guide(tmp_path: Path) -> Path:
 
 
 def _assert_columns_line_up(lines: list[str]) -> None:
-    """``_render`` pads every cell, the last one included, so the lines of a
-    table whose widths were measured on the text it prints are of one length,
-    and every header and row cell starts where its run of dashes does."""
+    """Every line of the table puts each column at the offset of its run of
+    dashes, and keeps the two-space gaps between columns blank: what a cell
+    measured on text other than what was printed breaks. ``_render`` pads
+    every cell, the last one included, so the lines are of one length too.
+    A blank cell (a missing value) is aligned like any other."""
     header, sep, *body = lines
     assert {len(line) for line in lines} == {len(sep)}, "\n".join(lines)
-    starts = [m.start() for m in re.finditer(r"-+", sep)]
+    runs = [(m.start(), m.end()) for m in re.finditer(r"-+", sep)]
     for line in (header, *body):
-        for start in starts[1:]:
-            assert line[start - 2 : start] == "  " and line[start] != " ", line
+        for (_, end), (start, _) in zip(runs, runs[1:]):
+            assert line[end:start] == "  ", line
+    # Header names are never blank: each starts its column.
+    assert all(header[start] != " " for start, _ in runs), header
 
 
 # --- In process: each printing function on a strict ASCII stdout ----------
@@ -121,14 +144,19 @@ def test_show_prints_user_data_it_cannot_encode_as_escapes(sweeps, monkeypatch):
     assert METRIC in result.table
 
 
-def test_show_aligns_the_columns_of_an_escaped_table(sweeps, monkeypatch):
+def test_show_aligns_the_columns_of_an_escaped_table(tmp_path, monkeypatch):
     # The escape is longer than the name: widths measured on the name would
-    # leave the header wider than its column.
-    # The escaped column comes before another, which a misfit would shift.
-    a, _ = sweeps
-    result, raw = _on_ascii_stdout(monkeypatch, mushin.show, a, metrics=[METRIC, "acc"])
+    # leave the header wider than its column. The escaped column comes before
+    # another, which a misfit would shift, and the failed cell leaves blanks.
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="failed"):
+        _sweep(wd, fail=(0.2, 1))
+    result, raw = _on_ascii_stdout(
+        monkeypatch, mushin.show, wd, metrics=[METRIC, "acc"]
+    )
     lines = raw.decode("ascii").splitlines()
     assert lines[0].split() == ["lr", "seed", "status", f"{ESCAPED}_score", "acc"]
+    assert any(line.split()[2:] == ["failed"] for line in lines[2:])  # blanks
     _assert_columns_line_up(lines)
     _assert_columns_line_up(result.table.splitlines())
 
@@ -166,16 +194,47 @@ def test_dry_run_preview_escapes_a_swept_value(tmp_path, monkeypatch):
     assert summary["axes"]["name"] == [f"{ALPHA}lpha", "b"]
 
 
-def test_guide_path_writes_the_bytes_of_a_path_the_console_cannot_encode(
-    tmp_path, monkeypatch
+# --- guide --path: the real path or an error, never an escaped one ---------
+
+# A path the file system decoded from a byte that is not valid in its
+# encoding (surrogateescape on POSIX, surrogatepass on Windows): no stdout
+# encoding takes it strictly, but os.fsencode gives its bytes back.
+UNDECODABLE = "site-\udcff"
+
+
+def test_guide_path_writes_bytes_when_stdout_shares_the_file_system_encoding(
+    monkeypatch,
 ):
-    # Callers read --path by machine (`test -s "$(... --path)"`), so the output
-    # must be the real path: its bytes, not an escape that names no file.
-    guide = _non_ascii_guide(tmp_path)
-    monkeypatch.setattr(cli, "_guide_path", lambda: guide)
-    code, raw = _on_ascii_stdout(monkeypatch, cli.main, ["guide", "--path"])
-    assert code == 0
-    assert raw == os.fsencode(str(guide)) + b"\n"
+    raw, stream = _stream(sys.getfilesystemencoding())
+    assert _on_stdout(monkeypatch, stream, cli._print_path, UNDECODABLE) == 0
+    assert raw.getvalue() == os.fsencode(UNDECODABLE) + b"\n"
+
+
+@pytest.mark.parametrize("errors", ["replace", "backslashreplace"])
+def test_guide_path_ignores_a_lossy_error_handler(monkeypatch, errors):
+    # The handler never fails, so asking it whether the path fits would
+    # always say yes, and the console would get "site-?" or "site-\udcff".
+    raw, stream = _stream(sys.getfilesystemencoding(), errors=errors)
+    assert _on_stdout(monkeypatch, stream, cli._print_path, UNDECODABLE) == 0
+    assert raw.getvalue() == os.fsencode(UNDECODABLE) + b"\n"
+
+
+def test_guide_path_fails_when_stdout_would_misread_the_bytes(tmp_path, monkeypatch):
+    # A reader decodes stdout in its declared encoding (a Windows pipe in the
+    # code page): the path's file-system bytes would read as another path.
+    if _same_codec(sys.getfilesystemencoding(), "ascii"):
+        pytest.skip("the file system encoding here is ASCII")
+    monkeypatch.setattr(cli, "_guide_path", lambda: _non_ascii_guide(tmp_path))
+    raw, stream = _stream("ascii")
+    stderr = io.StringIO()
+    with monkeypatch.context() as m:
+        m.setattr(sys, "stdout", stream)
+        m.setattr(sys, "stderr", stderr)
+        code = cli.main(["guide", "--path"])
+    stream.flush()
+    assert code == 1
+    assert raw.getvalue() == b""
+    assert "PYTHONUTF8=1" in stderr.getvalue()
 
 
 class _TextOnly:
@@ -196,28 +255,33 @@ class _TextOnly:
         pass
 
 
-def test_guide_path_fails_rather_than_print_an_escaped_path(
-    tmp_path, monkeypatch, capsys
-):
-    guide = _non_ascii_guide(tmp_path)
-    monkeypatch.setattr(cli, "_guide_path", lambda: guide)
-    stdout = _TextOnly()
-    monkeypatch.setattr(sys, "stdout", stdout)
-    assert cli.main(["guide", "--path"]) == 1
+def test_guide_path_fails_rather_than_print_an_escaped_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "_guide_path", lambda: _non_ascii_guide(tmp_path))
+    stdout, stderr = _TextOnly(), io.StringIO()
+    with monkeypatch.context() as m:
+        m.setattr(sys, "stdout", stdout)
+        m.setattr(sys, "stderr", stderr)
+        code = cli.main(["guide", "--path"])
+    assert code == 1
     assert stdout.parts == []
-    assert "cannot encode" in capsys.readouterr().err
+    assert "cannot represent" in stderr.getvalue()
 
 
 def test_a_missing_stderr_drops_the_message_instead_of_moving_it_to_stdout(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch
 ):
-    # With fd 2 closed, sys.stderr is None. The guide's error then goes
-    # nowhere, as print(file=None) does; on stdout `$(... --path)` would
-    # capture it as the path.
+    # With fd 2 closed, sys.stderr is None. print(msg, file=sys.stderr) would
+    # then write to stdout, where `$(... --path)` would capture the message
+    # as the path; echo(file=None) writes nothing, on purpose.
     monkeypatch.setattr(cli, "_guide_path", lambda: tmp_path / "missing.md")
-    monkeypatch.setattr(sys, "stderr", None)
-    assert cli.main(["guide", "--path"]) == 1
-    assert capsys.readouterr().out == ""
+    raw, stdout = _stream("utf-8")
+    with monkeypatch.context() as m:
+        m.setattr(sys, "stdout", stdout)
+        m.setattr(sys, "stderr", None)
+        code = cli.main(["guide", "--path"])
+    stdout.flush()
+    assert code == 1
+    assert raw.getvalue() == b""
 
 
 # --- Subprocess: the real interpreter on a console of each encoding --------
@@ -292,9 +356,9 @@ def test_guide_command_survives_the_console(
         encoding, PYTHONPATH=os.pathsep.join(p for p in path_entries if p)
     )
 
-    def run(*args: str) -> bytes:
-        result = subprocess.run(
-            [sys.executable, "-m", "mushin", "guide", *args],
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, *args],
             capture_output=True,
             env=env,
             # -m puts the cwd first on sys.path; an empty one cannot shadow
@@ -302,25 +366,37 @@ def test_guide_command_survives_the_console(
             cwd=tmp_path,
             timeout=300,
         )
-        stderr = result.stderr.decode(encoding, errors="replace")
-        assert result.returncode == 0, stderr[-3000:]
-        assert "UnicodeEncodeError" not in stderr
-        return result.stdout
 
-    assert run().decode(encoding).startswith("<!-- mushin ")
-    # The output names the real file, as `test -s "$(... --path)"` needs.
-    path = Path(os.fsdecode(run("--path").strip()))
-    assert path.is_file()
-    assert path.samefile(mushin_on_a_non_ascii_path / "mushin" / "agent_guide.md")
+    guide = run("-m", "mushin", "guide")
+    assert guide.returncode == 0, guide.stderr.decode(errors="replace")[-3000:]
+    assert guide.stdout.decode(encoding).startswith("<!-- mushin ")
+
+    # The real path or an error: `test -s "$(... --path)"` must never get a
+    # path that names no file with exit status 0.
+    found = run("-m", "mushin", "guide", "--path")
+    assert b"UnicodeEncodeError" not in found.stderr
+    fs = run("-c", "import sys; print(sys.getfilesystemencoding())")
+    if _same_codec(fs.stdout.decode().strip(), encoding):
+        assert found.returncode == 0, found.stderr.decode(errors="replace")
+        path = Path(os.fsdecode(found.stdout.strip()))
+        assert path.samefile(mushin_on_a_non_ascii_path / "mushin" / "agent_guide.md")
+    else:
+        assert found.returncode == 1
+        assert found.stdout == b""
+        assert b"PYTHONUTF8=1" in found.stderr
 
 
-_FAIL_SOFT = """
+# --- Files: UTF-8 whatever the locale --------------------------------------
+
+_UNDER_AN_ASCII_LOCALE = """
+import json
 import locale
+import subprocess
 import sys
 
 # The C locale stands in for a Windows code page: open() without an encoding
-# then writes in an encoding without the alpha. Where the fallback locale is
-# UTF-8 anyway there is nothing to test.
+# then writes in one without the alpha. Where the fallback locale is UTF-8
+# anyway there is nothing to test.
 try:
     "\\u03b1".encode(locale.getpreferredencoding(False))
 except UnicodeEncodeError:
@@ -328,8 +404,24 @@ except UnicodeEncodeError:
 else:
     sys.exit(77)
 
-from mushin import multirun
+# uv's output with a character the locale lacks (a path in it, say), without
+# depending on uv or on what it would print here.
+_run = subprocess.run
+
+
+def fake_run(cmd, *args, **kwargs):
+    if list(cmd)[:1] == ["uv"]:
+        out = "# /home/\\u03b1/project\\nfoo==1.0\\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+    return _run(cmd, *args, **kwargs)
+
+
+subprocess.run = fake_run
+
+from mushin import export, multirun
 from mushin.workflows import MultiRunMetricsWorkflow
+
+wd, csv = sys.argv[1:3]
 
 
 class W(MultiRunMetricsWorkflow):
@@ -337,14 +429,42 @@ class W(MultiRunMetricsWorkflow):
     def task(seed):
         if seed == 1:
             raise ValueError("bad \\u03b1")
-        return {"v": 1.0}
+        return {"\\u03b1_score": 1.0}
 
 
-W().run(seed=multirun([0, 1]), working_dir=sys.argv[1], on_error="nan")
+def sweep():
+    W().run(seed=multirun([0, 1]), working_dir=wd, on_error="nan", capture_env=True)
+
+
+def failures():
+    from mushin.mcp.server import _get_failures
+
+    return _get_failures(wd)["failures"][0].get("traceback")
+
+
+steps = {}
+for name, step in [
+    ("sweep", sweep),
+    ("export", lambda: str(export.table(wd, path=csv))),
+    ("mcp", failures),
+]:
+    try:
+        steps[name] = step()
+    except ImportError as exc:  # mushin.mcp needs the mcp extra
+        steps[name] = {"skip": repr(exc)}
+    except Exception as exc:
+        steps[name] = {"error": repr(exc)}
+print(json.dumps(steps))
 """
 
 
-def test_fail_soft_survives_an_error_message_the_locale_cannot_encode(tmp_path):
+@pytest.fixture(scope="module")
+def ascii_locale_run(tmp_path_factory) -> tuple[Path, Path, dict]:
+    """One fail-soft sweep with ``capture_env=True``, its CSV export and its
+    MCP failure listing, all under an ASCII locale: the sweep's directory, the
+    CSV path and what each step returned (or raised)."""
+    root = tmp_path_factory.mktemp("locale")
+    wd, csv = root / "s", root / "cells.csv"
     # LC_ALL=C with UTF-8 mode and locale coercion off gives an ASCII locale on
     # Linux and macOS; Windows ignores LC_ALL and keeps its ANSI code page.
     env = {
@@ -355,9 +475,8 @@ def test_fail_soft_survives_an_error_message_the_locale_cannot_encode(tmp_path):
         "PYTHONCOERCECLOCALE": "0",
     }
     env.pop("PYTHONIOENCODING", None)
-    wd = tmp_path / "s"
     result = subprocess.run(
-        [sys.executable, "-c", _FAIL_SOFT, str(wd)],
+        [sys.executable, "-c", _UNDER_AN_ASCII_LOCALE, str(wd), str(csv)],
         capture_output=True,
         env=env,
         timeout=300,
@@ -365,8 +484,42 @@ def test_fail_soft_survives_an_error_message_the_locale_cannot_encode(tmp_path):
     if result.returncode == 77:
         pytest.skip("this platform's C locale encodes the test character")
     assert result.returncode == 0, result.stderr.decode(errors="replace")[-3000:]
+    steps = json.loads(result.stdout.decode("ascii").splitlines()[-1])
+    return wd, csv, steps
+
+
+def test_fail_soft_survives_an_error_message_the_locale_cannot_encode(
+    ascii_locale_run,
+):
+    wd, _, steps = ascii_locale_run
+    assert steps["sweep"] is None, steps["sweep"]
     (error_file,) = wd.glob("*/mushin_error.txt")
     assert f"ValueError: bad {ALPHA}" in error_file.read_text(encoding="utf-8")
+
+
+def test_env_snapshot_is_written_under_a_locale_that_lacks_its_text(
+    ascii_locale_run,
+):
+    # The caller swallows a failed snapshot, so a crash here showed as no file.
+    wd, _, _ = ascii_locale_run
+    snapshot = (wd / "mushin_env.txt").read_text(encoding="utf-8")
+    assert f"/home/{ALPHA}/project" in snapshot
+
+
+def test_export_table_writes_utf8_under_a_locale_that_lacks_a_metric_name(
+    ascii_locale_run,
+):
+    _, csv, steps = ascii_locale_run
+    assert steps["export"] == str(csv), steps["export"]
+    assert METRIC in csv.read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_mcp_get_failures_reads_the_traceback_under_that_locale(ascii_locale_run):
+    _, _, steps = ascii_locale_run
+    if isinstance(steps["mcp"], dict) and "skip" in steps["mcp"]:
+        pytest.skip(steps["mcp"]["skip"])
+    assert isinstance(steps["mcp"], str), steps["mcp"]
+    assert f"ValueError: bad {ALPHA}" in steps["mcp"]
 
 
 # --- The helper ------------------------------------------------------------
@@ -396,13 +549,69 @@ def test_echo_leaves_a_lenient_error_handler_in_charge():
     assert raw.getvalue() == b"\xff\n"
 
 
-def test_echo_escapes_only_what_a_lenient_handler_cannot_take():
-    # The handler takes the surrogate but not the alpha: the surrogate must
-    # still come out as its byte, with only the alpha escaped.
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (f"\udcff {ALPHA}", b"\xff \\u03b1\n"),
+        # One run for the codec: the surrogate right after the alpha must
+        # still reach the handler on its own.
+        (f"{ALPHA}\udcff", b"\\u03b1\xff\n"),
+    ],
+)
+def test_echo_escapes_only_what_a_lenient_handler_cannot_take(text, expected):
     raw, stream = _stream("ascii", errors="surrogateescape")
-    echo(f"\udcff {ALPHA}", file=stream)
+    echo(text, file=stream)
     stream.flush()
-    assert raw.getvalue() == b"\xff \\u03b1\n"
+    assert raw.getvalue() == expected
+
+
+def test_for_console_escapes_a_long_text_in_one_pass():
+    # Re-encoding the rest of the text at each escape is quadratic (20 s for a
+    # 50k-row table). A codec that is ASCII and tallies what it is handed
+    # counts the work without timing it: one check, then one escaping pass.
+    tally: list[int] = []
+
+    def search(name):
+        if name != "mushin_tally_ascii":
+            return None
+
+        def encode(text, errors="strict"):
+            tally.append(len(text))
+            return codecs.ascii_encode(text, errors)
+
+        return codecs.CodecInfo(encode, codecs.ascii_decode, name=name)
+
+    text = "\n".join(f"row {i} {ALPHA}" for i in range(1000))
+    codecs.register(search)
+    try:
+        stream = types.SimpleNamespace(encoding="mushin_tally_ascii", errors="strict")
+        out = for_console(text, stream)
+    finally:
+        codecs.unregister(search)
+    assert out.count(ESCAPED) == 1000 and out.isascii()
+    assert sum(tally) <= 2 * len(text), f"{len(tally)} encodes"
+
+
+class _NoCodec:
+    """Names an encoding the codecs registry does not know, as a wrapper's
+    plain ``encoding`` attribute can."""
+
+    encoding = "no-such-codec"
+    errors = "strict"
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+
+    def write(self, s: str) -> int:
+        self.parts.append(s)
+        return len(s)
+
+
+def test_a_stream_naming_no_codec_gets_the_text_as_it_is():
+    stream = _NoCodec()
+    assert for_console(METRIC, stream) == METRIC
+    echo(METRIC, file=stream)
+    assert "".join(stream.parts) == f"{METRIC}\n"
 
 
 class _Tee:
@@ -451,8 +660,9 @@ def test_echo_survives_a_stream_whose_encoding_is_wider_than_its_sink():
 
 
 def test_echo_without_stdout_is_a_no_op(monkeypatch):
-    monkeypatch.setattr(sys, "stdout", None)  # pythonw.exe has no console
-    echo("nothing to write to")
+    with monkeypatch.context() as m:
+        m.setattr(sys, "stdout", None)  # pythonw.exe has no console
+        echo("nothing to write to")
 
 
 def test_a_utf8_console_shows_user_data_as_itself(sweeps, capsys):
@@ -463,7 +673,7 @@ def test_a_utf8_console_shows_user_data_as_itself(sweeps, capsys):
     assert METRIC in capsys.readouterr().out
 
 
-# --- Guard: mushin's own runtime strings are ASCII -------------------------
+# --- Guards: mushin's runtime strings are ASCII, its file I/O UTF-8 --------
 
 SRC = Path(mushin.__file__).parent
 # (path relative to the package, the literal) -> why it must stay non-ASCII.
@@ -471,8 +681,13 @@ SRC = Path(mushin.__file__).parent
 ALLOWED: dict[tuple[str, str], str] = {}
 
 
-def _non_ascii_runtime_strings(path: Path) -> list[tuple[int, str]]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+def _modules():
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        yield path.relative_to(SRC).as_posix(), tree
+
+
+def _non_ascii_runtime_strings(tree: ast.AST) -> list[tuple[int, str]]:
     # A string that is a statement of its own (a docstring, or a bare string
     # documenting an attribute) is never written to a console by mushin:
     # help() escapes for the console itself (pydoc), and nothing prints it.
@@ -492,13 +707,48 @@ def _non_ascii_runtime_strings(path: Path) -> list[tuple[int, str]]:
 
 
 def test_runtime_string_literals_are_ascii():
-    found = []
-    for path in sorted(SRC.rglob("*.py")):
-        rel = path.relative_to(SRC).as_posix()
-        for line, value in _non_ascii_runtime_strings(path):
-            if (rel, value) not in ALLOWED:
-                found.append(f"{rel}:{line}: {value!r}")
+    found = [
+        f"{rel}:{line}: {value!r}"
+        for rel, tree in _modules()
+        for line, value in _non_ascii_runtime_strings(tree)
+        if (rel, value) not in ALLOWED
+    ]
     assert not found, (
         "runtime strings with non-ASCII characters (a console that cannot "
         "encode them escapes or fails them; rewrite in ASCII):\n" + "\n".join(found)
     )
+
+
+def _text_io_without_encoding(tree: ast.AST) -> list[int]:
+    """Lines of ``read_text``/``write_text`` calls, and of ``open`` calls in
+    a text mode, that leave the encoding to the locale."""
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name not in ("read_text", "write_text", "open"):
+            continue
+        if any(k.arg == "encoding" for k in node.keywords):
+            continue
+        if name == "open":
+            # open(file, mode) or path.open(mode): binary needs no encoding.
+            args = node.args[1:] if isinstance(func, ast.Name) else node.args
+            modes = [*args[:1], *(k.value for k in node.keywords if k.arg == "mode")]
+            if any(isinstance(m, ast.Constant) and "b" in str(m.value) for m in modes):
+                continue
+        lines.append(node.lineno)
+    return lines
+
+
+def test_mushin_reads_and_writes_text_files_as_utf8():
+    # A locale-encoded file breaks under cp1252 (a write that raises, a file
+    # one machine writes and another misreads), so every text file mushin
+    # writes or reads names its encoding.
+    found = [
+        f"{rel}:{line}"
+        for rel, tree in _modules()
+        for line in _text_io_without_encoding(tree)
+    ]
+    assert not found, "text file I/O without encoding=:\n" + "\n".join(found)

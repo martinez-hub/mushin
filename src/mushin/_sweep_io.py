@@ -109,7 +109,7 @@ def read_metrics_sidecar(job_dir) -> dict | None:
     # ValueError, not just JSONDecodeError: an int past the parser's digit limit
     # raises a plain ValueError, and RecursionError guards a deeply nested file.
     try:
-        return _restore_nonfinite(json.loads(p.read_text()))
+        return _restore_nonfinite(json.loads(p.read_text(encoding="utf-8")))
     except (ValueError, OSError, RecursionError):
         return None
 
@@ -122,7 +122,7 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
     # mid-write and rename half-written content over the target.
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        tmp.write_text(text)
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)  # atomic on POSIX/Windows
     finally:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
@@ -166,8 +166,10 @@ class Manifest:
             # status sidecars remain the durable source of truth, so resume
             # reconstructs from them instead of aborting the whole sweep.
             try:
-                d = json.loads(p.read_text())
-            except (json.JSONDecodeError, OSError):
+                d = json.loads(p.read_text(encoding="utf-8"))
+            # ValueError, not just JSONDecodeError: bytes that are not
+            # UTF-8 raise UnicodeDecodeError, a corrupt file all the same.
+            except (ValueError, OSError):
                 return cls(root, params)
             # A valid-JSON manifest of the wrong SHAPE (list payload, non-dict
             # cells) degrades like a corrupt one instead of crashing callers.

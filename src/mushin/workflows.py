@@ -796,13 +796,23 @@ def _write_env_snapshot(working_dir: Path) -> None:
             n += 1
         out = working_dir / f"mushin_env.{n}.txt"
 
+    # The snapshot is UTF-8 on every platform: under a cp1252 locale a path or
+    # name the code page lacks made the write raise, and the caller's
+    # best-effort guard then left no snapshot at all. uv writes UTF-8, so its
+    # output is decoded as such ("replace" for anything that is not).
     for cmd in (["uv", "export"], ["uv", "pip", "freeze"]):
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
         except Exception:  # noqa: BLE001 - uv may be absent
             continue
         if res.returncode == 0 and res.stdout.strip():
-            out.write_text(res.stdout)
+            out.write_text(res.stdout, encoding="utf-8")
             return
 
     # Fallback: dump installed distributions via importlib.metadata.
@@ -814,7 +824,7 @@ def _write_env_snapshot(working_dir: Path) -> None:
             for d in distributions()
             if d.metadata["Name"]
         )
-        out.write_text("\n".join(lines) + "\n")
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except Exception:  # noqa: BLE001 - env capture is best-effort
         pass
 
@@ -1870,7 +1880,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
             from ._sweep_io import _restore_nonfinite
 
-            with open(file_path) as f:
+            with open(file_path, encoding="utf-8") as f:
                 # Decode the sidecar's non-finite encodings (NaN as null, ±Inf
                 # as a tagged marker) so an offline reload yields the same
                 # float values the in-process run produced.

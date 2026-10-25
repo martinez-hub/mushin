@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import os
 import sys
 from importlib import metadata, resources
 from pathlib import Path
 
-from ._console import echo, for_console
+from ._console import echo
 
 GUIDE = "agent_guide.md"
 
@@ -34,40 +35,56 @@ def guide_text() -> str:
     return f"<!-- mushin {_version()} -->\n" + _guide_path().read_text(encoding="utf-8")
 
 
+def _same_codec(a: str, b: str) -> bool:
+    try:
+        return codecs.lookup(a).name == codecs.lookup(b).name
+    except LookupError:
+        return False
+
+
 def _print_path(path: str) -> int:
     """Print ``path`` for a caller that reads it by machine (CI runs
-    ``test -s "$(python -m mushin guide --path)"``), so the output is the real
-    path or nothing: never the escaped text ``echo`` would write.
+    ``test -s "$(python -m mushin guide --path)"``), so the output is the
+    real path or an error, never a path with escapes or replacements.
 
     The install path can hold a character the console cannot encode (an
-    accented Windows user name). Then the path's own bytes go to stdout's
-    byte layer, which is what a shell's ``$(...)`` captures on POSIX; on
-    Windows ``os.fsencode`` gives UTF-8, which a caller decoding in the code
-    page misreads, so ``PYTHONUTF8=1`` is still the fix there. Without a byte
-    layer the command fails with a message instead."""
+    accented Windows user name). Encodability is judged strictly, not with
+    the stream's own handler: ``backslashreplace`` or ``replace`` never fail,
+    and would write a path that names no file. ``surrogateescape`` is the
+    exception, because it writes an undecodable path back as its bytes. A
+    path that fails the strict test goes out as its own bytes
+    (``os.fsencode``) only when stdout's encoding is the file system's, which
+    is how the reader will decode them; otherwise, on a Windows pipe in the
+    code page for one, the command fails and says to set ``PYTHONUTF8=1``."""
     stream = sys.stdout
     if stream is None:  # pythonw.exe: print() would write nowhere too
         return 0
-    if for_console(path, stream) == path:
-        try:
-            stream.write(path + "\n")
-            return 0
-        except UnicodeEncodeError:
-            pass  # its .encoding did not describe it: try the bytes
+    encoding = getattr(stream, "encoding", None)
+    if not isinstance(encoding, str) or not encoding:
+        stream.write(path + "\n")  # a stream that takes any str (io.StringIO)
+        return 0
+    errors = getattr(stream, "errors", None)
+    lossless = "surrogateescape" if errors == "surrogateescape" else "strict"
+    try:
+        path.encode(encoding, lossless)
+        stream.write(path + "\n")
+        return 0
+    except (UnicodeEncodeError, LookupError):
+        pass  # not encodable, or not verifiably: the bytes, or the error
     buffer = getattr(stream, "buffer", None)
-    if buffer is None:
-        echo(
-            "python -m mushin guide --path: the guide's path holds a character "
-            "this console cannot encode, and stdout takes no bytes; run with "
-            "PYTHONUTF8=1, or print the guide itself with `python -m mushin guide`",
-            file=sys.stderr,
-        )
-        return 1
-    stream.flush()  # keep the order of anything already written as text
-    buffer.write(os.fsencode(path))
-    buffer.flush()
-    stream.write("\n")  # through the text layer, translated as print() would
-    return 0
+    if buffer is not None and _same_codec(encoding, sys.getfilesystemencoding()):
+        stream.flush()  # keep the order of anything already written as text
+        buffer.write(os.fsencode(path))
+        buffer.flush()
+        stream.write("\n")  # through the text layer, translated as print() would
+        return 0
+    echo(
+        "python -m mushin guide --path: the guide's path holds a character "
+        f"this console's encoding ({encoding}) cannot represent; run with "
+        "PYTHONUTF8=1, or print the guide itself with `python -m mushin guide`",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -97,9 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         return _print_path(str(path))
-    # The guide is ASCII (tests/test_agent_guide.py checks); echo is here so
-    # every console route of mushin shares one write path.
-    echo(guide_text(), end="")
+    # The guide is ASCII (tests/test_agent_guide.py checks), so every console
+    # encoding takes it as it is: no check, no copy.
+    if sys.stdout is not None:  # pythonw.exe has no stdout
+        sys.stdout.write(guide_text())
     return 0
 
 

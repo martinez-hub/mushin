@@ -231,20 +231,12 @@ def show(
     elif param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))
     table = _render(columns, rows)
-    # The table holds user data (swept values, metric names), so a console
-    # that cannot encode it gets escapes, not a crash.
-    echo(_console_copy(table, lambda cell: _render(columns, rows, cell)))
+    # The table holds user data (swept values, metric names). The console copy
+    # is laid out from cells escaped for stdout (each unchanged when stdout
+    # can encode it), so a console that cannot gets escapes in aligned
+    # columns, not a crash.
+    echo(_render(columns, rows, for_console))
     return ShowResult(rows, table)
-
-
-def _console_copy(table: str, render) -> str:
-    """``table`` as stdout should get it: itself when stdout can encode it,
-    else ``render(for_console)``, the table laid out again from cells escaped
-    for stdout. Escaping the finished table instead would leave each column
-    as wide as its unescaped text and push the rest out of line."""
-    if for_console(table) == table:
-        return table
-    return render(for_console)
 
 
 def _sortable(v: Any):
@@ -626,20 +618,19 @@ def best(
 def _render(columns: list[str], rows: list[dict], cell=str) -> str:
     """The table as text. ``cell`` maps each header and formatted value
     before the column widths are measured (``show`` and ``diff`` pass
-    ``for_console`` for a console that cannot encode a value as it is)."""
+    ``for_console`` for their console copy)."""
     if not rows:
         return "(no cells found)"
-    head = [cell(c) for c in columns]
-    cells = [[cell(_fmt(r.get(c))) for c in columns] for r in rows]
-    widths = [
-        max(len(head[i]), *(len(row[i]) for row in cells)) for i in range(len(head))
-    ]
-    header = "  ".join(head[i].ljust(widths[i]) for i in range(len(head)))
-    sep = "  ".join("-" * widths[i] for i in range(len(columns)))
-    body = "\n".join(
-        "  ".join(row[i].ljust(widths[i]) for i in range(len(columns))) for row in cells
-    )
-    return f"{header}\n{sep}\n{body}"
+    lines = [[cell(c) for c in columns]]
+    lines += [[cell(_fmt(r.get(c))) for c in columns] for r in rows]
+    widths = [max(len(text) for text in col) for col in zip(*lines, strict=True)]
+
+    def join(texts) -> str:
+        return "  ".join(t.ljust(w) for t, w in zip(texts, widths, strict=True))
+
+    header, *body = lines
+    sep = "  ".join("-" * w for w in widths)
+    return "\n".join([join(header), sep, *(join(row) for row in body)])
 
 
 def _read_provenance(root) -> dict | None:
@@ -769,13 +760,9 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
 
     provenance = _diff_provenance(_read_provenance(a), _read_provenance(b))
     table = _render_diff(rows, only_in_a, only_in_b, provenance)
-    # User data, as in show(); only the table part is laid out in columns.
-    echo(
-        _console_copy(
-            table,
-            lambda cell: _render_diff(rows, only_in_a, only_in_b, provenance, cell),
-        )
-    )
+    # User data, laid out for the console as in show(); echo escapes the
+    # lines after the table, which are not in columns.
+    echo(_render_diff(rows, only_in_a, only_in_b, provenance, for_console))
     return DiffResult(rows, only_in_a, only_in_b, provenance, table)
 
 

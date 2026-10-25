@@ -202,7 +202,7 @@ def record_accelerator(job_dir, written: Any) -> None:
         return
     path = Path(job_dir) / "mushin_provenance.json"
     try:
-        record = json.loads(path.read_text())
+        record = json.loads(path.read_text(encoding="utf-8"))
         if record.get("accelerator") == seen:
             return
         record["accelerator"] = seen
@@ -223,7 +223,7 @@ def representative_record(paths) -> dict | None:
     readable = 0
     for p in paths:
         try:
-            data = json.loads(Path(p).read_text())
+            data = json.loads(Path(p).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if not isinstance(data, dict):
