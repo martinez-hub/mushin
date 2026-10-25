@@ -78,14 +78,15 @@ def test_nonpositive_budget_rejected(tmp_path):
 
 def test_skipped_cells_are_resumable(tmp_path):
     calls = []
+    # The flag lives in a dict, not on the class: a class attribute the task
+    # reads is project code, and changing it would re-run every cell.
+    slow = {"on": True}
 
     class W(MultiRunMetricsWorkflow):
-        SLOW = True
-
         @staticmethod
         def task(seed):
             calls.append(seed)
-            if seed == 0 and W.SLOW:
+            if seed == 0 and slow["on"]:
                 time.sleep(0.3)
             return dict(v=float(seed))
 
@@ -97,7 +98,7 @@ def test_skipped_cells_are_resumable(tmp_path):
             working_dir=wd,
         )
 
-    W.SLOW = False
+    slow["on"] = False
     calls.clear()
     wf2 = W()
     wf2.run(seed=multirun([0, 1, 2, 3]), resume=True, working_dir=wd)  # no budget

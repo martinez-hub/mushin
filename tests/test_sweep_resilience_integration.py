@@ -28,14 +28,15 @@ _BASE = {"alpha": 0.0, "beta": 1.0}
 
 def test_fail_soft_resume_compare_end_to_end(tmp_path):
     calls: dict[str, int] = {"n": 0}
+    # The flag lives in a dict, not on the class: a class attribute the task
+    # reads is project code, and changing it would re-run every cell.
+    fail = {"on": True}
 
     class Sweep(MultiRunMetricsWorkflow):
-        FAIL = True
-
         @staticmethod
         def task(method, seed):
             calls["n"] += 1
-            if Sweep.FAIL and method == _FAILED_METHOD and seed == _FAILED_SEED:
+            if fail["on"] and method == _FAILED_METHOD and seed == _FAILED_SEED:
                 raise RuntimeError("boom: transient training failure")
             # a per-seed-varying score so the downstream stats test has a real
             # sampling distribution (not a constant that gets masked out).
@@ -45,7 +46,7 @@ def test_fail_soft_resume_compare_end_to_end(tmp_path):
     grid = dict(method=multirun(["alpha", "beta"]), seed=multirun([0, 1, 2]))
 
     # --- pass 1: fail-soft -------------------------------------------------
-    Sweep.FAIL = True
+    fail["on"] = True
     wf = Sweep()
     with pytest.warns(UserWarning, match="fail"):
         wf.run(working_dir=working_dir, on_error="nan", **grid)
@@ -83,7 +84,7 @@ def test_fail_soft_resume_compare_end_to_end(tmp_path):
         compare_methods(ds)
 
     # --- pass 2: fix the cause and resume ----------------------------------
-    Sweep.FAIL = False
+    fail["on"] = False
     calls["n"] = 0
     wf2 = Sweep()
     wf2.run(working_dir=working_dir, resume=True, **grid)

@@ -61,7 +61,7 @@ def run_training_sweep(
     The methods fingerprint covers each function's own source, not values it
     closes over; the project code each method reaches (helpers, module
     constants) is guarded as for any sweep, so an edited helper re-runs its
-    cells with a warning naming the file. Installed packages and data are not
+    cells with a warning naming where the change is. Installed packages and data are not
     covered.
     """
     ckpt_dir = Path(ckpt_dir).resolve()

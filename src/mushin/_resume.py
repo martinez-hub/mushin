@@ -49,7 +49,7 @@ def write_cell_status(
     attempt: int,
     config_hash: str | None = None,
     code_hash: str | None = None,
-    code_deps: dict[str, str] | None = None,
+    code_deps: dict | None = None,
     job_num: int | None = None,
     choices: dict[str, str | None] | None = None,
 ) -> None:
@@ -150,29 +150,465 @@ def config_fingerprint(cfg) -> str | None:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def code_fingerprint(fn) -> str | None:
+    """Stable short hash of a task function's source, or None if the source
+    can't be read.
+
+    Complements ``config_fingerprint`` in the resume guard: a task whose
+    *body* was edited between runs (same config, same combo key) would
+    otherwise have its stale cached metrics silently returned. Only the task
+    function's own source is hashed; the project code it reaches (helpers,
+    module-level constants) is covered by ``project_fingerprints``, installed
+    packages and data files by neither, so a fresh ``working_dir`` is still
+    the safe choice after upgrading a dependency or changing the data."""
+    import inspect
+
+    try:
+        # unwrap functools.wraps / decorators to the underlying function
+        target = inspect.unwrap(fn) if callable(fn) else fn
+        src = inspect.getsource(target)
+    except (OSError, TypeError):
+        return None
+    import hashlib
+
+    return hashlib.sha256(src.encode()).hexdigest()[:16]
+
+
 def _short_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def _canonical_dump(node) -> str:
-    """A syntax tree as text, leaving out empty and None fields. ``ast.dump``
-    prints every field, and the fields grow across Python minors (3.12 added
-    ``type_params=[]`` to every def and class, 3.13 changed which empty fields
-    are shown), so the same code would hash differently under another
-    interpreter and a resume would blame every project file. Code that uses
-    no syntax newer than 3.11 hashes alike on 3.11 to 3.14."""
-    import ast
+#: The interpreter's own directories, by their sysconfig names: the standard
+#: library and the installed packages. Not the bare prefixes: a project checked
+#: out under the interpreter's prefix (/usr/src/app on a Debian system Python,
+#: code kept inside a conda env) is still the project's own.
+_FOREIGN_PATH_KEYS = ("stdlib", "platstdlib", "purelib", "platlib")
 
-    if isinstance(node, ast.AST):
-        fields = [
-            f"{name}={_canonical_dump(value)}"
-            for name, value in ast.iter_fields(node)
-            if value is not None and value != []
-        ]
-        return f"{type(node).__name__}({','.join(fields)})"
-    if isinstance(node, list):
-        return "[" + ",".join(_canonical_dump(item) for item in node) + "]"
-    return repr(node)
+
+@functools.cache
+def _foreign_roots() -> tuple[Path, ...]:
+    """Directories whose Python files are not the project's own: the running
+    interpreter's standard library and site-packages (its own, a venv's, the
+    user's). The prefixes themselves are dropped, since on Windows
+    ``site.getsitepackages()`` lists ``sys.prefix`` next to its
+    ``Lib\\site-packages``."""
+    import site
+    import sys
+    import sysconfig
+
+    paths = sysconfig.get_paths()
+    roots: set[str] = {paths[k] for k in _FOREIGN_PATH_KEYS if paths.get(k)}
+    try:
+        roots.update(site.getsitepackages())
+        roots.add(site.getusersitepackages())
+    except Exception:  # noqa: BLE001 - a restricted site module; nothing to add
+        pass
+    prefixes = set()
+    for prefix in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix):
+        try:
+            prefixes.add(Path(prefix).resolve())
+        except OSError:
+            continue
+    out = []
+    for r in roots:
+        if not r:
+            continue
+        try:
+            path = Path(r).resolve()
+        except OSError:
+            continue
+        if path not in prefixes:
+            out.append(path)
+    return tuple(out)
+
+
+@functools.cache
+def _installed_top_levels() -> frozenset[str]:
+    """Top-level module names that belong to an installed distribution other
+    than an editable one: code on ``PYTHONPATH`` from a cluster's ``module
+    load``, a ``pip install --target`` directory. An editable install is the
+    project itself (``pip install -e .``, a uv project), so its modules stay
+    the project's. Read once per process."""
+    import importlib.metadata as md
+    import json
+
+    editable: set[str] = set()
+    for dist in md.distributions():
+        try:
+            direct = dist.read_text("direct_url.json")
+            if direct and json.loads(direct).get("dir_info", {}).get("editable"):
+                name = dist.metadata["Name"]
+                if name:
+                    editable.add(name.lower().replace("_", "-"))
+        except Exception:  # noqa: BLE001 - a broken dist-info: not editable
+            continue
+    out = set()
+    for top, dists in md.packages_distributions().items():
+        if not all(d.lower().replace("_", "-") in editable for d in dists):
+            out.add(top)
+    return frozenset(out)
+
+
+@functools.cache
+def _is_foreign_module(name: str) -> bool:
+    """True for a module that is not the project's own: the standard library,
+    mushin, an installed (non-editable) package, or a file under the
+    interpreter's library directories. Decided by name, once per process."""
+    import sys
+
+    top = name.partition(".")[0]
+    if top in sys.stdlib_module_names or top in sys.builtin_module_names:
+        return True
+    if top == "mushin":
+        return True
+    module = sys.modules.get(name)
+    file = getattr(module, "__file__", None) if module is not None else None
+    if isinstance(file, str) and file:
+        try:
+            path = Path(file).resolve()
+        except OSError:
+            return True
+        if any(path.is_relative_to(root) for root in _foreign_roots()):
+            return True
+    try:
+        return top in _installed_top_levels()
+    except Exception:  # noqa: BLE001 - unreadable metadata: by path alone
+        return False
+
+
+#: Values hashed by their repr when the task reads them as globals. Mutable
+#: containers are left out: a module-level cache filled during a run would
+#: otherwise look like an edit.
+_CONSTANT_TYPES = (int, float, complex, str, bytes, bool, type(None))
+
+
+def _constant_repr(value, depth: int = 0) -> str | None:
+    """``repr`` of an immutable constant (tuples and frozensets of them too),
+    or None for anything else."""
+    if isinstance(value, _CONSTANT_TYPES):
+        return repr(value)
+    if isinstance(value, (tuple, frozenset)) and depth < 4 and len(value) <= 1000:
+        items = [_constant_repr(v, depth + 1) for v in value]
+        if any(i is None for i in items):
+            return None
+        if isinstance(value, frozenset):
+            items.sort()
+        return f"{type(value).__name__}({','.join(items)})"
+    return None
+
+
+def _code_hash(code, nested: dict | None = None) -> str:
+    """The hash of what a code object does: its bytecode, names, constants and
+    nested code, not its file name or line numbers, so a comment, a blank line
+    or a moved function is not an edit. Bytecode is stable within a Python
+    minor version; the sidecar records the version, and a resume under another
+    one does not compare."""
+    import types
+
+    parts = [
+        code.co_code,
+        repr(code.co_names).encode(),
+        repr(code.co_varnames).encode(),
+        repr(code.co_freevars).encode(),
+        repr(code.co_cellvars).encode(),
+        repr((code.co_argcount, code.co_kwonlyargcount, code.co_flags)).encode(),
+    ]
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            parts.append(_code_hash(const).encode())
+        else:
+            parts.append(repr(const).encode())
+    return _short_hash(b"\x00".join(parts))
+
+
+def _code_names(code) -> set[str]:
+    """Every global or attribute name a code object and its nested code use."""
+    import types
+
+    names: set[str] = set()
+    pending = [code]
+    while pending:
+        c = pending.pop()
+        names.update(c.co_names)
+        pending.extend(k for k in c.co_consts if isinstance(k, types.CodeType))
+    return names
+
+
+def _function_imports(code, package: str | None) -> list[str]:
+    """The modules a function imports in its body (``import x.y``, ``from .a
+    import b``), resolved against ``package``; each parent package included."""
+    import dis
+    import importlib.util
+    import types
+
+    found: list[str] = []
+    pending = [code]
+    while pending:
+        c = pending.pop()
+        pending.extend(k for k in c.co_consts if isinstance(k, types.CodeType))
+        level = 0
+        for ins in dis.get_instructions(c):
+            if ins.opname == "LOAD_CONST" and isinstance(ins.argval, int):
+                level = ins.argval
+            elif ins.opname == "IMPORT_NAME" and isinstance(ins.argval, str):
+                name = ins.argval
+                if level:
+                    if not package:
+                        continue
+                    try:
+                        name = importlib.util.resolve_name(
+                            "." * level + name, package
+                        ).rstrip(".")
+                    except (ImportError, ValueError):
+                        continue
+                parts = name.split(".")
+                for i in range(1, len(parts) + 1):
+                    dotted = ".".join(parts[:i])
+                    if dotted and dotted not in found:
+                        found.append(dotted)
+    return found
+
+
+def _unloaded_module_hash(name: str) -> tuple[str, str] | None:
+    """A project module the task imports in its body but this process has not
+    imported yet: its file's hash, found without importing it. None when it is
+    foreign, already loaded, or cannot be located."""
+    import importlib.util
+    import sys
+
+    if name in sys.modules or _is_foreign_module(name):
+        return None
+    parent = name.rpartition(".")[0]
+    if parent and parent not in sys.modules:
+        return None  # finding a submodule would import its parent
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, ValueError):
+        return None
+    if spec is None or not spec.has_location or not spec.origin:
+        return None
+    try:
+        path = Path(spec.origin).resolve()
+        if any(path.is_relative_to(root) for root in _foreign_roots()):
+            return None
+        return f"{name} (file)", _short_hash(path.read_bytes())
+    except OSError:
+        return None
+
+
+class _CodeWalk:
+    """Walks from a task through the names its code uses, recording a hash for
+    every project function, class and constant it reaches, keyed by where the
+    name was looked up (``helpers:scale``), so a module attribute rebound to
+    another function is seen as a change."""
+
+    def __init__(self, roots):
+        import sys
+
+        self.labels: dict[str, str] = {}
+        for root in roots:
+            module = getattr(_unwrap_task(root), "__module__", None)
+            if isinstance(module, str):
+                mod = sys.modules.get(module)
+                file = getattr(mod, "__file__", None) if mod is not None else None
+                # The task's module is named by its file, so a script run as
+                # __main__ and the same file imported by name agree; a module
+                # with no file (a notebook) is __main__ either way.
+                self.labels[module] = (
+                    Path(file).stem if isinstance(file, str) and file else module
+                )
+        self.hashes: dict[str, str] = {}
+        self._object_hash: dict[int, str] = {}
+        self._walked: set[int] = set()
+
+    def label(self, module: str) -> str:
+        return self.labels.get(module, module)
+
+    def walk_root(self, root) -> None:
+        target = _unwrap_task(root)
+        code = getattr(target, "__code__", None)
+        if code is not None:
+            # The root's own body is covered by code_fingerprint (the task) or
+            # by Study's methods fingerprint; walk only what it uses.
+            self._walk_function(target, record_as=None)
+        elif isinstance(target, type):
+            self._walk_class(target, record_as=None)
+        else:
+            self._walk_class(type(target), record_as=None)
+
+    def _project(self, value) -> bool:
+        module = getattr(value, "__module__", None)
+        return isinstance(module, str) and not _is_foreign_module(module)
+
+    def _record(self, key: str | None, digest: str) -> None:
+        if key is not None:
+            self.hashes[key] = digest
+
+    def _walk_function(self, fn, record_as: str | None) -> None:
+        import sys
+
+        code = fn.__code__
+        digest = self._object_hash.get(id(fn))
+        if digest is None:
+            extras = [_code_hash(code)]
+            for value in (fn.__defaults__ or ()) + tuple(
+                (fn.__kwdefaults__ or {}).values()
+            ):
+                extras.append(_constant_repr(value) or type(value).__qualname__)
+            digest = _short_hash("|".join(extras).encode())
+            self._object_hash[id(fn)] = digest
+        self._record(record_as, digest)
+        if id(fn) in self._walked:
+            return
+        self._walked.add(id(fn))
+        names = _code_names(code)
+        module = fn.__module__ if isinstance(fn.__module__, str) else "?"
+        here = self.label(module)
+        namespace = getattr(fn, "__globals__", {}) or {}
+        for name in sorted(names):
+            if name in namespace:
+                self._walk_value(namespace[name], f"{here}:{name}", names)
+        for cell_name, cell in zip(
+            code.co_freevars, fn.__closure__ or (), strict=False
+        ):
+            try:
+                value = cell.cell_contents
+            except ValueError:  # an empty cell
+                continue
+            self._walk_value(value, f"{here}:{fn.__qualname__}.<{cell_name}>", names)
+        package = namespace.get("__package__")
+        package = package if isinstance(package, str) else None
+        for name in _function_imports(code, package):
+            loaded = sys.modules.get(name)
+            if loaded is not None:
+                self._walk_value(loaded, f"{name}:", names)
+            else:
+                found = _unloaded_module_hash(name)
+                if found is not None:
+                    self._record(*found)
+
+    def _walk_class(self, cls, record_as: str | None) -> None:
+        import types
+
+        if not self._project(cls):
+            return
+        digest = self._object_hash.get(id(cls))
+        if digest is None:
+            parts = [cls.__qualname__]
+            members = []
+            for attr, value in sorted(vars(cls).items()):
+                func = getattr(value, "__func__", value)
+                code = getattr(func, "__code__", None)
+                if isinstance(code, types.CodeType):
+                    members.append((attr, func))
+                    parts.append(f"{attr}={_code_hash(code)}")
+                else:
+                    const = _constant_repr(value)
+                    if const is not None:
+                        parts.append(f"{attr}={const}")
+            parts.extend(f"base={b.__module__}.{b.__qualname__}" for b in cls.__bases__)
+            digest = _short_hash("|".join(parts).encode())
+            self._object_hash[id(cls)] = digest
+        else:
+            members = []
+        self._record(record_as, digest)
+        if id(cls) in self._walked:
+            return
+        self._walked.add(id(cls))
+        if not members:
+            for attr, value in vars(cls).items():
+                func = getattr(value, "__func__", value)
+                if isinstance(getattr(func, "__code__", None), types.CodeType):
+                    members.append((attr, func))
+        for _, func in members:
+            if self._project(func):
+                self._walk_function(func, record_as=None)
+        for base in cls.__bases__:
+            if self._project(base):
+                key = f"{self.label(base.__module__)}:{base.__qualname__}"
+                self._walk_class(base, record_as=key)
+
+    def _walk_value(self, value, key: str, names: set[str]) -> None:
+        import functools as _ft
+        import types
+
+        try:
+            if isinstance(value, types.ModuleType):
+                if id(value) in self._walked or _is_foreign_module(value.__name__):
+                    return
+                self._walked.add(id(value))
+                namespace = vars(value)
+                here = self.label(value.__name__)
+                for name in sorted(names):
+                    if name in namespace:
+                        self._walk_value(namespace[name], f"{here}:{name}", names)
+                return
+            if isinstance(value, _ft.partial):
+                self._walk_value(value.func, key + ".func", names)
+                for i, arg in enumerate(value.args):
+                    const = _constant_repr(arg)
+                    if const is not None:
+                        self._record(f"{key}.args[{i}]", _short_hash(const.encode()))
+                return
+            if isinstance(value, types.MethodType):
+                value = value.__func__
+            if isinstance(value, types.FunctionType):
+                if self._project(value):
+                    self._walk_function(value, record_as=key)
+                return
+            if isinstance(value, type):
+                self._walk_class(value, record_as=key)
+                return
+            const = _constant_repr(value)
+            if const is not None:
+                self._record(key, _short_hash(const.encode()))
+                return
+            # An instance of a project class (a model, a config object): its
+            # class is code the task runs; its state is not hashed.
+            if self._project(type(value)):
+                self._walk_class(type(value), record_as=f"{key}.__class__")
+        except Exception:  # noqa: BLE001 - a global that resists inspection
+            return
+
+
+def project_fingerprints(fn, *more) -> dict | None:
+    """What the project code a task reaches looks like now, as recorded in
+    each cell's status sidecar: ``{"python": "3.11", "code": {key: hash}}``.
+
+    The walk starts from the names the task's code uses and follows them
+    through the project's own functions, classes, modules and constants, as
+    loaded in this process, which is the code that will run. Each reached
+    project function or class is hashed by its bytecode (not its text: a
+    comment, a blank line or a moved definition is not an edit), and each
+    immutable constant it reads (``SCALE = 10``, or ``THRESH`` imported with
+    ``from consts import THRESH``) by its value. Keys say where a name was
+    looked up, ``helpers:scale`` or, for the task's own module, its file's
+    name, so a script run as ``__main__`` and the same file imported by name
+    agree. A project module the task imports inside its body that this process
+    has not imported yet is hashed by its file. ``more`` adds roots walked the
+    same way (``Study``'s training functions, which its task calls but does not
+    import). The roots' own bodies are not entries: ``code_fingerprint`` and
+    ``Study``'s methods fingerprint cover them.
+
+    Not reached: the standard library, mushin, installed packages other than
+    editable ones (a dependency upgrade is provenance's job), data files, a
+    mutable module-level container, code called only through a string (a
+    class named by ``_target_`` whose module nothing the task uses), and
+    attribute chains on objects rather than modules. None when the walk fails;
+    a resume then does not compare, and ``cache_dir`` is not used."""
+    import sys
+
+    try:
+        roots = (fn, *more)
+        walk = _CodeWalk(roots)
+        for root in roots:
+            walk.walk_root(root)
+        return {
+            "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
+            "code": walk.hashes,
+        }
+    except Exception:  # noqa: BLE001 - a best-effort guard never fails the sweep
+        return None
 
 
 def _unwrap_task(fn):
@@ -190,449 +626,23 @@ def _unwrap_task(fn):
     return target
 
 
-def _task_source(fn) -> str | None:
-    """The task's source through decorators; a functools.partial has none
-    (callers key it on its bound arguments instead)."""
-    import inspect
-
-    try:
-        target = inspect.unwrap(fn) if callable(fn) else fn
-        return inspect.getsource(target)
-    except (OSError, TypeError, ValueError):
+def changed_project_code(prior, current) -> list[str] | None:
+    """The keys whose hashes differ between two ``project_fingerprints``
+    records, compared on the keys both have (a name one run reached and the
+    other did not is not an edit: reaching it changed some code both reached,
+    or it was imported lazily in one process only). None when they cannot be
+    compared: either is missing or malformed (a sidecar from before the field),
+    or they were taken under different Python versions, whose bytecode
+    differs (an interpreter upgrade is, like a package upgrade, provenance's
+    job)."""
+    if not isinstance(prior, dict) or not isinstance(current, dict):
         return None
-
-
-def code_fingerprint(fn) -> str | None:
-    """Stable short hash of a task function's code, or None if the source
-    can't be read.
-
-    Complements ``config_fingerprint`` in the resume guard: a task whose
-    *body* was edited between runs (same config, same combo key) would
-    otherwise have its stale cached metrics silently returned. The source is
-    hashed as its syntax tree, so a comment or a reformat inside the body is
-    not an edit, the same rule ``project_fingerprints`` applies to the files
-    the task reaches (a source that does not parse on its own, a lambda in a
-    larger statement, is hashed as text). Only the task function's own source
-    is hashed; the project's other code the task reaches (helpers,
-    module-level constants) is covered by ``project_fingerprints``, installed
-    packages and data files by neither, so a fresh ``working_dir`` is still
-    the safe choice after upgrading a dependency or changing the data."""
-    import ast
-    import textwrap
-
-    src = _task_source(fn)
-    if src is None:
+    if prior.get("python") != current.get("python"):
         return None
-    try:
-        tree = ast.parse(textwrap.dedent(src))
-        return _short_hash(_canonical_dump(tree).encode())
-    except (SyntaxError, ValueError, RecursionError):
-        return _short_hash(src.encode())
-
-
-def legacy_code_fingerprint(fn) -> str | None:
-    """The hash of the task's source as text, which sidecars recorded before
-    ``code_fingerprint`` hashed the syntax tree. A resume accepts either, so a
-    sweep recorded by an earlier version still reuses its cells."""
-    src = _task_source(fn)
-    return None if src is None else _short_hash(src.encode())
-
-
-#: The interpreter's own directories, by their sysconfig names: the standard
-#: library and the installed packages. Not the bare prefixes: a project checked
-#: out under the interpreter's prefix (/usr/src/app on a Debian system Python,
-#: code kept inside a conda env) is still the project's own.
-_FOREIGN_PATH_KEYS = ("stdlib", "platstdlib", "purelib", "platlib")
-
-
-@functools.cache
-def _foreign_roots() -> tuple[Path, ...]:
-    """Directories whose Python files are not the project's own: the running
-    interpreter's standard library and site-packages (its own, a venv's, the
-    user's) and mushin itself. Resolved once; a file under any of them is left
-    out of ``project_fingerprints``."""
-    import site
-    import sysconfig
-
-    paths = sysconfig.get_paths()
-    roots: set[str] = {paths[k] for k in _FOREIGN_PATH_KEYS if paths.get(k)}
-    try:
-        roots.update(site.getsitepackages())
-        roots.add(site.getusersitepackages())
-    except Exception:  # noqa: BLE001 - a restricted site module; nothing to add
-        pass
-    roots.add(str(Path(__file__).parent))  # mushin's own package
-    out = []
-    for r in roots:
-        if not r:
-            continue
-        try:
-            out.append(Path(r).resolve())
-        except OSError:
-            continue
-    return tuple(out)
-
-
-def _project_path(file) -> Path | None:
-    """``file`` resolved, when it is an existing file of the project's own (not
-    under the interpreter or mushin), else None. Any file counts, a compiled
-    extension included: rebuilding one changes its bytes."""
-    if not isinstance(file, str) or not file:
+    a, b = prior.get("code"), current.get("code")
+    if not isinstance(a, dict) or not isinstance(b, dict):
         return None
-    try:
-        path = Path(file).resolve()
-        if not path.is_file():
-            return None
-    except OSError:
-        return None
-    if any(path.is_relative_to(root) for root in _foreign_roots()):
-        return None
-    return path
-
-
-def _project_file(module) -> Path | None:
-    """The file ``module`` was loaded from when it is the project's own."""
-    return _project_path(getattr(module, "__file__", None))
-
-
-def _loaded_from_older_source(module, path: Path) -> bool:
-    """True when ``module``'s bytecode cache says it was compiled from a version
-    of ``path`` with a different size or mtime than the file has now: the file
-    was edited after this process imported it, so the code that would run is
-    not the code on disk. Best effort, and silent when the cache cannot be
-    trusted: no timestamp-based ``.pyc`` (none written, or hash-based), or a
-    process that does not rewrite a stale one (``PYTHONDONTWRITEBYTECODE``, a
-    read-only ``__pycache__``), where a stale header means the opposite, an
-    import that compiled the current source fresh."""
-    import os
-    import sys
-
-    cached = getattr(module, "__cached__", None)
-    if not isinstance(cached, str) or not cached or sys.dont_write_bytecode:
-        return False
-    try:
-        if Path(cached).resolve() == path:
-            return False  # a sourceless module: the .pyc is the code itself
-        if not os.access(os.path.dirname(cached) or ".", os.W_OK):
-            return False
-        with open(cached, "rb") as f:
-            header = f.read(16)
-        st = path.stat()
-    except OSError:
-        return False
-    if len(header) < 16 or int.from_bytes(header[4:8], "little") & 0b11:
-        return False  # truncated, or hash-based: no source mtime recorded
-    mtime = int.from_bytes(header[8:12], "little")
-    size = int.from_bytes(header[12:16], "little")
-    return (int(st.st_mtime) & 0xFFFFFFFF) != mtime or (st.st_size & 0xFFFFFFFF) != size
-
-
-def _is_main_guard(node) -> bool:
-    """``if __name__ == "__main__":`` (either order): a script's driver block,
-    which an import never runs and a resume edit most often touches. Not
-    ``!=``, whose block is import-time code."""
-    import ast
-
-    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-        return False
-    if len(node.test.ops) != 1 or not isinstance(node.test.ops[0], ast.Eq):
-        return False
-    parts = [node.test.left, *node.test.comparators]
-    names = {part.id for part in parts if isinstance(part, ast.Name)}
-    consts = {part.value for part in parts if isinstance(part, ast.Constant)}
-    return "__name__" in names and "__main__" in consts
-
-
-def _parse_source(path: Path):
-    """The syntax tree of a Python file, or None for any other file or one
-    that does not parse."""
-    import ast
-
-    if path.suffix != ".py":
-        return None
-    try:
-        return ast.parse(path.read_bytes(), filename=str(path))
-    except (SyntaxError, ValueError):
-        return None
-
-
-def _source_digest(path: Path, tree=None) -> str:
-    """The hash of the code in ``path``: for a Python file its syntax tree
-    without the ``if __name__ == "__main__":`` blocks, so comments, formatting,
-    line endings and a driver script's own run block do not count as edits
-    (``_canonical_dump`` keeps it stable across Python minors); for any other
-    file, or one that does not parse, its bytes. A value assigned inside the
-    main block is not code the task reaches, even if the task reads it as a
-    global: pass it as a config value instead, which the resume guards too."""
-    import ast
-
-    if tree is None:
-        return _short_hash(path.read_bytes())
-    body = []
-    for node in tree.body:
-        if _is_main_guard(node):
-            body.extend(node.orelse)  # the else branch runs on import: it is code
-        else:
-            body.append(node)
-    stripped = ast.Module(body=body, type_ignores=[])
-    return _short_hash(_canonical_dump(stripped).encode())
-
-
-def _imported_modules(tree, package: str | None) -> list[str]:
-    """Every module name a file imports, at any depth (a function-local import
-    included), each with its parent packages, since a package's ``__init__``
-    is code that runs too; relative imports resolved against ``package``."""
-    import ast
-    import importlib.util
-
-    names: list[str] = []
-
-    def add(name: str) -> None:
-        parts = name.split(".")
-        for i in range(1, len(parts) + 1):
-            dotted = ".".join(parts[:i])
-            if dotted not in names:
-                names.append(dotted)
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                add(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            if node.level:
-                if not package:
-                    continue
-                try:
-                    base = importlib.util.resolve_name("." * node.level + base, package)
-                except (ImportError, ValueError):
-                    continue
-            if base:
-                add(base)
-            for alias in node.names:
-                if alias.name != "*" and base:
-                    add(
-                        f"{base}.{alias.name}"
-                    )  # a submodule, or a name: resolved below
-    return names
-
-
-def _module_file(name: str) -> str | None:
-    """The file a module name denotes: the loaded module's, or the one the
-    import system would load for a top-level name, or a submodule of a loaded
-    package (finding it imports nothing; ``from pkg import name`` where
-    ``name`` is a function resolves to no file and is skipped)."""
-    import importlib.util
-    import sys
-
-    mod = sys.modules.get(name)
-    if mod is not None:
-        return getattr(mod, "__file__", None)
-    parent = name.rpartition(".")[0]
-    if parent and parent not in sys.modules:
-        return None
-    try:
-        spec = importlib.util.find_spec(name)
-    except (ImportError, AttributeError, ValueError):
-        return None
-    return spec.origin if spec is not None and spec.has_location else None
-
-
-def _module_owner(value):
-    """The module name a global's code comes from: a function's or class's
-    own, otherwise its type's; None when that cannot be read (a proxy whose
-    attribute access raises, a descriptor that is not a string)."""
-    import types
-
-    try:
-        owner = (
-            value.__module__
-            if isinstance(value, (types.FunctionType, type))
-            else type(value).__module__
-        )
-    except Exception:  # noqa: BLE001 - best effort over arbitrary globals
-        return None
-    return owner if isinstance(owner, str) else None
-
-
-def _referenced_globals(fn, module) -> list:
-    """The values in ``module``'s globals that ``fn`` uses, following the
-    module's own functions it calls (their code objects, nested ones too). For
-    a task defined where there is no file (a notebook), so that only what the
-    task uses counts, not everything the notebook has imported."""
-    import types
-
-    try:
-        namespace = vars(module)
-    except TypeError:
-        return []
-    seen_code: set[int] = set()
-    seen_names: set[str] = set()
-    values = []
-    pending = [getattr(fn, "__code__", None)]
-    while pending:
-        code = pending.pop()
-        if not isinstance(code, types.CodeType) or id(code) in seen_code:
-            continue
-        seen_code.add(id(code))
-        pending.extend(c for c in code.co_consts if isinstance(c, types.CodeType))
-        for name in code.co_names:
-            if name in seen_names or name not in namespace:
-                continue
-            seen_names.add(name)
-            value = namespace[name]
-            values.append(value)
-            inner = getattr(value, "__code__", None)
-            if (
-                inner is not None
-                and getattr(value, "__module__", None) == module.__name__
-            ):
-                pending.append(inner)
-            if isinstance(value, type) and value.__module__ == module.__name__:
-                for attr in vars(value).values():
-                    func = getattr(attr, "__func__", attr)
-                    if isinstance(getattr(func, "__code__", None), types.CodeType):
-                        pending.append(func.__code__)
-    return values
-
-
-_STALE_WARNED: set[str] = set()
-
-
-class _Stale(Exception):
-    """A reached file was edited after this process imported it."""
-
-
-def project_fingerprints(fn, *more) -> dict[str, str] | None:
-    """Hashes of the code in the project's own source files the task reaches,
-    keyed by path relative to the task's module (so a script run as
-    ``__main__`` and the same file imported by name agree, and a relocated
-    checkout still matches; absolute when the task's module has no file, as in
-    a notebook): the module that defines ``fn`` and, transitively, every
-    project module a reached file imports, at any depth (``from consts import
-    THRESH``, an import inside a function). For a task defined where there is
-    no file (a notebook), the walk starts from the globals the task uses,
-    following the notebook functions it calls, not from everything the notebook
-    has imported. ``more`` adds further roots walked the same way (``Study``'s
-    training functions, which its task calls but does not import); keys are
-    then relative to the first root that has a file.
-
-    A Python file is hashed as its syntax tree without the ``if __name__ ==
-    "__main__":`` blocks (see ``_source_digest``), so an edit to a driver
-    script's run block, a comment or the formatting is not a code change, while
-    a constant or a helper in the same file is. None when a root's module
-    cannot be found (a function built at runtime), or when a reached file was
-    edited after this process imported it (with a warning, once per file: the
-    code that would run is not the code on disk, so nothing is recorded under
-    the new hash and a resume does not compare it; restart the process). An
-    empty dict when the task reaches no project file (defined inside an
-    installed package, or in a notebook that uses none).
-
-    Complements ``code_fingerprint``, which covers the task's own body: an
-    edited helper, a changed module constant or a modified imported module of
-    the project changes this fingerprint, so a resume re-runs the cell and a
-    ``cache_dir`` lookup misses, instead of returning a result computed by code
-    that no longer exists. Not reached: installed packages (a dependency
-    upgrade is provenance's job, and hashing site-packages would miss the cache
-    on every unrelated install), data files, and a module the task only meets
-    through the config (a class named by ``_target_`` whose module nothing the
-    task's module imports)."""
-    import warnings
-
-    try:
-        return _walk_project(fn, *more)
-    except _Stale as stale:
-        path = str(stale)
-        if path not in _STALE_WARNED:
-            _STALE_WARNED.add(path)
-            # Outside the best-effort guard below, so a caller that turns
-            # warnings into errors sees it rather than a silent None.
-            warnings.warn(
-                f"{path} was edited after this process imported it, so the code "
-                "that would run is not the code on disk; the project code the "
-                "task reaches is not fingerprinted for this run, and a resume "
-                "does not compare it. Restart the process to run, and record, "
-                "the edited code.",
-                UserWarning,
-                stacklevel=2,
-            )
-        return None
-    except Exception:  # noqa: BLE001 - a best-effort guard never fails the sweep
-        return None
-
-
-def _walk_project(*roots) -> dict[str, str] | None:
-    """``project_fingerprints`` without its guards: raises ``_Stale``."""
-    import inspect
-    import os
-    import sys
-    import types
-
-    pending: list[Path] = []
-    base: Path | None = None
-    for root in roots:
-        target = _unwrap_task(root)
-        module = inspect.getmodule(target)
-        if module is None and not isinstance(target, (types.FunctionType, type)):
-            module = inspect.getmodule(type(target))
-        if module is None:
-            return None
-        module_file = _project_file(module)
-        if module_file is not None:
-            base = base or module_file.parent
-            pending.append(module_file)
-            continue
-        # No file (a notebook, or a task defined inside mushin): start from the
-        # globals the task uses; the import walk below takes it from there.
-        for value in _referenced_globals(target, module):
-            if isinstance(value, types.ModuleType):
-                path = _project_file(value)
-            else:
-                owner = _module_owner(value)
-                path = _project_path(_module_file(owner)) if owner else None
-            if path is not None:
-                pending.append(path)
-    # Loaded modules by file, for the staleness check and a module's package.
-    loaded: dict[Path, object] = {}
-    for mod in list(sys.modules.values()):
-        f = getattr(mod, "__file__", None)
-        if isinstance(f, str) and f:
-            try:
-                loaded.setdefault(Path(f).resolve(), mod)
-            except OSError:
-                continue
-    hashes: dict[str, str] = {}
-    visited: set[Path] = set()
-    while pending:
-        path = pending.pop()
-        if path in visited:
-            continue
-        visited.add(path)
-        mod = loaded.get(path)
-        if mod is not None and _loaded_from_older_source(mod, path):
-            raise _Stale(str(path))
-        try:
-            tree = _parse_source(path)
-            digest = _source_digest(path, tree)
-        except (OSError, RecursionError):
-            continue
-        key = path.as_posix()
-        if base is not None:
-            try:
-                key = Path(os.path.relpath(path, base)).as_posix()
-            except ValueError:  # another drive on Windows
-                pass
-        hashes[key] = digest
-        if tree is None:
-            continue
-        package = getattr(mod, "__package__", None) if mod is not None else None
-        if not isinstance(package, str):
-            package = None
-        for name in _imported_modules(tree, package):
-            dep = _project_path(_module_file(name))
-            if dep is not None and dep not in visited:
-                pending.append(dep)
-    return hashes
+    return sorted(k for k in a.keys() & b.keys() if a[k] != b[k])
 
 
 def read_cell_status(cell_dir) -> dict | None:

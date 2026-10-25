@@ -141,8 +141,9 @@ resuming. Don't, and mushin actively stops you from doing it by accident.
   carry results from an *older* version of your code and some from the current
   one, silently combined into one dataset. mushin's resume guards on a
   fingerprint of the resolved config, the task source **and** the project code
-  the task reaches (its module and the project modules that imports), so an
-  edited task or helper re-runs its cells rather than reusing a stale result;
+  the task reaches (the helpers, classes and constants it uses, through your
+  own modules), so an edited task or helper re-runs its cells rather than
+  reusing a stale result;
   an upgraded dependency or changed data is not seen, and the only way to be
   sure *every* cell in your paper grid came from one code era is to run that
   grid fresh. (See [Resilient & resumable sweeps](resilience.md) for how the

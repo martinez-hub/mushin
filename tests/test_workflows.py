@@ -1046,24 +1046,24 @@ def test_resume_reruns_only_failed_cell(tmp_path, monkeypatch, relative):
         wd = str(tmp_path / "s")
 
     CALLS = {"n": 0}
+    # The flag lives in a dict, not on the class: a class attribute the task
+    # reads is project code, and changing it would re-run every cell.
+    FAIL = {"on": True}
 
     class W(MultiRunMetricsWorkflow):
-        FAIL = True
-
         @staticmethod
         def task(a, b):
             CALLS["n"] += 1
-            if a == 2 and b == 1 and W.FAIL:
+            if a == 2 and b == 1 and FAIL["on"]:
                 raise RuntimeError("boom")
             return dict(val=float(a * 10 + b))
 
-    W.FAIL = True
     wf = W()
     # fail-soft emits a UserWarning naming the failed cell — assert it (this also
     # keeps it out of the pytest warnings summary).
     with pytest.warns(UserWarning, match="fail"):
         wf.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, on_error="nan")
-    W.FAIL = False
+    FAIL["on"] = False
     CALLS["n"] = 0
     wf2 = W()
     wf2.run(a=multirun([1, 2]), b=multirun([0, 1]), working_dir=wd, resume=True)
@@ -1272,26 +1272,26 @@ def test_cell_status_combo_for_override_string_multirun(tmp_path):
 
 def test_task_receives_resume_context_on_reexecution(tmp_path):
     seen = {}
+    # The flag lives in a dict, not on the class: a class attribute the task
+    # reads is project code, and changing it would re-run every cell.
+    fail = {"on": True}
 
     class W(MultiRunMetricsWorkflow):
-        FAIL = True
-
         @staticmethod
         def task(seed, mushin_resume=None):
             seen[seed] = mushin_resume
             if mushin_resume is not None and mushin_resume.dir is not None:
                 (mushin_resume.dir / "last.ckpt").write_text("state")
-            if seed == 0 and W.FAIL:
+            if seed == 0 and fail["on"]:
                 raise RuntimeError("boom")
             return dict(val=float(seed))
 
     wd = str(tmp_path / "s")
-    W.FAIL = True
     with pytest.warns(UserWarning, match="fail"):
         W().run(seed=multirun([0, 1]), working_dir=wd, on_error="nan")
     assert seen[0] is not None and seen[0].is_resume is False and seen[0].attempt == 1
 
-    W.FAIL = False
+    fail["on"] = False
     seen.clear()
     wf = W()
     wf.run(seed=multirun([0, 1]), working_dir=wd, resume=True)

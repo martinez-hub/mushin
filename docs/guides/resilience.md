@@ -103,6 +103,13 @@ compare_methods(wf.to_xarray())  # no longer raises
 without a stable location). The completed cells are not recomputed, so a resume
 of a mostly-successful sweep is cheap.
 
+That holds when the cause was outside your code: a full disk, a lost node, a
+flaky download. If the fix is an edit to the task or to the project code it
+uses (a helper, a constant it reads), the completed cells were computed by the
+old code, so the resume re-runs them as well, with a warning naming where the
+change is. Comments, formatting, and code in the script's `if __name__ ==
+"__main__":` block that the task does not call are not edits.
+
 ### The full loop
 
 ```

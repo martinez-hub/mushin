@@ -379,7 +379,6 @@ class _TaskRunner:
         sampled_indices=None,
         cache_dir=None,
         code_deps=None,
-        legacy_code_hash=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -388,20 +387,15 @@ class _TaskRunner:
         self.on_error = on_error
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
-        self.code_hash = code_hash  # hash of the task's code (resume guard)
-        # The hash of the task's source as TEXT, which sidecars recorded before
-        # code_hash hashed the syntax tree; a prior cell matching either is
-        # unchanged, so older sweeps still resume.
-        self.legacy_code_hash = legacy_code_hash
-        # Hashes, by path relative to the task's module, of the project's own
-        # source files the task reaches (its module, the helpers it imports);
-        # None when unknown. The other half of the code guard: an edited helper
-        # re-runs the cell. The cache key's third part is fixed for the run, so
-        # it is built once.
+        self.code_hash = code_hash  # hash of the task source (resume guard)
+        # What the project code the task reaches looks like ({"python": ...,
+        # "code": {where-looked-up: hash}}, see project_fingerprints), or None
+        # when it could not be taken. The other half of the code guard: an
+        # edited helper re-runs the cell. The cache key's third part is fixed
+        # for the run, so it is built once.
         self.code_deps = code_deps
-        self._deps_key = (
-            ":" + json.dumps(code_deps, sort_keys=True) if code_deps else ""
-        )
+        reached = code_deps.get("code") if isinstance(code_deps, dict) else None
+        self._deps_key = ":" + json.dumps(code_deps, sort_keys=True) if reached else ""
         # Grid subsampling: the set of Hydra job numbers to actually run (None =
         # run every cell). A cell whose job.num is not selected is skipped
         # (NaN), keyed on the deterministic job index so it's launcher- and
@@ -427,6 +421,10 @@ class _TaskRunner:
         never cached). A task that reaches no project file keeps the two-part
         key, so its entries from before the third part are still found."""
         if not self.cache_dir or config_hash is None or self.code_hash is None:
+            return None
+        if self.code_deps is None:
+            # The project code could not be fingerprinted: no key would tell
+            # this code era from another, so the cache is not used this run.
             return None
         import hashlib
 
@@ -488,6 +486,7 @@ class _TaskRunner:
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
+            changed_project_code,
             config_fingerprint,
             discover_last_ckpt,
             read_cell_status,
@@ -562,20 +561,13 @@ class _TaskRunner:
                 code_changed = (
                     prior_code is not None
                     and self.code_hash is not None
-                    and prior_code not in (self.code_hash, self.legacy_code_hash)
+                    and prior_code != self.code_hash
                 )
-                # Judged on the files both runs reached: a module reached by
-                # one run only (a notebook imported more since) is not an
-                # edit, and a file whose imports changed is caught through
-                # the file that imports it.
-                deps_changed = (
-                    isinstance(prior_deps, dict)
-                    and self.code_deps is not None
-                    and any(
-                        prior_deps[m] != self.code_deps[m]
-                        for m in prior_deps.keys() & self.code_deps.keys()
-                    )
-                )
+                # Judged on the names both runs reached, under one Python
+                # version; None when they cannot be compared (a sidecar from
+                # before the field, another interpreter, an unknown record).
+                changed_deps = changed_project_code(prior_deps, self.code_deps)
+                deps_changed = bool(changed_deps)
                 if config_changed or code_changed or deps_changed:
                     parts = []
                     if config_changed:
@@ -583,14 +575,11 @@ class _TaskRunner:
                     if code_changed:
                         parts.append("task code")
                     if deps_changed:
-                        # Name the modules that differ, so the user sees which
-                        # helper (or constant-holding module) the edit was in.
-                        names = sorted(
-                            m
-                            for m in prior_deps.keys() & self.code_deps.keys()
-                            if prior_deps[m] != self.code_deps[m]
+                        # Name where the change is, so the user sees which
+                        # helper or constant the edit was in.
+                        parts.append(
+                            f"code the task reaches ({', '.join(changed_deps)})"
                         )
-                        parts.append(f"code the task reaches ({', '.join(names)})")
                     what = " and ".join(parts)
                     warnings.warn(
                         f"resume: cell {key!r} was completed under a different "
@@ -610,7 +599,15 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         cwd = Path.cwd()
                         write_metrics_sidecar(cwd, cached)
-                        write_status(cwd, status="completed", combo=sc, attempt=1)
+                        # Keep the reused cell's record when this run has
+                        # none: dropping it would make a later resume reuse the
+                        # cell unchecked.
+                        keep = {}
+                        if self.code_deps is None and prior_deps is not None:
+                            keep["code_deps"] = prior_deps
+                        write_status(
+                            cwd, status="completed", combo=sc, attempt=1, **keep
+                        )
                         return cached
 
         # (1.4) content-addressed cache: reuse a cell computed under the same
@@ -1171,8 +1168,9 @@ class BaseWorkflow:
 
         cache_dir : str | None (default: None)
             Content-addressed cache of completed cells shared across
-            ``working_dir``\\ s: a cell whose config AND task source match a
-            cached entry reuses it instead of recomputing.
+            ``working_dir``\\ s: a cell whose config, task source and the
+            project code the task reaches match a cached entry reuses it
+            instead of recomputing.
 
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
@@ -1549,11 +1547,7 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import (
-            code_fingerprint,
-            legacy_code_fingerprint,
-            project_fingerprints,
-        )
+        from ._resume import code_fingerprint, project_fingerprints
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -1585,7 +1579,6 @@ class BaseWorkflow:
             code_deps=project_fingerprints(
                 self.task, *getattr(self, "_mushin_code_roots", ())
             ),
-            legacy_code_hash=legacy_code_fingerprint(self.task),
         )
 
         self._capture_env = capture_env
@@ -1974,21 +1967,23 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             metrics are read from the sidecar) and re-run the rest. A completed
             cell is reused only if its swept-parameter combination AND
             fingerprints of its resolved config, its task source and the
-            project's own code the task reaches (the module defining it and the
-            project modules that module imports, transitively; the code in
-            their files when ``run()`` starts, where comments, formatting and a
-            script's ``if __name__ == "__main__":`` block do not count) still
-            match; a changed
-            non-swept value, an edited task body or an edited helper re-runs
-            that cell, with a warning that names the changed file. A file
-            edited after this process imported it is not fingerprinted (the
-            warning says to restart), since the code that would run is not the
-            code on disk. The fingerprint does not cover installed packages,
-            data files, the environment, or a module the task meets only
-            through the config (a class named by ``_target_`` whose module
-            nothing the task's module imports). After upgrading a dependency,
-            changing the data or editing such a class, re-run from a fresh
-            ``working_dir`` rather than resuming.
+            project code the task reaches still match. The project code is
+            found from the names the task's code uses, followed through the
+            project's own functions, classes, modules and constants as this
+            process has loaded them, which is the code that will run: a helper
+            it calls, a constant it reads (``from consts import THRESH``
+            included), a function in a notebook or in a script's main block.
+            Functions are hashed by their bytecode, so a comment or a moved
+            definition is not an edit. A changed non-swept value, an edited
+            task body or an edited helper re-runs that cell, with a warning
+            naming where the change is (``helpers:scale``). Not covered:
+            installed packages other than editable ones, data files, the
+            environment, a mutable module-level container, and code reached
+            only through a string (a class named by ``_target_`` that nothing
+            the task uses imports). A resume under another Python version does
+            not compare project code (its bytecode differs). After upgrading a
+            dependency, changing the data or editing such code, re-run from a
+            fresh ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
@@ -2043,10 +2038,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             recomputing, so a cell computed in one sweep is free in another.
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
-            edited task body or an edited helper is a cache miss. The key is
-            the whole set of files the task reaches, so a task that starts
-            using one more project module recomputes (a resume, by contrast,
-            compares only the files both runs reached).
+            edited task body or an edited helper is a cache miss, and so is a
+            change of Python version. When the project code cannot be
+            fingerprinted, the cache is not used for that run.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for
