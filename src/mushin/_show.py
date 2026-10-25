@@ -10,11 +10,9 @@ before committing to the full ``to_xarray`` load."""
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from typing import Any
 
 
 def _ordered_union(dicts: list[dict]) -> list[str]:
@@ -68,7 +66,8 @@ def _manifest_cells(root: Path) -> tuple[dict, float]:
 
 def _read_cells(root) -> list[dict]:
     """Scan a sweep ``root`` and return one dict per cell:
-    ``{"combo", "status", "metrics", "dir"}`` (``dir`` is the job dir Path).
+    ``{"combo", "status", "metrics", "dir", "status_mtime"}`` (``dir`` is the
+    job dir Path, ``status_mtime`` its status sidecar's mtime, 0.0 if unknown).
     Reads only the per-cell JSON sidecars: no Hydra/xarray. Raises
     ``FileNotFoundError`` if ``root`` is not a directory.
 
@@ -102,16 +101,15 @@ def _scan(root) -> tuple[list[dict], float]:
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
+        try:
+            status_mtime = (d / STATUS_FILE).stat().st_mtime
+        except OSError:
+            status_mtime = 0.0
         if manifest_cells:
             entry = manifest_cells.get(combo_key(s["combo"]))
             in_grid = isinstance(entry, dict) and entry.get("dir") == d.name
-            if not in_grid:
-                try:
-                    newer = (d / STATUS_FILE).stat().st_mtime > manifest_mtime
-                except OSError:
-                    newer = False
-                if not newer:
-                    continue  # stale cell from a previous sweep of this dir
+            if not in_grid and status_mtime <= manifest_mtime:
+                continue  # stale cell from a previous sweep of this dir
         m = read_metrics_sidecar(d) or {}
         if not isinstance(m, dict):
             m = {}
@@ -121,6 +119,7 @@ def _scan(root) -> tuple[list[dict], float]:
                 "status": s.get("status", "pending"),
                 "metrics": m,
                 "dir": d,
+                "status_mtime": status_mtime,
             }
         )
     return cells, manifest_mtime
@@ -323,11 +322,10 @@ def _over_names(over) -> list[str]:
     argument is not masked by a sweep that has no finite metric yet."""
     if isinstance(over, str):
         names = [over]
+    elif isinstance(over, Sequence):  # not a dict or set: their order is not ours
+        names = list(over)
     else:
-        try:
-            names = list(over)
-        except TypeError:
-            names = []
+        names = []
     if not names or not all(isinstance(n, str) for n in names):
         raise ValueError(
             f"`over` must be a swept-param name or a sequence of them, got {over!r}"
@@ -361,7 +359,6 @@ def _mean(values: list[float]) -> float | None:
 
 
 def _best_group(
-    root,
     cells: list[dict],
     manifest_mtime: float,
     metric: str,
@@ -388,7 +385,6 @@ def _best_group(
     reported with a warning; no complete group raises."""
     import warnings
 
-    from ._resume import STATUS_FILE
     from ._sweep_io import combo_key
 
     def over_key(c: dict) -> str:
@@ -431,18 +427,18 @@ def _best_group(
     # predates it).
     in_flight = sum(c["status"] in ("running", "pending") for c in grouped)
 
-    def newer(c: dict) -> bool:
-        try:
-            return (c["dir"] / STATUS_FILE).stat().st_mtime > manifest_mtime
-        except OSError:
-            return False
-
     if in_flight:
-        why = f"{in_flight} cell(s) still running"
+        why = (
+            f"{in_flight} cell(s) recorded as running; a killed sweep leaves them "
+            "so, and resume=True reruns them"
+        )
     elif not manifest_mtime:
         why = "no usable manifest: it is written when run() ends, or predates it"
-    elif any(newer(c) for c in grouped):
-        why = "cells newer than the manifest, so a re-run is in flight"
+    elif any(c["status_mtime"] > manifest_mtime for c in grouped):
+        why = (
+            "cells recorded later than the manifest, as when a re-run of the grid "
+            "is in flight (or the clocks that wrote them differ)"
+        )
     else:
         why = None
     if why:
@@ -531,7 +527,9 @@ def best(
         ``sample=`` sweep's holes, a configuration whose seeds have not all
         run) are skipped with a warning; a seed that failed for every
         configuration drops out instead. On a sweep still running the seeds
-        reached so far set the bar, and the warning says so; the definitive answer comes once the sweep has finished. A finished sweep with one value of ``over`` has nothing to average, and raises.
+        reached so far set the bar, and the warning says so; the definitive
+        answer comes once the sweep has finished. A finished sweep with one
+        value of ``over`` has nothing to average, and raises.
 
     Returns
     -------
@@ -546,7 +544,8 @@ def best(
         If ``mode`` is invalid, no completed cell has ``metric`` as a finite
         scalar (the error lists the scalar metrics that are available), ``over``
         is not a swept-param name or a sequence of them, names a param the
-        sweep does not vary, or no group is complete.
+        sweep does not vary, no group is complete, or a finished sweep has one
+        value of ``over``.
     FileNotFoundError
         If ``root`` is not a directory.
     """
@@ -574,7 +573,7 @@ def best(
         )
 
     if names is not None:
-        return _best_group(root, cells, manifest_mtime, metric, mode, names)
+        return _best_group(cells, manifest_mtime, metric, mode, names)
 
     pick = (max if mode == "max" else min)(
         candidates, key=lambda c: c["metrics"][metric]

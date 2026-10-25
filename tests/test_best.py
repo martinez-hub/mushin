@@ -192,7 +192,7 @@ def test_best_over_skips_incomplete_groups_with_a_warning(tmp_path):
     assert r.n == 3
     ours = [w for w in rec if "skipped" in str(w.message)]
     assert all(w.filename == __file__ for w in ours)
-    assert "no manifest" not in str(ours[0].message)  # the sweep finished
+    assert "not finished" not in str(ours[0].message)  # the sweep finished
 
 
 def test_best_over_drops_a_seed_that_failed_everywhere(tmp_path):
@@ -307,6 +307,9 @@ def test_best_over_unknown_param_raises_with_swept_params(tmp_path):
         mushin.best(wd, "score", over=5)
     with pytest.raises(ValueError, match="`over`"):
         mushin.best(wd, "score", over=[])
+    # a dict or set is not a sequence: its order would not be the caller's
+    with pytest.raises(ValueError, match="`over`"):
+        mushin.best(wd, "score", over={"seed": 1})
     # a wrong `over` is reported even when no cell has the metric yet
     with pytest.raises(ValueError, match="`over`"):
         mushin.best(wd, "nope", over=5)
@@ -398,7 +401,7 @@ def test_best_over_warns_while_a_resumed_cell_is_running(tmp_path):
         combo={"lr": 0.2, "seed": 2},
         attempt=2,
     )
-    with pytest.warns(UserWarning, match=r"1 cell\(s\) still running") as rec:
+    with pytest.warns(UserWarning, match=r"1 cell\(s\) recorded as running") as rec:
         r = mushin.best(wd, "score", over="seed")
     assert r.combo == {"lr": 0.1}
     assert "skipped 1 of 2" in str(rec[0].message)
@@ -449,7 +452,7 @@ def test_best_over_warns_when_cells_are_newer_than_the_manifest(tmp_path):
     later = (wd / MANIFEST_FILE).stat().st_mtime + 5
     status = _cell_dir(wd, lr=0.1, seed=0) / STATUS_FILE
     os.utime(status, (later, later))
-    with pytest.warns(UserWarning, match="newer than the manifest"):
+    with pytest.warns(UserWarning, match="later than the manifest"):
         r = mushin.best(wd, "score", over="seed")
     assert r.combo == {"lr": 0.2}
 
