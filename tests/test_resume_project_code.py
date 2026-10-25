@@ -799,36 +799,30 @@ def test_a_module_reached_by_two_functions_is_walked_for_both(project):
             sys.modules.pop(n, None)
 
 
-def test_a_name_that_stops_being_hashable_is_still_an_edit(project):
-    """`LAYERS = 3` becoming a list, or a helper becoming a foreign function,
-    keeps its key with a stand-in hash, so the edit shows."""
+def test_objects_containers_and_installed_code_get_no_entry(project):
+    """Only project code and constants are entries: a mutable container, an
+    object and an installed function or module may change as the code runs or
+    belong to provenance, so they are not compared (a helper replaced by an
+    installed function goes unseen, a documented limit). A task that reaches
+    nothing else keeps main's two-part cache key."""
     root, _ = project
     src = """
         import math
 
-        LAYERS = {layers}
-        {act}
+        import numpy as np
+
+        LAYERS = [64, 64]
+        CACHE = {}
+        act = math.fabs
 
 
         def task(a):
-            return dict(v=act(a) * len(str(LAYERS)))
+            CACHE[a] = 1
+            return dict(v=act(a) * len(LAYERS) + float(np.mean([a])))
         """
-    mod = _module(
-        root,
-        "mushin_t_kinds",
-        textwrap.dedent(src).format(layers=3, act="def act(x):\n    return abs(x)"),
-    )
+    mod = _module(root, "mushin_t_kinds", textwrap.dedent(src))
     try:
-        before = project_fingerprints(mod.task)
-        mod = _module(
-            root,
-            "mushin_t_kinds",
-            textwrap.dedent(src).format(layers="[64, 64]", act="act = math.fabs"),
-        )
-        assert set(_changed(before, mod.task)) == {
-            "mushin_t_kinds:LAYERS",
-            "mushin_t_kinds:act",
-        }
+        assert project_fingerprints(mod.task)["code"] == {}
     finally:
         sys.modules.pop("mushin_t_kinds", None)
 
@@ -1023,15 +1017,16 @@ def test_pre_task_and_config_targets_are_roots(project):
     cfg = {"model": {"_target_": "mushin_t_roots.Model"}, "a": 1}
     try:
         before = cell_project_record("tok-a", (mod.task,), (mod.pre_task,), cfg)
-        assert {"mushin_t_roots:pre_task", "target:mushin_t_roots.Model"} <= set(
+        assert {"mushin_t_roots:pre_task", "mushin_t_roots (file)"} <= set(
             before["code"]
         )
         mod = _module(root, "mushin_t_roots", src.format(off=1, k=2))
         after = cell_project_record("tok-b", (mod.task,), (mod.pre_task,), cfg)
-        assert changed_project_code(before, after) == ["mushin_t_roots:SEED_OFFSET"]
+        # The target's module is this file, so its file entry moves too.
+        assert "mushin_t_roots:SEED_OFFSET" in changed_project_code(before, after)
         mod = _module(root, "mushin_t_roots", src.format(off=0, k=3))
         after = cell_project_record("tok-c", (mod.task,), (mod.pre_task,), cfg)
-        assert "target:mushin_t_roots.Model" in changed_project_code(before, after)
+        assert "mushin_t_roots (file)" in changed_project_code(before, after)
     finally:
         sys.modules.pop("mushin_t_roots", None)
 
@@ -1340,8 +1335,9 @@ def test_a_decorators_globals_belong_to_the_decorator_module(project):
 
 
 def test_settings_objects_are_hashed_by_value(project):
-    """A module-level dataclass instance, frozen or not, with a path and a
-    nested settings object among its fields."""
+    """A module-level frozen dataclass instance, with a path and a nested
+    settings object among its fields, is hashed by value; a mutable one is
+    state (it may change as the code runs) and is not."""
     root, _ = project
     src = """
         import dataclasses
@@ -1353,7 +1349,7 @@ def test_settings_objects_are_hashed_by_value(project):
             lr: float = 0.01
 
 
-        @dataclasses.dataclass
+        @dataclasses.dataclass(frozen=True)
         class Settings:
             lr: float
             data: Path
@@ -1584,3 +1580,139 @@ def test_a_script_task_under_joblib_records_the_code_its_workers_run(tmp_path, s
     err = run(second, "resume")
     assert "code the task reaches (jl_script:OFFSET)" in err, err
     assert calls.read_text() == "xxxx"
+
+
+# --- round 7: the walk is bounded and prefers missing an edit to a re-run ------
+
+
+def _bounded(fn, seconds=20):
+    """project_fingerprints(fn) in a thread, failing if it does not finish."""
+    import threading
+
+    out = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("r", project_fingerprints(fn)), daemon=True
+    )
+    t.start()
+    t.join(seconds)
+    assert not t.is_alive(), "the walk did not finish"
+    return out["r"]
+
+
+def test_a_closure_that_holds_itself_does_not_hang_the_walk(project):
+    """A call-counter decorator and a recursive inner function: the closure
+    holds the function itself (Codex-style hang, adversarial round 6)."""
+    root, _ = project
+    src = """
+        import functools
+
+
+        def counted(fn):
+            @functools.wraps(fn)
+            def wrapper(*a, **k):
+                wrapper.calls += 1
+                return fn(*a, **k)
+
+            wrapper.calls = 0
+            return wrapper
+
+
+        def make():
+            def depth(n):
+                return 0 if not n else 1 + depth(n[1:])
+
+            return depth
+
+
+        DEPTH = make()
+
+
+        @counted
+        def scale(x):
+            return x * 2
+
+
+        def task(a):
+            return dict(v=scale(a) + DEPTH("ab"))
+        """
+    mod = _module(root, "mushin_t_selfref", textwrap.dedent(src))
+    try:
+        assert "mushin_t_selfref:DEPTH" in _bounded(mod.task)["code"]
+    finally:
+        sys.modules.pop("mushin_t_selfref", None)
+
+
+def test_an_object_that_invents_attributes_does_not_hang_the_walk(project):
+    """addict.Dict and its kind return a new object for any missing attribute,
+    __wrapped__ included."""
+    root, _ = project
+    src = """
+        class AttrDict(dict):
+            def __getattr__(self, name):
+                return self[name] if name in self else type(self)()
+
+
+        CFG = AttrDict(lr=0.1)
+
+
+        def task(a):
+            return dict(v=a * CFG.lr)
+        """
+    mod = _module(root, "mushin_t_addict", textwrap.dedent(src))
+    try:
+        _bounded(mod.task)
+    finally:
+        sys.modules.pop("mushin_t_addict", None)
+
+
+def test_a_walk_past_its_bound_stops_at_the_same_place_in_every_process(
+    project, monkeypatch
+):
+    import mushin._resume as r
+
+    root, _ = project
+    n = 300
+    lines = [f"def f{i}(x):\n    return f{i + 1}(x)\n" for i in range(n)]
+    lines.append(f"def f{n}(x):\n    return x\n")
+    lines.append("def task(a):\n    return dict(v=f0(a))\n")
+    mod = _module(root, "mushin_t_bound", "\n\n".join(lines))
+    monkeypatch.setattr(r, "_WALK_MAX_OPS", 100)
+    try:
+        first = project_fingerprints(mod.task)
+        assert 0 < len(first["code"]) < n
+        assert project_fingerprints(mod.task) == first
+    finally:
+        sys.modules.pop("mushin_t_bound", None)
+
+
+def test_secret_patterns_do_not_hide_ordinary_code(project):
+    """Names and strings that only look like provider tokens are settings and
+    are compared; real tokens are not."""
+    from mushin._resume import _SECRET
+
+    root, _ = project
+    src = 'MODEL = "mask-rcnn_r50_fpn_1x_coco"\nCACHE_DIR = "/data/hf_cache/models"\nAUTHOR = "me"\nHF_TOKEN = "hf_abcdefghijklmnopqrst"\nVALUEISH = "sk-abcdefghijklmnopqrst"\n\n\ndef task(a):\n    return dict(v=a * len(MODEL + CACHE_DIR + AUTHOR + HF_TOKEN + VALUEISH))\n'
+    mod = _module(root, "mushin_t_secret2", src)
+    try:
+        code = project_fingerprints(mod.task)["code"]
+        for name in ("MODEL", "CACHE_DIR", "AUTHOR"):
+            assert code[f"mushin_t_secret2:{name}"] != _SECRET, name
+        assert code["mushin_t_secret2:HF_TOKEN"] == _SECRET  # by name
+        assert code["mushin_t_secret2:VALUEISH"] == _SECRET  # by value alone
+    finally:
+        sys.modules.pop("mushin_t_secret2", None)
+
+
+def test_a_registry_holds_code_not_entries_for_its_other_contents(project):
+    """A registry filled as the code runs must not move the record: only the
+    project code it holds is walked, and the container itself is no entry."""
+    root, _ = project
+    src = 'def cnn(x):\n    return x\n\n\nMODELS = {"cnn": cnn}\nHISTORY = [(1, 2)]\n\n\ndef task(a):\n    HISTORY.append((a, a))\n    MODELS["x" + str(a)] = 3\n    return dict(v=MODELS["cnn"](a))\n'
+    mod = _module(root, "mushin_t_reg2", src)
+    try:
+        before = project_fingerprints(mod.task)
+        assert "mushin_t_reg2:MODELS['cnn']" in before["code"]
+        mod.task(1)
+        assert project_fingerprints(mod.task) == before
+    finally:
+        sys.modules.pop("mushin_t_reg2", None)

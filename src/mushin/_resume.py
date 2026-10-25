@@ -10,6 +10,7 @@ import contextvars
 import functools
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -337,7 +338,12 @@ def _constant_repr(value, depth: int = 0) -> str | None:
         return repr(value)
     if isinstance(value, pathlib.PurePath):
         return f"path({value.as_posix()!r})"
-    if dataclasses.is_dataclass(value) and not isinstance(value, type) and depth < 4:
+    if (
+        dataclasses.is_dataclass(value)
+        and not isinstance(value, type)
+        and type(value).__dataclass_params__.frozen
+        and depth < 4
+    ):
         fields = []
         for f in dataclasses.fields(value):
             v = getattr(value, f.name)
@@ -423,7 +429,11 @@ def _code_names(code) -> tuple[set[str], set[str], list[tuple[str, int]]]:
     while pending:
         c = pending.pop()
         pending.extend(k for k in c.co_consts if isinstance(k, types.CodeType))
-        instructions = list(dis.get_instructions(c))
+        instructions = [
+            ins
+            for ins in dis.get_instructions(c)
+            if ins.opname not in ("EXTENDED_ARG", "CACHE", "NOP")
+        ]
         for i, ins in enumerate(instructions):
             name = ins.argval
             if not isinstance(name, str):
@@ -529,6 +539,8 @@ def _find_file(name: str) -> str | None:
     if loaded is not None:
         file = getattr(loaded, "__file__", None)
         return file if isinstance(file, str) and file else None
+    import importlib.util
+
     parts = name.split(".")
     path = None
     spec = None
@@ -540,7 +552,12 @@ def _find_file(name: str) -> str | None:
             spec = getattr(loaded, "__spec__", None)
             continue
         try:
-            spec = importlib.machinery.PathFinder.find_spec(dotted, path)
+            if i == 0:
+                # Every finder, for the top level only (importing nothing):
+                # an editable install may be found by a meta-path finder.
+                spec = importlib.util.find_spec(dotted)
+            else:
+                spec = importlib.machinery.PathFinder.find_spec(dotted, path)
         except (ImportError, AttributeError, ValueError):
             return None
         if spec is None:
@@ -634,18 +651,28 @@ _STATE = _short_hash(b"<state>")
 _SECRET = _short_hash(b"<secret>")
 
 
-def _secret_value(value: str) -> bool:
-    from ._provenance import _REDACT_VALUE_RE
+#: Secret-shaped names and values, narrower than provenance's redaction rules
+#: (where a false positive costs nothing): here one would hide an edit. A name
+#: matches as a whole word between underscores (``HF_TOKEN``, ``api_key``, not
+#: ``AUTHOR`` or ``tokenizer``); a value matches a provider token that starts
+#: the string or follows a separator (not ``mask-rcnn_r50`` or a path holding
+#: ``hf_cache``).
+_SECRET_NAME_RE = re.compile(
+    r"(?i)(?:^|_)(?:api_?key|secret|token|password|passwd|credentials?|auth)(?:_|$)"
+)
+_SECRET_VALUE_RE = re.compile(
+    r"(?:^|[\s=:'\"])(?:sk-|hf_|ghp_|gho_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{16,}"
+)
 
-    return bool(_REDACT_VALUE_RE.search(value))
+
+def _secret_value(value: str) -> bool:
+    return bool(_SECRET_VALUE_RE.search(value))
 
 
 def _secret_name(name: str, value) -> bool:
     """A string under a secret-shaped name (``api_key``): a number under one
     (``MAX_TOKENS = 512``) is a setting, and is hashed."""
-    from ._provenance import _REDACT_KEY_RE
-
-    return isinstance(value, (str, bytes)) and bool(_REDACT_KEY_RE.search(name))
+    return isinstance(value, (str, bytes)) and bool(_SECRET_NAME_RE.search(name))
 
 
 def _secret(key: str, value) -> bool:
@@ -653,6 +680,12 @@ def _secret(key: str, value) -> bool:
     if _secret_name(name, value):
         return True
     return isinstance(value, str) and _secret_value(value)
+
+
+#: Bounds on one walk: steps, and the length of a key (a chain of names that
+#: long is an object inventing attributes, not code).
+_WALK_MAX_OPS = 50_000
+_WALK_MAX_KEY = 400
 
 
 class _CodeWalk:
@@ -672,9 +705,19 @@ class _CodeWalk:
         self._module_names: dict[int, set[str]] = {}
         self._state_names: dict[int, frozenset[str]] = {}
         self._stack: list[tuple] = []
+        self._ops = 0
+        self.truncated = False
 
     def run(self) -> None:
+        # The walk runs for every sweep, so it must end: at most _WALK_MAX_OPS
+        # steps. The order is fixed (sorted names, a stack), so a cut-off walk
+        # records the same entries in every process.
         while self._stack:
+            if self._ops >= _WALK_MAX_OPS:
+                self.truncated = True
+                self._stack.clear()
+                return
+            self._ops += 1
             op, *args = self._stack.pop()
             try:
                 op(*args)
@@ -711,7 +754,7 @@ class _CodeWalk:
         return _module_label(name, g)
 
     def _record(self, key: str | None, digest: str) -> None:
-        if key is not None:
+        if key is not None and len(key) <= _WALK_MAX_KEY:
             self.hashes[key] = digest
 
     def _kind(self, value) -> str:
@@ -810,25 +853,19 @@ class _CodeWalk:
         self.run()
 
     def walk_target(self, path: str) -> None:
-        """A class or function the config names as ``_target_``: resolved from
-        the modules this process has loaded (never importing one)."""
-        import sys
-
+        """A class or function the config names as ``_target_``: recorded by
+        the file of its module (and the project modules that file imports), so
+        the entry is the same whether or not this process has imported it yet.
+        Hydra imports it from that file when the cell instantiates it."""
         parts = path.split(".")
         if _is_foreign_module(parts[0]):
-            return  # never touch an installed package: getattr may import
+            return
         for i in range(len(parts) - 1, 0, -1):
-            module = sys.modules.get(".".join(parts[:i]))
-            if module is None:
+            module = ".".join(parts[:i])
+            if _find_file(module) is None:
                 continue
-            value = module
-            try:
-                for attr in parts[i:]:
-                    value = getattr(value, attr)
-            except Exception:  # noqa: BLE001 - not there, or raises
-                return
-            self._push(self._walk_value, value, f"target:{path}", set(), set(), 0)
-            self.run()
+            for key, digest in _file_entries(module).items():
+                self._record(key, digest)
             return
 
     # -- values -------------------------------------------------------------
@@ -844,10 +881,24 @@ class _CodeWalk:
                     fn.__code__, fn.__doc__ if isinstance(fn.__doc__, str) else None
                 ),
             ]
-            for value in (fn.__defaults__ or ()) + tuple(
-                (fn.__kwdefaults__ or {}).values()
-            ):
-                extras.append(_constant_repr(value) or self._kind(value))
+            code = fn.__code__
+            positional = code.co_varnames[: code.co_argcount]
+            defaults = fn.__defaults__ or ()
+            named = list(
+                zip(
+                    positional[len(positional) - len(defaults) :],
+                    defaults,
+                    strict=False,
+                )
+            )
+            named += sorted((fn.__kwdefaults__ or {}).items())
+            for name, value in named:
+                if _secret_name(name, value):
+                    extras.append(f"{name}=<secret>")
+                else:
+                    extras.append(
+                        f"{name}={_constant_repr(value) or self._kind(value)}"
+                    )
             digest = _short_hash("|".join(extras).encode())
             self._object_hash[id(fn)] = digest
         return digest
@@ -879,9 +930,14 @@ class _CodeWalk:
         self._record(record_as, self._function_digest(fn))
         globals_, attrs, imports = _code_names(code)
         here = self._here(fn)
+        if id(fn) in self._walked:
+            return
+        self._walked.add(id(fn))
         # Closure cells and callable defaults belong to this function object,
-        # so they are keyed under where it was reached: two closures from one
-        # factory differ.
+        # so they are keyed under where it was first reached (two closures
+        # from one factory are two objects, and differ), and walked once: a
+        # closure that holds the function itself (a call counter, a recursive
+        # inner function) would otherwise be walked forever.
         owner = record_as or f"{here}:{fn.__qualname__}"
         for cell_name, cell in zip(
             code.co_freevars, fn.__closure__ or (), strict=False
@@ -901,9 +957,6 @@ class _CodeWalk:
                 self._push(
                     self._walk_value, value, f"{owner}.<default {i}>", set(), attrs, 0
                 )
-        if id(fn) in self._walked:
-            return
-        self._walked.add(id(fn))
         namespace = getattr(fn, "__globals__", {}) or {}
         state = self._state(namespace)
         for name in sorted(globals_):
@@ -985,9 +1038,7 @@ class _CodeWalk:
 
     def _walk_class(self, cls, record_as: str | None) -> None:
         if not self._project(cls):
-            if record_as is not None:
-                self._record(record_as, self._kind(cls))
-            return
+            return  # installed code: provenance's job, and no entry
         members = self._class_members(cls)
         digest = self._object_hash.get(id(cls))
         if digest is None:
@@ -1025,53 +1076,50 @@ class _CodeWalk:
     def _walk_value(
         self, value, key: str, globals_: set[str], attrs: set[str], depth: int
     ) -> None:
+        """What a name refers to. An entry is recorded only for the project's
+        own code and for constants read from its modules: an object, a
+        container's contents, an installed function or module get none. That
+        prefers missing an edit over re-running unchanged work, since such
+        values may change as the code runs."""
         import types
 
+        if len(key) > _WALK_MAX_KEY:
+            return
         if isinstance(value, types.ModuleType):
-            # The name says which module it is (`import impl_a as impl`): an
-            # alias pointed at another module is a change.
-            self._record(key, _short_hash(f"<module {value.__name__}>".encode()))
-            self._walk_module(value, attrs)
+            if not _is_foreign_module(value.__name__):
+                # Which module it is (`import impl_a as impl`): an alias
+                # pointed at another project module is a change.
+                self._record(key, _short_hash(f"<module {value.__name__}>".encode()))
+                self._walk_module(value, attrs)
             return
         if isinstance(value, functools.partial):
-            self._record(key, self._partial_digest(value))
+            if depth == 0:
+                self._record(key, self._partial_digest(value))
             self._push(
                 self._walk_value, value.func, key + ".func", globals_, attrs, depth
             )
             return
         if isinstance(value, types.MethodType):
             value = value.__func__
-        wrapped = getattr(value, "__wrapped__", None)
-        if wrapped is not None and wrapped is not value:
-            # A decorated function (functools.lru_cache, functools.wraps): the
-            # wrapper may be foreign or a C object; the code that runs is what
-            # it wraps.
-            self._push(
-                self._walk_value, wrapped, key + ".__wrapped__", globals_, attrs, depth
-            )
         if isinstance(value, types.FunctionType):
             if self._project(value):
                 self._walk_function(value, key)
             else:
-                self._record(key, self._kind(value))
+                self._unwrap(value, key, globals_, attrs, depth)
             return
         if isinstance(value, type):
             self._walk_class(value, key)
             return
-        const = _constant_repr(value)
-        if const is not None:
-            self._record(
-                key, _SECRET if _secret(key, value) else _short_hash(const.encode())
-            )
-            if self._project(type(value)):
-                # A dataclass settings object: its fields above, its class too.
-                self._push(self._walk_class, type(value), f"{key}.__class__")
-            return
         if isinstance(value, (dict, list, tuple, set, frozenset)):
-            # A registry such as {"cnn": CNN, "mlp": mlp}: its type is recorded
-            # (not its contents, which may change at runtime), and the project
-            # code it holds is walked.
-            self._record(key, self._kind(value))
+            const = _constant_repr(value) if depth == 0 else None
+            if const is not None:
+                self._record(
+                    key, _SECRET if _secret(key, value) else _short_hash(const.encode())
+                )
+                return
+            # A registry such as {"cnn": CNN, "mlp": mlp}: the project code it
+            # holds is walked; its other contents, and the container itself,
+            # are not entries (it may be filled as the code runs).
             if depth < 2 and len(value) <= 1000:
                 if isinstance(value, dict):
                     items = sorted(
@@ -1085,25 +1133,73 @@ class _CodeWalk:
                         ((self._item_key(v), v) for v in value), key=lambda kv: kv[0]
                     )
                 else:
-                    items = list(enumerate(value))
+                    items = [(str(i), v) for i, v in enumerate(value)]
+                code_like = (
+                    types.FunctionType,
+                    type,
+                    functools.partial,
+                    dict,
+                    list,
+                    tuple,
+                )
                 for k, v in items:
-                    if callable(v) or isinstance(v, (dict, list, tuple)):
+                    if isinstance(v, code_like):
                         self._push(
                             self._walk_value,
                             v,
-                            f"{key}[{k if isinstance(k, str) else repr(k)}]",
+                            f"{key}[{k}]",
                             globals_,
                             attrs,
                             depth + 1,
                         )
             return
-        if self._project(type(value)):
-            # An instance of a project class (a model, a settings object): its
-            # class is code the task runs; a dataclass instance (a settings
-            # object) was hashed by its fields above, other state is not.
-            self._push(self._walk_class, type(value), f"{key}.__class__")
+        if depth > 0:
+            return  # inside a registry, only code
+        const = _constant_repr(value)
+        if const is not None:
+            self._record(
+                key, _SECRET if _secret(key, value) else _short_hash(const.encode())
+            )
+            if self._project(type(value)):
+                # A frozen settings dataclass: its fields above, its class too.
+                self._push(self._walk_class, type(value), f"{key}.__class__")
             return
-        self._record(key, self._kind(value))
+        if callable(value):
+            # A decorated function behind a C wrapper (functools.lru_cache).
+            self._unwrap(value, key, globals_, attrs, depth)
+        if self._project(type(value)):
+            # An instance of a project class (a model): its class is code the
+            # task runs; its state is not hashed.
+            self._push(self._walk_class, type(value), f"{key}.__class__")
+
+    def _unwrap(self, value, key: str, globals_, attrs, depth: int) -> None:
+        """Follow a decorator's ``__wrapped__`` chain to project code, as
+        inspect.unwrap does: only through functions, classes and partials, at
+        most a few layers, each object once (an object that invents attributes,
+        such as an addict.Dict, never leads anywhere)."""
+        import types
+
+        code_like = (types.FunctionType, type, functools.partial)
+        seen = {id(value)}
+        try:
+            layer = getattr(value, "__wrapped__", None)
+        except Exception:  # noqa: BLE001 - an attribute that raises
+            return
+        for _ in range(16):
+            if not isinstance(layer, code_like) or id(layer) in seen:
+                return
+            seen.add(id(layer))
+            if isinstance(layer, functools.partial) or self._project(layer):
+                self._push(
+                    self._walk_value,
+                    layer,
+                    key + ".__wrapped__",
+                    globals_,
+                    attrs,
+                    depth,
+                )
+                return
+            layer = getattr(layer, "__wrapped__", None)
 
 
 def _config_targets(cfg) -> list[str]:

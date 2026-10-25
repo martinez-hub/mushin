@@ -1995,18 +1995,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             THRESH`` included), a class in a registry dict it indexes, a
             function in a notebook or in a script's main block, a module it
             imports inside its body (with the project modules that module
-            imports), a settings dataclass it reads. Helpers are hashed by their
+            imports), a frozen settings dataclass it reads. Helpers are hashed by their
             bytecode, so a comment, a docstring or a moved definition in one is
             not an edit (the task function's own source is compared as text, so
             a comment in its body is). A changed non-swept value, an
             edited task body or an edited helper re-runs that cell, with a
             warning naming where the change is (``helpers:scale``). Not
-            covered: installed packages other than editable ones, data files,
-            the environment, the contents of a mutable container (beyond the
-            code it holds), a module-level name the project's own code rebinds
-            (a lazily created object, a warn-once flag: state, not code), a
-            ``_target_`` whose module the cell's process has not imported, and
-            code reached only through some other string. A module-level value
+            covered: installed packages other than editable ones (a helper
+            replaced by an installed function is not seen), data files, the
+            environment, objects and mutable containers (beyond the project
+            code a container holds), a module-level name the project's own code
+            rebinds (a lazily created object, a warn-once flag: state, not
+            code), and code reached only through a string other than a
+            ``_target_``. Where in doubt the guard misses an edit rather than
+            re-running unchanged cells, and the walk has a fixed size limit, so
+            a very large project is covered only as far as it reaches. A module-level value
             computed at import (from the clock, the environment, the host) is
             hashed by its value, so if it differs from process to process the
             cells re-run. A resume under another Python
