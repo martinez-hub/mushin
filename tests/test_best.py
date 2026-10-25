@@ -310,6 +310,8 @@ def test_best_over_unknown_param_raises_with_swept_params(tmp_path):
     # a wrong `over` is reported even when no cell has the metric yet
     with pytest.raises(ValueError, match="`over`"):
         mushin.best(wd, "nope", over=5)
+    with pytest.raises(ValueError, match="'sed'"):
+        mushin.best(wd, "nope", over="sed")
 
 
 def test_best_over_unknown_metric_raises_the_usual_error(tmp_path):
@@ -341,12 +343,13 @@ def test_best_never_picks_an_infinite_cell(tmp_path):
     assert r.combo["seed"] == 2
 
 
-def test_best_result_without_dir_has_no_dirs():
+def test_best_result_without_a_dir_needs_dirs():
     from mushin._show import BestResult
 
-    r = BestResult({}, "completed", {}, 0.0, None)
-    assert r.dirs == [] and r.n == 0
-    assert "n=0" in repr(r)
+    with pytest.raises(TypeError, match="dirs"):
+        BestResult({}, "completed", {}, 0.0, None)
+    r = BestResult({}, "completed", {}, 0.0, None, dirs=["a", "b"])
+    assert r.n == 2 and "n=2" in repr(r)
 
 
 def test_best_skips_an_int_metric_beyond_float_range(tmp_path):
@@ -361,3 +364,55 @@ def test_best_skips_an_int_metric_beyond_float_range(tmp_path):
     assert mushin.best(wd, "score").combo["lr"] == 0.2
     with pytest.warns(UserWarning, match="skipped 1 of 2"):
         assert mushin.best(wd, "score", over="seed").combo == {"lr": 0.2}
+
+
+def test_best_over_with_results_only_in_foreign_cells_raises(tmp_path):
+    """The metric exists only in a cell that lacks `seed`: no grouped cell has
+    a result, so the bar is empty and that is "no complete group", not every
+    group complete over nothing (fmean of nothing)."""
+    import json
+    import shutil
+
+    from mushin._resume import write_cell_status
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    extra = wd / "99"
+    shutil.copytree(_cell_dir(wd, lr=0.1, seed=2), extra)
+    (extra / "mushin_metrics.json").write_text(json.dumps({"fresh": 1.0}))
+    write_cell_status(extra, status="completed", combo={"lr": 0.3}, attempt=1)
+    _touch_newer_than_manifest(wd, extra)
+    with pytest.raises(ValueError, match="no group of cells.*left out"):
+        mushin.best(wd, "fresh", over="seed")
+
+
+def test_best_over_warns_while_a_resumed_cell_is_running(tmp_path):
+    """A resume re-runs cells under the prior run's manifest, so the manifest
+    alone does not say the sweep finished; a running cell does."""
+    from mushin._resume import write_cell_status
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    write_cell_status(
+        _cell_dir(wd, lr=0.2, seed=2),
+        status="running",
+        combo={"lr": 0.2, "seed": 2},
+        attempt=2,
+    )
+    with pytest.warns(UserWarning, match=r"1 cell\(s\) still running") as rec:
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.1}
+    assert "skipped 1 of 2" in str(rec[0].message)
+
+
+def test_best_over_treats_a_corrupt_manifest_as_unfinished(tmp_path):
+    """_read_cells scans unscoped when the manifest is unusable; the result
+    must say so rather than take the file's presence as "finished"."""
+    from mushin._sweep_io import MANIFEST_FILE
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    (wd / MANIFEST_FILE).write_text("{not json")
+    with pytest.warns(UserWarning, match="no manifest yet"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2} and r.n == 3

@@ -51,6 +51,21 @@ def _numeric_dir_key(name: str):
         return (1, name)
 
 
+def _manifest_cells(root: Path) -> tuple[dict, float]:
+    """The latest sweep's manifest cells and the manifest's mtime, or
+    ``({}, 0.0)`` when none is usable (missing, corrupt, wrong shape): the scan
+    is then unscoped, and ``best(over=)`` cannot take the sweep as finished."""
+    from ._sweep_io import MANIFEST_FILE, Manifest
+
+    try:
+        cells = Manifest.load_or_new(root, []).cells
+        if not isinstance(cells, dict) or not cells:
+            return {}, 0.0
+        return cells, (root / MANIFEST_FILE).stat().st_mtime
+    except Exception:  # noqa: BLE001 - unreadable manifest -> unscoped scan
+        return {}, 0.0
+
+
 def _read_cells(root) -> list[dict]:
     """Scan a sweep ``root`` and return one dict per cell:
     ``{"combo", "status", "metrics", "dir"}`` (``dir`` is the job dir Path).
@@ -65,22 +80,13 @@ def _read_cells(root) -> list[dict]:
     view). Without a manifest (fresh dir mid-sweep, pre-manifest sweeps) every
     cell dir is kept."""
     from ._resume import STATUS_FILE, read_cell_status
-    from ._sweep_io import MANIFEST_FILE, Manifest, combo_key, read_metrics_sidecar
+    from ._sweep_io import combo_key, read_metrics_sidecar
 
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f"sweep directory not found: {root}")
 
-    manifest_cells: dict = {}
-    manifest_mtime = 0.0
-    try:
-        manifest_cells = Manifest.load_or_new(root, []).cells
-        if not isinstance(manifest_cells, dict):
-            manifest_cells = {}
-        if manifest_cells:
-            manifest_mtime = (root / MANIFEST_FILE).stat().st_mtime
-    except Exception:  # noqa: BLE001 - unreadable manifest -> unscoped scan
-        manifest_cells = {}
+    manifest_cells, manifest_mtime = _manifest_cells(root)
 
     cells: list[dict] = []
     for d in sorted(
@@ -271,11 +277,12 @@ class BestResult:
         self.metrics = metrics
         self.value = value
         self.dir = dir
-        # ``dir is None`` means "a group", so it must never smuggle a [None].
-        if dirs is not None:
-            self.dirs = list(dirs)
-        else:
-            self.dirs = [] if dir is None else [dir]
+        # ``dir is None`` means "a group", which must say which cells it averages.
+        if dirs is None:
+            if dir is None:
+                raise TypeError("a BestResult without a dir needs dirs")
+            dirs = [dir]
+        self.dirs = list(dirs)
         self.n = len(self.dirs)
 
     def __repr__(self) -> str:
@@ -356,7 +363,7 @@ def _best_group(
     import warnings
     from statistics import fmean
 
-    from ._sweep_io import MANIFEST_FILE, combo_key
+    from ._sweep_io import combo_key
 
     def over_key(c: dict) -> str:
         return combo_key({k: c["combo"][k] for k in over})
@@ -374,19 +381,25 @@ def _best_group(
         key: [c for c in g if _is_candidate(c, metric)] for key, g in groups.items()
     }
     bar = {over_key(c) for rs in results.values() for c in rs}
+    # No bar (no grouped cell has a result) means no complete group, not every
+    # group complete over nothing.
     complete = [
         rs
         for rs in results.values()
-        if len(rs) == len(bar) and {over_key(c) for c in rs} == bar
+        if bar and len(rs) == len(bar) and {over_key(c) for c in rs} == bar
     ]
 
     names = ", ".join(map(repr, over))
     notes = []
-    if not (Path(root) / MANIFEST_FILE).is_file():
+    # Unfinished: a cell still running (a resume re-runs cells under the prior
+    # run's manifest), or no usable manifest, which run() writes at the end.
+    in_flight = sum(c["status"] in ("running", "pending") for c in cells)
+    if in_flight or not _manifest_cells(Path(root))[0]:
+        why = f"{in_flight} cell(s) still running" if in_flight else "no manifest yet"
         notes.append(
-            "the sweep has no manifest yet (still running, or stopped early), so "
-            f"the bar is the values of {names} reached so far, and a "
-            "configuration whose other cells have not started looks complete"
+            f"the sweep has not finished ({why}), so the bar is the values of "
+            f"{names} reached so far, and a configuration whose other cells have "
+            "not started looks complete"
         )
     skipped = len(groups) - len(complete)
     if skipped:
@@ -397,7 +410,8 @@ def _best_group(
         )
     if lacking:
         notes.append(
-            f"{lacking} cell(s) whose params do not include {names} were left out"
+            f"{lacking} cell(s) whose params do not include {names} were left out "
+            f"(if they are the sweep you meant, it does not vary {names})"
         )
     if not complete:
         raise ValueError(
@@ -487,6 +501,8 @@ def best(
     names = None if over is None else _over_names(over)
 
     cells = _read_cells(root)
+    if names is not None:
+        _check_swept(names, cells)
     candidates = [c for c in cells if _is_candidate(c, metric)]
     if not candidates:
         available = sorted(
@@ -504,7 +520,6 @@ def best(
         )
 
     if names is not None:
-        _check_swept(names, cells)
         return _best_group(root, cells, metric, mode, names)
 
     pick = (max if mode == "max" else min)(
