@@ -38,7 +38,7 @@ it, under a name `compare(task=...)` accepts.
 
 ## Batteries
 
-Each battery is a factory for a `torchmetrics` collection. The detection,
+Each battery returns a dict of named `torchmetrics` metrics. The detection,
 image-quality and audio batteries need their own extras (`detection`, `image`,
 `audio`), as their docstrings say.
 

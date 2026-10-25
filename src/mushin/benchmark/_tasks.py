@@ -42,8 +42,9 @@ class Task:
     prob_metrics : frozenset[str]
         The metric names that consume probabilities rather than predictions.
     requires_num_classes : bool
-        Whether the battery needs ``num_classes`` (classification does;
-        regression, retrieval and the paired batteries do not).
+        Whether the battery needs ``num_classes`` (classification and
+        segmentation do; detection, regression, retrieval and the paired
+        batteries do not).
     description : str
         Shown by ``list_tasks``.
     update_fn : UpdateFn | None

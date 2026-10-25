@@ -6,16 +6,21 @@ it. Needs the `eval` extra.
 
 ## Types
 
-Three aliases name what `compare_llms` takes; `llm_judge` returns a `Metric`:
+The shapes `compare_llms` accepts for its systems, examples and metrics, and
+`llm_judge` returns a `Metric`. The signatures below spell them as `Any`, so
+any callable or mapping of the right shape passes.
 
-- `System`: a callable `(inputs, seed) -> outputs`. It maps a batch of inputs
-  and an integer seed to a batch of outputs in the same order.
-- `Metric`: a `torchmetrics.Metric`, or a per-example scorer
-  `(output, reference) -> float`.
-- `Example`: one evaluation example, either a mapping
-  `{"input": ..., "reference": ...}` or a bare input when the metric needs no
-  reference. A bare tuple is one input, not an `(input, reference)` pair; use
-  the mapping form to attach a reference.
+::: mushin.llm.System
+    options:
+      heading_level: 3
+
+::: mushin.llm.Metric
+    options:
+      heading_level: 3
+
+::: mushin.llm.Example
+    options:
+      heading_level: 3
 
 ::: mushin.llm.compare_llms
 

@@ -70,7 +70,7 @@ def cohens_d(a, b) -> float:
 
 
 def cohens_dz(a, b) -> float:
-    """Paired-samples Cohen's :math:`d_z`: ``mean(a - b) / std(a - b)``.
+    """Paired-samples Cohen's ``d_z``: ``mean(a - b) / std(a - b)``.
 
     The effect size matching the paired tests (``wilcoxon``, ``ttest_rel``);
     the pooled-variance ``cohens_d`` ignores the pairing and understates

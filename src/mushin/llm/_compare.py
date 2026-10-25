@@ -397,9 +397,10 @@ def compare_scores(
     Every system must cover the *same* items in the *same order*: item ``i`` of
     one system is paired with item ``i`` of another. Call once per metric.
 
-    ``clusters`` is passed to ``paired_item_bootstrap``.
-    Supply it when items are grouped (several questions per passage), or the
-    interval will be too narrow.
+    ``clusters`` names each item's group; the item-level bootstrap then draws
+    whole groups, so items of one group are resampled together. Supply it when
+    items are grouped (several questions per passage), or the interval will be
+    too narrow.
     """
     if not scores:
         raise ValueError("`scores` is empty")

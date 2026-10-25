@@ -289,10 +289,11 @@ jobs:
       # Some docs content is pinned by tests: llms.txt must list every nav page
       # and state facts that match pyproject.toml, the numbers quoted in the
       # statistics guide must match the code, and the agent guide's code must
-      # run and its keywords and links resolve, and the Claude Code plugin's
+      # run and its keywords and links resolve, the Claude Code plugin's
       # manifests, skill and documented install commands must agree (nothing
       # in CI runs Claude Code, and plugins/ is not in the `code` filter, so
-      # this is the one place tests/test_plugin.py runs on a plugin-only PR).
+      # this is the one place tests/test_plugin.py runs on a plugin-only PR),
+      # and every public name must have a reference-page directive.
       # The `test` job skips docs-only PRs, which are the ones most likely to
       # break these, so they run here on every PR as well, after the strict
       # build so a failure here does not hide a build error. --extra eval:
