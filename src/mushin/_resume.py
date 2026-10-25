@@ -21,10 +21,17 @@ STATUS_FILE = "mushin_cell_status.json"
 class ResumeContext:
     """Handed to a task that declares a ``mushin_resume`` parameter.
 
-    ``dir`` is the cell's working directory (already the cwd when the task runs).
-    ``is_resume`` is True when a prior attempt of the SAME combo left artifacts
-    here. ``last_ckpt`` is the newest checkpoint in ``dir`` (or None). ``attempt``
-    is 1 on the first run and increments on each re-execution of this combo."""
+    Attributes
+    ----------
+    dir : Path | None
+        The cell's working directory (already the cwd when the task runs).
+    is_resume : bool
+        True when a prior attempt of the SAME combo left artifacts here.
+    last_ckpt : Path | None
+        The newest checkpoint in ``dir``, or None.
+    attempt : int
+        1 on the first run; increments on each re-execution of this combo.
+    """
 
     dir: Path | None
     is_resume: bool
@@ -51,7 +58,7 @@ def write_cell_status(
     reader applies, so nothing is recorded that a reload would then reject),
     never one without the other, they let a reload sort the cells and key
     config-group axes without parsing hydra.yaml, which is most of a reload's
-    time; see :func:`sidecar_job_fields`."""
+    time; see ``sidecar_job_fields``."""
 
     payload: dict[str, Any] = {
         "status": status,
@@ -121,7 +128,7 @@ def config_fingerprint(cfg) -> str | None:
     when the config that would run now matches the one that produced them;
     otherwise a changed NON-swept value (same combo key) would silently mix
     results from two configurations into one dataset. Task *source* changes are
-    guarded separately by :func:`code_fingerprint`."""
+    guarded separately by ``code_fingerprint``."""
     try:
         from omegaconf import OmegaConf
 
@@ -142,7 +149,7 @@ def code_fingerprint(fn) -> str | None:
     """Stable short hash of a task function's source, or None if the source
     can't be read.
 
-    Complements :func:`config_fingerprint` in the resume guard: a task whose
+    Complements ``config_fingerprint`` in the resume guard: a task whose
     *body* was edited between runs (same config, same combo key) would
     otherwise have its stale cached metrics silently returned. Only the task
     function's own source is hashed; helpers it calls and module-level

@@ -30,10 +30,28 @@ from ._predict import (
 
 @dataclass(frozen=True)
 class Task:
-    """A reusable evaluation task: a metric ``battery`` factory, a ``predict_fn``
-    that extracts ``(predictions, probabilities)`` from a model, the subset of
-    metric names that consume probabilities, and whether the battery needs
-    ``num_classes``. ``description`` is shown by :func:`list_tasks`."""
+    """A reusable evaluation task, registered under a name that ``compare(task=...)``
+    accepts.
+
+    Attributes
+    ----------
+    battery : Callable[..., dict[str, Metric]]
+        Builds the task's metric collection (one of the battery factories).
+    predict_fn : PredictFn
+        Extracts ``(predictions, probabilities)`` from a model and a batch.
+    prob_metrics : frozenset[str]
+        The metric names that consume probabilities rather than predictions.
+    requires_num_classes : bool
+        Whether the battery needs ``num_classes`` (classification and
+        segmentation do; detection, regression, retrieval and the paired
+        batteries do not).
+    description : str
+        Shown by ``list_tasks``.
+    update_fn : UpdateFn | None
+        Replaces the default metric update when the battery takes grouped
+        inputs (retrieval), forwarded even when ``metrics=`` overrides the
+        battery.
+    """
 
     battery: Callable[..., dict[str, Metric]]
     predict_fn: PredictFn

@@ -138,7 +138,7 @@ def _apply_metric_filter(
 
 
 class ShowResult:
-    """The result of :func:`show`: ``rows`` (one dict per cell, with raw swept
+    """The result of ``show``: ``rows`` (one dict per cell, with raw swept
     params, ``status``, and metric values) plus a rendered ``table``. ``str()``
     returns the table."""
 
@@ -228,7 +228,7 @@ def _sortable(v: Any):
 
 
 class BestResult:
-    """The winning cell of a sweep (see :func:`best`): its swept-param ``combo``,
+    """The winning cell of a sweep (see ``best``): its swept-param ``combo``,
     the optimized metric ``value``, the full ``metrics`` dict, its ``status``,
     and its job ``dir`` (for locating checkpoints/artifacts)."""
 
@@ -382,7 +382,7 @@ def _diff_provenance(a: dict | None, b: dict | None) -> dict:
 
 
 class DiffResult:
-    """The result of :func:`diff`: ``rows`` (one per shared cell, each with a
+    """The result of ``diff``: ``rows`` (one per shared cell, each with a
     ``deltas`` map of ``metric -> (a, b, b - a)``), ``only_in_a`` / ``only_in_b``
     (combos unique to each sweep), the ``provenance`` delta, and the rendered
     ``table``. ``str()`` returns the table."""

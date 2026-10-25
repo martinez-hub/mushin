@@ -60,11 +60,11 @@ experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 ## API reference
 
 - [analysis](https://martinez-hub.github.io/mushin/reference/analysis/): `show`, `best`, `diff` and CSV export over a sweep directory
-- [benchmark](https://martinez-hub.github.io/mushin/reference/benchmark/): `compare` and `BenchmarkResult`
-- [llm](https://martinez-hub.github.io/mushin/reference/llm/): `compare_llms`, `compare_scores`, `llm_judge`
+- [benchmark](https://martinez-hub.github.io/mushin/reference/benchmark/): `compare_methods`, `compare` and `BenchmarkResult`, the `Task` registry, and the metric batteries
+- [llm](https://martinez-hub.github.io/mushin/reference/llm/): `compare_llms`, `compare_scores`, `llm_judge`, and the `System`, `Metric` and `Example` types
 - [study](https://martinez-hub.github.io/mushin/reference/study/): `Study`
-- [workflows](https://martinez-hub.github.io/mushin/reference/workflows/): `sweep`, `multirun`, `hydra_list`, `MultiRunMetricsWorkflow`
-- [lightning](https://martinez-hub.github.io/mushin/reference/lightning/): `HydraDDP` and `MetricsCallback`
+- [workflows](https://martinez-hub.github.io/mushin/reference/workflows/): `sweep`, `multirun`, `hydra_list`, `MultiRunMetricsWorkflow`, `ResumeContext`
+- [lightning](https://martinez-hub.github.io/mushin/reference/lightning/): `HydraDDP`, `HydraFSDP`, `MetricsCallback`, and the cluster and GPU helpers
 - [tuning](https://martinez-hub.github.io/mushin/reference/tuning/): `tune_batch_size`, `tune_learning_rate`
 - [utils](https://martinez-hub.github.io/mushin/reference/utils/): `load_experiment`, `load_from_checkpoint`, `original_cwd`
 

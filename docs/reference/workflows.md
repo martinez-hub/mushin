@@ -21,3 +21,12 @@ Re-exported from hydra-zen.
 ::: mushin.workflows.MultiRunMetricsWorkflow
 
 ::: mushin.workflows.RobustnessCurve
+
+## Resuming
+
+A task that declares a `mushin_resume` parameter receives one of these per
+cell; the [resilience guide](../guides/resilience.md) shows the pattern.
+
+::: mushin.ResumeContext
+    options:
+      heading_level: 3
