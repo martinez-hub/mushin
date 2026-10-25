@@ -98,7 +98,8 @@ def _accelerator() -> dict | None:
     alone cannot reconstruct: CUDA/cuDNN build + device name on NVIDIA, the MPS
     device on Apple Silicon. ``None`` (not recorded) in a process that has not
     imported torch; all-None values when torch is loaded but found no device.
-    Never initializes CUDA itself: the device is named once the task has."""
+    Makes no CUDA call unless the task already initialized CUDA: the device is
+    named once the task has."""
     torch = sys.modules.get("torch")
     if torch is None:
         # Never import torch here. Importing it is the dominant cost of a
@@ -118,16 +119,16 @@ def _accelerator() -> dict | None:
         except Exception:  # noqa: BLE001 - best-effort
             pass
         try:
-            if torch.cuda.is_available():
-                # get_device_name initializes CUDA. In a worker whose task never
-                # touched the GPU that would create a context (hundreds of MB)
-                # and make the next cell's pin_gpu_round_robin raise, so the
-                # name is read only once the task has initialized CUDA itself.
-                # Device 0: the pinned GPU under pin_gpu_round_robin, and the
-                # same answer on every rank of a node (current_device differs
-                # per rank, and per cell in a reused worker).
-                if _cuda_initialized(torch):
-                    out["device"] = torch.cuda.get_device_name(0)
+            # No torch.cuda call before the task has initialized CUDA itself:
+            # is_available() alone initializes the driver and fixes the visible
+            # devices, so the next cell's pin_gpu_round_robin in a reused worker
+            # would pass its is_initialized() guard and silently pin nothing,
+            # and get_device_name would create a context (hundreds of MB).
+            # Device 0: the pinned GPU under pin_gpu_round_robin, and the same
+            # answer on every rank of a node (current_device differs per rank,
+            # and per cell in a reused worker).
+            if _cuda_initialized(torch):
+                out["device"] = torch.cuda.get_device_name(0)
             elif (
                 getattr(torch.backends, "mps", None) is not None
                 and torch.backends.mps.is_available()
@@ -173,7 +174,7 @@ def _seen_accelerator() -> dict | None:
 NOT_WRITTEN = object()  # record_accelerator: the record's first write failed
 
 
-def record_accelerator(job_dir, written: Any = NOT_WRITTEN) -> None:
+def record_accelerator(job_dir, written: Any) -> None:
     """Rewrite the ``accelerator`` of a cell's provenance record from the
     process that ran the cell, once its task has returned or raised.
 
@@ -184,10 +185,12 @@ def record_accelerator(job_dir, written: Any = NOT_WRITTEN) -> None:
     one the cell never used. The cell's own process, after its task, knows: a
     process that has not imported torch by then did not use it, and leaves the
     record as written. ``written`` is the accelerator ``write_provenance``
-    put in the record before the task; when it is already the answer, there is
-    nothing to read back. Best-effort, like every provenance write."""
+    put in the record before the task: when it is already the answer there is
+    nothing to read back, and when that write failed (``NOT_WRITTEN``) there
+    is nothing of this cell's to patch, only perhaps a prior sweep's record in
+    a reused directory. Best-effort, like every provenance write."""
     seen = _seen_accelerator()
-    if seen is None or (written is not NOT_WRITTEN and written == seen):
+    if seen is None or written is NOT_WRITTEN or written == seen:
         return
     path = Path(job_dir) / "mushin_provenance.json"
     try:
@@ -205,32 +208,29 @@ def capture_base() -> dict:
     git state and package versions, which are identical for every cell in a
     sweep but expensive to compute (``_git()`` spawns three git subprocesses),
     so a sweep captures it ONCE and reuses it for all cells rather than paying
-    it per cell (3N git subprocesses for an N-cell sweep). The accelerator in
-    it is this process's view, a placeholder that ``record_accelerator``
-    replaces in each cell once its task has run."""
+    it per cell (3N git subprocesses for an N-cell sweep). The accelerator is
+    not part of it: it belongs to the process that runs the cell (``capture``,
+    then ``record_accelerator`` once the task has run)."""
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "git": _git(),
         "packages": _versions(),
-        "accelerator": _accelerator(),
     }
 
 
 def capture(config: Any = None, base: dict | None = None) -> dict:
     """A full provenance record. ``base`` is the sweep-constant part from
     ``capture_base()``; when omitted it is computed fresh (so a standalone call
-    still works). Only ``timestamp`` and ``config`` vary per cell, and the
-    accelerator is this process's current view when it has torch loaded (the
-    base may carry another process's)."""
+    still works). ``timestamp``, ``config`` and the accelerator vary per cell:
+    the accelerator is this process's view, never another process's (a base
+    from before 0.17 may carry one; it is replaced)."""
     if base is None:
         base = capture_base()
-    seen = _seen_accelerator()
-    if seen is not None:
-        base = {**base, "accelerator": seen}
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         **base,
+        "accelerator": _seen_accelerator(),
         "config": _to_plain(config) if config is not None else None,
     }
 

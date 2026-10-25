@@ -156,7 +156,8 @@ package versions, the resolved config and, once the task has returned, the
 accelerator as the cell's process saw it (CUDA and cuDNN build, and the device
 once the task initialized CUDA or when MPS is available). It is `null` when
 that process never imported torch, and a record of `null` values when torch
-was loaded but found no device:
+was loaded but found no device. A cell killed during its task keeps the view
+its process had before the task:
 
 ```python
 wf.provenance  # dict: {"git": {"sha": ...}, "packages": {...}, "config": {...}, ...}

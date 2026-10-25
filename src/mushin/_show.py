@@ -363,26 +363,22 @@ def _accelerator_unrecorded(record: dict | None) -> bool:
     return record is not None and not isinstance(record.get("accelerator"), dict)
 
 
-def _is_accelerator_key(key: str) -> bool:
-    return key == "accelerator" or key.startswith("accelerator.")
-
-
 def _diff_provenance(a: dict | None, b: dict | None) -> dict:
     """Flattened field-by-field diff of two provenance records, excluding
     volatile fields and an accelerator that either side did not record.
     Returns ``{dotted_key: (a_value, b_value)}`` for every field whose value
     differs (a field present on only one side reads as ``None`` on the
     other)."""
-    fa = _flatten({k: v for k, v in (a or {}).items() if k not in _PROV_VOLATILE})
-    fb = _flatten({k: v for k, v in (b or {}).items() if k not in _PROV_VOLATILE})
+    skip = set(_PROV_VOLATILE)
     # A null accelerator means "not recorded": the cell's process never
     # imported torch, so a torch sweep against a scikit-learn sweep on the same
     # box is no hardware change. A dict of None values is recorded (torch was
     # loaded and found no CUDA or MPS device) and still compares, so a CPU-only
     # torch build against a GPU box is reported, as it always was.
     if _accelerator_unrecorded(a) or _accelerator_unrecorded(b):
-        fa = {k: v for k, v in fa.items() if not _is_accelerator_key(k)}
-        fb = {k: v for k, v in fb.items() if not _is_accelerator_key(k)}
+        skip.add("accelerator")
+    fa = _flatten({k: v for k, v in (a or {}).items() if k not in skip})
+    fb = _flatten({k: v for k, v in (b or {}).items() if k not in skip})
     changed = {}
     for k in sorted(set(fa) | set(fb)):
         va, vb = fa.get(k), fb.get(k)
