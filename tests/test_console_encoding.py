@@ -1031,13 +1031,15 @@ def _opens_text(node: ast.Call) -> bool | None:
 
 
 # importlib.metadata's Distribution.read_text takes no encoding argument: it
-# reads a distribution's metadata files as UTF-8 itself.
-_METADATA_READS = {"dist.read_text"}
+# reads a distribution's metadata files as UTF-8 itself. Exempt only where
+# mushin reads distribution metadata, by module and call.
+_METADATA_READS = {("_resume.py", "dist.read_text")}
 
 
-def _text_io_without_encoding(tree: ast.AST) -> list[int]:
+def _text_io_without_encoding(tree: ast.AST, module: str = "") -> list[int]:
     """Lines of ``read_text``/``write_text`` calls, and of ``open`` calls in
-    a text mode, that leave the encoding to the locale."""
+    a text mode, that leave the encoding to the locale, in ``module`` (a path
+    relative to the package)."""
     lines = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -1046,7 +1048,7 @@ def _text_io_without_encoding(tree: ast.AST) -> list[int]:
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
         if name not in ("read_text", "write_text", "open"):
             continue
-        if ast.unparse(func) in _METADATA_READS:
+        if (module, ast.unparse(func)) in _METADATA_READS:
             continue
         if any(k.arg == "encoding" for k in node.keywords):
             continue
@@ -1079,11 +1081,17 @@ def _text_io_without_encoding(tree: ast.AST) -> list[int]:
         ("os.open(p, os.O_RDONLY)", False),
         ("p.open('rb')", False),
         ("p.read_text(encoding='utf-8')", False),
-        ("dist.read_text('top_level.txt')", False),
+        ("dist.read_text('top_level.txt')", True),  # outside _resume.py
     ],
 )
 def test_the_encoding_guard_tells_text_io_from_binary(call, flagged):
     assert bool(_text_io_without_encoding(ast.parse(call))) is flagged
+
+
+def test_only_mushins_metadata_reads_are_exempt():
+    call = ast.parse("dist.read_text('top_level.txt')")
+    assert _text_io_without_encoding(call, "_resume.py") == []
+    assert _text_io_without_encoding(call, "export.py") == [1]
 
 
 def test_mushin_reads_and_writes_text_files_as_utf8():
@@ -1093,6 +1101,6 @@ def test_mushin_reads_and_writes_text_files_as_utf8():
     found = [
         f"{rel}:{line}"
         for rel, tree in _modules()
-        for line in _text_io_without_encoding(tree)
+        for line in _text_io_without_encoding(tree, rel)
     ]
     assert not found, "text file I/O without encoding=:\n" + "\n".join(found)

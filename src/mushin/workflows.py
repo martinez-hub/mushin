@@ -557,6 +557,7 @@ class _TaskRunner:
         code_roots=(),
         code_body_roots=(),
         cache_ok=True,
+        script_entries=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -580,6 +581,11 @@ class _TaskRunner:
         # tell apart from another of its type (an array): never cached, as
         # main never cached a partial task (see partial_task_cacheable).
         self.cache_ok = cache_ok
+        # The driver script's entries, taken by the driver when the run
+        # started (driver_script_entries): a worker runs the driver's pickled
+        # script functions, so this, not the file as it is when the worker
+        # starts, is what its cells run.
+        self.script_entries = dict(script_entries or {})
         # Grid subsampling: the set of Hydra job numbers to actually run (None =
         # run every cell). A cell whose job.num is not selected is skipped
         # (NaN), keyed on the deterministic job index so it's launcher- and
@@ -638,6 +644,7 @@ class _TaskRunner:
         self.__dict__.setdefault("code_body_roots", ())
         self.__dict__.setdefault("_code_token", "")
         self.__dict__.setdefault("cache_ok", True)
+        self.__dict__.setdefault("script_entries", {})
 
     def budget_start_path(self, root) -> Path:
         """The file in sweep root ``root`` that holds this run's budget start."""
@@ -811,6 +818,12 @@ class _TaskRunner:
             deps = {}
         import hashlib
 
+        from ._resume import _STALE
+
+        if _STALE in deps.get("code", {}).values():
+            # Computed by code edited after this process loaded it: never put
+            # in, or taken from, a cache that other processes share.
+            return None
         payload = f"{config_hash}:{self.code_hash}"
         if deps.get("code"):
             payload += ":" + json.dumps(deps, sort_keys=True)
@@ -890,7 +903,11 @@ class _TaskRunner:
         # This cell's project-code record, taken here, in the process that will
         # run (or reuse) it: see cell_project_record.
         deps = cell_project_record(
-            self._code_token, self.code_roots, self.code_body_roots, cfg
+            self._code_token,
+            self.code_roots,
+            self.code_body_roots,
+            cfg,
+            scripts=self.script_entries,
         )
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
@@ -1993,7 +2010,12 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import _unwrap_task, code_fingerprint, partial_task_cacheable
+        from ._resume import (
+            _unwrap_task,
+            code_fingerprint,
+            driver_script_entries,
+            partial_task_cacheable,
+        )
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -2008,6 +2030,7 @@ class BaseWorkflow:
             sampled_indices = frozenset(_rng.sample(range(num_cells), sample))
 
         _task_fn, _wants_resume = _prepare_task(self.task)
+        _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
         task_call = _TaskRunner(
             task=task_fn_wrapper(_task_fn),
             pre_task=pre_task_fn_wrapper(self.pre_task),
@@ -2024,11 +2047,12 @@ class BaseWorkflow:
             sampled_indices=sampled_indices,
             cache_dir=cache_dir,
             # Further roots a subclass names (Study's training functions,
-            # which its task calls but does not import), and pre_task, whose
-            # own body nothing else covers.
-            code_roots=(self.task, *getattr(self, "_mushin_code_roots", ())),
+            # which its task calls but does not import), and pre_task: the
+            # project files their modules import are recorded like the task's.
+            code_roots=_code_roots,
             code_body_roots=(self.pre_task,),
             cache_ok=partial_task_cacheable(self.task),
+            script_entries=driver_script_entries((*_code_roots, self.pre_task)),
         )
 
         self._capture_env = capture_env
@@ -2453,23 +2477,26 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ``zen_meta``). Each file is compared as a whole, by its syntax tree
             without its main block and docstrings: an edit anywhere in it
             re-runs the cells, and a comment, a docstring or formatting does
-            not. A task defined in the driver script is compared by the
-            script's code without what drives the sweep: its main block (but
-            a function, class or value defined there that the task uses), a
-            call to a ``run`` method or to ``print``, and an assignment that
-            nothing else reads (``GRID = dict(...)``), so extending the grid
-            or adding a print is not an edit. A re-run warns, naming the file
-            (``helpers (file)``). A file edited after this process imported
-            it, and not reloaded, is recorded as stale, so the cells computed
-            with the old code re-run once a process runs the new one. Not
-            covered: installed packages other than editable ones, data files,
-            the environment, code defined in a notebook (the project modules
-            it imports are covered), and code reached only through some other
-            string. A very large project is covered up to a fixed number of
-            files (with a warning), and a resume under another Python version
-            does not compare project code. After upgrading a dependency,
-            changing the data or editing such code, re-run from a fresh
-            ``working_dir`` rather than resuming.
+            not (so neither does a prompt a decorator reads from a
+            docstring). A task defined in the driver script is compared by
+            what its definition can reach by name in the script (a helper, a
+            constant, a decorated definition, in the main block too), not by
+            the run call, top-level calls or prints, or what only they read
+            (``GRID = dict(...)``), so extending the grid or adding a print is
+            not an edit; the script is read when the run starts, so editing it
+            while the sweep runs does not change what its cells record. A
+            re-run warns, naming the file (``helpers (file)``). A file edited
+            after this process first recorded it, and not reloaded, is
+            recorded as stale, so the cells computed with the old code re-run
+            once a process runs the new one; an edit made after the import
+            but before that first record is not seen. Not covered: installed
+            packages other than editable ones, data files, the environment,
+            code defined in a notebook (the project modules its functions,
+            classes, objects and module values come from are covered), and
+            code reached only through some other string. A very large project
+            is covered up to a fixed number of files (with a warning). After
+            upgrading a dependency, changing the data or editing such code,
+            re-run from a fresh ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
@@ -2546,9 +2573,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             recomputing, so a cell computed in one sweep is free in another.
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
-            edited task body or an edited project file is a cache miss, and so
-            is a change of Python version. An entry an earlier mushin wrote is
-            recomputed once. When the project code cannot be fingerprinted (a
+            edited task body or an edited project file is a cache miss. An
+            entry an earlier mushin wrote is recomputed once, and a cell
+            computed with code edited after its process loaded it is never
+            cached. When the project code cannot be fingerprinted (a
             warning says so), the cache is not used for that cell, and a
             partial task that binds an argument the key cannot tell apart from
             another of its type (an array) is never cached.

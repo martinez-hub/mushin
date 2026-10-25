@@ -304,9 +304,11 @@ def test_a_module_imported_only_by_a_main_block_is_not_followed(project):
 
 
 def test_a_secret_in_a_project_file_does_not_reach_its_hash(project):
+    """A string shaped like a provider token is blanked before hashing."""
     root, _ = project
     src = "API_KEY = {v!r}\n\n\ndef task(a):\n    return a\n"
-    assert _edited(root, "mushin_t_secretfile", src, "hunter2", "correct-horse") == []
+    a, b = "hf_" + "a" * 30, "hf_" + "b" * 30
+    assert _edited(root, "mushin_t_secretfile", src, a, b) == []
 
 
 def test_the_record_is_the_same_in_every_process(tmp_path):
@@ -504,10 +506,10 @@ def test_a_lazily_imported_module_named_like_an_installed_one_is_found(
         r._foreign_by_path.cache_clear()
 
 
-def test_changed_project_code_does_not_compare_across_python_versions():
-    a = {"python": "3.11", "code": {"m:f": "1"}}
+def test_changed_project_code_compares_the_keys_both_records_have():
+    a = {"python": "3.11", "code": {"m:f": "1", "only_a": "1"}}
     assert changed_project_code(a, {"python": "3.11", "code": {"m:f": "2"}}) == ["m:f"]
-    assert changed_project_code(a, {"python": "3.12", "code": {"m:f": "2"}}) is None
+    assert changed_project_code(a, {"python": "3.11", "code": {"other": "2"}}) == []
     assert changed_project_code(None, a) is None  # a sidecar from before the field
     assert changed_project_code(a, None) is None  # not fingerprinted this run
 
@@ -594,30 +596,19 @@ def test_a_script_constant_edited_while_it_runs_is_stale(tmp_path):
         assert project_fingerprints(ns["task"])["code"][key] == _STALE
 
 
-def test_a_function_edited_before_the_first_record_is_stale(project):
-    """Imported, then edited on disk, then recorded for the first time: the
-    loaded function no longer compiles from the file."""
+def test_a_comment_or_docstring_edited_after_import_is_not_stale(project):
+    """Only an edit to code makes a loaded module stale: a comment line added
+    above its functions, or a docstring reworded, leaves its digest as it was."""
     from mushin._resume import _STALE
 
     root, exp = project
+    before = _code(exp.W.task)[f"{HELPERS} (file)"]
     helpers = root / f"{HELPERS}.py"
-    text = helpers.read_text()  # the same lines, a different body
-    helpers.write_text(text.replace("* SCALE", "* SCALE * 2"))
-    with pytest.warns(UserWarning, match="changed on disk after this process"):
-        assert _code(exp.W.task)[f"{HELPERS} (file)"] == _STALE
-
-
-def test_a_module_an_import_hook_rewrote_is_compared_by_its_file(project):
-    """pytest's assertion rewriting (or a type-checking hook) loads code that
-    never equals a plain compile: such a module is never taken for stale."""
-    from mushin._resume import _file_entry, _loaded_stale
-
-    root, _ = project
-    assert not _loaded_stale(HELPERS, _file_entry(HELPERS)[1])
-    _write(root, scale=3)  # edited, not reloaded: stale for the standard loader
-    assert _loaded_stale(HELPERS, _file_entry(HELPERS)[1])
-    sys.modules[HELPERS].__loader__ = object()  # as an import hook's loader
-    assert not _loaded_stale(HELPERS, _file_entry(HELPERS)[1])
+    helpers.write_text("# a new first line\n" + helpers.read_text())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        after = _code(exp.W.task)[f"{HELPERS} (file)"]
+    assert after == before != _STALE
 
 
 def test_sidecar_records_the_project_code(project):
@@ -1100,13 +1091,12 @@ def test_hydra_zen_routes_classes_through_its_own_functions():
     assert {"pkg.models.Net", "pkg.models.Head"} <= set(_config_targets(cfg))
 
 
-def test_a_driver_script_target_is_not_a_module_to_follow(project, monkeypatch):
-    """builds(Net) in a script names __main__.Net; the script is covered as a
-    script, not by its whole file. ``__main__`` here is a project script with
-    a spec, so without the guard its file would be followed."""
+def test_a_driver_script_target_is_recorded_as_the_script(project, monkeypatch):
+    """builds(Net) in a script names __main__.Net: the script is recorded the
+    way a task defined in it is, not followed as a whole file."""
     import importlib.util
 
-    from mushin._resume import _target_module
+    from mushin._resume import _target_entries
 
     root, _ = project
     script = root / "mushin_t_driver.py"
@@ -1115,7 +1105,10 @@ def test_a_driver_script_target_is_not_a_module_to_follow(project, monkeypatch):
     main = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(main)
     monkeypatch.setitem(sys.modules, "__main__", main)
-    assert _target_module("__main__.Net") is None
+    seeds, scripts = [], {}
+    _target_entries("__main__.Net", seeds, scripts)
+    assert seeds == []
+    assert scripts[str(script)][1] == {"Net"}
 
 
 # --- parallel launchers -------------------------------------------------------
@@ -1384,3 +1377,452 @@ def test_matrix_an_edit_is_caught_under_every_launcher(tmp_path, launcher, edit,
     err = mx.run(launcher, "resume")
     assert f"code the task reaches ({key})" in err, err
     assert _count(mx.calls) == 4
+
+
+# --- the redesign's review: each case in the context it breaks in ---------------
+
+REGISTRY_SCRIPT = """
+import sys
+
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+MODELS = {{}}
+
+
+def register(cls):
+    MODELS[cls.__name__] = cls
+    return cls
+
+
+@register
+class Lin:
+    SCALE = {scale}
+
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a):
+        with open({calls!r}, "a") as f:
+            f.write("x")
+        return dict(v=a * MODELS["Lin"].SCALE)
+
+
+if __name__ == "__main__":
+    W().run(
+        a=multirun([1, 2]),
+        working_dir=sys.argv[1],
+        resume="resume" in sys.argv,
+        cache_dir={cache!r} if "cache" in sys.argv else None,
+    )
+"""
+
+
+def _registry_project(tmp_path):
+    calls = tmp_path / "calls.txt"
+    script = tmp_path / "reg_script.py"
+
+    def write(scale):
+        script.write_text(
+            REGISTRY_SCRIPT.format(
+                scale=scale, calls=str(calls), cache=str(tmp_path / "cache")
+            )
+        )
+
+    return calls, write, _script_runner(tmp_path, script)
+
+
+def test_a_registry_a_decorator_fills_does_not_make_the_script_stale(tmp_path):
+    """`MODELS = {}` filled at import is not a constant edited on disk: edits
+    to the script after it are still caught, resume after resume."""
+    calls, write, run = _registry_project(tmp_path)
+    wd = str(tmp_path / "wd")
+    write(1.0)
+    err = run(wd)
+    assert "changed on disk" not in err, err
+    write(5.0)
+    err = run(wd, "resume")
+    assert "code the task reaches (reg_script (script))" in err, err
+    write(7.0)
+    err = run(wd, "resume")
+    assert "code the task reaches (reg_script (script))" in err, err
+    assert calls.read_text() == "xxxxxx"
+
+
+def test_a_fresh_working_dir_with_a_shared_cache_misses_after_an_edit(tmp_path):
+    calls, write, run = _registry_project(tmp_path)
+    write(1.0)
+    run(str(tmp_path / "wd1"), "cache")
+    write(5.0)
+    run(str(tmp_path / "wd2"), "cache")
+    assert calls.read_text() == "xxxx"  # the edited code was computed
+
+
+def test_a_stale_record_never_matches_another_process(project):
+    """The stale marker is this process's own: a record stale here never
+    equals one stale in another process, and the cache is not used for it."""
+    from mushin._resume import _STALE
+
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from mushin._resume import _STALE; print(_STALE)"
+    )
+    root, _ = project
+    other = subprocess.run(
+        [sys.executable, "-c", probe, str(root)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert other and other != _STALE
+
+
+def test_a_stale_record_is_never_cached():
+    from mushin._resume import _STALE
+    from mushin.workflows import _TaskRunner
+
+    runner = _TaskRunner(
+        task=None,
+        pre_task=None,
+        swept_names=(),
+        base_provenance=None,
+        on_error="raise",
+        inject_resume=False,
+        prior_manifest=None,
+        code_hash="c0de",
+        cache_dir="cache",
+        code_roots=(len,),
+    )
+    assert runner._cache_key("h", {"python": PY, "code": {"m (file)": "1"}})
+    assert runner._cache_key("h", {"python": PY, "code": {"m (file)": _STALE}}) is None
+
+
+MAIN_BLOCK_TASK = """
+import sys
+
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+if __name__ == "__main__":
+    SCALE = {scale}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            with open({calls!r}, "a") as f:
+                f.write("x")
+            return dict(v=a * SCALE)
+
+    W().run(a=multirun([1, 2]), working_dir={wd!r}, resume="resume" in sys.argv)
+"""
+
+MAIN_FUNCTION = """
+import sys
+
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+SCALE = {scale}
+
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a):
+        with open({calls!r}, "a") as f:
+            f.write("x")
+        return dict(v=a * SCALE)
+
+
+def main():
+    W().run(a=multirun({grid}), working_dir={wd!r}, resume="resume" in sys.argv)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+@pytest.mark.parametrize("layout", ["main block task", "main function"])
+def test_the_script_counts_what_the_task_reads_wherever_it_is(tmp_path, layout):
+    """A task defined in the main block reads a main-block constant; a task
+    run from `def main()` has its grid there: the constant is code the task
+    runs, the grid is not."""
+    calls = tmp_path / "calls.txt"
+    script = tmp_path / "lay_script.py"
+    template = MAIN_BLOCK_TASK if layout == "main block task" else MAIN_FUNCTION
+
+    def write(scale=1.0, grid="[1, 2]"):
+        script.write_text(
+            template.format(
+                scale=scale, grid=grid, calls=str(calls), wd=str(tmp_path / "wd")
+            )
+        )
+
+    run = _script_runner(tmp_path, script)
+    write()
+    run()
+    if layout == "main function":
+        write(grid="[1, 2, 3]")
+        err = run("resume")
+        assert "fingerprint mismatch" not in err, err
+        assert calls.read_text() == "xxx"  # only the new cell ran
+    before = len(calls.read_text())
+    write(scale=5.0, grid="[1, 2, 3]" if layout == "main function" else "[1, 2]")
+    err = run("resume")
+    assert "code the task reaches (lay_script (script))" in err, err
+    assert len(calls.read_text()) > before
+
+
+TARGET_SCRIPT = """
+import sys
+
+from hydra_zen import builds, make_config
+
+import tgt_mod
+from mushin import multirun
+
+
+class Net:
+    def f(self, x):
+        return x * {scale}
+
+
+if __name__ == "__main__":
+    tgt_mod.W(eval_task_cfg=make_config(net=builds(Net))).run(
+        a=multirun([1, 2]), working_dir={wd!r}, resume="resume" in sys.argv
+    )
+"""
+
+TARGET_MODULE = """
+from mushin.workflows import MultiRunMetricsWorkflow
+
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(net, a):
+        with open({calls!r}, "a") as f:
+            f.write("x")
+        return dict(v=net.f(a))
+"""
+
+
+def test_a_target_class_in_the_driver_script_is_covered(tmp_path):
+    calls = tmp_path / "calls.txt"
+    (tmp_path / "tgt_mod.py").write_text(TARGET_MODULE.format(calls=str(calls)))
+    script = tmp_path / "tgt_script.py"
+
+    def write(scale):
+        script.write_text(TARGET_SCRIPT.format(scale=scale, wd=str(tmp_path / "wd")))
+
+    run = _script_runner(tmp_path, script)
+    write(1.0)
+    run()
+    write(5.0)
+    err = run("resume")
+    assert "code the task reaches (tgt_script:Net (script))" in err, err
+    assert calls.read_text() == "xxxx"
+
+
+def test_a_partial_over_a_closure_a_method_or_a_lambda_is_not_cached():
+    from mushin._resume import partial_task_cacheable
+
+    def train(a, fn):
+        return a
+
+    def make(k):
+        return lambda x: x * k
+
+    class M:
+        def predict(self, x):
+            return x
+
+    assert not partial_task_cacheable(functools.partial(train, fn=make(2.0)))
+    assert not partial_task_cacheable(functools.partial(train, fn=M().predict))
+    assert not partial_task_cacheable(functools.partial(train, fn=lambda x: x))
+    assert partial_task_cacheable(functools.partial(train, fn=len))
+
+
+def test_settings_named_like_secrets_are_compared(project):
+    """`EOS_TOKEN = "</s>"` is a tokenizer setting; only a value shaped like a
+    provider token is blanked."""
+    root, _ = project
+    src = "EOS_TOKEN = {v!r}\n\n\ndef task(a):\n    return a\n"
+    assert _edited(root, "mushin_t_eos", src, "</s>", "<|endoftext|>") != []
+    token = "sk-" + "a" * 24
+    assert _edited(root, "mushin_t_tok", src, token, "sk-" + "b" * 24) == []
+
+
+def test_a_record_from_another_python_version_is_compared():
+    """File digests read alike on every supported Python, so an edit made
+    around an interpreter upgrade is still seen."""
+    a = {"python": "3.11", "code": {"m (file)": "1"}}
+    assert changed_project_code(a, {"python": "3.12", "code": {"m (file)": "2"}}) == [
+        "m (file)"
+    ]
+
+
+LAZY_PROXY = """
+RESOLVED = []
+
+
+class Proxy:
+    \"\"\"Resolves its target (a large dataset) the first time any attribute
+    is read: it notes each read here.\"\"\"
+
+    def __getattr__(self, name):
+        RESOLVED.append(name)
+        raise AttributeError(name)
+
+    @property
+    def __class__(self):
+        RESOLVED.append("__class__")
+        return Proxy
+
+    @property
+    def __wrapped__(self):
+        RESOLVED.append("__wrapped__")
+        return None
+
+
+DATA = Proxy()
+
+
+def task(a):
+    return a
+"""
+
+
+def test_the_record_never_resolves_a_lazy_object():
+    """Taking the record runs in every cell's process, resume or not: it must
+    not read attributes of the objects a notebook's namespace holds."""
+    nb = types.ModuleType("mushin_t_lazynb")  # a notebook: no file
+    exec(LAZY_PROXY, nb.__dict__)
+    assert project_fingerprints(nb.task) is not None
+    assert nb.RESOLVED == []
+
+
+def test_a_project_module_named_like_the_standard_library_is_the_project(project):
+    """A checkout's `code/` package: its file, not its name, decides."""
+    root, _ = project
+    pkg = root / "code"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "train.py").write_text("def task(a):\n    return a\n")
+    saved = {
+        n: sys.modules.pop(n) for n in list(sys.modules) if n.split(".")[0] == "code"
+    }
+    try:
+        mod = importlib.import_module("code.train")
+        assert mod.__file__.startswith(str(root))  # the checkout's, not the stdlib's
+        assert "code.train (file)" in project_fingerprints(mod.task)["code"]
+    finally:
+        for n in [n for n in sys.modules if n.split(".")[0] == "code"]:
+            sys.modules.pop(n, None)
+        sys.modules.update(saved)
+
+
+def _digest_of_script(tmp_path, name, text, roots):
+    from mushin._resume import _script_digest
+
+    path = tmp_path / f"{name}.py"
+    path.write_text(text)
+    return _script_digest(path, frozenset(roots))[0]
+
+
+def test_a_script_counts_what_the_task_reads_not_its_parameters(tmp_path):
+    """`a = [1, 2]` feeds the run call; the task's parameter `a` is a local
+    name, not a read of it. A run result and what uses it do not count."""
+    text = (
+        "SCALE = 2\na = {grid}\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
+        "ds = run(a=a)\nsummary = ds.mean()\nprint(summary)\n"
+    )
+    one = _digest_of_script(tmp_path, "par1", text.format(grid="[1, 2]"), {"task"})
+    two = _digest_of_script(tmp_path, "par2", text.format(grid="[1, 2, 3]"), {"task"})
+    assert one == two
+    three = _digest_of_script(
+        tmp_path,
+        "par3",
+        text.replace("SCALE = 2", "SCALE = 3").format(grid="[1]"),
+        {"task"},
+    )
+    assert three != one
+
+
+def test_a_name_both_assigned_and_imported_is_never_stale(tmp_path):
+    """`np = None` then `try: import numpy as np`: no check compares a loaded
+    value with the file, so a name the script rebinds never reads as stale."""
+    from mushin._resume import _STALE, _script_entry
+
+    path = tmp_path / "mushin_t_np.py"
+    path.write_text(
+        "np = None\ntry:\n    import json as np\nexcept ImportError:\n    pass\n\n\n"
+        "def task(a):\n    return a if np is None else a + 1\n"
+    )
+    ns = {"__name__": "__main__", "__file__": str(path)}
+    exec(compile(path.read_bytes(), str(path), "exec"), ns)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        first = _script_entry(str(path), ns, {"task"})[0]
+        assert _script_entry(str(path), ns, {"task"})[0] == first != _STALE
+
+
+def test_a_cell_uses_the_drivers_script_entry(project, tmp_path):
+    """A worker runs the driver's pickled script functions: the entry the
+    driver took when the run started is the one recorded, even if the file
+    changed since."""
+    from mushin._resume import cell_project_record, driver_script_entries
+
+    path = tmp_path / "mushin_t_drv.py"
+    path.write_text("OFFSET = 0\n\n\ndef task(a):\n    return a + OFFSET\n")
+    ns = {"__name__": "__main__", "__file__": str(path)}
+    exec(compile(path.read_bytes(), str(path), "exec"), ns)
+    given = driver_script_entries([ns["task"]])
+    path.write_text("OFFSET = 5\n\n\ndef task(a):\n    return a + OFFSET\n")
+    record = cell_project_record("tok-drv", (ns["task"],), (), None, scripts=given)
+    assert record["code"]["mushin_t_drv (script)"] == given[str(path)][0]
+
+
+def test_a_partials_bound_function_records_its_module(project):
+    """`partial(train, fn=helpers.scale)`: the module of the bound function is
+    code the task runs, though the task's module does not import it."""
+    root, _ = project
+    mod = _module(root, "mushin_t_ptrain", "def train(a, fn):\n    return fn(a)\n")
+    helpers = importlib.import_module(HELPERS)
+    try:
+        record = project_fingerprints(functools.partial(mod.train, fn=helpers.scale))
+        assert f"{HELPERS} (file)" in record["code"]
+    finally:
+        sys.modules.pop("mushin_t_ptrain", None)
+
+
+def test_a_bound_method_root_records_its_module(project):
+    """Study can be given a bound method (`trainer.fit`)."""
+    root, _ = project
+    mod = _module(
+        root,
+        "mushin_t_trainer",
+        f"import {HELPERS} as helpers\n\n\nclass Trainer:\n    def fit(self, seed):\n        return helpers.scale(seed)\n",
+    )
+    try:
+        code = project_fingerprints(mod.Trainer().fit)["code"]
+        assert {"mushin_t_trainer (file)", f"{HELPERS} (file)"} <= set(code)
+    finally:
+        sys.modules.pop("mushin_t_trainer", None)
+
+
+def test_a_notebook_records_the_modules_of_the_objects_it_holds(project):
+    """A notebook holding an instance of a project class (a model made from
+    an imported module, the module itself not kept under a name)."""
+    root, _ = project
+    mod = _module(
+        root,
+        "mushin_t_nbmodel",
+        "class Model:\n    def f(self, x):\n        return x\n",
+    )
+    nb = types.ModuleType("mushin_t_nbinst")
+    nb.__dict__["MODEL"] = mod.Model()
+    exec("def task(a):\n    return MODEL.f(a)\n", nb.__dict__)
+    try:
+        assert "mushin_t_nbmodel (file)" in project_fingerprints(nb.task)["code"]
+    finally:
+        sys.modules.pop("mushin_t_nbmodel", None)

@@ -160,11 +160,12 @@ rules:
   or through other project files, and the modules of the classes the config
   names as `_target_`. An edit anywhere in such a file re-runs the cells; a
   comment, a docstring or formatting does not (a comment in the task
-  function's own body does). In the driver script, the main block, the
-  `run(...)` call, `print` calls and assignments only they read are left
-  out, so extending the grid is not an edit. It does not see an installed
-  package, data files, code defined in a notebook, or code reached only
-  through some other string. After such a change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
+  function's own body does). In the driver script, only what the task's
+  definition can reach by name counts, not the `run(...)` call, top-level
+  calls, `print` calls or what only they read, so extending the grid is not
+  an edit. It does not see an installed package, data files, code defined in
+  a notebook, or code reached only through some other string. After such a
+  change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
   lists every cell when a resume launches; the completed ones return their
   saved metrics without running.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string
