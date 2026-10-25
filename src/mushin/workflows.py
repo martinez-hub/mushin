@@ -379,6 +379,7 @@ class _TaskRunner:
         sampled_indices=None,
         cache_dir=None,
         code_deps=None,
+        legacy_code_hash=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -387,11 +388,16 @@ class _TaskRunner:
         self.on_error = on_error
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
-        self.code_hash = code_hash  # hash of the task source (resume guard)
-        # Hashes, by module name, of the project's own source files the task
-        # reaches (its module, the helpers it imports); None when unknown. The
-        # other half of the code guard: an edited helper re-runs the cell. The
-        # cache key's third part is fixed for the run, so it is built once.
+        self.code_hash = code_hash  # hash of the task's code (resume guard)
+        # The hash of the task's source as TEXT, which sidecars recorded before
+        # code_hash hashed the syntax tree; a prior cell matching either is
+        # unchanged, so older sweeps still resume.
+        self.legacy_code_hash = legacy_code_hash
+        # Hashes, by path relative to the task's module, of the project's own
+        # source files the task reaches (its module, the helpers it imports);
+        # None when unknown. The other half of the code guard: an edited helper
+        # re-runs the cell. The cache key's third part is fixed for the run, so
+        # it is built once.
         self.code_deps = code_deps
         self._deps_key = (
             ":" + json.dumps(code_deps, sort_keys=True) if code_deps else ""
@@ -556,7 +562,7 @@ class _TaskRunner:
                 code_changed = (
                     prior_code is not None
                     and self.code_hash is not None
-                    and prior_code != self.code_hash
+                    and prior_code not in (self.code_hash, self.legacy_code_hash)
                 )
                 # Judged on the files both runs reached: a module reached by
                 # one run only (a notebook imported more since) is not an
@@ -1543,7 +1549,11 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import code_fingerprint, project_fingerprints
+        from ._resume import (
+            code_fingerprint,
+            legacy_code_fingerprint,
+            project_fingerprints,
+        )
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -1570,7 +1580,12 @@ class BaseWorkflow:
             max_total_seconds=max_total_seconds,
             sampled_indices=sampled_indices,
             cache_dir=cache_dir,
-            code_deps=project_fingerprints(self.task),
+            # Further roots a subclass names (Study's training functions,
+            # which its task calls but does not import).
+            code_deps=project_fingerprints(
+                self.task, *getattr(self, "_mushin_code_roots", ())
+            ),
+            legacy_code_hash=legacy_code_fingerprint(self.task),
         )
 
         self._capture_env = capture_env
@@ -1969,9 +1984,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             edited after this process imported it is not fingerprinted (the
             warning says to restart), since the code that would run is not the
             code on disk. The fingerprint does not cover installed packages,
-            data files or the environment. After upgrading a dependency or
-            changing the data, re-run from a fresh ``working_dir`` rather than
-            resuming.
+            data files, the environment, or a module the task meets only
+            through the config (a class named by ``_target_`` whose module
+            nothing the task's module imports). After upgrading a dependency,
+            changing the data or editing such a class, re-run from a fresh
+            ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
@@ -2026,7 +2043,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             recomputing, so a cell computed in one sweep is free in another.
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
-            edited task body or an edited helper is a cache miss.
+            edited task body or an edited helper is a cache miss. The key is
+            the whole set of files the task reaches, so a task that starts
+            using one more project module recomputes (a resume, by contrast,
+            compares only the files both runs reached).
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for

@@ -218,7 +218,9 @@ def test_project_fingerprints_do_not_depend_on_the_import_name(project):
     sys.modules[spec.name] = other
     try:
         spec.loader.exec_module(other)
-        assert project_fingerprints(other.W.task) == project_fingerprints(exp.W.task)
+        deps = project_fingerprints(exp.W.task)
+        assert deps  # a broken fingerprint (None or {}) must not pass as equal
+        assert project_fingerprints(other.W.task) == deps
     finally:
         sys.modules.pop(spec.name, None)
 
@@ -437,3 +439,288 @@ def test_a_task_in_the_driver_script_survives_edits_to_the_script(tmp_path):
     err = run("resume")
     assert "code the task reaches (exp_script.py)" in err
     assert calls.read_text() == "xxxx"
+
+
+def test_project_fingerprints_follow_imports_the_globals_cannot_show(project):
+    """`from consts import THRESH` leaves an int in the globals, and an import
+    inside the task leaves nothing: both are found in the syntax tree."""
+    root, exp = project
+    (root / "mushin_t_consts.py").write_text("THRESH = 10\n")
+    (root / "mushin_t_lazy.py").write_text("FACTOR = 3\n")
+    (root / f"{EXP}.py").write_text(
+        textwrap.dedent("""
+            from mushin.workflows import MultiRunMetricsWorkflow
+            from mushin_t_consts import THRESH
+
+
+            class W(MultiRunMetricsWorkflow):
+                @staticmethod
+                def task(a):
+                    import mushin_t_lazy
+
+                    return dict(v=float(a) * THRESH * mushin_t_lazy.FACTOR)
+            """)
+    )
+    for name in ("mushin_t_consts", "mushin_t_lazy"):
+        sys.modules.pop(name, None)
+    exp = importlib.reload(exp)
+    exp.__dict__.pop("helpers")  # a reload keeps old globals; a fresh process has none
+    try:
+        deps = project_fingerprints(exp.W.task)
+        assert set(deps) == {EXP_KEY, "mushin_t_consts.py", "mushin_t_lazy.py"}
+        (root / "mushin_t_consts.py").write_text("THRESH = 100\n")
+        assert (
+            project_fingerprints(exp.W.task)["mushin_t_consts.py"]
+            != deps["mushin_t_consts.py"]
+        )
+    finally:
+        for name in ("mushin_t_consts", "mushin_t_lazy"):
+            sys.modules.pop(name, None)
+
+
+def test_only_the_equality_main_guard_is_stripped(project):
+    """`if __name__ != "__main__":` holds import-time code: an edit counts."""
+    root, exp = project
+    helpers = root / f"{HELPERS}.py"
+    before = project_fingerprints(exp.W.task)
+    helpers.write_text(
+        helpers.read_text() + 'if __name__ != "__main__":\n    REG = 1\n'
+    )
+    assert project_fingerprints(exp.W.task) != before
+
+
+def test_staleness_is_not_judged_when_the_process_does_not_rewrite_pycs(
+    tmp_path, monkeypatch
+):
+    """With PYTHONDONTWRITEBYTECODE a stale .pyc is never rewritten, so its
+    header disagreeing with the file means the opposite: the import compiled
+    the current source fresh. The check must stay silent."""
+    from mushin._resume import _loaded_from_older_source
+
+    root = tmp_path / "docker"
+    root.mkdir()
+    name = "mushin_t_image"
+    path = root / f"{name}.py"
+    path.write_text("VALUE = 1\n")
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    monkeypatch.syspath_prepend(str(root))
+    sys.modules.pop(name, None)
+    mod = importlib.import_module(name)  # writes the .pyc, as an image build would
+    try:
+        path.write_text("VALUE = 2000\n")
+        assert _loaded_from_older_source(mod, path)  # same process, true edit
+        monkeypatch.setattr(sys, "dont_write_bytecode", True)
+        assert not _loaded_from_older_source(mod, path)  # cannot be trusted: silent
+    finally:
+        sys.modules.pop(name, None)
+
+
+def test_a_comment_in_the_task_body_is_not_an_edit(project):
+    """The task body is hashed as code too."""
+    root, exp = project
+    wd = root / "sweep"
+    exp.W().run(a=multirun([1, 2]), working_dir=str(wd))
+    src = (root / f"{EXP}.py").read_text()
+    (root / f"{EXP}.py").write_text(
+        src.replace(
+            "return dict(", "# a comment inside the body\n            return dict("
+        )
+    )
+    exp = _reload(exp)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ds = _resume(exp, str(wd))
+    assert float(ds["v"].sel(a=2)) == 20.0
+
+
+def test_a_sidecar_holding_the_text_hash_of_the_task_still_resumes(project):
+    """Sidecars from before the body was hashed as code hold the text hash; an
+    unchanged task matches it, so an older sweep resumes without a re-run."""
+    from mushin._resume import code_fingerprint, legacy_code_fingerprint
+
+    root, exp = project
+    wd = root / "sweep"
+    exp.W().run(a=multirun([1, 2]), working_dir=str(wd))
+    legacy = legacy_code_fingerprint(exp.W.task)
+    assert legacy != code_fingerprint(exp.W.task)
+    for status in wd.rglob(STATUS_FILE):
+        d = json.loads(status.read_text())
+        d["code_hash"] = legacy  # as an earlier version recorded it
+        status.write_text(json.dumps(d))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ds = _resume(exp, str(wd))
+    assert float(ds["v"].sel(a=2)) == 20.0
+
+
+def test_a_namespace_package_submodule_is_reached(project):
+    """`import pkg.helpers` with no pkg/__init__.py binds a module without a
+    file; the import in the syntax tree still names pkg.helpers."""
+    root, exp = project
+    (root / "mushin_t_ns").mkdir()
+    (root / "mushin_t_ns" / "helpers.py").write_text("K = 1\n")
+    (root / f"{EXP}.py").write_text(
+        textwrap.dedent("""
+            import mushin_t_ns.helpers
+
+
+            def task(a):
+                return dict(v=a * mushin_t_ns.helpers.K)
+            """)
+    )
+    for name in ("mushin_t_ns", "mushin_t_ns.helpers"):
+        sys.modules.pop(name, None)
+    exp = importlib.reload(exp)
+    try:
+        assert "mushin_t_ns/helpers.py" in project_fingerprints(exp.task)
+    finally:
+        for name in ("mushin_t_ns", "mushin_t_ns.helpers"):
+            sys.modules.pop(name, None)
+
+
+def test_the_else_branch_of_a_main_guard_is_code(project):
+    root, exp = project
+    helpers = root / f"{HELPERS}.py"
+    guarded = (
+        helpers.read_text()
+        + 'if __name__ == "__main__":\n    pass\nelse:\n    REG = {}\n'
+    )
+    helpers.write_text(guarded.format(1))
+    before = project_fingerprints(exp.W.task)
+    helpers.write_text(guarded.format(2))
+    assert project_fingerprints(exp.W.task) != before
+
+
+def test_a_notebook_task_reaches_only_what_it_uses(project):
+    """A task defined where there is no file walks from the globals it uses,
+    following the notebook functions it calls: importing one more project
+    module into the notebook is not a change to the task."""
+    root, exp = project
+    (root / "mushin_t_unused.py").write_text("X = 1\n")
+    nb = types.ModuleType("mushin_t_notebook")  # a kernel's __main__ has no file
+    sys.modules[nb.__name__] = nb
+    try:
+        exec(
+            textwrap.dedent(f"""
+                import {HELPERS} as helpers
+
+
+                def inner(a):
+                    return helpers.scale(a)
+
+
+                def task(a):
+                    return dict(v=inner(a))
+                """),
+            nb.__dict__,
+        )
+        before = project_fingerprints(nb.task)
+        assert set(before) == {str((root / HELPERS_KEY).resolve().as_posix())}
+        exec("import mushin_t_unused", nb.__dict__)
+        assert project_fingerprints(nb.task) == before
+    finally:
+        sys.modules.pop("mushin_t_notebook", None)
+        sys.modules.pop("mushin_t_unused", None)
+
+
+def test_the_stale_warning_surfaces_when_warnings_are_errors(tmp_path, monkeypatch):
+    """The best-effort guard swallows errors, but not the warning: a caller that
+    turns warnings into errors must see it."""
+    root = tmp_path / "strict"
+    root.mkdir()
+    name = "mushin_t_strict"
+    path = root / f"{name}.py"
+    path.write_text("VALUE = 1\n\n\ndef task(a):\n    return dict(v=a)\n")
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    monkeypatch.syspath_prepend(str(root))
+    sys.modules.pop(name, None)
+    mod = importlib.import_module(name)
+    try:
+        path.write_text("VALUE = 2000\n\n\ndef task(a):\n    return dict(v=a)\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(UserWarning, match="edited after this process"):
+                project_fingerprints(mod.task)
+    finally:
+        sys.modules.pop(name, None)
+
+
+def test_a_sourceless_module_is_not_stale():
+    """A module imported from a .pyc alone has the .pyc as both its file and its
+    cache: there is no source to be older than."""
+    from mushin._resume import _loaded_from_older_source
+
+    mod = types.ModuleType("mushin_t_sourceless")
+    mod.__cached__ = __file__
+    assert not _loaded_from_older_source(mod, pathlib.Path(__file__).resolve())
+
+
+def test_the_syntax_tree_hash_leaves_out_fields_newer_pythons_add():
+    """3.12 added type_params=[] to every def, 3.13 changed which empty fields
+    ast.dump shows: the canonical dump omits empty fields, so the same code
+    hashes alike across interpreters."""
+    import ast
+
+    from mushin._resume import _canonical_dump
+
+    dumped = _canonical_dump(
+        ast.parse("def f(x):\n    return x\n\n\nclass C:\n    pass\n")
+    )
+    assert "type_params" not in dumped
+    assert "decorator_list" not in dumped and "keywords" not in dumped
+    assert "FunctionDef(name='f'" in dumped
+
+
+def test_study_records_its_methods_project_code_per_cell(project):
+    """Study's project code goes into the cell sidecar like any sweep's, so the
+    methods fingerprint (a config value) is what it was before, and a Study
+    sweep recorded before this guard resumes without re-training."""
+    from mushin.study._sweep import run_training_sweep
+
+    root, exp = project
+    (root / "mushin_t_train2.py").write_text(
+        textwrap.dedent(f"""
+            from pathlib import Path
+
+            import {HELPERS} as helpers
+
+
+            def train(seed):
+                p = Path(f"ckpt2_{{seed}}.bin")
+                p.write_text(str(helpers.scale(seed + 1)))
+                return str(p.resolve())
+            """)
+    )
+    sys.modules.pop("mushin_t_train2", None)
+    train_mod = importlib.import_module("mushin_t_train2")
+    cwd = root / "cwd2"
+    cwd.mkdir()
+    old = os.getcwd()
+    os.chdir(cwd)
+    try:
+        wd = root / "study2"
+        run_training_sweep(
+            {"m": train_mod.train},
+            seeds=[0],
+            ckpt_dir=root / "ck2",
+            working_dir=str(wd),
+        )
+        (status,) = wd.rglob(STATUS_FILE)
+        deps = json.loads(status.read_text())["code_deps"]
+        assert {"mushin_t_train2.py", HELPERS_KEY} <= set(deps)
+        # A sidecar from before the guard, with no code_deps, resumes as-is.
+        d = json.loads(status.read_text())
+        d.pop("code_deps")
+        status.write_text(json.dumps(d))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            run_training_sweep(
+                {"m": train_mod.train},
+                seeds=[0],
+                ckpt_dir=root / "ck2",
+                working_dir=str(wd),
+                resume=True,
+            )
+    finally:
+        os.chdir(old)
+        sys.modules.pop("mushin_t_train2", None)

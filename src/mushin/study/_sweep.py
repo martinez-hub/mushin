@@ -58,9 +58,11 @@ def run_training_sweep(
     renaming, reordering, adding/removing a method, or editing any method's
     body invalidates every completed cell (with a warning) rather than silently
     reusing checkpoints trained by different code. Coarse, but never stale.
-    Like the core resume guard, the fingerprint covers each function's own
-    source and the project code its module reaches (helpers, module constants),
-    not values it closes over, installed packages or data.
+    The methods fingerprint covers each function's own source, not values it
+    closes over; the project code each method reaches (helpers, module
+    constants) is guarded as for any sweep, so an edited helper re-runs its
+    cells with a warning naming the file. Installed packages and data are not
+    covered.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -75,17 +77,7 @@ def run_training_sweep(
     import hashlib
     import warnings
 
-    from mushin._resume import code_fingerprint, project_fingerprints
-
-    def _project_identity(fn) -> str:
-        """The project code ``fn``'s module reaches, as one hash; '' when there
-        is none, or it cannot be checked (then only the body guards)."""
-        deps = project_fingerprints(fn)
-        if not deps:
-            return ""
-        return (
-            ":" + hashlib.sha256(repr(sorted(deps.items())).encode()).hexdigest()[:16]
-        )
+    from mushin._resume import code_fingerprint
 
     def _method_identity(fn) -> str:
         """A string that changes when the method's code (or bound arguments)
@@ -94,7 +86,7 @@ def run_training_sweep(
         on its class source plus instance state. '?' means undetectable."""
         fp = code_fingerprint(fn)
         if fp is not None:
-            return fp + _project_identity(fn)
+            return fp
         if isinstance(fn, functools.partial):
             kw = sorted((fn.keywords or {}).items())
             return f"partial:{_method_identity(fn.func)}:{fn.args!r}:{kw!r}"
@@ -133,7 +125,16 @@ def run_training_sweep(
         return {"checkpoint": str(dest)}
 
     sweep_cls = type(
-        "_StudySweep", (MultiRunMetricsWorkflow,), {"task": staticmethod(task)}
+        "_StudySweep",
+        (MultiRunMetricsWorkflow,),
+        {
+            "task": staticmethod(task),
+            # The task lives in mushin; the project code to guard is what the
+            # training functions reach. Recorded per cell like any sweep's, so
+            # an edited helper re-runs the cells and a Study sweep recorded
+            # before this guard resumes without re-training.
+            "_mushin_code_roots": tuple(methods[n] for n in names),
+        },
     )
     wf = sweep_cls()
     wf.run(
