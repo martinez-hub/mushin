@@ -46,7 +46,7 @@ def parse_score(reply: str) -> float:
         if is_bare_int and text[m.end() :].strip(" .!"):
             raise ValueError(
                 f"could not parse a score from judge reply: {reply!r} (a "
-                "leading bare integer with trailing text is ambiguous — have "
+                "leading bare integer with trailing text is ambiguous; have "
                 "the judge reply `score: <0-1>`)"
             )
         score = _to_float(m.group(1), m.group(2))

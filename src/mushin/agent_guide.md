@@ -201,9 +201,11 @@ rules:
   `mushin.best(root, "score", over="seed")` returns the configuration with
   the best mean, counting only configurations with a result at every seed
   another has (older versions: `ds["score"].mean("seed")`).
-- **On Windows, set `PYTHONUTF8=1`** (or run `python -X utf8`) when mushin's
-  output is captured: `mushin.diff` and the dry-run preview print characters
-  that a Windows console code page may lack.
+- **On Windows, set `PYTHONUTF8=1`** (or run `python -X utf8`) when output is
+  captured: a pipe then writes in the ANSI code page (cp1252 on Western
+  systems), and `print()` of a character it lacks fails. mushin's own output
+  survives it (a swept value or metric name outside the code page prints as
+  an escape such as `\u03b1`), but your script's `print()` calls do not.
 
 ## Running long sweeps from an agent
 

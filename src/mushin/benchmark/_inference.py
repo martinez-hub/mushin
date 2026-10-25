@@ -75,8 +75,8 @@ def accumulate_metric(out: dict[str, float], name: str, value) -> None:
     if clash:
         raise ValueError(
             f"metric battery produced colliding data-variable name(s) "
-            f"{sorted(clash)}; a dict-valued metric expands to its own keys — "
-            "rename the battery entry to avoid the clash."
+            f"{sorted(clash)}; a dict-valued metric expands to its own keys. "
+            "Rename the battery entry to avoid the clash."
         )
     out.update(scored)
 

@@ -9,6 +9,8 @@ import sys
 from importlib import metadata, resources
 from pathlib import Path
 
+from ._console import echo
+
 GUIDE = "agent_guide.md"
 
 
@@ -51,15 +53,20 @@ def main(argv: list[str] | None = None) -> int:
     path = _guide_path()
     if args.path:
         if not Path(str(path)).is_file():  # e.g. mushin imported from a zip
-            print(
+            echo(
                 "the guide is not a file on disk here (mushin is imported from "
                 "an archive); print it with `python -m mushin guide`",
                 file=sys.stderr,
             )
             return 1
-        print(path)
+        # The install path can hold any character (an accented Windows user
+        # name), so it goes through echo, which escapes what the console
+        # cannot encode instead of failing the command.
+        echo(str(path))
         return 0
-    sys.stdout.write(guide_text())
+    # The guide is ASCII (tests/test_agent_guide.py checks); echo is here so
+    # every console route of mushin shares one write path.
+    echo(guide_text(), end="")
     return 0
 
 

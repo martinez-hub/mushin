@@ -14,6 +14,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from ._console import echo
+
 
 def _ordered_union(dicts: list[dict]) -> list[str]:
     """Keys across ``dicts`` in first-seen order (preserves sweep-axis and
@@ -229,7 +231,9 @@ def show(
     elif param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))
     table = _render(columns, rows)
-    print(table)
+    # The table holds user data (swept values, metric names), so it goes
+    # through echo: a console that cannot encode it gets escapes, not a crash.
+    echo(table)
     return ShowResult(rows, table)
 
 
@@ -752,8 +756,15 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
 
     provenance = _diff_provenance(_read_provenance(a), _read_provenance(b))
     table = _render_diff(rows, only_in_a, only_in_b, provenance)
-    print(table)
+    echo(table)  # user data, as in show()
     return DiffResult(rows, only_in_a, only_in_b, provenance, table)
+
+
+def _delta_column(metric: str) -> str:
+    # "(b-a)" rather than a Greek delta: cp1252 and cp437, the code pages of a
+    # Western Windows pipe and console, have no capital delta, and the header
+    # also says which way the subtraction goes.
+    return f"{metric} (b-a)"
 
 
 def _render_diff(rows, only_in_a, only_in_b, provenance) -> str:
@@ -761,12 +772,12 @@ def _render_diff(rows, only_in_a, only_in_b, provenance) -> str:
         [{k: v for k, v in r.items() if k != "deltas"} for r in rows]
     )
     metric_cols = _ordered_union([r["deltas"] for r in rows])
-    columns = [*param_cols, *(f"Δ{m}" for m in metric_cols)]
+    columns = [*param_cols, *(_delta_column(m) for m in metric_cols)]
     flat_rows = []
     for r in rows:
         fr = {p: r.get(p) for p in param_cols}
         for m in metric_cols:
-            fr[f"Δ{m}"] = r["deltas"][m][2] if m in r["deltas"] else None
+            fr[_delta_column(m)] = r["deltas"][m][2] if m in r["deltas"] else None
         flat_rows.append(fr)
     parts = [_render(columns, flat_rows) if rows else "(no shared cells)"]
     if only_in_a:

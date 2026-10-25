@@ -22,6 +22,7 @@ from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._launch import _NotSet
 
+from ._console import echo
 from ._validate import value_check
 
 LoadedValue: TypeAlias = str | int | float | bool | list[Any] | dict[str, Any]
@@ -143,7 +144,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
     axes = summary.get("axes", {})
     fixed = summary.get("fixed", {})
     n = summary.get("num_cells", 0)
-    lines = [f"Dry run — {n} cell{'s' if n != 1 else ''}, no jobs launched."]
+    lines = [f"Dry run: {n} cell{'s' if n != 1 else ''}, no jobs launched."]
     wd = summary.get("working_dir")
     lines.append(f"  working_dir: {wd if wd else '(Hydra default)'}")
     if "sample" in summary:
@@ -155,7 +156,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
         for k, v in axes.items():
             lines.append(f"    {k:<{width}} = {list(v)!r}")
     else:
-        lines.append("  swept axes: (none — a single cell)")
+        lines.append("  swept axes: none (a single cell)")
     if fixed:
         width = max(len(k) for k in fixed)
         lines.append("  fixed:")
@@ -909,7 +910,7 @@ class BaseWorkflow:
                     raise ValueError(
                         f"unsupported sweep override for {param_name!r}: "
                         f"{type(val).__name__}. mushin assembles a Cartesian "
-                        "grid, so sweep axes must be discrete — use "
+                        "grid, so sweep axes must be discrete: use "
                         "`param=a,b,c`, `choice(...)`, or `range(...)`; "
                         "`interval(...)`/adaptive-sweeper syntax is not "
                         "supported."
@@ -1196,7 +1197,7 @@ class BaseWorkflow:
         if launcher_config is not None:
             if launcher is None:
                 raise ValueError(
-                    "`launcher_config` requires `launcher=` — its fields "
+                    "`launcher_config` requires `launcher=`: its fields "
                     "configure that launcher (e.g. launcher='submitit_slurm' "
                     "with mushin.submitit_slurm_config(...))."
                 )
@@ -1421,7 +1422,9 @@ class BaseWorkflow:
             }
             if sample is not None:
                 summary["sample"] = effective_cells
-            print(_format_dry_run(summary))
+            # Axis values, fixed values and the path are user data: echo
+            # escapes what the console cannot encode instead of crashing.
+            echo(_format_dry_run(summary))
             return summary
 
         # Pre-launch cell-count gate: refuse an over-large sweep before it
@@ -1446,7 +1449,7 @@ class BaseWorkflow:
                 ""
                 if sample is None
                 else f" `sample={sample}` limits compute but does not reduce the "
-                f"number of launched Hydra jobs — all {num_cells} cells would "
+                f"number of launched Hydra jobs: all {num_cells} cells would "
                 "still be launched."
             )
             raise ValueError(
@@ -2026,7 +2029,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             for d in target_job_dirs:
                 if not d.is_dir() or not d.exists():
                     raise FileNotFoundError(
-                        f"The specified target directory – {d} – does not exist."
+                        f"The specified target directory does not exist: {d}"
                     )
             target_job_dirs = multirun([str(s) for s in target_job_dirs])
             workflow_overrides[self._JOBDIR_NAME] = target_job_dirs

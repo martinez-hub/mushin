@@ -68,7 +68,7 @@ def pin_gpu_round_robin(num_gpus: int, job_index: int | None = None) -> int:
         # message instead of an opaque OmegaConf error.
         no_index = RuntimeError(
             "pin_gpu_round_robin: no Hydra multirun job index (hydra.job.num) is "
-            "available — it is set only inside a Hydra --multirun sweep, not in "
+            "available; it is set only inside a Hydra --multirun sweep, not in "
             "single-run mode or outside Hydra. Pass job_index=... explicitly."
         )
         if not HydraConfig.initialized():
@@ -86,7 +86,7 @@ def pin_gpu_round_robin(num_gpus: int, job_index: int | None = None) -> int:
                 "pin_gpu_round_robin: CUDA is already initialized in this process, "
                 "so setting CUDA_VISIBLE_DEVICES now has no effect. Call it at the "
                 "top of your task function, before any CUDA use. In a sweep, make "
-                "sure each job runs in a fresh worker process — reused workers keep "
+                "sure each job runs in a fresh worker process, as reused workers keep "
                 "the first job's GPU. See the GPU-packing guide."
             )
     except ImportError:  # pragma: no cover

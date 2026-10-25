@@ -39,7 +39,7 @@ def submitit_slurm_config(
     if "tasks_per_node" in extra:
         raise ValueError(
             "`tasks_per_node` is derived from `gpus_per_node` (one DDP task per "
-            "GPU) and must not be overridden — that desync is the footgun this "
+            "GPU) and must not be overridden: that desync is the footgun this "
             "helper exists to prevent."
         )
     cfg: dict[str, Any] = {
