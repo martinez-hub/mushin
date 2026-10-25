@@ -191,10 +191,17 @@ def _check_correction(correction: str) -> None:
         )
 
 
+#: The rank tests: their p-values are discrete, so at a given seed count they
+#: have a floor no separation gets under (a paired Wilcoxon over 3 seeds never
+#: goes below p=0.25). A parametric test's p-value falls without bound as the
+#: separation grows relative to the spread, so once it can run its floor is 0.
+_RANK_TESTS = frozenset({"wilcoxon", "mannwhitney"})
+
+
 def _best_case_p(test: str, n_seeds: int) -> float | None:
-    """The smallest p-value ``test`` can produce at ``n_seeds`` seeds, probed on
-    maximally separated samples (a paired Wilcoxon over 3 seeds, for example,
-    can never go below p=0.25); None when the test cannot run at that size."""
+    """The smallest p-value ``test`` can produce at ``n_seeds`` seeds: the probe
+    on maximally separated samples for a rank test, 0 for a parametric test
+    that runs; None when the test cannot run at that size."""
     if test not in _TESTS:
         return None
     func, _ = _TESTS[test]
@@ -213,7 +220,9 @@ def _best_case_p(test: str, n_seeds: int) -> float | None:
     p = float(p)
     # A parametric test at one seed gives NaN: no sampling distribution, which
     # compare_methods reports as not significant; a floor is nothing to say.
-    return None if np.isnan(p) else p
+    if np.isnan(p):
+        return None
+    return p if test in _RANK_TESTS else 0.0
 
 
 def _underpowered(

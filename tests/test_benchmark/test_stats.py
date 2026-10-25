@@ -906,3 +906,23 @@ def test_compare_methods_counts_metrics_whose_names_stringify_alike():
     )
     with pytest.warns(UserWarning, match="method 'a' produced identical scores"):
         compare_methods(ds, test="welch")
+
+
+def test_parametric_tests_have_no_floor_for_the_family_to_raise():
+    """A t-test's p-value falls without bound as the separation grows, so the
+    probe's value is not a floor: three methods two seeds apart by 10000 are
+    all significant under Holm at alpha=1e-6, and must not be told they
+    cannot be (Codex, #269)."""
+    scores = np.array([[0.0, 1.0], [10000.0, 10001.0], [20000.0, 20001.0]])
+    ds = xr.Dataset(
+        {"score": (("method", "seed"), scores)},
+        coords={"method": ["a", "b", "c"], "seed": [0, 1]},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = compare_methods(ds, test="welch", alpha=1e-6)
+    assert df["significant"].all()
+    assert not [c for c in caught if "cannot reach" in str(c.message)]
+    # The probe itself is still consulted: at one seed welch has nothing to say,
+    # and an unknown test neither.
+    assert _underpowered("welch", 2, alpha=1e-12, n_comparisons=100) == []
