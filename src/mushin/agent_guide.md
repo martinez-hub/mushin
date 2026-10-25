@@ -152,9 +152,13 @@ rules:
 - **Resume.** `resume=True` with the same `working_dir` reruns the cells that
   are incomplete or whose config, task function or project code changed: the
   module that defines the task and the project modules it imports (a helper,
-  a constant), as their files are on disk when `run()` starts. It does not see
-  an edit to an installed package or to data files. After such a change, use a
-  new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
+  a constant), as the code in their files stands when `run()` starts; a
+  comment, formatting or a script's `if __name__ == "__main__":` block does
+  not count, and a file edited after the process imported it is not
+  fingerprinted (the warning says to restart). It does not see an edit to an
+  installed package or to data files.
+  After such a change, use a new `working_dir`. `cache_dir=` keys on the same
+  fingerprints. Hydra still
   lists every cell when a resume launches; the completed ones return their
   saved metrics without running.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string

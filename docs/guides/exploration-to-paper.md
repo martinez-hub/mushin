@@ -159,8 +159,8 @@ Two mushin features make the re-run cheap and honest at the same time:
   the task's and the project code it reaches: a cell only comes from the cache
   if it is the same computation by the same project code. It never mixes code
   eras. (If you changed the task or a helper since exploration, those cells
-  simply recompute; a dependency upgrade is not seen, so after one start a
-  fresh cache too.)
+  simply recompute. A dependency upgrade is not seen, so after one start a
+  fresh `cache_dir` as well as a fresh `working_dir`.)
 - Because the paper run is a normal sweep, everything else in mushin applies to
   it: [fail-soft + resume](resilience.md) for the flaky cells, `show`/`best` to
   watch it, and the provenance record it writes automatically.

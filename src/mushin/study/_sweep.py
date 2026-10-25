@@ -59,7 +59,8 @@ def run_training_sweep(
     body invalidates every completed cell (with a warning) rather than silently
     reusing checkpoints trained by different code. Coarse, but never stale.
     Like the core resume guard, the fingerprint covers each function's own
-    source only, not helpers it calls or values it closes over.
+    source and the project code its module reaches (helpers, module constants),
+    not values it closes over, installed packages or data.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -74,7 +75,17 @@ def run_training_sweep(
     import hashlib
     import warnings
 
-    from mushin._resume import code_fingerprint
+    from mushin._resume import code_fingerprint, project_fingerprints
+
+    def _project_identity(fn) -> str:
+        """The project code ``fn``'s module reaches, as one hash; '' when there
+        is none, or it cannot be checked (then only the body guards)."""
+        deps = project_fingerprints(fn)
+        if not deps:
+            return ""
+        return (
+            ":" + hashlib.sha256(repr(sorted(deps.items())).encode()).hexdigest()[:16]
+        )
 
     def _method_identity(fn) -> str:
         """A string that changes when the method's code (or bound arguments)
@@ -83,7 +94,7 @@ def run_training_sweep(
         on its class source plus instance state. '?' means undetectable."""
         fp = code_fingerprint(fn)
         if fp is not None:
-            return fp
+            return fp + _project_identity(fn)
         if isinstance(fn, functools.partial):
             kw = sorted((fn.keywords or {}).items())
             return f"partial:{_method_identity(fn.func)}:{fn.args!r}:{kw!r}"

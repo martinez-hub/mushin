@@ -4,6 +4,7 @@
 
 import dataclasses
 import functools
+import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from inspect import getattr_static
@@ -389,8 +390,12 @@ class _TaskRunner:
         self.code_hash = code_hash  # hash of the task source (resume guard)
         # Hashes, by module name, of the project's own source files the task
         # reaches (its module, the helpers it imports); None when unknown. The
-        # other half of the code guard: an edited helper re-runs the cell.
+        # other half of the code guard: an edited helper re-runs the cell. The
+        # cache key's third part is fixed for the run, so it is built once.
         self.code_deps = code_deps
+        self._deps_key = (
+            ":" + json.dumps(code_deps, sort_keys=True) if code_deps else ""
+        )
         # Grid subsampling: the set of Hydra job numbers to actually run (None =
         # run every cell). A cell whose job.num is not selected is skipped
         # (NaN), keyed on the deterministic job index so it's launcher- and
@@ -418,11 +423,8 @@ class _TaskRunner:
         if not self.cache_dir or config_hash is None or self.code_hash is None:
             return None
         import hashlib
-        import json
 
-        payload = f"{config_hash}:{self.code_hash}"
-        if self.code_deps:
-            payload += ":" + json.dumps(self.code_deps, sort_keys=True)
+        payload = f"{config_hash}:{self.code_hash}{self._deps_key}"
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     @staticmethod
@@ -556,10 +558,17 @@ class _TaskRunner:
                     and self.code_hash is not None
                     and prior_code != self.code_hash
                 )
+                # Judged on the files both runs reached: a module reached by
+                # one run only (a notebook imported more since) is not an
+                # edit, and a file whose imports changed is caught through
+                # the file that imports it.
                 deps_changed = (
                     isinstance(prior_deps, dict)
                     and self.code_deps is not None
-                    and prior_deps != self.code_deps
+                    and any(
+                        prior_deps[m] != self.code_deps[m]
+                        for m in prior_deps.keys() & self.code_deps.keys()
+                    )
                 )
                 if config_changed or code_changed or deps_changed:
                     parts = []
@@ -572,8 +581,8 @@ class _TaskRunner:
                         # helper (or constant-holding module) the edit was in.
                         names = sorted(
                             m
-                            for m in set(prior_deps) | set(self.code_deps)
-                            if prior_deps.get(m) != self.code_deps.get(m)
+                            for m in prior_deps.keys() & self.code_deps.keys()
+                            if prior_deps[m] != self.code_deps[m]
                         )
                         parts.append(f"code the task reaches ({', '.join(names)})")
                     what = " and ".join(parts)
@@ -1951,13 +1960,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             cell is reused only if its swept-parameter combination AND
             fingerprints of its resolved config, its task source and the
             project's own code the task reaches (the module defining it and the
-            project modules that module imports, transitively; their files as
-            they are on disk when ``run()`` starts) still match; a changed
+            project modules that module imports, transitively; the code in
+            their files when ``run()`` starts, where comments, formatting and a
+            script's ``if __name__ == "__main__":`` block do not count) still
+            match; a changed
             non-swept value, an edited task body or an edited helper re-runs
-            that cell, with a warning that names the changed module. The
-            fingerprint does not cover installed packages, data files or the
-            environment. After upgrading a dependency or changing the data,
-            re-run from a fresh ``working_dir`` rather than resuming.
+            that cell, with a warning that names the changed file. A file
+            edited after this process imported it is not fingerprinted (the
+            warning says to restart), since the code that would run is not the
+            code on disk. The fingerprint does not cover installed packages,
+            data files or the environment. After upgrading a dependency or
+            changing the data, re-run from a fresh ``working_dir`` rather than
+            resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to

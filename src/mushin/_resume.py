@@ -174,18 +174,24 @@ def code_fingerprint(fn) -> str | None:
     return hashlib.sha256(src.encode()).hexdigest()[:16]
 
 
+#: The interpreter's own directories, by their sysconfig names: the standard
+#: library and the installed packages. Not the bare prefixes: a project checked
+#: out under the interpreter's prefix (/usr/src/app on a Debian system Python,
+#: code kept inside a conda env) is still the project's own.
+_FOREIGN_PATH_KEYS = ("stdlib", "platstdlib", "purelib", "platlib")
+
+
 @functools.cache
 def _foreign_roots() -> tuple[Path, ...]:
     """Directories whose Python files are not the project's own: the running
-    interpreter (its stdlib, site-packages and any venv prefix) and mushin
-    itself. Resolved once; a file under any of them is left out of
-    ``project_fingerprints``."""
+    interpreter's standard library and site-packages (its own, a venv's, the
+    user's) and mushin itself. Resolved once; a file under any of them is left
+    out of ``project_fingerprints``."""
     import site
-    import sys
     import sysconfig
 
-    roots: set[str] = set(sysconfig.get_paths().values())
-    roots.update((sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix))
+    paths = sysconfig.get_paths()
+    roots: set[str] = {paths[k] for k in _FOREIGN_PATH_KEYS if paths.get(k)}
     try:
         roots.update(site.getsitepackages())
         roots.add(site.getusersitepackages())
@@ -204,10 +210,11 @@ def _foreign_roots() -> tuple[Path, ...]:
 
 
 def _project_file(module) -> Path | None:
-    """The ``.py`` file ``module`` was loaded from when it is the project's own
-    (not under the interpreter or mushin), else None."""
+    """The file ``module`` was loaded from when it is the project's own (not
+    under the interpreter or mushin), else None. Any file counts, a compiled
+    extension included: rebuilding one changes its bytes."""
     f = getattr(module, "__file__", None)
-    if not isinstance(f, str) or not f.endswith(".py"):
+    if not isinstance(f, str) or not f:
         return None
     try:
         path = Path(f).resolve()
@@ -220,73 +227,175 @@ def _project_file(module) -> Path | None:
     return path
 
 
+def _loaded_from_older_source(module, path: Path) -> bool:
+    """True when ``module``'s bytecode cache says it was compiled from a version
+    of ``path`` with a different size or mtime than the file has now: the file
+    was edited after this process imported it, so the code that would run is
+    not the code on disk. Best effort: without a timestamp-based ``.pyc`` (no
+    bytecode written, a hash-based pyc) there is nothing to compare."""
+    cached = getattr(module, "__cached__", None)
+    if not isinstance(cached, str) or not cached:
+        return False
+    try:
+        with open(cached, "rb") as f:
+            header = f.read(16)
+        st = path.stat()
+    except OSError:
+        return False
+    if len(header) < 16 or int.from_bytes(header[4:8], "little") & 0b11:
+        return False  # truncated, or hash-based: no source mtime recorded
+    mtime = int.from_bytes(header[8:12], "little")
+    size = int.from_bytes(header[12:16], "little")
+    return (int(st.st_mtime) & 0xFFFFFFFF) != mtime or (st.st_size & 0xFFFFFFFF) != size
+
+
+def _is_main_guard(node) -> bool:
+    """``if __name__ == "__main__":`` (either order): a script's driver block,
+    which an import never runs and a resume edit most often touches."""
+    import ast
+
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    parts = [node.test.left, *node.test.comparators]
+    names = {part.id for part in parts if isinstance(part, ast.Name)}
+    consts = {part.value for part in parts if isinstance(part, ast.Constant)}
+    return "__name__" in names and "__main__" in consts
+
+
+def _source_digest(path: Path) -> str:
+    """The hash of the code in ``path``: for a Python file its syntax tree
+    without the ``if __name__ == "__main__":`` blocks, so comments, formatting,
+    line endings and a driver script's own run block do not count as edits
+    (``ast.dump`` is stable within a Python version; the first resume after an
+    interpreter upgrade may re-run once); for any other file, or one that does
+    not parse, its bytes."""
+    import ast
+
+    data = path.read_bytes()
+    if path.suffix == ".py":
+        try:
+            tree = ast.parse(data, filename=str(path))
+        except (SyntaxError, ValueError):
+            pass
+        else:
+            tree.body = [node for node in tree.body if not _is_main_guard(node)]
+            dumped = ast.dump(tree, include_attributes=False)
+            return hashlib.sha256(dumped.encode()).hexdigest()[:16]
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _module_owner(value):
+    """The module name a global's code comes from: a function's or class's
+    own, otherwise its type's; None when that cannot be read (a proxy whose
+    attribute access raises, a descriptor that is not a string)."""
+    import types
+
+    try:
+        owner = (
+            value.__module__
+            if isinstance(value, (types.FunctionType, type))
+            else type(value).__module__
+        )
+    except Exception:  # noqa: BLE001 - best effort over arbitrary globals
+        return None
+    return owner if isinstance(owner, str) else None
+
+
 def project_fingerprints(fn) -> dict[str, str] | None:
-    """Hashes, by module name, of the project's own source files the task
-    reaches: the module that defines ``fn`` and, transitively, every project
-    module referenced from a reached module's globals (an imported module, or
-    the module of a function, class or object held there). None when ``fn``'s
-    module cannot be found (a function built at runtime); an empty dict when
-    the task reaches no project file (defined inside an installed package, or
-    in a notebook that imports none).
+    """Hashes of the code in the project's own source files the task reaches,
+    keyed by path relative to the task's module (so a script run as
+    ``__main__`` and the same file imported by name agree, and a relocated
+    checkout still matches): the module that defines ``fn`` and, transitively,
+    every project module referenced from a reached module's globals (an
+    imported module, or the module of a function, class or object held there).
+    A Python file is hashed as its syntax tree without the ``if __name__ ==
+    "__main__":`` blocks (see ``_source_digest``), so an edit to a driver
+    script's run block, a comment or the formatting is not a code change, while
+    a constant or a helper in the same file is. None when ``fn``'s
+    module cannot be found (a function built at runtime), or when a reached
+    file was edited after this process imported it (with a warning: the code
+    that would run is not the code on disk, so nothing is recorded under the
+    new hash; restart the process). An empty dict when the task reaches no
+    project file (defined inside an installed package, or in a notebook that
+    imports none).
 
     Complements ``code_fingerprint``, which covers the task's own body: an
     edited helper, a changed module constant or a modified imported module of
     the project changes this fingerprint, so a resume re-runs the cell and a
     ``cache_dir`` lookup misses, instead of returning a result computed by code
-    that no longer exists. Files are hashed as they are on disk when ``run()``
-    starts, so an edit made since the module was imported counts (the re-run
-    then uses whatever code the process holds; a fresh process is the honest
-    way to pick up an edit). Installed packages are left out: a dependency
+    that no longer exists. Installed packages are left out: a dependency
     upgrade is provenance's job, and hashing site-packages would miss the cache
     on every unrelated install."""
     import inspect
+    import os
     import sys
     import types
+    import warnings
 
-    target = fn
-    while isinstance(target, functools.partial):
-        target = target.func
-    if callable(target):
-        try:
-            target = inspect.unwrap(target)
-        except ValueError:  # a __wrapped__ cycle: hash what we have
-            pass
-    module = inspect.getmodule(target)
-    if module is None and not isinstance(target, (types.FunctionType, type)):
-        module = inspect.getmodule(type(target))
-    if module is None:
-        return None
-    hashes: dict[str, str] = {}
-    visited: set[str] = set()
-    pending = [module]
-    while pending:
-        mod = pending.pop()
-        name = getattr(mod, "__name__", None)
-        if not isinstance(name, str) or name in visited:
-            continue
-        visited.add(name)
-        path = _project_file(mod)
-        if path is not None:
+    try:
+        target = fn
+        while isinstance(target, functools.partial):
+            target = target.func
+        if callable(target):
             try:
-                hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-            except OSError:
+                target = inspect.unwrap(target)
+            except ValueError:  # a __wrapped__ cycle: hash what we have
+                pass
+        module = inspect.getmodule(target)
+        if module is None and not isinstance(target, (types.FunctionType, type)):
+            module = inspect.getmodule(type(target))
+        if module is None:
+            return None
+        base_file = _project_file(module)
+        base = base_file.parent if base_file is not None else Path.cwd()
+        hashes: dict[str, str] = {}
+        visited: set[str] = set()
+        pending = [module]
+        while pending:
+            mod = pending.pop()
+            name = getattr(mod, "__name__", None)
+            if not isinstance(name, str) or name in visited:
                 continue
-        elif mod is not module:
-            continue  # a foreign module: do not walk into site-packages
-        # The task's own module is walked whether or not it has a file (a
-        # notebook's __main__ reaches the project modules it imports).
-        for value in list(vars(mod).values()):
-            if isinstance(value, types.ModuleType):
-                pending.append(value)
+            visited.add(name)
+            path = _project_file(mod)
+            if path is not None:
+                if _loaded_from_older_source(mod, path):
+                    warnings.warn(
+                        f"{path} was edited after this process imported it, so the "
+                        "code that would run is not the code on disk; the project "
+                        "code the task reaches is not fingerprinted for this run "
+                        "(a resume reuses completed cells as before). Restart the "
+                        "process to run, and record, the edited code.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    return None
+                try:
+                    rel = Path(os.path.relpath(path, base)).as_posix()
+                except ValueError:  # another drive on Windows
+                    rel = path.as_posix()
+                try:
+                    hashes[rel] = _source_digest(path)
+                except OSError:
+                    continue
+            elif mod is not module:
+                continue  # a foreign module: do not walk into site-packages
+            # The task's own module is walked whether or not it has a file (a
+            # notebook's __main__ reaches the project modules it imports).
+            try:
+                values = list(vars(mod).values())
+            except TypeError:
                 continue
-            owner = (
-                value.__module__
-                if isinstance(value, (types.FunctionType, type))
-                else type(value).__module__
-            )
-            if isinstance(owner, str) and owner in sys.modules:
-                pending.append(sys.modules[owner])
-    return hashes
+            for value in values:
+                if isinstance(value, types.ModuleType):
+                    pending.append(value)
+                    continue
+                owner = _module_owner(value)
+                if owner is not None and owner in sys.modules:
+                    pending.append(sys.modules[owner])
+        return hashes
+    except Exception:  # noqa: BLE001 - a best-effort guard never fails the sweep
+        return None
 
 
 def read_cell_status(cell_dir) -> dict | None:
