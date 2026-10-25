@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+import mushin
 from _docs_site import (
     ROOT,
     _nav_urls,
@@ -297,6 +298,7 @@ def test_the_guide_prose_keywords_exist():
         _run_parameters()
         | set(inspect.signature(compare_methods).parameters)
         | task_params
+        | set(inspect.signature(mushin.best).parameters)  # best(over=)
         | PROSE_KEYWORDS_ELSEWHERE
     )
     assert named, "found no keyword in the guide's prose"

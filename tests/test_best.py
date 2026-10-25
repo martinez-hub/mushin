@@ -254,7 +254,7 @@ def test_best_over_warns_that_a_running_sweep_sets_a_provisional_bar(tmp_path):
     for lr in (0.1, 0.2):
         for seed in (1, 2):
             shutil.rmtree(_cell_dir(wd, lr=lr, seed=seed))
-    with pytest.warns(UserWarning, match="no manifest yet") as rec:
+    with pytest.warns(UserWarning, match="no usable manifest") as rec:
         r = mushin.best(wd, "score", over="seed")
     assert r.combo == {"lr": 0.2} and r.n == 1
     assert "skipped" not in str(rec[0].message)  # only what happened
@@ -324,14 +324,13 @@ def test_best_over_unknown_metric_raises_the_usual_error(tmp_path):
 def test_best_over_non_finite_values_are_not_results(tmp_path):
     """A completed cell whose metric is NaN or infinite is no result: `only0`
     has one at seed 0 only and `signed_inf` at seed 2 only, in every group, so
-    the bar is that one seed and +inf/-inf never reach fmean."""
+    the bar is one seed, there is nothing to average, and +inf/-inf never
+    reach fmean."""
     wd = tmp_path / "s"
     _run_seeded(wd)
-    r = mushin.best(wd, "only0", over="seed")
-    assert r.n == 1 and r.value == pytest.approx(1.0)
-    r = mushin.best(wd, "signed_inf", over="seed")
-    assert r.n == 1 and r.value == pytest.approx(1.0)
-    assert _combos(r.dirs)[0]["seed"] == 2
+    for metric in ("only0", "signed_inf"):
+        with pytest.raises(ValueError, match="only one value of 'seed'"):
+            mushin.best(wd, metric, over="seed")
 
 
 def test_best_never_picks_an_infinite_cell(tmp_path):
@@ -413,6 +412,77 @@ def test_best_over_treats_a_corrupt_manifest_as_unfinished(tmp_path):
     wd = tmp_path / "s"
     _run_seeded(wd)
     (wd / MANIFEST_FILE).write_text("{not json")
-    with pytest.warns(UserWarning, match="no manifest yet"):
+    with pytest.warns(UserWarning, match="no usable manifest"):
         r = mushin.best(wd, "score", over="seed")
     assert r.combo == {"lr": 0.2} and r.n == 3
+
+
+def test_best_over_one_seed_on_a_finished_sweep_raises(tmp_path):
+    """seed=multirun([0]) is swept in name only; over="seed" would silently be
+    the per-cell pick with n=1, the lucky-seed answer the option exists to
+    avoid. Mid-sweep one seed is plausible and warns instead (see the
+    provisional-bar test)."""
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(lr, seed):
+            return dict(score=float(lr))
+
+    wd = tmp_path / "s"
+    W().run(lr=multirun([0.1, 0.2]), seed=multirun([0]), working_dir=str(wd))
+    with pytest.raises(ValueError, match="only one value of 'seed'"):
+        mushin.best(wd, "score", over="seed")
+    assert mushin.best(wd, "score").combo == {"lr": 0.2, "seed": 0}
+
+
+def test_best_over_warns_when_cells_are_newer_than_the_manifest(tmp_path):
+    """A plain re-run of the same grid overwrites cells in place under the old
+    manifest; between completions nothing reads "running", so the sidecar
+    mtimes are what tell that the sweep is in flight."""
+    import os
+
+    from mushin._resume import STATUS_FILE
+    from mushin._sweep_io import MANIFEST_FILE
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    later = (wd / MANIFEST_FILE).stat().st_mtime + 5
+    status = _cell_dir(wd, lr=0.1, seed=0) / STATUS_FILE
+    os.utime(status, (later, later))
+    with pytest.warns(UserWarning, match="newer than the manifest"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2}
+
+
+def test_best_over_skips_a_group_whose_mean_overflows(tmp_path):
+    """Two finite values near the float maximum make fsum overflow; that group
+    has no mean to compare and is skipped, not a crash."""
+    import json
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    for seed in (0, 1, 2):
+        path = _cell_dir(wd, lr=0.1, seed=seed) / "mushin_metrics.json"
+        payload = json.loads(path.read_text())
+        payload["score"] = 1e308
+        path.write_text(json.dumps(payload))
+    with pytest.warns(UserWarning, match="mean overflows"):
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2}
+
+
+def test_best_over_does_not_count_foreign_running_cells_as_unfinished(tmp_path):
+    import shutil
+
+    from mushin._resume import write_cell_status
+
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    extra = wd / "99"
+    shutil.copytree(_cell_dir(wd, lr=0.1, seed=2), extra)
+    write_cell_status(extra, status="running", combo={"lr": 0.3}, attempt=1)
+    _touch_newer_than_manifest(wd, extra)
+    with pytest.warns(UserWarning, match="left out") as rec:
+        r = mushin.best(wd, "score", over="seed")
+    assert r.combo == {"lr": 0.2} and r.n == 3
+    assert "not finished" not in str(rec[0].message)
