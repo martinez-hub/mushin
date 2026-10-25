@@ -205,7 +205,10 @@ def _best_case_p(test: str, n_seeds: int) -> float | None:
     if test not in _TESTS:
         return None
     func, _ = _TESTS[test]
-    a = np.arange(n_seeds, dtype=float) + 1000.0
+    # Distinct, same-sign paired differences (i + 1000): identical differences
+    # are ties, which send scipy's Wilcoxon down its asymptotic path at larger
+    # n, where the p-value sits above the exact floor real data reaches.
+    a = 2.0 * np.arange(n_seeds) + 1000.0
     b = np.arange(n_seeds, dtype=float)
     try:
         with warnings.catch_warnings():

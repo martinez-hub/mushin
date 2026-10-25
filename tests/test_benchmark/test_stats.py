@@ -10,6 +10,7 @@ from _separated import separated, underpowered_warnings
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
+    _best_case_p,
     cohens_d,
     cohens_dz,
     compare_methods,
@@ -926,3 +927,26 @@ def test_parametric_tests_have_no_floor_for_the_family_to_raise(test):
     assert not [c for c in caught if "cannot reach" in str(c.message)]
     # The floor is 0 whatever the family or alpha, so no correction raises it.
     assert _underpowered(test, 2, alpha=1e-12, n_comparisons=100) == []
+
+
+def test_rank_probe_takes_the_exact_path_scipy_takes_for_real_data():
+    """Identical paired differences are ties, which switch scipy's Wilcoxon to
+    its asymptotic p-value at larger n (0.00018 at 14 seeds against the exact
+    2 ** (1 - 14)); a probe built that way told 25 methods at 14 seeds, whose
+    300 Holm-corrected pairs are all significant, that none could be (Codex,
+    #269). The probe's differences are distinct, so it reaches the exact floor."""
+    assert _best_case_p("wilcoxon", 14) == 2 ** (1 - 14)
+    n_methods, n_seeds = 25, 14
+    scores = np.array([(np.arange(n_seeds) + 1.0) * (i + 1) for i in range(n_methods)])
+    ds = xr.Dataset(
+        {"score": (("method", "seed"), scores)},
+        coords={
+            "method": [f"m{i}" for i in range(n_methods)],
+            "seed": np.arange(n_seeds),
+        },
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = compare_methods(ds)
+    assert len(df) == 300 and df["significant"].all()
+    assert not [c for c in caught if "cannot reach" in str(c.message)]
