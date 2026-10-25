@@ -38,6 +38,24 @@ EXP = "mushin_t_exp"
 PY = f"{sys.version_info[0]}.{sys.version_info[1]}"
 
 
+@pytest.fixture(autouse=True)
+def _new_modules_are_found(monkeypatch):
+    """Tests here write a module and then import it or look it up. The import
+    system caches each directory's listing and rescans it only when the
+    directory's mtime moves, which on Windows can lag a file written a moment
+    ago, so the module is not found. ``importlib.invalidate_caches`` is the
+    documented remedy; every ``.py`` written here calls it."""
+    write_text = pathlib.Path.write_text
+
+    def write_and_invalidate(self, *args, **kwargs):
+        n = write_text(self, *args, **kwargs)
+        if self.suffix == ".py":
+            importlib.invalidate_caches()
+        return n
+
+    monkeypatch.setattr(pathlib.Path, "write_text", write_and_invalidate)
+
+
 def _write(root, scale: int = 10, offset: int = 0, comment: str = ""):
     (root / f"{HELPERS}.py").write_text(
         textwrap.dedent(f"""
