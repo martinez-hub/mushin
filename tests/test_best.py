@@ -342,6 +342,9 @@ def test_best_over_unknown_param_raises_with_swept_params(tmp_path):
     _run_seeded(wd)
     with pytest.raises(ValueError, match="'sed'.*lr, seed"):
         mushin.best(wd, "score", over="sed")
+    # repeats collapse before the check, so the message names 'sed' once
+    with pytest.raises(ValueError, match=r"names 'sed', which"):
+        mushin.best(wd, "score", over=["sed", "sed"])
     with pytest.raises(ValueError, match="`over`"):
         mushin.best(wd, "score", over=5)
     with pytest.raises(ValueError, match="`over`"):
