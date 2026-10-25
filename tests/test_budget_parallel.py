@@ -613,6 +613,7 @@ def _as_pickled_by_an_earlier_mushin(runner):
         "code_roots",
         "code_body_roots",
         "_code_token",
+        "cache_ok",
     }
     state = {k: v for k, v in vars(runner).items() if k not in added}
     state["_deadline"] = None

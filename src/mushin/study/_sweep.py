@@ -59,10 +59,9 @@ def run_training_sweep(
     body invalidates every completed cell (with a warning) rather than silently
     reusing checkpoints trained by different code. Coarse, but never stale.
     The methods fingerprint covers each function's own source, not values it
-    closes over; the project code each method reaches (helpers, module
-    constants) is guarded as for any sweep, so an edited helper re-runs its
-    cells with a warning naming where the change is. Installed packages and data are not
-    covered.
+    closes over; the project files each method's module imports are guarded
+    as for any sweep, so an edited helper re-runs its cells with a warning
+    naming the file. Installed packages and data are not covered.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -130,9 +129,9 @@ def run_training_sweep(
         {
             "task": staticmethod(task),
             # The task lives in mushin; the project code to guard is what the
-            # training functions reach. Recorded per cell like any sweep's, so
-            # an edited helper re-runs the cells and a Study sweep recorded
-            # before this guard resumes without re-training.
+            # training functions' modules import. Recorded per cell like any
+            # sweep's, so an edited helper re-runs the cells and a Study sweep
+            # recorded before this guard resumes without re-training.
             "_mushin_code_roots": tuple(methods[n] for n in names),
         },
     )

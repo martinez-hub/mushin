@@ -316,10 +316,8 @@ def _is_foreign_module(name: str, file: str | None = None) -> bool:
         return False
 
 
-#: Values hashed by their repr when the task reads them. Mutable containers
-#: are hashed by their type only (a module-level cache filled during a run
-#: would otherwise look like an edit), and the project code they hold is
-#: walked.
+#: Values whose repr is the same in every process, by type: what a partial
+#: task's bound arguments are compared by.
 _CONSTANT_TYPES = (int, float, complex, str, bytes, bool, type(None))
 
 
@@ -364,201 +362,71 @@ def _constant_repr(value, depth: int = 0) -> str | None:
     return None
 
 
-#: 3.14 marks a code object that has a docstring with this flag; it is not
-#: part of what the code does.
-_CO_HAS_DOCSTRING = 0x4000000
-_CONST_OPS = frozenset({"LOAD_CONST", "RETURN_CONST"})
-_SKIPPED_OPS = frozenset({"CACHE", "EXTENDED_ARG", "NOP", "RESUME"})
-#: 3.13+ fuse two adjacent local-variable instructions into one only when both
-#: are on the same line, so wrapping a call over several lines changes which
-#: opcodes appear; each is hashed as the instructions it stands for. 3.14's
-#: borrowed loads are the compiler's choice, not the code's.
-_FUSED_OPS = {
-    "LOAD_FAST_LOAD_FAST": ("LOAD_FAST", "LOAD_FAST"),
-    "STORE_FAST_LOAD_FAST": ("STORE_FAST", "LOAD_FAST"),
-    "STORE_FAST_STORE_FAST": ("STORE_FAST", "STORE_FAST"),
-    "LOAD_FAST_BORROW_LOAD_FAST_BORROW": ("LOAD_FAST", "LOAD_FAST"),
-}
-_RENAMED_OPS = {"LOAD_FAST_BORROW": "LOAD_FAST"}
-
-
-def _fused(ins) -> bool:
-    return ins.opname in _FUSED_OPS and isinstance(ins.argval, tuple)
-
-
-def _code_hash(code, function: bool = False) -> str:
-    """The hash of what a code object does: its instructions, with each
-    constant they load by value (not by its index in ``co_consts``, which a
-    docstring shifts on 3.14) and nested code by its own hash, plus its names
-    and signature; not its file name, line numbers or docstring (no
-    instruction loads a docstring). So a comment, a docstring, a blank line or
-    a moved function is not an edit. Bytecode is stable within a Python minor
-    version; the record carries the version, and a resume under another one
-    does not compare. ``function`` is kept for callers; every code object is
-    hashed the same way. Jumps are hashed by the index of the instruction
-    they reach, since a line number's NOP (dropped here) shifts every later
-    offset, and fused instructions as the ones they stand for, so most
-    reformatting is not an edit either."""
-    import bisect
-    import dis
-    import types
-
-    del function
-    jumps = (
-        set(getattr(dis, "hasjump", ()))
-        | set(getattr(dis, "hasjrel", ()))
-        | set(getattr(dis, "hasjabs", ()))
-    )
-    kept = [i for i in dis.get_instructions(code) if i.opname not in _SKIPPED_OPS]
-    # Where each kept instruction starts in the stream as hashed, in which a
-    # fused instruction counts as the two it stands for.
-    offsets, positions, at = [], [], 0
-    for ins in kept:
-        offsets.append(ins.offset)
-        positions.append(at)
-        at += 2 if _fused(ins) else 1
-    parts = [
-        repr(code.co_names).encode(),
-        repr(code.co_varnames).encode(),
-        repr(code.co_freevars).encode(),
-        repr(code.co_cellvars).encode(),
-        repr(
-            (
-                code.co_argcount,
-                code.co_kwonlyargcount,
-                code.co_flags & ~_CO_HAS_DOCSTRING,
-            )
-        ).encode(),
-    ]
-    for ins in kept:
-        opname = _RENAMED_OPS.get(ins.opname, ins.opname)
-        if _fused(ins):
-            for op, name in zip(_FUSED_OPS[opname], ins.argval, strict=False):
-                parts.append(f"{op} {name!r}".encode())
-            continue
-        if opname in _CONST_OPS:
-            const = ins.argval
-            if isinstance(const, types.CodeType):
-                arg = _code_hash(const)
-            else:
-                # A frozenset constant (``x in {"a", "b"}``) prints in
-                # string-hash order, which differs per process: sorted.
-                arg = _constant_repr(const) or repr(const)
-        elif ins.opcode in jumps and isinstance(ins.argval, int):
-            # The target's index among the kept instructions (a dropped NOP
-            # target resolves to the next kept one).
-            at = bisect.bisect_left(offsets, ins.argval)
-            arg = f"->{positions[at] if at < len(positions) else 'end'}"
-        else:
-            arg = repr(ins.argval) if ins.argval is not None else ""
-        parts.append(f"{opname} {arg}".encode())
-    return _short_hash(b"\x00".join(parts))
-
-
-#: Opcodes that read a name as a global (or from a class or module namespace),
-#: as opposed to an attribute of some object.
-_GLOBAL_OPS = frozenset(
-    {
-        "LOAD_GLOBAL",
-        "LOAD_NAME",
-        "STORE_GLOBAL",
-        "DELETE_GLOBAL",
-        "LOAD_FROM_DICT_OR_GLOBALS",
-    }
-)
-_ATTR_OPS = frozenset(
-    {
-        "LOAD_ATTR",
-        "LOAD_METHOD",
-        "STORE_ATTR",
-        "DELETE_ATTR",
-        "IMPORT_FROM",
-        "LOAD_SUPER_ATTR",
-    }
-)
-_INT_LOADS = frozenset({"LOAD_CONST", "LOAD_SMALL_INT"})
-
-
-def _code_names(code) -> tuple[set[str], set[str], list[tuple[str, int]]]:
-    """The global names a code object (and its nested code) reads, the
-    attribute names it uses, and the modules it imports as ``(name, level)``
-    pairs, read from its instructions so an attribute named like an unrelated
-    global (``random.seed`` next to a global ``seed``) is not mistaken for it."""
-    import dis
-    import types
-
-    globals_: set[str] = set()
-    attrs: set[str] = set()
-    imports: list[tuple[str, int]] = []
-    pending = [code]
-    while pending:
-        c = pending.pop()
-        pending.extend(k for k in c.co_consts if isinstance(k, types.CodeType))
-        instructions = [
-            ins
-            for ins in dis.get_instructions(c)
-            if ins.opname not in ("EXTENDED_ARG", "CACHE", "NOP")
+def _bound_repr(value, depth: int = 0) -> str | None:
+    """How a partial task's bound argument is compared: a constant (as
+    ``_constant_repr``), a list, dict or set of them by value, a function or
+    class by its qualified name (its code is covered by its module's file);
+    None for anything else (an array, an object), which a cache key cannot
+    tell apart from another of its type."""
+    const = _constant_repr(value, depth)
+    if const is not None:
+        return const
+    name = getattr(value, "__qualname__", None)
+    if isinstance(value, type) or (callable(value) and isinstance(name, str)):
+        return f"<{getattr(value, '__module__', '?')}.{name}>"
+    if isinstance(value, functools.partial) and depth < 4:
+        inner = [_bound_repr(value.func, depth + 1)]
+        inner += [_bound_repr(a, depth + 1) for a in value.args]
+        inner += [
+            "<secret>" if _secret_name(k, v) else _bound_repr(v, depth + 1)
+            for k, v in sorted((value.keywords or {}).items())
         ]
-        for i, ins in enumerate(instructions):
-            name = ins.argval
-            if not isinstance(name, str):
-                continue
-            if ins.opname in _GLOBAL_OPS:
-                globals_.add(name)
-            elif ins.opname in _ATTR_OPS:
-                attrs.add(name)
-            elif ins.opname == "IMPORT_NAME":
-                # The level is the integer loaded two instructions before:
-                # LOAD_CONST (LOAD_SMALL_INT on 3.14) level, the fromlist,
-                # then IMPORT_NAME.
-                level = 0
-                if i >= 2 and instructions[i - 2].opname in _INT_LOADS:
-                    arg = instructions[i - 2].argval
-                    level = arg if isinstance(arg, int) else 0
-                imports.append((name, level))
-                # `from pkg import sub`: sub may be a submodule, named only in
-                # the fromlist loaded just before.
-                fromlist = instructions[i - 1].argval if i >= 1 else None
-                if isinstance(fromlist, tuple):
-                    for item in fromlist:
-                        if isinstance(item, str) and item != "*":
-                            imports.append((f"{name}.{item}" if name else item, level))
-    return globals_, attrs, imports
+        return None if None in inner else f"partial({','.join(inner)})"
+    if depth >= 4:
+        return None
+    if isinstance(value, (list, set)) and len(value) <= 1000:
+        items = [_bound_repr(v, depth + 1) for v in value]
+        if None in items:
+            return None
+        if isinstance(value, set):
+            items.sort()
+        return f"{type(value).__name__}({','.join(items)})"
+    if isinstance(value, dict) and len(value) <= 1000:
+        items = []
+        for k, v in value.items():
+            key = _constant_repr(k, depth + 1)
+            inner = "<secret>" if _secret_name(str(k), v) else _bound_repr(v, depth + 1)
+            if key is None or inner is None:
+                return None
+            items.append(f"{key}:{inner}")
+        return f"dict({','.join(sorted(items))})"
+    return None
 
 
-def _stored_attrs(codes) -> set[str]:
-    """The attribute names some code, or code nested in it, assigns or deletes
-    (``Net.made += 1``, ``cls._cache = ...``): a class attribute its own
-    methods store is state."""
-    import dis
-    import types
-
-    names: set[str] = set()
-    stack = list(codes)
-    while stack:
-        current = stack.pop()
-        stack.extend(k for k in current.co_consts if isinstance(k, types.CodeType))
-        for ins in dis.get_instructions(current):
-            if ins.opname in ("STORE_ATTR", "DELETE_ATTR"):
-                names.add(ins.argval)
-    return names
+def _partial_digest(value) -> str:
+    """A partial task's bound arguments, as ``_bound_repr`` compares them; an
+    argument it cannot represent by its type."""
+    parts = []
+    for a in value.args:
+        parts.append(_bound_repr(a) or f"<{type(a).__module__}.{type(a).__qualname__}>")
+    for k, v in sorted((value.keywords or {}).items()):
+        rep = "<secret>" if _secret_name(k, v) else _bound_repr(v)
+        parts.append(f"{k}={rep or f'<{type(v).__module__}.{type(v).__qualname__}>'}")
+    return _short_hash("|".join(parts).encode())
 
 
-def _rebound_cells(code) -> set[str]:
-    """The free variables a function, or code nested in it, rebinds with
-    ``nonlocal``."""
-    import dis
-    import types
-
-    names: set[str] = set()
-    stack = [code]
-    while stack:
-        current = stack.pop()
-        stack.extend(k for k in current.co_consts if isinstance(k, types.CodeType))
-        for ins in dis.get_instructions(current):
-            if ins.opname in ("STORE_DEREF", "DELETE_DEREF"):
-                names.add(ins.argval)
-    return names & set(code.co_freevars)
+def partial_task_cacheable(task) -> bool:
+    """Whether every argument a partial task binds can be told apart from
+    another of its type (``_bound_repr``), so a cache key can include it.
+    Main never cached a partial task; one that binds an array or an object
+    still is not, since two such partials over different data would share an
+    entry."""
+    while isinstance(task, functools.partial):
+        values = list(task.args) + list((task.keywords or {}).values())
+        if any(_bound_repr(v) is None for v in values):
+            return False
+        task = task.func
+    return True
 
 
 def _resolve_imports(imports, package: str | None) -> list[str]:
@@ -583,31 +451,6 @@ def _resolve_imports(imports, package: str | None) -> list[str]:
             if dotted and dotted not in found:
                 found.append(dotted)
     return found
-
-
-def _module_label(module_name: str, namespace: dict | None = None) -> str:
-    """How a module is named in a key: by its import name, except a script run
-    as ``__main__``, which is named as ``python -m`` names it (its spec) or by
-    its file, so the run and a later ``import`` of the same file agree. A
-    notebook's ``__main__`` has neither and stays ``__main__``. ``namespace``
-    (a function's ``__globals__``) says which ``__main__``: in a parallel worker
-    ``sys.modules["__main__"]`` is the launcher's module, while the task's
-    functions carry their script's globals."""
-    import sys
-
-    if module_name != "__main__":
-        return module_name
-    if namespace is None:
-        main = sys.modules.get("__main__")
-        namespace = getattr(main, "__dict__", {}) or {}
-        file = namespace.get("__file__")
-        if isinstance(file, str) and file and _foreign_by_path(file, "__main__"):
-            return "__main__"  # the launcher's module, not the user's script
-    spec = namespace.get("__spec__")
-    if spec is not None and getattr(spec, "name", None):
-        return spec.name
-    file = namespace.get("__file__")
-    return Path(file).stem if isinstance(file, str) and file else "__main__"
 
 
 def _canonical_dump(node) -> str:
@@ -673,21 +516,27 @@ def _find_file(name: str) -> str | None:
     return spec.origin
 
 
+def _is_main_guard(node) -> bool:
+    """``if __name__ == "__main__":`` (either way round)."""
+    import ast
+
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    if len(node.test.ops) != 1 or not isinstance(node.test.ops[0], ast.Eq):
+        return False
+    parts = [node.test.left, *node.test.comparators]
+    names = {p.id for p in parts if isinstance(p, ast.Name)}
+    consts = {p.value for p in parts if isinstance(p, ast.Constant)}
+    return "__name__" in names and "__main__" in consts
+
+
 def _strip_tree(tree):
     """A module's syntax tree without what does not run on import or is not
     code: ``if __name__ == "__main__":`` blocks (an imported module's driver
     block) and docstrings, at any depth."""
     import ast
 
-    def is_main_guard(node) -> bool:
-        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-            return False
-        if len(node.test.ops) != 1 or not isinstance(node.test.ops[0], ast.Eq):
-            return False
-        parts = [node.test.left, *node.test.comparators]
-        names = {p.id for p in parts if isinstance(p, ast.Name)}
-        consts = {p.value for p in parts if isinstance(p, ast.Constant)}
-        return "__name__" in names and "__main__" in consts
+    is_main_guard = _is_main_guard
 
     def is_doc(node) -> bool:
         return (
@@ -716,21 +565,32 @@ def _strip_tree(tree):
 
 
 #: Parsed project files, per process: (resolved path, mtime_ns, size) ->
-#: (digest, tree). A walk that reaches the same file through many lazy imports
+#: (digest, tree). A record that reaches the same file through many imports
 #: reads and parses it once.
 _FILE_CACHE: dict[tuple[str, int, int], tuple[str, object]] = {}
 _FILE_CACHE_MAX = 2048
 
 
+def _cache_put(cache: dict, key, value) -> None:
+    while len(cache) >= _FILE_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _stat_key(path: Path) -> tuple[str, int, int]:
+    st = path.stat()
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
 def _parsed(path: Path):
     """``(digest, tree)`` for a project file, cached: a Python file is hashed as
-    its syntax tree without its main block and docstrings (a comment, a
-    docstring or the driver block is not an edit), anything else by its bytes
-    (``tree`` is then None)."""
+    its syntax tree without its main block and docstrings, with secret-shaped
+    strings blanked (a comment, formatting, a docstring or the driver block is
+    not an edit), anything else by its bytes (``tree`` is then None). ``tree``
+    is the stripped tree: its imports are the ones the module can run."""
     import ast
 
-    st = path.stat()
-    cache_key = (str(path), st.st_mtime_ns, st.st_size)
+    cache_key = _stat_key(path)
     hit = _FILE_CACHE.get(cache_key)
     if hit is not None:
         return hit
@@ -738,14 +598,12 @@ def _parsed(path: Path):
     result: tuple[str, object] = (_short_hash(data), None)
     if path.suffix == ".py":
         try:
-            tree = ast.parse(data)
-            digest = _short_hash(_canonical_dump(_strip_tree(ast.parse(data))).encode())
+            tree = _strip_tree(ast.parse(data))
+            digest = _short_hash(_canonical_dump(_sanitized(tree)).encode())
             result = (digest, tree)
         except (SyntaxError, ValueError, RecursionError):
             pass
-    while len(_FILE_CACHE) >= _FILE_CACHE_MAX:
-        _FILE_CACHE.pop(next(iter(_FILE_CACHE)))
-    _FILE_CACHE[cache_key] = result
+    _cache_put(_FILE_CACHE, cache_key, result)
     return result
 
 
@@ -781,13 +639,16 @@ def _file_entry(name: str):
     return f"{name} (file)", digest, tree
 
 
-def _file_imports(tree, name: str, is_package: bool) -> list[str]:
+def _file_imports(
+    tree, name: str, is_package: bool, package: str | None = None
+) -> list[str]:
     """The modules a file imports, at any depth, with ``from pkg import sub``
     naming the submodule too, relative imports resolved against the file's own
-    package."""
+    package (or ``package``, for a script run with ``python -m``)."""
     import ast
 
-    package = name if is_package else name.rpartition(".")[0]
+    if package is None:
+        package = name if is_package else name.rpartition(".")[0]
     pairs: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -803,20 +664,23 @@ def _file_imports(tree, name: str, is_package: bool) -> list[str]:
     return _resolve_imports([(n, lv) for n, lv in pairs if n], package or None)
 
 
-#: At most this many files per module imported in a body: a lazily imported
-#: project module that pulls in a large package is covered that far.
+#: Bounds on one record: project files, and module names looked at (most are
+#: the standard library's or installed packages', which cost a lookup each).
 _FILES_MAX = 400
+_NAMES_MAX = 20_000
 
 
-def _file_entries(name: str) -> tuple[dict[str, str], bool]:
-    """Entries for a module imported inside a function's body and, through
-    their files, every project module it imports in turn (a helper imported
-    lazily that itself imports the constants it uses), and whether
-    ``_FILES_MAX`` cut the list short."""
+def _file_entries(names) -> tuple[dict[str, str], bool]:
+    """Entries for project modules ``names`` and, through their files, every
+    project module they import in turn, at any depth (a helper imported inside
+    a function, and the constants it imports); and whether ``_FILES_MAX`` cut
+    the list short. A loaded module that no longer matches its file is
+    ``_STALE``."""
     out: dict[str, str] = {}
-    pending = [name]
+    pending = list(reversed(list(names)))
     seen: set[str] = set()
-    while pending and len(seen) < _FILES_MAX:
+    files = 0
+    while pending and files < _FILES_MAX and len(seen) < _NAMES_MAX:
         current = pending.pop()
         if current in seen:
             continue
@@ -824,254 +688,399 @@ def _file_entries(name: str) -> tuple[dict[str, str], bool]:
         found = _file_entry(current)
         if found is None:
             continue
+        files += 1
         key, digest, tree = found
-        out[key] = digest
+        out[key] = _STALE if _loaded_stale(current, digest) else digest
         if tree is not None:
             file = _find_file(current) or ""
             is_package = Path(file).name == "__init__.py"
-            pending.extend(_file_imports(tree, current, is_package))
+            pending.extend(reversed(_file_imports(tree, current, is_package)))
     return out, any(p not in seen for p in pending)
 
 
-#: Each project file's module-level bindings and class bodies, per process:
-#: (path, mtime_ns, size) -> index.
-_SOURCE_CACHE: dict[tuple[str, int, int], tuple[dict, dict]] = {}
+#: Each script's digest, per process: (path, mtime_ns, size) -> (digest, tree).
+_SCRIPT_CACHE: dict[tuple[str, int, int], tuple[str, object]] = {}
 
 
-def _source_index(file: str, module_name: str):
-    """``(bindings, class_bodies)`` for a project file. ``bindings`` maps each
-    module-level name assigned in the file to the source of its assignments
-    (or, for ``from m import x``, to ``("from", m, x)``); ``class_bodies`` maps
-    each class's qualified name to the source of its non-method statements.
-    Assignments inside functions and classes are not module-level bindings."""
+def _script_digest(path: Path):
+    """``(digest, kept)`` for a driver script: its code without what drives the
+    sweep, so the resilience loop (extend the grid, add a print, resume) is
+    not an edit; ``kept`` is a module of the statements that count, whose
+    imports are followed. Outside the main block, every statement counts but a
+    call to a ``run`` method or to ``print``, a bare name or constant, and an
+    assignment to names nothing that counts reads (``GRID = dict(...)``, read
+    only by the run call). In the main block, only a function, class or
+    assignment that something that counts reads (a helper the task calls);
+    not its imports, calls or prints. Docstrings never count."""
     import ast
-    import importlib.util
+    import copy
 
-    path = Path(file).resolve()
-    st = path.stat()
-    cache_key = (str(path), st.st_mtime_ns, st.st_size)
-    hit = _SOURCE_CACHE.get(cache_key)
+    cache_key = _stat_key(path)
+    hit = _SCRIPT_CACHE.get(cache_key)
     if hit is not None:
         return hit
     tree = ast.parse(path.read_bytes())
-    is_package = path.name == "__init__.py"
-    package = module_name if is_package else module_name.rpartition(".")[0]
-    bindings: dict[str, object] = {}
-    class_bodies: dict[str, str] = {}
 
-    def names(target) -> list[str]:
-        if isinstance(target, ast.Name):
-            return [target.id]
-        if isinstance(target, (ast.Tuple, ast.List)):
-            return [n for elt in target.elts for n in names(elt)]
-        if isinstance(target, ast.Starred):
-            return names(target.value)
-        return []
-
-    def literal(node) -> bool:
-        value = getattr(node, "value", None)
-        if value is None or isinstance(node, ast.AugAssign):
+    def drives(node) -> bool:
+        if not isinstance(node, ast.Expr):
             return False
-        try:
-            ast.literal_eval(value)
-        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-            return False
-        return True
+        call = node.value
+        if not isinstance(call, ast.Call):
+            return True  # a bare name or constant (a docstring) does nothing
+        func = call.func
+        return (isinstance(func, ast.Attribute) and func.attr == "run") or (
+            isinstance(func, ast.Name) and func.id == "print"
+        )
 
-    def bind(name: str, node) -> None:
-        dumped = _canonical_dump(_sanitized(node))
-        prior = bindings.get(name)
-        entries = prior if isinstance(prior, list) else []
-        value = _NO_LITERAL
-        if literal(node) and isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if all(isinstance(t, ast.Name) for t in targets):
-                value = ast.literal_eval(node.value)
-        bindings[name] = entries + [(value, dumped)]
+    def bound_names(node) -> set[str] | None:
+        """The names a statement binds when binding names is all it does;
+        None when it does more (imports, sets an attribute or an item, calls
+        something at the top level)."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return {node.name}
+        if isinstance(node, ast.Expr):
+            return None
+        names: set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(
+                sub,
+                (
+                    ast.Import,
+                    ast.ImportFrom,
+                    ast.Global,
+                    ast.Nonlocal,
+                    # A definition inside `try:` or `if ...:` counts as one
+                    # at the top level does.
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                ),
+            ):
+                return None
+            if isinstance(sub, (ast.Attribute, ast.Subscript)) and isinstance(
+                sub.ctx, (ast.Store, ast.Del)
+            ):
+                return None
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                names.add(sub.id)
+        return names
 
-    def visit(body, prefix: str) -> None:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if isinstance(node, ast.ClassDef):
-                qual = f"{prefix}{node.name}"
-                stmts = [
-                    b
-                    for b in node.body
-                    if not isinstance(
-                        b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                    )
-                    and not (
-                        isinstance(b, ast.Expr)
-                        and isinstance(b.value, ast.Constant)
-                        and isinstance(b.value.value, str)
-                    )
-                ]
-                class_bodies[qual] = _short_hash(
-                    "|".join(_canonical_dump(_sanitized(b)) for b in stmts).encode()
-                )
-                visit_classes(node.body, qual + ".")
-                continue
-            for sub_node in ast.walk(node):
-                if isinstance(
-                    sub_node,
-                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
-                ):
+    kept, pending = [], []
+    for node in tree.body:
+        if _is_main_guard(node):
+            for inner in node.body:
+                if isinstance(inner, (ast.Import, ast.ImportFrom)) or drives(inner):
                     continue
-                if isinstance(sub_node, ast.Assign):
-                    for t in sub_node.targets:
-                        for n in names(t):
-                            bind(n, sub_node)
-                elif isinstance(sub_node, (ast.AnnAssign, ast.AugAssign)):
-                    for n in names(sub_node.target):
-                        bind(n, sub_node)
-                elif isinstance(sub_node, ast.NamedExpr):
-                    for n in names(sub_node.target):
-                        bind(n, sub_node)
-                elif isinstance(sub_node, ast.ImportFrom):
-                    base = sub_node.module or ""
-                    if sub_node.level:
-                        try:
-                            base = importlib.util.resolve_name(
-                                "." * sub_node.level + base, package or None
-                            ).rstrip(".")
-                        except (ImportError, ValueError):
-                            continue
-                    for alias in sub_node.names:
-                        if alias.name != "*" and not isinstance(
-                            bindings.get(alias.asname or alias.name), list
-                        ):
-                            bindings[alias.asname or alias.name] = (
-                                "from",
-                                base,
-                                alias.name,
-                            )
+                names = bound_names(inner)
+                if names:  # a call or assertion in the main block: not counted
+                    pending.append((inner, names))
+            nodes = node.orelse  # runs on import
+        else:
+            nodes = [node]
+        for inner in nodes:
+            if drives(inner):
+                continue
+            names = bound_names(inner)
+            is_def = isinstance(
+                inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            )
+            if names is None or is_def:
+                kept.append((inner, names))
+            else:
+                pending.append((inner, names))
+    while pending:
+        read = {
+            sub.id
+            for node, _ in kept
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
+        }
+        add = [(n, names) for n, names in pending if names & read]
+        if not add:
+            break
+        kept += add
+        pending = [(n, names) for n, names in pending if not names & read]
+    kept.sort(key=lambda pair: pair[0].lineno)
+    module = ast.Module(body=[copy.deepcopy(n) for n, _ in kept], type_ignores=[])
+    module = _strip_tree(module)  # docstrings inside what counts
+    digest = _short_hash(_canonical_dump(_sanitized(module)).encode())
+    _cache_put(_SCRIPT_CACHE, cache_key, (digest, module))
+    return digest, module
 
-    def visit_classes(body, prefix: str) -> None:
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                visit([node], prefix)
 
-    visit(tree.body, "")
-    out = (bindings, class_bodies)
-    while len(_SOURCE_CACHE) >= _FILE_CACHE_MAX:
-        _SOURCE_CACHE.pop(next(iter(_SOURCE_CACHE)))
-    _SOURCE_CACHE[cache_key] = out
+#: The code objects compiled from each file as it is now, per process:
+#: (path, mtime_ns, size) -> {(qualname, first line): [code, ...]}, or None
+#: when the file does not compile.
+_COMPILED_CACHE: dict[tuple[str, int, int], dict | None] = {}
+
+
+def _compiled_index(file: str):
+    import sys
+    import types
+
+    path = Path(file)
+    try:
+        cache_key = _stat_key(path)
+    except OSError:
+        return None
+    if cache_key in _COMPILED_CACHE:
+        return _COMPILED_CACHE[cache_key]
+    try:
+        # As the import system compiles a source file, so an unedited file
+        # gives code objects equal to the loaded ones.
+        code = compile(
+            path.read_bytes(),
+            file,
+            "exec",
+            dont_inherit=True,
+            optimize=sys.flags.optimize,
+        )
+    except (SyntaxError, ValueError, OSError, RecursionError, MemoryError):
+        index = None
+    else:
+        index: dict | None = {}
+        stack = [code]
+        while stack:
+            current = stack.pop()
+            index.setdefault((current.co_qualname, current.co_firstlineno), []).append(
+                current
+            )
+            stack.extend(k for k in current.co_consts if isinstance(k, types.CodeType))
+    _cache_put(_COMPILED_CACHE, cache_key, index)
+    return index
+
+
+def _defined_codes(namespace: dict, file: str) -> list:
+    """The code objects of the functions and methods a module's namespace
+    defines from ``file``: its functions, its classes' methods (static, class,
+    property parts, nested classes), through decorators' ``__wrapped__``."""
+    import types
+
+    module_name = namespace.get("__name__")
+    out, seen = [], set()
+    stack = list(namespace.values())
+    steps = 0
+    while stack and steps < _NAMES_MAX:
+        steps += 1
+        value = stack.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        try:
+            if isinstance(value, (staticmethod, classmethod)):
+                stack.append(value.__func__)
+            elif isinstance(value, property):
+                stack.extend(f for f in (value.fget, value.fset, value.fdel) if f)
+            elif isinstance(value, types.FunctionType):
+                if value.__code__.co_filename == file:
+                    out.append(value.__code__)
+                wrapped = getattr(value, "__wrapped__", None)
+                if wrapped is not None:
+                    stack.append(wrapped)
+            elif isinstance(value, type):
+                if value.__module__ == module_name:
+                    stack.extend(vars(value).values())
+            else:
+                # A C wrapper (functools.cache) around a function.
+                wrapped = getattr(value, "__wrapped__", None)
+                if isinstance(wrapped, types.FunctionType):
+                    stack.append(wrapped)
+        except Exception:  # noqa: BLE001 - a value that resists inspection
+            continue
     return out
 
 
-#: Each project file's default arguments and ``global`` declarations, per
-#: process: (path, mtime_ns, size) -> (defaults, rebound).
-_DEF_CACHE: dict[tuple[str, int, int], tuple[dict, frozenset]] = {}
+def _same_code(a, b) -> bool:
+    """Whether two code objects are the same code: instructions, constants
+    (nested code alike), names and first line. Not their compile flags, which
+    a runner that inherits ``__future__`` flags (IPython's ``%run``) sets
+    differently for the same source."""
+    import types
+
+    stack = [(a, b)]
+    while stack:
+        x, y = stack.pop()
+        if (
+            x.co_code != y.co_code
+            or x.co_names != y.co_names
+            or x.co_varnames != y.co_varnames
+            or x.co_firstlineno != y.co_firstlineno
+            or len(x.co_consts) != len(y.co_consts)
+        ):
+            return False
+        for cx, cy in zip(x.co_consts, y.co_consts, strict=True):
+            if isinstance(cx, types.CodeType) and isinstance(cy, types.CodeType):
+                stack.append((cx, cy))
+                continue
+            try:
+                if type(cx) is not type(cy) or cx != cy:
+                    return False
+            except Exception:  # noqa: BLE001 - a constant that cannot compare
+                return False
+    return True
 
 
-def _default_entry(node) -> tuple[str, object]:
-    """How a default argument is written: ``("literal", value)`` for a literal,
-    else ``("source", digest)`` of its expression with secret-shaped strings
-    blanked (a default computed on import, ``stamp=time.time()``, then reads
-    alike in every process and on every node)."""
-    import ast
+def _namespace_stale(namespace: dict, file) -> bool:
+    """Whether the code a module's namespace runs is no longer what ``file``
+    compiles to: the file was edited after the process loaded it, and not
+    reloaded. The record then must not describe the file, or a cell this
+    process computes with the old code would be filed under the new."""
+    if not isinstance(file, str):
+        return False
+    index = _compiled_index(file)
+    if index is None:
+        return True
+    for code in _defined_codes(namespace, file):
+        compiled = index.get((code.co_qualname, code.co_firstlineno), ())
+        if not any(_same_code(code, c) for c in compiled):
+            _warn_stale(file)
+            return True
+    return False
 
+
+#: The file digest each loaded module had when this process first recorded
+#: that load of it: name -> (its ``__spec__``, digest). A reload replaces the
+#: spec, so a new load starts afresh.
+_LOAD_BASELINE: dict[str, tuple[object, str]] = {}
+
+
+def _loaded_stale(name: str, digest: str) -> bool:
+    """Whether module ``name``, loaded from source by the standard loader, no
+    longer matches its file, whose digest is now ``digest``: a function or
+    method differs from what the file compiles to, or the file changed since
+    this process first recorded this load of the module (a constant edited
+    and not reloaded). A module an import hook rewrites (pytest's assertion
+    rewriting, a type-checking hook) never matches a plain compile, so it is
+    compared by its file only."""
+    import importlib.machinery
+    import sys
+
+    module = sys.modules.get(name)
+    if module is None:
+        return False
+    if type(getattr(module, "__loader__", None)) is not (
+        importlib.machinery.SourceFileLoader
+    ):
+        return False
+    file = getattr(module, "__file__", None)
+    spec = getattr(module, "__spec__", None)
+    seen = _LOAD_BASELINE.get(name)
+    if seen is None or seen[0] is not spec:
+        _LOAD_BASELINE[name] = (spec, digest)
+    elif seen[1] != digest:
+        _warn_stale(str(file))
+        return True
     try:
-        return ("literal", ast.literal_eval(node))
-    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-        return ("source", _short_hash(_canonical_dump(_sanitized(node)).encode()))
+        namespace = vars(module)
+    except TypeError:
+        return False
+    return _namespace_stale(namespace, file)
 
 
-def _def_index(file: str) -> tuple[dict, frozenset]:
-    """``(defaults, rebound)`` for a project file. ``defaults`` maps each
-    function's ``(name, first line)`` (its first decorator's line, as
-    ``co_firstlineno`` gives it) to ``{argument: _default_entry}``, or to None
-    when two functions share that key; ``rebound`` holds every name a
-    ``global`` statement in the file declares: state the module's own code
-    rebinds, the same set in every process (a parallel worker's copy of a
-    script's globals holds only the names its pickled functions use)."""
+#: Each script's literal top-level names, per process: (path, mtime_ns,
+#: size) -> {name: value}.
+_LITERALS_CACHE: dict[tuple[str, int, int], dict] = {}
+
+
+def _script_literals(path: Path) -> dict:
+    """The top-level names a script assigns exactly once, to a literal, and
+    that no ``global`` statement in it declares: what its loaded values must
+    still equal if the script was not edited since they were set."""
     import ast
 
-    path = Path(file).resolve()
-    st = path.stat()
-    cache_key = (str(path), st.st_mtime_ns, st.st_size)
-    hit = _DEF_CACHE.get(cache_key)
+    cache_key = _stat_key(path)
+    hit = _LITERALS_CACHE.get(cache_key)
     if hit is not None:
         return hit
-    _, tree = _parsed(path)
-    defaults: dict[tuple[str, int], dict | None] = {}
-    rebound: set[str] = set()
-    for node in ast.walk(tree) if tree is not None else ():
-        if isinstance(node, ast.Global):
-            rebound.update(node.names)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            decorators = getattr(node, "decorator_list", None) or []
-            first = decorators[0].lineno if decorators else node.lineno
-            a = node.args
-            positional = [*a.posonlyargs, *a.args]
-            entries = {
-                arg.arg: _default_entry(d)
-                for arg, d in zip(
-                    positional[len(positional) - len(a.defaults) :],
-                    a.defaults,
-                    strict=False,
-                )
-            }
-            for arg, d in zip(a.kwonlyargs, a.kw_defaults, strict=False):
-                if d is not None:
-                    entries[arg.arg] = _default_entry(d)
-            key = (getattr(node, "name", "<lambda>"), first)
-            defaults[key] = None if key in defaults else entries
-    out = (defaults, frozenset(rebound))
-    while len(_DEF_CACHE) >= _FILE_CACHE_MAX:
-        _DEF_CACHE.pop(next(iter(_DEF_CACHE)))
-    _DEF_CACHE[cache_key] = out
+    tree = ast.parse(path.read_bytes())
+    counts: dict[str, int] = {}
+    literals: dict[str, object] = {}
+    declared = {
+        n for sub in ast.walk(tree) if isinstance(sub, ast.Global) for n in sub.names
+    }
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            counts[node.name] = counts.get(node.name, 0) + 1
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                counts[sub.id] = counts.get(sub.id, 0) + 1
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if len(targets) == 1 and isinstance(targets[0], ast.Name):
+                try:
+                    literals[targets[0].id] = ast.literal_eval(node.value)
+                except (
+                    ValueError,
+                    TypeError,
+                    SyntaxError,
+                    MemoryError,
+                    RecursionError,
+                ):
+                    pass
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            inner = getattr(node, field, None)
+            if isinstance(inner, list):
+                stack.extend(n for n in inner if isinstance(n, ast.stmt))
+    out = {
+        k: v for k, v in literals.items() if counts.get(k) == 1 and k not in declared
+    }
+    _cache_put(_LITERALS_CACHE, cache_key, out)
     return out
 
 
-#: _default_sources' answer for a function generated at runtime (a
-#: dataclass's ``__init__``, a NamedTuple's ``__new__``): its defaults are the
-#: class body's, which the class's entry covers.
-_GENERATED = object()
-#: _default_sources' answer for a function in a module with a file that does
-#: not show its definition where its code says (two lambdas on one line, the
-#: file edited and not reloaded, or unreadable here): its defaults by type
-#: only, rather than by a value that may differ between processes.
-_UNKNOWN_DEFS = object()
-
-
-def _default_sources(fn):
-    """How ``fn``'s defaults are written in its file: ``{argument: entry}``;
-    ``_GENERATED`` for generated code; ``_UNKNOWN_DEFS`` when its module has
-    a file that does not show the definition; None when its module has no
-    file (a notebook), whose defaults are hashed by value."""
-    code = fn.__code__
-    filename = code.co_filename
-    if not isinstance(filename, str):
-        return None
-    if (
-        filename.startswith("<")
-        and filename.endswith(">")
-        and not filename.startswith("<ipython-input-")
-    ):
-        return _GENERATED
-    # Whether the module has a file is the namespace's to say, as for a
-    # class: a notebook cell's code has a file name that exists nowhere.
-    if not isinstance((getattr(fn, "__globals__", None) or {}).get("__file__"), str):
-        return None
+def _script_stale(namespace: dict, path: Path) -> bool:
+    """Whether a script's loaded code (the driver's ``__main__``, or the copy a
+    parallel worker unpickled) no longer matches its file: a function differs
+    from what it compiles to, or a literal top-level name's value differs from
+    the literal (a constant edited while the sweep ran)."""
+    file = str(path)
+    if _namespace_stale(namespace, file):
+        return True
     try:
-        defaults, _ = _def_index(filename)
+        literals = _script_literals(path)
     except (OSError, SyntaxError, ValueError, RecursionError):
-        return _UNKNOWN_DEFS
-    found = defaults.get((code.co_name, code.co_firstlineno))
-    return _UNKNOWN_DEFS if found is None else found
+        return True
+    for name, written in literals.items():
+        if name in namespace:
+            value = namespace[name]
+            try:
+                same = type(value) is type(written) and value == written
+            except Exception:  # noqa: BLE001 - a comparison that raises
+                same = False
+            if not same:
+                _warn_stale(file)
+                return True
+    return False
 
 
-#: _source_constant's answer for a name assigned one literal (``SCALE =
-#: 10``), with the literal's value: the value that runs is hashed while it
-#: equals the literal. When it does not, the process changed it at runtime
-#: (another module's ``state.STEP += 1``) or the file was edited and not
-#: reloaded: either way no entry, rather than a re-run of unchanged cells.
-_LITERAL = "<literal>"
-_NO_LITERAL = object()
-#: _class_source's answer for a class in a module with no file (a notebook).
-_NO_FILE = object()
+#: The digest of a module this process loaded before its file was edited: it
+#: never equals a file's digest, so a cell computed now with the old code
+#: re-runs once a process runs the new code, and is reused meanwhile.
+_STALE = _short_hash(b"<stale>")
+_STALE_WARNED: set[str] = set()
+
+
+def _warn_stale(file: str) -> None:
+    if file in _STALE_WARNED:
+        return
+    _STALE_WARNED.add(file)
+    _best_effort_warning(
+        f"resume/cache_dir: {file} changed on disk after this process imported "
+        "it, so cells computed now run the old code and are recorded as such; "
+        "they re-run once the module is reloaded or the process restarts."
+    )
+
+
+def _best_effort_warning(message: str) -> None:
+    import warnings
+
+    try:
+        warnings.warn(message, UserWarning, stacklevel=4)
+    except Warning:  # warnings as errors: the record is best effort
+        pass
 
 
 def _sanitized(node):
@@ -1119,43 +1128,6 @@ def _sanitized(node):
     return node
 
 
-def _source_constant(file: str, module_name: str, name: str, depth: int = 0):
-    """How a module-level name is assigned in a project file. A name assigned
-    only literals (``SCALE = 10``) gives ``_LITERAL``: its value, which is
-    what runs, is hashed by the caller. A name computed on import (from the
-    host or the environment: ``os.cpu_count()``, ``"cuda" if ... else "cpu"``)
-    gives the digest of its assignments' source, so it reads alike in every
-    process and on every node, with secret-shaped strings blanked. A name
-    imported with ``from m import x`` is followed to ``m``. None when the file
-    does not bind the name at module level (it is then not compared)."""
-    try:
-        bindings, _ = _source_index(file, module_name)
-    except (OSError, SyntaxError, ValueError, RecursionError):
-        return None
-    binding = bindings.get(name)
-    if isinstance(binding, list):
-        if len(binding) == 1 and binding[0][0] is not _NO_LITERAL:
-            # The caller hashes the value, which is what runs, while it still
-            # equals this literal.
-            return (_LITERAL, binding[0][0])
-        return _short_hash("|".join(dumped for _, dumped in binding).encode())
-    if isinstance(binding, tuple) and depth < 5:
-        _, module, attr = binding
-        path = _project_file_of(module)
-        if path is None:
-            return None
-        return _source_constant(str(path), module, attr, depth + 1)
-    return None
-
-
-#: A stand-in for a module-level name the project's own code rebinds (a
-#: lazily created object, a warn-once flag): state, not code, so its value is
-#: not hashed; and for a secret-shaped name or value, which is never written
-#: to a sidecar even as a hash.
-_STATE = _short_hash(b"<state>")
-_SECRET = _short_hash(b"<secret>")
-
-
 #: Secret-shaped names and values, narrower than provenance's redaction rules
 #: (where a false positive costs nothing): here one would hide an edit. A name
 #: matches as a whole word between underscores (``HF_TOKEN``, ``api_key``, not
@@ -1180,708 +1152,103 @@ def _secret_name(name: str, value) -> bool:
     return isinstance(value, (str, bytes)) and bool(_SECRET_NAME_RE.search(name))
 
 
-def _secret(key: str, value) -> bool:
-    # The last name in the key: `mod:f.<api_key>` for a closure cell.
-    name = key.rpartition(":")[2].rpartition(".")[2].strip("<>")
-    if _secret_name(name, value):
-        return True
-    return isinstance(value, str) and _secret_value(value)
+def _namespace_modules(namespace: dict) -> list[str]:
+    """For a module with no file (a notebook): the project modules its names
+    refer to, by module values and by the modules their functions and classes
+    come from. Its own code is not compared."""
+    import types
+
+    names = set()
+    for value in list(namespace.values()):
+        try:
+            if isinstance(value, types.ModuleType):
+                names.add(value.__name__)
+            elif isinstance(value, (types.FunctionType, type)):
+                module = value.__module__
+                if isinstance(module, str) and module != namespace.get("__name__"):
+                    names.add(module)
+        except Exception:  # noqa: BLE001 - a value that resists inspection
+            continue
+    return sorted(names)
 
 
-#: Bounds on one walk: steps, and the length of a key (a chain of names that
-#: long is an object inventing attributes, not code).
-_WALK_MAX_OPS = 50_000
-_WALK_MAX_KEY = 400
-
-
-class _CodeWalk:
-    """Walks from the roots through the names their code uses, recording a hash
-    for every project function, class and constant reached, keyed by where the
-    name was looked up (``helpers:scale``), so a module attribute rebound to
-    another function is seen as a change. Only project code and constants get
-    entries: an object, a container's contents and installed code do not, so
-    an edit that turns a constant into one of those is not seen (where in
-    doubt the guard misses an edit rather than re-running unchanged cells). A
-    module-level constant in a project file is recorded by the source of its
-    assignment. The walk is iterative and bounded."""
-
-    def __init__(self):
-        self.hashes: dict[str, str] = {}
-        self._object_hash: dict[int, str] = {}
-        self._walked: set[int] = set()
-        self._module_names: dict[int, set[str]] = {}
-        self._state_names: dict[int, frozenset[str]] = {}
-        self._stack: list[tuple] = []
-        self._ops = 0
-        self.truncated = False
-        self._file_memo: dict[str, dict[str, str]] = {}
-        # The module namespace each class was reached through by name: a
-        # class with no functions of its own (an Enum, a constants class) in
-        # the driver script says nothing else about where it is, since in a
-        # parallel worker ``__main__`` is the launcher's module.
-        self._class_home: dict[int, dict] = {}
-
-    def run(self) -> None:
-        # The walk runs for every sweep, so it must end: at most _WALK_MAX_OPS
-        # steps. The order is fixed (sorted names, a stack), so a cut-off walk
-        # records the same entries in every process.
-        while self._stack:
-            if self._ops >= _WALK_MAX_OPS:
-                self.truncated = True
-                self._stack.clear()
-                return
-            self._ops += 1
-            op, *args = self._stack.pop()
+def _root_layers(root) -> list:
+    """A root and what it wraps: a partial's function, a decorator's
+    ``__wrapped__``, at most a few layers, each object once."""
+    layers, seen = [], set()
+    layer = root
+    for _ in range(16):
+        if layer is None or id(layer) in seen:
+            break
+        seen.add(id(layer))
+        layers.append(layer)
+        if isinstance(layer, functools.partial):
+            layer = layer.func
+        else:
             try:
-                op(*args)
-            except Exception:  # noqa: BLE001 - a value that resists inspection
-                continue
+                layer = getattr(layer, "__wrapped__", None)
+            except Exception:  # noqa: BLE001 - an attribute that raises
+                break
+    return layers
 
-    def _push(self, op, *args) -> None:
-        self._stack.append((op, *args))
 
-    # -- helpers ------------------------------------------------------------
-    def _project(self, value) -> bool:
-        import types
+def _root_entries(root, code: dict[str, str], seeds: list[str]) -> None:
+    """Add the entries a root gives directly (a driver script's, a partial's
+    bound arguments) to ``code``, and the project modules to follow to
+    ``seeds``."""
+    import sys
+    import types
 
-        try:
-            if isinstance(value, types.FunctionType):
-                # A function knows its own module from its globals; a
-                # functools.wraps wrapper copies __module__ from what it wraps.
-                g = value.__globals__
-                name, file = g.get("__name__"), g.get("__file__")
-                return isinstance(name, str) and not _is_foreign_module(
-                    name, file if isinstance(file, str) else None
-                )
-            module = getattr(value, "__module__", None)
-        except Exception:  # noqa: BLE001 - a descriptor that raises
-            return False
-        return isinstance(module, str) and not _is_foreign_module(module)
-
-    def _here(self, fn) -> str:
-        """The label of the module a function's globals belong to."""
-        g = getattr(fn, "__globals__", None) or {}
-        name = g.get("__name__")
-        if not isinstance(name, str):
-            name = fn.__module__ if isinstance(fn.__module__, str) else "?"
-        return _module_label(name, g)
-
-    def _class_namespace(self, cls) -> dict | None:
-        """The globals of the module that defines a class: one of its own
-        functions' globals (in a parallel worker ``__main__`` is the launcher's
-        module, while a script's class keeps its functions' script globals);
-        else the namespace the walk reached it through by name; else its
-        module's, except for a class in ``__main__``, which then has none in
-        every process."""
-        import sys
-        import types
-
-        try:
-            for value in vars(cls).values():
-                func = getattr(value, "__func__", value)
-                # Only a function defined in this class says where the class
-                # is (enum puts its own functions in an Enum subclass).
-                if isinstance(
-                    func, types.FunctionType
-                ) and func.__qualname__.startswith(cls.__qualname__ + "."):
-                    return func.__globals__
-        except Exception:  # noqa: BLE001 - a class whose namespace resists
-            return None
-        home = self._class_home.get(id(cls))
-        if home is not None:
-            return home
-        if cls.__module__ == "__main__":
-            return None
-        try:
-            return vars(sys.modules[cls.__module__])
-        except (KeyError, TypeError):
-            return None
-
-    def _class_label(self, cls) -> str:
-        """The label of a class's module."""
-        namespace = self._class_namespace(cls)
-        if namespace is None:
-            return cls.__module__
-        return _module_label(cls.__module__, namespace)
-
-    def _class_source(self, cls):
-        """The digest of a class body's non-method statements, from its file;
-        ``_NO_FILE`` for a class in a module with no file (a notebook); None
-        when it cannot be told."""
-        namespace = self._class_namespace(cls)
-        if namespace is None:
-            return None
-        file, name = namespace.get("__file__"), namespace.get("__name__")
-        if not isinstance(name, str):
-            return None
-        if file is None:
-            return _NO_FILE
-        if not (isinstance(file, str) and file.endswith(".py")):
-            return None
-        try:
-            _, bodies = _source_index(file, name)
-        except (OSError, SyntaxError, ValueError, RecursionError):
-            return None
-        return bodies.get(cls.__qualname__)
-
-    def _record(self, key: str | None, digest: str) -> None:
-        if key is not None and len(key) <= _WALK_MAX_KEY:
-            self.hashes[key] = digest
-
-    def _kind(self, value) -> str:
-        """A stand-in for a value that is not hashed: its type, and for a
-        callable its qualified name."""
-        t = type(value)
-        name = getattr(value, "__qualname__", None)
-        module = getattr(value, "__module__", None)
-        if isinstance(name, str) and isinstance(module, str):
-            return _short_hash(f"<{t.__qualname__} {module}.{name}>".encode())
-        return _short_hash(f"<{t.__module__}.{t.__qualname__}>".encode())
-
-    def _state(self, namespace: dict) -> frozenset[str]:
-        """The module-level names the module's own functions and methods rebind
-        (``global x; x = ...``): state, whose value changes as the code runs.
-        ``namespace`` is the module's globals. Read from the module's file when
-        it has one; otherwise (a notebook) from its functions' code, through
-        decorators."""
-        import dis
-        import types
-
-        cached = self._state_names.get(id(namespace))
-        if cached is not None:
-            return cached
-        file = namespace.get("__file__")
-        if isinstance(file, str) and file.endswith(".py"):
-            # From the file's own ``global`` statements: the same in every
-            # process, where a parallel worker's copy of a script's globals
-            # holds only the names its pickled functions use.
-            try:
-                _, out = _def_index(file)
-            except (OSError, SyntaxError, ValueError, RecursionError):
-                pass
-            else:
-                self._state_names[id(namespace)] = out
-                return out
-        module_name = namespace.get("__name__")
-        codes = []
-        for value in list(namespace.values()):
-            try:
-                if not isinstance(value, (types.FunctionType, type)):
-                    # A decorated function may be a C wrapper: what it wraps.
-                    value = getattr(value, "__wrapped__", None)
-                    if not isinstance(value, types.FunctionType):
-                        continue
-                if isinstance(value, types.FunctionType):
-                    layer, seen = value, set()
-                    while (
-                        isinstance(layer, types.FunctionType) and id(layer) not in seen
-                    ):
-                        seen.add(id(layer))
-                        if layer.__globals__ is namespace:
-                            codes.append(layer.__code__)
-                        layer = getattr(layer, "__wrapped__", None)
-                elif value.__module__ == module_name:
-                    for member in vars(value).values():
-                        func = getattr(member, "__func__", member)
-                        if isinstance(getattr(func, "__code__", None), types.CodeType):
-                            codes.append(func.__code__)
-            except Exception:  # noqa: BLE001 - a class whose attributes raise
-                continue
-        names: set[str] = set()
-        while codes:
-            code = codes.pop()
-            codes.extend(k for k in code.co_consts if isinstance(k, types.CodeType))
-            for ins in dis.get_instructions(code):
-                if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
-                    names.add(ins.argval)
-        out = frozenset(names)
-        self._state_names[id(namespace)] = out
-        return out
-
-    # -- roots --------------------------------------------------------------
-    def walk_root(self, root, *, with_body: bool = False) -> None:
-        import types
-
-        layer = root
-        while isinstance(layer, functools.partial):
-            # A partial task's bound arguments are part of what runs.
+    for layer in _root_layers(root):
+        if isinstance(layer, functools.partial):
             inner = layer.func
             while isinstance(inner, functools.partial):
                 inner = inner.func
             name = getattr(inner, "__qualname__", type(inner).__qualname__)
-            label = self._here(inner) if hasattr(inner, "__globals__") else "?"
-            self._record(f"{label}:{name}.<partial>", self._partial_digest(layer))
-            layer = layer.func
-        # A project decorator around the task is code it runs: each wrapper
-        # layer is recorded with its body; the innermost function is the
-        # task itself, covered by code_fingerprint (or by Study's methods
-        # fingerprint), unless with_body (pre_task).
-        layers = [layer]
-        seen = {id(layer)}
-        while True:
-            inner = getattr(layers[-1], "__wrapped__", None)
-            if inner is None or id(inner) in seen:
-                break
-            seen.add(id(inner))
-            layers.append(inner)
-        for i, target in enumerate(layers):
-            innermost = i == len(layers) - 1
-            if isinstance(getattr(target, "__code__", None), types.CodeType):
-                key = None
-                if (not innermost or with_body) and self._project(target):
-                    key = f"{self._here(target)}:{target.__qualname__}"
-                self._push(self._walk_function, target, key)
-            elif innermost and isinstance(target, type):
-                self._push(self._walk_class, target, None)
-            elif innermost and target is not None:
-                self._push(self._walk_class, type(target), None)
-        self.run()
-
-    def walk_target(self, path: str) -> None:
-        """A class or function the config names as ``_target_``: recorded by
-        the file of its module (and the project modules that file imports), so
-        the entry is the same whether or not this process has imported it yet.
-        Hydra imports it from that file when the cell instantiates it."""
-        parts = path.split(".")
-        if parts[0] == "__main__" or _is_foreign_module(parts[0]):
-            # A class in the driver script (builds(Net) there names
-            # __main__.Net): hashing the script's file would make an edit to
-            # its run block an edit; such a class is covered when the task's
-            # code reaches it.
-            return
-        for i in range(len(parts) - 1, 0, -1):
-            module = ".".join(parts[:i])
-            if _find_file(module) is None:
-                continue
-            self._record_files(module)
-            return
-
-    # -- values -------------------------------------------------------------
-    def _function_digest(self, fn) -> str:
-        """A function's code, where it is defined, and its default arguments
-        (a default is part of what the function does, and lives outside its
-        code object)."""
-        digest = self._object_hash.get(id(fn))
-        if digest is None:
-            extras: list[str] = [
-                f"{self._here(fn)}.{fn.__qualname__}",
-                _code_hash(fn.__code__, function=True),
-            ]
-            code = fn.__code__
-            positional = code.co_varnames[: code.co_argcount]
-            defaults = fn.__defaults__ or ()
-            named = list(
-                zip(
-                    positional[len(positional) - len(defaults) :],
-                    defaults,
-                    strict=False,
+            module = getattr(inner, "__module__", "?")
+            code[f"{module}:{name}.<partial>"] = _partial_digest(layer)
+            continue
+        if isinstance(layer, types.FunctionType):
+            namespace = layer.__globals__
+        else:
+            cls = layer if isinstance(layer, type) else type(layer)
+            module = sys.modules.get(getattr(cls, "__module__", ""), None)
+            namespace = getattr(module, "__dict__", None) or {}
+        name, file = namespace.get("__name__"), namespace.get("__file__")
+        if not isinstance(name, str):
+            continue
+        if name == "__main__" and isinstance(file, str) and file.endswith(".py"):
+            path = Path(file)
+            digest, tree = _script_digest(path)
+            stale = _script_stale(namespace, path)
+            code[f"{path.stem} (script)"] = _STALE if stale else digest
+            package = namespace.get("__package__")
+            seeds.extend(
+                _file_imports(
+                    tree,
+                    "__main__",
+                    False,
+                    package=package if isinstance(package, str) else None,
                 )
             )
-            named += sorted((fn.__kwdefaults__ or {}).items())
-            sources = _default_sources(fn) if named else None
-            for name, value in named:
-                extras.append(f"{name}={self._default_repr(name, value, sources)}")
-            digest = _short_hash("|".join(extras).encode())
-            self._object_hash[id(fn)] = digest
-        return digest
+        elif not isinstance(file, str):
+            seeds.extend(_namespace_modules(namespace))  # a notebook
+        elif not _is_foreign_module(name, file):
+            seeds.append(name)
 
-    def _default_repr(self, name: str, value, sources) -> str:
-        """A default argument as hashed. In a project file, by how it is
-        written, as module-level names are: a literal by its value while the
-        value still equals it, an expression computed on import by its source
-        (it then reads alike on every node). A generated function's defaults
-        by type only (its class's body covers them); with no file (a
-        notebook), by value."""
-        if _secret(name, value):
-            return "<secret>"
-        if sources is _GENERATED or sources is _UNKNOWN_DEFS:
-            return self._kind(value)
-        if sources is None:
-            return _constant_repr(value) or self._kind(value)
-        how, written = sources.get(name, (None, None))
-        if how == "source":
-            return f"<source {written}>"
-        if how == "literal":
-            try:
-                same = type(value) is type(written) and value == written
-            except Exception:  # noqa: BLE001 - a comparison that raises
-                same = False
-            if same:
-                return _constant_repr(value) or self._kind(value)
-        # Changed since import (``__defaults__`` set, or the file edited and
-        # not reloaded), or not found: the type only.
-        return self._kind(value)
 
-    def _partial_digest(self, value) -> str:
-        parts = []
-        for a in value.args:
-            parts.append(_constant_repr(a) or self._kind(a))
-        for k, v in sorted((value.keywords or {}).items()):
-            c = "<secret>" if _secret_name(k, v) else _constant_repr(v)
-            parts.append(f"{k}={c or self._kind(v)}")
-        return _short_hash("|".join(parts).encode())
-
-    def _item_key(self, value) -> str:
-        """A key for an item in a set or dict whose repr would show a memory
-        address (a function, a class): its module and name, the same in every
-        process."""
-        const = _constant_repr(value)
-        if const is not None:
-            return const
-        name = getattr(value, "__qualname__", None)
-        if isinstance(name, str):
-            module = getattr(value, "__module__", "?")
-            return f"{module}.{name}"
-        return f"<{type(value).__qualname__}>"
-
-    def _walk_function(self, fn, record_as: str | None) -> None:
-        code = fn.__code__
-        self._record(record_as, self._function_digest(fn))
-        if id(fn) in self._walked:
-            return
-        self._walked.add(id(fn))
-        globals_, attrs, imports = _code_names(code)
-        here = self._here(fn)
-        # Closure cells and callable defaults belong to this function object,
-        # so they are keyed under where it was first reached (two closures
-        # from one factory are two objects, and differ), and walked once: a
-        # closure that holds the function itself (a call counter, a recursive
-        # inner function) would otherwise be walked forever.
-        owner = record_as or f"{here}:{fn.__qualname__}"
-        rebound = _rebound_cells(code) if code.co_freevars else set()
-        for cell_name, cell in zip(
-            code.co_freevars, fn.__closure__ or (), strict=False
-        ):
-            if cell_name in rebound:
-                # ``nonlocal x; x = ...`` (a warn-once flag, a call counter):
-                # state, whose value changes as the code runs.
-                self._record(f"{owner}.<{cell_name}>", _STATE)
-                continue
-            try:
-                value = cell.cell_contents
-            except ValueError:  # an empty cell
-                continue
-            self._push(
-                self._walk_value, value, f"{owner}.<{cell_name}>", globals_, attrs, 0
-            )
-        defaults = list(fn.__defaults__ or ()) + list(
-            (fn.__kwdefaults__ or {}).values()
-        )
-        for i, value in enumerate(defaults):
-            if callable(value):
-                self._push(
-                    self._walk_value, value, f"{owner}.<default {i}>", set(), attrs, 0
-                )
-        namespace = getattr(fn, "__globals__", {}) or {}
-        for name in sorted(globals_):
-            if name in namespace:
-                self._walk_name(namespace, name, f"{here}:{name}", globals_, attrs)
-        package = namespace.get("__package__")
-        package = package if isinstance(package, str) else None
-        # Imports inside the body are recorded by their files, the same in a
-        # process that has imported them and one that has not.
-        for name in _resolve_imports(imports, package):
-            self._record_files(name)
-
-    def _record_files(self, name: str) -> None:
-        """The file entries for module ``name`` and the project modules its
-        file imports, once per walk."""
-        entries = self._file_memo.get(name)
-        if entries is None:
-            entries, cut = _file_entries(name)
-            self._file_memo[name] = entries
-            self._ops += len(entries)  # file work counts against the bound
-            self.truncated = self.truncated or cut
-        for key, digest in entries.items():
-            self._record(key, digest)
-
-    def _walk_module(self, module, attrs: set[str]) -> None:
-        """The attributes of a project module that the reaching code uses. A
-        module reached again by other code is walked again for the names that
-        code uses."""
-        if _is_foreign_module(module.__name__):
-            return
-        seen = self._module_names.setdefault(id(module), set())
-        new = attrs - seen
-        if not new:
-            return
-        seen.update(new)
-        try:
-            namespace = vars(module)
-        except TypeError:
-            return
-        here = _module_label(module.__name__, namespace)
-        for name in sorted(new):
-            if name in namespace:
-                self._walk_name(namespace, name, f"{here}:{name}", set(), attrs)
-
-    def _walk_name(self, namespace: dict, name: str, key: str, globals_, attrs) -> None:
-        """A module-level name the reaching code uses. Code (a function, a
-        class, a module, code behind a C wrapper) is walked. A value in a
-        project file assigned only literals is recorded by its value, which is
-        what runs; one computed on import, by the source of its assignment (it
-        then reads alike on every node), with the code it holds walked. In a
-        module with no file (a notebook) values are recorded as they are,
-        unless the module's own code rebinds them."""
-        import types
-
-        value = namespace[name]
-        if isinstance(value, type) and value.__module__ == namespace.get("__name__"):
-            self._class_home.setdefault(id(value), namespace)
-        code_like = (types.FunctionType, types.MethodType, type, types.ModuleType)
-        wrapped = None
-        if callable(value) and not isinstance(value, (functools.partial, type)):
-            try:
-                wrapped = getattr(value, "__wrapped__", None)
-            except Exception:  # noqa: BLE001 - an attribute that raises
-                wrapped = None
-        if isinstance(value, code_like) or isinstance(wrapped, types.FunctionType):
-            self._push(self._walk_value, value, key, globals_, attrs, 0)
-            return
-        if name in self._state(namespace):
-            self._record(key, _STATE)
-            return
-        file = namespace.get("__file__")
-        module_name = namespace.get("__name__")
-        if (
-            isinstance(file, str)
-            and file.endswith(".py")
-            and isinstance(module_name, str)
-        ):
-            digest = _source_constant(file, module_name, name)
-            if isinstance(digest, tuple):
-                _, written = digest
-                try:
-                    same = type(value) is type(written) and value == written
-                except Exception:  # noqa: BLE001 - a comparison that raises
-                    same = False
-                if not same:
-                    return  # changed at runtime, or edited and not reloaded
-            else:
-                if digest is not None:
-                    self._record(key, _SECRET if _secret(key, value) else digest)
-                # The code the value holds, without a value entry.
-                self._push(self._walk_value, value, key, globals_, attrs, 1)
-                return
-        self._push(self._walk_value, value, key, globals_, attrs, 0)
-
-    def _class_members(self, cls):
-        """``(name, kind, value)`` for each member that is code: functions,
-        static and class methods, properties (getter, setter, deleter),
-        cached properties, and nested project classes."""
-        import types
-
-        out = []
-        for attr, value in sorted(vars(cls).items()):
-            if attr.startswith("__") and attr.endswith("__"):
-                func = getattr(value, "__func__", value)
-                if not isinstance(getattr(func, "__code__", None), types.CodeType):
-                    continue  # __module__, __doc__, __firstlineno__ (3.13+)
-            if isinstance(value, property):
-                for part, f in (
-                    ("fget", value.fget),
-                    ("fset", value.fset),
-                    ("fdel", value.fdel),
-                ):
-                    if f is not None:
-                        out.append((f"{attr}.{part}", "function", f))
-                continue
-            func = (
-                getattr(value, "func", None)
-                if type(value).__name__ == "cached_property"
-                else None
-            )
-            func = func or getattr(value, "__func__", value)
-            if isinstance(getattr(func, "__code__", None), types.CodeType):
-                out.append((attr, "function", func))
-            elif isinstance(value, type):
-                out.append((attr, "class", value))
-            else:
-                out.append((attr, "value", value))
-        return out
-
-    def _walk_class(self, cls, record_as: str | None) -> None:
-        if not self._project(cls):
-            return  # installed code: provenance's job, and no entry
-        members = self._class_members(cls)
-        home = self._class_namespace(cls)
-        if home is not None:
-            # Its bases and nested classes from the same module live there too.
-            related = [v for _, k, v in members if k == "class"] + list(cls.__bases__)
-            for other in related:
-                if getattr(other, "__module__", None) == cls.__module__:
-                    self._class_home.setdefault(id(other), home)
-        digest = self._object_hash.get(id(cls))
-        if digest is None:
-            parts = [cls.__qualname__]
-            for attr, kind, value in members:
-                if kind == "function":
-                    parts.append(f"{attr}={self._function_digest(value)}")
-                elif kind == "class":
-                    parts.append(f"{attr}=class {value.__qualname__}")
-            # Class-level values by the class body's source (a value a method
-            # fills in later, such as a lazy cache, is state, not code). With
-            # no file (a notebook), the immutable ones by value.
-            body = self._class_source(cls)
-            if body is _NO_FILE:
-                stored = _stored_attrs(
-                    value.__code__ for _, kind, value in members if kind == "function"
-                )
-                for attr, kind, value in members:
-                    const = _constant_repr(value) if kind == "value" else None
-                    if const is not None and attr not in stored:
-                        secret = _secret(attr, value)
-                        parts.append(f"{attr}={'<secret>' if secret else const}")
-            elif body is not None:
-                parts.append(f"body={body}")
-            parts.extend(
-                f"base={self._class_label(b) if self._project(b) else b.__module__}.{b.__qualname__}"
-                for b in cls.__bases__
-            )
-            digest = _short_hash("|".join(parts).encode())
-            self._object_hash[id(cls)] = digest
-        self._record(record_as, digest)
-        if id(cls) in self._walked:
-            return
-        self._walked.add(id(cls))
-        for _attr, kind, value in members:
-            if kind == "function" and self._project(value):
-                self._push(self._walk_function, value, None)
-            elif kind == "class" and self._project(value):
-                key = f"{self._class_label(value)}:{value.__qualname__}"
-                self._push(self._walk_class, value, key)
-        for base in cls.__bases__:
-            if self._project(base):
-                key = f"{self._class_label(base)}:{base.__qualname__}"
-                self._push(self._walk_class, base, key)
-
-    def _walk_value(
-        self, value, key: str, globals_: set[str], attrs: set[str], depth: int
-    ) -> None:
-        """What a name refers to. An entry is recorded only for the project's
-        own code and for constants read from its modules: an object, a
-        container's contents, an installed function or module get none. That
-        prefers missing an edit over re-running unchanged work, since such
-        values may change as the code runs."""
-        import types
-
-        if len(key) > _WALK_MAX_KEY:
-            return
-        if isinstance(value, types.ModuleType):
-            if not _is_foreign_module(value.__name__):
-                # Which module it is (`import impl_a as impl`): an alias
-                # pointed at another project module is a change.
-                self._record(key, _short_hash(f"<module {value.__name__}>".encode()))
-                self._walk_module(value, attrs)
-            return
-        if isinstance(value, functools.partial):
-            if depth == 0:
-                self._record(key, self._partial_digest(value))
-            self._push(
-                self._walk_value, value.func, key + ".func", globals_, attrs, depth
-            )
-            return
-        if isinstance(value, types.MethodType):
-            value = value.__func__
-        if isinstance(value, types.FunctionType):
-            if self._project(value):
-                self._walk_function(value, key)
-            else:
-                self._unwrap(value, key, globals_, attrs, depth)
-            return
-        if isinstance(value, type):
-            self._walk_class(value, key)
-            return
-        if isinstance(value, (dict, list, tuple, set, frozenset)):
-            const = _constant_repr(value) if depth == 0 else None
-            if const is not None:
-                self._record(
-                    key, _SECRET if _secret(key, value) else _short_hash(const.encode())
-                )
-                return
-            # A registry such as {"cnn": CNN, "mlp": mlp}: the project code it
-            # holds is walked; its other contents, and the container itself,
-            # are not entries (it may be filled as the code runs).
-            if depth < 2 and len(value) <= 1000:
-                if isinstance(value, dict):
-                    items = sorted(
-                        ((self._item_key(k), v) for k, v in value.items()),
-                        key=lambda kv: kv[0],
-                    )
-                elif isinstance(value, (set, frozenset)):
-                    # A set iterates in hash order, which for functions and
-                    # classes follows their addresses: key items by name.
-                    items = sorted(
-                        ((self._item_key(v), v) for v in value), key=lambda kv: kv[0]
-                    )
-                else:
-                    items = [(str(i), v) for i, v in enumerate(value)]
-                code_like = (
-                    types.FunctionType,
-                    type,
-                    functools.partial,
-                    dict,
-                    list,
-                    tuple,
-                )
-                for k, v in items:
-                    if isinstance(v, code_like):
-                        self._push(
-                            self._walk_value,
-                            v,
-                            f"{key}[{k}]",
-                            globals_,
-                            attrs,
-                            depth + 1,
-                        )
-            return
-        if depth > 0:
-            return  # inside a registry, only code
-        const = _constant_repr(value)
-        if const is not None:
-            self._record(
-                key, _SECRET if _secret(key, value) else _short_hash(const.encode())
-            )
-            if self._project(type(value)):
-                # A frozen settings dataclass: its fields above, its class too.
-                self._push(self._walk_class, type(value), f"{key}.__class__")
-            return
-        if callable(value):
-            # A decorated function behind a C wrapper (functools.lru_cache).
-            self._unwrap(value, key, globals_, attrs, depth)
-        if self._project(type(value)):
-            # An instance of a project class (a model): its class is code the
-            # task runs; its state is not hashed.
-            self._push(self._walk_class, type(value), f"{key}.__class__")
-
-    def _unwrap(self, value, key: str, globals_, attrs, depth: int) -> None:
-        """Follow a decorator's ``__wrapped__`` chain to project code, as
-        inspect.unwrap does: only through functions, classes and partials, at
-        most a few layers, each object once (an object that invents attributes,
-        such as an addict.Dict, never leads anywhere)."""
-        import types
-
-        code_like = (types.FunctionType, type, functools.partial)
-        seen = {id(value)}
-        try:
-            layer = getattr(value, "__wrapped__", None)
-        except Exception:  # noqa: BLE001 - an attribute that raises
-            return
-        for _ in range(16):
-            if not isinstance(layer, code_like) or id(layer) in seen:
-                return
-            seen.add(id(layer))
-            if isinstance(layer, functools.partial) or self._project(layer):
-                self._push(
-                    self._walk_value,
-                    layer,
-                    key + ".__wrapped__",
-                    globals_,
-                    attrs,
-                    depth,
-                )
-                return
-            layer = getattr(layer, "__wrapped__", None)
+def _target_module(path: str) -> str | None:
+    """The module a ``_target_`` string's class or function lives in, found
+    without importing it; None for one in the driver script (``__main__``,
+    covered when the script imports or defines it) or in foreign code."""
+    parts = path.split(".")
+    if parts[0] == "__main__" or _is_foreign_module(parts[0]):
+        return None
+    for i in range(len(parts) - 1, 0, -1):
+        module = ".".join(parts[:i])
+        if _find_file(module) is not None:
+            return module
+    return None
 
 
 def _config_targets(cfg) -> list[str]:
@@ -1919,89 +1286,79 @@ def _config_targets(cfg) -> list[str]:
     return sorted(found)
 
 
+#: Warned once per process each: a record cut short by its bounds, and one
+#: that could not be taken.
 _TRUNCATION_WARNED: list = []
+_FAILURE_WARNED: list = []
 
 
 def project_fingerprints(fn, *more, cfg=None, with_body=()) -> dict | None:
-    """What the project code a task reaches looks like now, as recorded in
+    """What the project code a task can run looks like now, as recorded in
     each cell's status sidecar: ``{"python": "3.11", "code": {key: hash}}``.
 
-    The walk starts from the names the task's code uses and follows them
-    through the project's own functions, classes, modules and constants, as
-    loaded in this process, which is the code that will run (a cell computes
-    it in its own process, so a parallel worker records what it imported).
-    Each reached project function or class is hashed by its bytecode (not its
-    text: a comment, a blank line or a moved definition is not an edit), each
-    immutable constant it reads (``SCALE = 10``, or ``THRESH`` imported with
-    ``from consts import THRESH``) by its value, and the project functions and
-    classes held in a container it reads (a registry dict) are walked. Keys say
-    where a name was looked up, ``helpers:scale``. A project module the task
-    imports inside its body that this process has not imported yet is hashed
-    by its file. ``more`` adds roots walked the same way (``pre_task``, and
-    ``Study``'s training functions, which its task calls but does not import),
-    and ``cfg`` adds the classes and functions the config names as
-    ``_target_`` (or through hydra-zen's ``just()`` and ``zen_meta``), by the
-    file of their module. The roots' own
-    bodies are not entries (``code_fingerprint`` and ``Study``'s methods
-    fingerprint cover them), except those in ``with_body`` (``pre_task``).
+    Every project file the task's module imports, directly or through other
+    project files, at any depth (imports inside functions included), is an
+    entry ``"<module> (file)"``, hashed as its syntax tree without its main
+    block and docstrings: an edit anywhere in such a file is a change, and a
+    comment, a docstring or formatting is not. A task defined in the driver
+    script gives ``"<script> (script)"``, its top-level code without what
+    drives the sweep (see ``_script_digest``), and the project files the
+    script imports. A module that this process loaded before its file was
+    edited is recorded as ``_STALE``. ``more`` and ``with_body`` add roots
+    walked the same way (``pre_task``; ``Study``'s training functions), and
+    ``cfg`` adds the modules of the classes and functions it names as
+    ``_target_`` (or through hydra-zen's ``just()`` and ``zen_meta``). A partial
+    task's bound arguments are an entry too.
 
-    Not reached: the standard library, mushin, installed packages other than
+    Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
-    contents of a mutable container other than the code it holds, code called
-    only through a string that is not a ``_target_`` of the config, a
-    ``_target_`` in the driver script (``__main__``), and attribute
-    chains on objects rather than modules. None when the walk fails; a resume
-    then does not compare, and ``cache_dir`` is not used."""
+    environment, code defined in a notebook (the project modules it imports
+    are covered), and code reached only through a string that is not a
+    ``_target_`` of the config. None when the record cannot be taken; a
+    resume then does not compare, and ``cache_dir`` is not used."""
     import sys
 
     try:
-        walk = _CodeWalk()
-        for root in (fn, *more):
+        code: dict[str, str] = {}
+        seeds: list[str] = []
+        for root in (fn, *more, *with_body):
             if root is not None:
-                walk.walk_root(root)
-        for root in with_body:
-            if root is not None:
-                walk.walk_root(root, with_body=True)
+                _root_entries(root, code, seeds)
         if cfg is not None:
-            for target in _config_targets(cfg):
-                walk.walk_target(target)
-        _warn_if_truncated(walk)
+            seeds += [m for m in map(_target_module, _config_targets(cfg)) if m]
+        entries, cut = _file_entries(seeds)
+        code.update(entries)
+        if cut and not _TRUNCATION_WARNED:
+            _TRUNCATION_WARNED.append(True)
+            _best_effort_warning(
+                "resume/cache_dir: the task's code imports more project files than "
+                "the fingerprint covers, so edits past that point are not compared; "
+                "use a fresh working_dir after a large refactor."
+            )
         return {
             "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
-            "code": walk.hashes,
+            "code": code,
         }
     except Exception:  # noqa: BLE001 - a best-effort guard never fails the sweep
+        if not _FAILURE_WARNED:
+            _FAILURE_WARNED.append(True)
+            _best_effort_warning(
+                "resume/cache_dir: the project code this task uses could not be "
+                "fingerprinted, so a resume does not compare it and cache_dir is not "
+                "used; use a fresh working_dir after editing it."
+            )
         return None
 
 
-def _warn_if_truncated(walk: _CodeWalk) -> None:
-    """Warn, once per process, that a walk reached one of its bounds."""
-    if not walk.truncated or _TRUNCATION_WARNED:
-        return
-    _TRUNCATION_WARNED.append(True)
-    import warnings
-
-    try:
-        warnings.warn(
-            "resume/cache_dir: the project code this task reaches is larger than "
-            "the fingerprint walks, so edits past that point are not compared; "
-            "use a fresh working_dir after a large refactor.",
-            UserWarning,
-            stacklevel=4,
-        )
-    except Warning:  # warnings as errors: the walk is best effort
-        pass
-
-
-#: The roots' record per run token, in this process: a parallel worker walks
-#: once per run however many cells it runs. Bounded, since a reused worker
+#: The roots' record per run token, in this process: a parallel worker takes
+#: it once per run however many cells it runs. Bounded, since a reused worker
 #: process (loky keeps them across run() calls) sees many runs.
 _ROOT_RECORDS: dict[str, dict | None] = {}
 _ROOT_RECORDS_MAX = 64
 
 
-#: Each ``_target_``'s walk per (run token, target), in this process: every
-#: cell of a sweep that names the same classes shares it. Bounded like the
+#: Each ``_target_``'s entries per (run token, target), in this process: every
+#: cell of a sweep that names the same classes shares them. Bounded like the
 #: roots' records.
 _TARGET_RECORDS: dict[tuple[str, str], dict[str, str]] = {}
 _TARGET_RECORDS_MAX = 4096
@@ -2009,9 +1366,9 @@ _TARGET_RECORDS_MAX = 4096
 
 def cell_project_record(token: str, roots, with_body, cfg) -> dict | None:
     """The project-code record of one cell, taken in the process that runs it:
-    the roots' walk (cached per process for the run ``token``) plus the
-    ``_target_`` classes and functions of this cell's config, which can differ
-    from cell to cell (a swept model class)."""
+    the roots' record (cached per process for the run ``token``) plus the
+    modules of this cell's config ``_target_``\\ s, which can differ from cell
+    to cell (a swept model class)."""
     if token in _ROOT_RECORDS:
         base = _ROOT_RECORDS[token]
     else:
@@ -2029,10 +1386,8 @@ def cell_project_record(token: str, roots, with_body, cfg) -> dict | None:
         entries = _TARGET_RECORDS.get((token, target))
         if entries is None:
             try:
-                walk = _CodeWalk()
-                walk.walk_target(target)
-                entries = walk.hashes
-                _warn_if_truncated(walk)
+                module = _target_module(target)
+                entries = _file_entries([module])[0] if module else {}
             except Exception:  # noqa: BLE001 - best effort: the roots' record stands
                 entries = {}
             while len(_TARGET_RECORDS) >= _TARGET_RECORDS_MAX:

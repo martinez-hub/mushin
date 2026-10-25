@@ -156,10 +156,9 @@ resuming. Don't, and mushin actively stops you from doing it by accident.
   helpers, and config. If you resumed an exploration directory, some cells would
   carry results from an *older* version of your code and some from the current
   one, silently combined into one dataset. mushin's resume guards on a
-  fingerprint of the resolved config, the task source **and** the project code
-  the task reaches (the helpers, classes and constants it uses, through your
-  own modules), so an edited task or helper re-runs its cells rather than
-  reusing a stale result;
+  fingerprint of the resolved config, the task source **and** the project files
+  the task's module imports (directly or through your other modules), so an
+  edited task or helper re-runs its cells rather than reusing a stale result;
   an upgraded dependency or changed data is not seen, and the only way to be
   sure *every* cell in your paper grid came from one code era is to run that
   grid fresh. (See [Resilient & resumable sweeps](resilience.md) for how the
@@ -173,7 +172,7 @@ resuming. Don't, and mushin actively stops you from doing it by accident.
 Two mushin features make the re-run cheap and honest at the same time:
 
 - `cache_dir=` reuse is safe here because it is keyed on config **and** code,
-  the task's and the project code it reaches: a cell only comes from the cache
+  the task's and the project files it imports: a cell only comes from the cache
   if it is the same computation by the same project code. It never mixes code
   eras. (If you changed the task or a helper since exploration, those cells
   simply recompute. A dependency upgrade is not seen, so after one start a
