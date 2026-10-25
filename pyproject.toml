@@ -215,7 +215,7 @@ mushin = ["py.typed", "agent_guide.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["examples", "tests/plugins"]  # tests/plugins: hydra_plugins test sweeper
+pythonpath = ["examples", "tests", "tests/plugins"]  # tests: shared helpers (_docs_site, _separated); tests/plugins: hydra_plugins test sweeper
 addopts = "-m 'not real_data and not cluster'"
 markers = [
     "real_data: end-to-end checks that download a real dataset/model (deselected by default; run with -m real_data)",

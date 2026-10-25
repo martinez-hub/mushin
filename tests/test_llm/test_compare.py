@@ -841,6 +841,21 @@ def test_compare_scores_single_run_is_clean_under_error_warnings(test):
     assert not np.isnan(row["item_p"])
 
 
+def test_compare_scores_single_run_has_no_seed_floor_to_warn_about():
+    """The default welch test at one run has a NaN best-case p-value: no
+    sampling distribution, reported as not significant above. That is nothing
+    to warn about; a "cannot reach alpha (best-case p=nan)" warning recommending
+    the test in use crept in once with the family-aware seed floor."""
+    from mushin.llm import compare_scores
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        compare_scores(
+            {"a": np.array([1.0, 0.0, 1.0] * 10), "b": np.array([0.0, 1.0, 0.0] * 10)}
+        )
+    assert not [c for c in caught if "cannot reach" in str(c.message)]
+
+
 def test_clusters_validated_before_any_system_call():
     """`clusters` was the only compare_llms argument checked after the token spend."""
     calls = []

@@ -90,9 +90,9 @@ Pass `correction=` to choose `"holm"` (default), `"bonferroni"`, `"fdr_bh"`
     With only one seed per method there is no within-method variance, so a
     parametric test returns a NaN p-value and the comparison is reported as
     **not** significant rather than producing a false positive. `compare` also
-    warns when the chosen test cannot reach `alpha` at the given seed count
-    (e.g. Wilcoxon with very few seeds). Use several seeds for meaningful
-    significance.
+    warns when the chosen test cannot reach `alpha` at the given seed count for
+    the method pairs it corrects over (e.g. Wilcoxon with very few seeds, or
+    with 6 seeds and 3 methods). Use several seeds for meaningful significance.
 
 ## Setting alpha
 

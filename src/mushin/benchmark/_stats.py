@@ -7,7 +7,7 @@ from __future__ import annotations
 import itertools
 import json
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -115,6 +115,13 @@ def _normalize_failures(val) -> list[str]:
     return [str(val)]
 
 
+def _family_size(pvalues) -> int:
+    """The pairs a correction adjusts together: NaN p-values (masked pairs) are
+    outside the family. The one definition the corrections and the underpowered
+    warning share."""
+    return int(np.count_nonzero(~np.isnan(np.asarray(pvalues, dtype=float))))
+
+
 def holm_correction(pvalues) -> list[float]:
     """Holm-Bonferroni step-down correction, returned in original order.
 
@@ -123,7 +130,7 @@ def holm_correction(pvalues) -> list[float]:
     pvalues = np.asarray(pvalues, dtype=float)
     m = len(pvalues)
     order = np.argsort(pvalues)  # NaNs sort to the end
-    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
+    n_valid = _family_size(pvalues)
     corrected = np.empty(m)
     running = 0.0
     for rank, idx in enumerate(order):
@@ -140,7 +147,7 @@ def bonferroni_correction(pvalues) -> list[float]:
     """Bonferroni correction (``p * n_valid``, capped at 1), original order.
     NaNs stay NaN and are excluded from the family size."""
     pvalues = np.asarray(pvalues, dtype=float)
-    n_valid = int(np.count_nonzero(~np.isnan(pvalues)))
+    n_valid = _family_size(pvalues)
     return [
         float("nan") if np.isnan(p) else float(min(p * n_valid, 1.0)) for p in pvalues
     ]
@@ -177,16 +184,31 @@ def available_corrections() -> list[str]:
     return list(_CORRECTIONS)
 
 
-def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
-    """Warn if ``test`` cannot reach ``alpha`` at ``n_seeds`` seeds.
+def _check_correction(correction: str) -> None:
+    if correction not in _CORRECTIONS:
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
 
-    Determined empirically: run the test on maximally-separated samples of size
-    ``n_seeds`` and check whether the best-case p-value clears ``alpha``. (A
-    paired Wilcoxon over 3 seeds, for example, can never go below p=0.25.)"""
+
+#: The rank tests: their p-values are discrete, so at a given seed count they
+#: have a floor no separation gets under (a paired Wilcoxon over 3 seeds never
+#: goes below p=0.25). A parametric test's p-value falls without bound as the
+#: separation grows relative to the spread, so once it can run its floor is 0.
+_RANK_TESTS = frozenset({"wilcoxon", "mannwhitney"})
+
+
+def _best_case_p(test: str, n_seeds: int) -> float | None:
+    """The smallest p-value ``test`` can produce at ``n_seeds`` seeds: the probe
+    on maximally separated samples for a rank test, 0 for a parametric test
+    that runs; None when the test cannot run at that size."""
     if test not in _TESTS:
-        return
+        return None
     func, _ = _TESTS[test]
-    a = np.arange(n_seeds, dtype=float) + 1000.0
+    # Distinct, same-sign paired differences (i + 1000): identical differences
+    # are ties, which send scipy's Wilcoxon down its asymptotic path at larger
+    # n, where the p-value sits above the exact floor real data reaches.
+    a = 2.0 * np.arange(n_seeds) + 1000.0
     b = np.arange(n_seeds, dtype=float)
     try:
         with warnings.catch_warnings():
@@ -197,15 +219,80 @@ def warn_if_underpowered(test: str, n_seeds: int, alpha: float) -> None:
             warnings.simplefilter("ignore")
             _, p = func(a, b)
     except ValueError:
-        return  # test could not even run at this n; nothing useful to say
-    if float(p) > alpha:
-        warnings.warn(
-            f"test={test!r} cannot reach alpha={alpha} with {n_seeds} seeds "
-            f"(best-case p={float(p):.4g}); use more seeds or a parametric test "
-            f"such as test='welch'.",
-            UserWarning,
-            stacklevel=3,
+        return None  # test could not even run at this n; nothing useful to say
+    p = float(p)
+    # A parametric test at one seed gives NaN: no sampling distribution, which
+    # compare_methods reports as not significant; a floor is nothing to say.
+    if np.isnan(p):
+        return None
+    return p if test in _RANK_TESTS else 0.0
+
+
+def _underpowered(
+    test: str, n_seeds: int, alpha: float, n_comparisons: int, correction: str
+) -> tuple[str, str] | None:
+    """Why ``test`` cannot reach ``alpha``, as the two halves of a warning (a
+    scope such as " for metric 'loss'" goes between them), or None when it can.
+
+    Significance is ``p_corrected < alpha``, so a best case that lands exactly
+    on ``alpha`` cannot reach it. The best-case corrected p-value is the
+    correction run on a family of ``n_comparisons`` copies of the best-case p:
+    under Holm or Bonferroni that is ``n_comparisons`` times it, so the bar a
+    pair must clear is ``alpha / n_comparisons``; Benjamini-Hochberg's step-up
+    leaves equally extreme p-values unchanged and ``"none"`` adjusts nothing, so
+    for those the bar stays ``alpha``. Running the real correction keeps this
+    right for any correction added to ``_CORRECTIONS`` later."""
+    # Validated before the probe, so a typo is caught whatever the test says.
+    _check_correction(correction)
+    if n_comparisons < 1:
+        raise ValueError(f"n_comparisons must be at least 1, got {n_comparisons!r}")
+    p = _best_case_p(test, n_seeds)
+    if p is None:
+        return None
+    family = int(n_comparisons)
+    correct = _CORRECTIONS[correction]
+    best = min(correct([p] * family)) if family > 1 else p
+    if best < alpha:
+        return None
+    if p < alpha:
+        # The test alone could reach alpha; the correction over the family is
+        # what puts it out of reach, so say so, and offer the remedies that act
+        # on the family too.
+        return (
+            f"test={test!r} cannot reach alpha={alpha} with {n_seeds} seeds over "
+            f"{family} method pairs under correction={correction!r}",
+            f" (best-case p={p:.4g}, corrected {best:.4g}); use more seeds, "
+            f"compare fewer methods, or a parametric test such as test='welch'.",
         )
+    return (
+        f"test={test!r} cannot reach alpha={alpha} with {n_seeds} seeds",
+        f" (best-case p={p:.4g}); use more seeds or a parametric test "
+        f"such as test='welch'.",
+    )
+
+
+def warn_if_underpowered(
+    test: str,
+    n_seeds: int,
+    alpha: float,
+    n_comparisons: int = 1,
+    correction: str = "holm",
+) -> None:
+    """Warn if ``test`` cannot reach ``alpha`` at ``n_seeds`` seeds.
+
+    A probe on maximally-separated samples of size ``n_seeds`` decides whether
+    the test can run at all (NaN or an error means there is nothing to say).
+    For a rank test the probe's p-value is the floor no separation gets under;
+    a parametric test that runs has a floor of 0. The floor, corrected over a
+    family of ``n_comparisons`` p-values with ``correction``, must be below
+    ``alpha`` (the comparison that decides significance). Under Holm or
+    Bonferroni the family raises it: Wilcoxon needs 6 seeds for one pair but 7
+    for the three pairs of three methods. ``"fdr_bh"`` and ``"none"`` leave it
+    at the single pair's.
+    """
+    reason = _underpowered(test, n_seeds, alpha, n_comparisons, correction)
+    if reason is not None:
+        warnings.warn("".join(reason), UserWarning, stacklevel=2)
 
 
 #: Below this many resampling UNITS (items, or clusters when grouped) the
@@ -252,7 +339,9 @@ def compare_methods(
     ``False``, rather than reporting a duplicated-point p-value of ~0 and a
     meaningless ±huge effect size; Holm is then applied over the surviving pairs.
     Emits a warning when ``test`` cannot reach ``alpha`` at the dataset's seed
-    count, and when a method is constant across seeds in *every* metric.
+    count for the family of pairs that ``correction`` adjusts (under Holm, the
+    three pairs of three methods need a seventh Wilcoxon seed), and when a
+    method is constant across seeds in *every* metric.
 
     ``allow_incomplete`` (default ``False``): when ``True``, an incomplete sweep
     is compared anyway (with a warning) instead of raising, computing stats over
@@ -307,21 +396,20 @@ def compare_methods(
         )
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
-    if correction not in _CORRECTIONS:
-        raise ValueError(
-            f"unknown correction {correction!r}; choose from {available_corrections()}"
-        )
+    _check_correction(correction)
     correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])
-    warn_if_underpowered(test, n_seeds, alpha)
     func, is_paired = _TESTS[test]
     methods = [str(m) for m in ds["method"].values]
 
     rows = []
     constant_metric_count: dict[str, int] = {}  # method -> #metrics it is constant in
-    n_metrics = 0
+    # The family each metric's correction adjusted: masked pairs (NaN p) are
+    # outside it, so a constant method shrinks it. The underpowered warning is
+    # judged on these after the loop, since with k methods the smallest p-value
+    # must clear alpha / m for the m pairs, not alpha.
+    families: dict[Hashable, int] = {}  # keyed by the data variable itself
     for metric in ds.data_vars:
-        n_metrics += 1
         vals = {m: ds[metric].sel({"method": m}).values for m in methods}
         # A method with no within-group variance has no sampling distribution.
         # Constancy is judged over the COMPLETED (non-NaN) seeds, so the mask
@@ -400,15 +488,36 @@ def compare_methods(
             )
             pvals.append(p)
         corrected = correct(pvals) if len(pvals) > 1 else pvals
+        # The same count the corrections use for their family size; a family of
+        # 0 (every pair masked) is judged as the single pair, which is what the
+        # seed count alone can say.
+        families[metric] = max(_family_size(pvals), 1)
         for rec, pc in zip(recs, corrected, strict=True):
             rec["p_corrected"] = float(pc)
             rec["significant"] = False if np.isnan(pc) else bool(pc < alpha)
             rows.append(rec)
 
+    # Judged per metric: a metric that masks a method has a smaller family,
+    # which may still reach alpha while another metric's cannot. One warning per
+    # distinct reason, naming its metrics unless it holds for all of them (or
+    # there is no metric, when the single pair's floor is all there is to say).
+    reasons: dict[tuple[str, str], list[str]] = {}
+    for family in sorted(set(families.values()) or {1}):  # one probe per family
+        reason = _underpowered(test, n_seeds, alpha, family, correction)
+        if reason is not None:
+            named = [m for m, f in families.items() if f == family]
+            reasons.setdefault(reason, []).extend(named)
+    for (head, tail), named in reasons.items():
+        scope = ""
+        if families and len(named) < len(families):
+            noun = "metric" if len(named) == 1 else "metrics"
+            scope = f" for {noun} " + ", ".join(repr(str(m)) for m in named)
+        warnings.warn(head + scope + tail, UserWarning, stacklevel=2)
+
     # Warn for methods constant across seeds in *every* metric (they ignore the
     # seed): the seeds are duplicated points, not independent samples.
     for m in sorted(methods):
-        if n_metrics and constant_metric_count.get(m, 0) == n_metrics:
+        if families and constant_metric_count.get(m, 0) == len(families):
             warnings.warn(
                 f"method {m!r} produced identical scores across all {n_seeds} "
                 "seeds — it is deterministic or ignores the seed, so seed-based "

@@ -14,14 +14,14 @@ seeds, 0.0625 at 5, 0.0313 at 6. Only the last clears ``alpha=0.05``.
 
 from __future__ import annotations
 
+import functools
 import re
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pytest
-import xarray as xr
 
+from _separated import separated, underpowered_warnings
 from mushin.benchmark import compare_methods
 from mushin.benchmark._stats import warn_if_underpowered
 
@@ -32,10 +32,9 @@ ALPHA = 0.05
 
 
 def _warns(test: str, n_seeds: int, alpha: float = ALPHA) -> bool:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        warn_if_underpowered(test, n_seeds=n_seeds, alpha=alpha)
-    return any("cannot reach alpha" in str(c.message) for c in caught)
+    return bool(
+        underpowered_warnings(warn_if_underpowered, test, n_seeds=n_seeds, alpha=alpha)
+    )
 
 
 def _seed_floor(test: str, alpha: float = ALPHA) -> int:
@@ -172,25 +171,26 @@ AGENT_GUIDE = (
 )
 
 
+@functools.cache  # a brute-force search, asked for the same three counts repeatedly
 def _holm_floor(n_methods: int, alpha: float = ALPHA) -> int:
     """Seeds at which compare_methods first calls every pair significant on data
-    that separates the methods perfectly. Each method's scores vary across seeds
-    (a method constant across seeds gets NaN), and each pair's differences are
-    distinct and nonzero (tied differences make the Wilcoxon p approximate)."""
+    that separates the methods perfectly."""
     for n in range(2, 32):
-        scores = np.array([(np.arange(n) + 1.0) * (i + 1) for i in range(n_methods)])
-        ds = xr.Dataset(
-            {"score": (("method", "seed"), scores)},
-            coords={
-                "method": [f"m{i}" for i in range(n_methods)],
-                "seed": np.arange(n),
-            },
-        )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # the underpowered warning, below the floor
-            if compare_methods(ds, alpha=alpha)["significant"].all():
+            if compare_methods(separated(n_methods, n), alpha=alpha)[
+                "significant"
+            ].all():
                 return n
     raise AssertionError(f"{n_methods} methods never clear alpha={alpha}")
+
+
+def _compare_warns(n_methods: int, n_seeds: int, alpha: float = ALPHA) -> bool:
+    return bool(
+        underpowered_warnings(
+            compare_methods, separated(n_methods, n_seeds), alpha=alpha
+        )
+    )
 
 
 @pytest.mark.parametrize("n_methods, floor", [(2, 6), (3, 7), (4, 8)])
@@ -199,10 +199,39 @@ def test_holm_seed_floor(n_methods: int, floor: int):
     assert _holm_floor(n_methods) == floor
 
 
-def test_agent_guide_quotes_the_holm_seed_floors():
-    text = AGENT_GUIDE.read_text(encoding="utf-8")
+@pytest.mark.parametrize("n_methods", [2, 3, 4])
+def test_underpowered_warning_fires_exactly_below_the_holm_floor(n_methods: int):
+    """The warning promises that no pair can be significant. It must fire one
+    seed below the floor at which every pair is, and not at the floor, or
+    following the guides' seed counts would keep the warning (or lose it while
+    nothing can be significant)."""
+    floor = _holm_floor(n_methods)
+    assert _compare_warns(n_methods, floor - 1), f"silent below the floor ({floor})"
+    assert not _compare_warns(n_methods, floor), f"warns at the floor ({floor})"
+
+
+@pytest.mark.parametrize("guide", [AGENT_GUIDE, STATISTICS_GUIDE])
+def test_guides_quote_the_holm_seed_floors(guide: Path):
+    text = guide.read_text(encoding="utf-8")
     match = re.search(
-        r"at least (\d+) seeds for 2\s+methods, (\d+) for 3 and (\d+) for 4", text
+        r"at least (\d+) seeds for 2\s+methods, (\d+) for 3 and (\d+)\s+for 4", text
     )
-    assert match, "could not find the seed floors in the agent guide"
+    assert match, f"could not find the seed floors in {guide.name}"
     assert tuple(map(int, match.groups())) == tuple(_holm_floor(k) for k in (2, 3, 4))
+
+
+def test_statistics_guide_quotes_the_warnings_the_code_emits():
+    """Both ``UserWarning`` blocks in the guide are the messages the code formats:
+    the first said ``p=0.2500`` for years where the code prints ``0.25``."""
+    text = STATISTICS_GUIDE.read_text(encoding="utf-8")
+    quoted = [
+        " ".join(block.split())
+        for block in re.findall(r"```\nUserWarning: (.*?)\n```", text, re.S)
+    ]
+    emitted = [
+        underpowered_warnings(warn_if_underpowered, "wilcoxon", n_seeds=3, alpha=ALPHA)[
+            0
+        ],
+        underpowered_warnings(compare_methods, separated(3, 6), alpha=ALPHA)[0],
+    ]
+    assert quoted == emitted

@@ -6,9 +6,11 @@ import xarray as xr
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from _separated import separated, underpowered_warnings
 from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
+    _best_case_p,
     cohens_d,
     cohens_dz,
     compare_methods,
@@ -178,6 +180,154 @@ def test_compare_methods_warns_when_test_underpowered():
     ds = to_dataset(results)
     with pytest.warns(UserWarning, match="cannot reach"):
         compare_methods(ds, test="wilcoxon", alpha=0.05)
+
+
+def _underpowered(test: str, n_seeds: int, alpha: float = 0.05, **kwargs) -> list[str]:
+    """The "cannot reach" warnings of one warn_if_underpowered call."""
+    return underpowered_warnings(
+        warn_if_underpowered, test, n_seeds=n_seeds, alpha=alpha, **kwargs
+    )
+
+
+def test_warn_if_underpowered_counts_the_holm_family():
+    """Wilcoxon's best case at 6 seeds is p=0.03125: one pair clears alpha=0.05,
+    but Holm multiplies the smallest of three pairs' p-values by 3."""
+    assert _underpowered("wilcoxon", 6) == []
+    (msg,) = _underpowered("wilcoxon", 6, n_comparisons=3)
+    assert "with 6 seeds over 3 method pairs under correction='holm'" in msg
+    assert "best-case p=0.03125, corrected 0.09375" in msg
+    assert "compare fewer methods" in msg
+    # 3 * 2 ** (1 - 7) = 0.047 clears alpha: the floor is 7 seeds, exactly.
+    assert _underpowered("wilcoxon", 7, n_comparisons=3) == []
+    # Four methods, six pairs: 6 * 2 ** (1 - 7) = 0.094 does not, 8 seeds do.
+    assert _underpowered("wilcoxon", 7, n_comparisons=6)
+    assert _underpowered("wilcoxon", 8, n_comparisons=6) == []
+
+
+def test_warn_if_underpowered_blames_the_seeds_when_one_pair_cannot_reach_alpha():
+    """Below the single-pair floor the family is not the reason, so the warning
+    keeps the single-pair wording the statistics guide quotes."""
+    (msg,) = _underpowered("wilcoxon", 3, n_comparisons=3)
+    assert "with 3 seeds (best-case p=0.25)" in msg
+    assert "method pairs" not in msg
+
+
+@pytest.mark.parametrize(
+    "correction, warns",
+    [("holm", True), ("bonferroni", True), ("fdr_bh", False), ("none", False)],
+)
+def test_only_family_scaled_corrections_raise_the_seed_floor(correction, warns):
+    """Benjamini-Hochberg leaves a family of equally extreme p-values as they
+    are, and "none" adjusts nothing, so neither raises the bar above alpha."""
+    msgs = _underpowered("wilcoxon", 6, n_comparisons=3, correction=correction)
+    assert bool(msgs) is warns, msgs
+
+
+def test_warn_if_underpowered_says_nothing_for_a_nan_best_case():
+    """A parametric test at one seed has no sampling distribution (NaN p), which
+    compare_methods reports as not significant; a floor of NaN is nothing to say,
+    and before the family bar the NaN never compared true."""
+    assert _underpowered("welch", 1) == []
+    ds = to_dataset({"a": [{"accuracy": 0.9}], "b": [{"accuracy": 0.7}]})
+    assert underpowered_warnings(compare_methods, ds, test="welch") == []
+
+
+@pytest.mark.parametrize("test, n_seeds", [("wilcoxon", 6), ("welch", 1), ("bogus", 6)])
+def test_warn_if_underpowered_rejects_an_unknown_correction(test, n_seeds):
+    """A typo must not fall back to the laxer single-pair floor, whatever the
+    probe says: also when the test is unknown or its best case is NaN."""
+    with pytest.raises(ValueError, match="unknown correction 'Holm'"):
+        warn_if_underpowered(test, n_seeds, 0.05, n_comparisons=3, correction="Holm")
+
+
+@pytest.mark.parametrize("n_comparisons", [0, -5])
+def test_warn_if_underpowered_rejects_an_empty_family(n_comparisons):
+    """A miscomputed pair count must not pass as the single-pair floor."""
+    with pytest.raises(ValueError, match="n_comparisons must be at least 1"):
+        warn_if_underpowered("wilcoxon", 6, 0.05, n_comparisons=n_comparisons)
+
+
+def test_warn_if_underpowered_points_at_its_caller():
+    def caller():
+        warn_if_underpowered("wilcoxon", 3, 0.05)  # the line the warning names
+
+    with pytest.warns(UserWarning, match="cannot reach") as rec:
+        caller()
+    assert rec[0].lineno == caller.__code__.co_firstlineno + 1
+
+
+def test_warn_if_underpowered_matches_significance_at_exact_equality():
+    """A pair is significant when its corrected p is strictly below alpha, so a
+    best case that lands exactly on alpha cannot reach it and must warn."""
+    assert _underpowered("wilcoxon", 4, alpha=0.125)  # 2 ** (1 - 4) == 0.125
+    assert _underpowered("wilcoxon", 6, alpha=0.09375, n_comparisons=3)
+    ds = separated(3, 6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert not compare_methods(ds, alpha=0.09375)["significant"].any()
+
+
+def _compare_underpowered(ds: xr.Dataset, **kwargs) -> list[str]:
+    return underpowered_warnings(compare_methods, ds, **kwargs)
+
+
+def test_compare_methods_warns_for_three_methods_at_six_seeds():
+    (msg,) = _compare_underpowered(separated(3, 6))
+    assert "over 3 method pairs under correction='holm' (best-case" in msg
+    assert "for metric" not in msg  # it holds for every metric: none is named
+    assert _compare_underpowered(separated(3, 7)) == []
+    assert _compare_underpowered(separated(2, 6)) == []
+
+
+def test_compare_methods_without_a_family_correction_keeps_the_single_pair_floor():
+    assert _compare_underpowered(separated(3, 6), correction="none") == []
+    assert _compare_underpowered(separated(3, 6), correction="fdr_bh") == []
+    assert _compare_underpowered(separated(3, 6), correction="bonferroni")
+
+
+def test_compare_methods_judges_the_family_without_masked_pairs():
+    """A method constant across seeds is masked (NaN p), which takes its pairs
+    out of the Holm family: three methods with one constant correct one pair."""
+    ds = separated(3, 6)
+    ds["score"].loc[{"method": "m2"}] = 1.0
+    assert _compare_underpowered(ds) == []
+
+
+@pytest.mark.parametrize("order", [("full", "masked"), ("masked", "full")])
+def test_compare_methods_judges_the_family_per_metric(order):
+    """One metric masks a method (family of one pair, which can reach alpha),
+    the other corrects all three pairs (which cannot): the warning names the
+    metric it holds for, in either order, and the masked metric's pair is
+    still significant."""
+    ds = separated(3, 6, metrics=order)
+    ds["masked"].loc[{"method": "m2"}] = 1.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = compare_methods(ds)
+    msgs = [str(c.message) for c in caught if "cannot reach alpha" in str(c.message)]
+    (msg,) = msgs
+    assert "over 3 method pairs under correction='holm' for metric 'full' (" in msg
+    assert "'masked'" not in msg
+    masked = df[(df["metric"] == "masked") & (df["method_b"] == "m1")]
+    assert masked["significant"].tolist() == [True]
+
+
+def test_compare_methods_names_every_metric_a_family_puts_out_of_reach():
+    """Two metrics share one family that cannot reach alpha while a third's can:
+    one warning names the two, not one warning per metric."""
+    ds = separated(3, 6, metrics=("a", "b", "masked"))
+    ds["masked"].loc[{"method": "m2"}] = 1.0
+    (msg,) = _compare_underpowered(ds)
+    assert "for metrics 'a', 'b' (" in msg
+
+
+def test_compare_methods_blames_the_seeds_once_for_every_metric():
+    """Below the single-pair floor the family does not matter, so metrics with
+    different families share one unnamed warning."""
+    ds = separated(3, 3, metrics=("full", "masked"))
+    ds["masked"].loc[{"method": "m2"}] = 1.0
+    (msg,) = _compare_underpowered(ds)
+    assert "with 3 seeds (best-case p=0.25)" in msg
 
 
 def test_compare_methods_masks_zero_variance_methods():
@@ -744,3 +894,59 @@ def test_cluster_label_shape_is_checked_against_the_scores_shape():
         ValueError, match=r"one label per item, got \(5,\) for \(5, 1\) items"
     ):
         paired_item_bootstrap(a, a + 1, clusters=[0, 1, 0, 1, 0])
+
+
+def test_compare_methods_counts_metrics_whose_names_stringify_alike():
+    """Two data variables named 1 and "1" are two metrics: a method constant in
+    both is constant in every metric and gets the deterministic-method warning,
+    which keying the metrics by their string once suppressed."""
+    scores = np.array([[1.0, 1.0, 1.0], [0.1, 0.2, 0.3]])
+    ds = xr.Dataset(
+        {1: (("method", "seed"), scores), "1": (("method", "seed"), scores.copy())},
+        coords={"method": ["a", "b"], "seed": [0, 1, 2]},
+    )
+    with pytest.warns(UserWarning, match="method 'a' produced identical scores"):
+        compare_methods(ds, test="welch")
+
+
+@pytest.mark.parametrize("test", ["welch", "ttest_ind", "ttest_rel"])
+def test_parametric_tests_have_no_floor_for_the_family_to_raise(test):
+    """A t-test's p-value falls without bound as the separation grows, so the
+    probe's value is not a floor: three methods two seeds apart by 10000 are
+    all significant under Holm at alpha=1e-6, and must not be told they
+    cannot be (Codex, #269). Every parametric test takes the same branch."""
+    scores = np.array([[0.0, 1.0], [10000.0, 10001.0], [20000.0, 20001.0]])
+    ds = xr.Dataset(
+        {"score": (("method", "seed"), scores)},
+        coords={"method": ["a", "b", "c"], "seed": [0, 1]},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = compare_methods(ds, test=test, alpha=1e-6)
+    assert df["significant"].all()
+    assert not [c for c in caught if "cannot reach" in str(c.message)]
+    # The floor is 0 whatever the family or alpha, so no correction raises it.
+    assert _underpowered(test, 2, alpha=1e-12, n_comparisons=100) == []
+
+
+def test_rank_probe_takes_the_exact_path_scipy_takes_for_real_data():
+    """Identical paired differences are ties, which switch scipy's Wilcoxon to
+    its asymptotic p-value at larger n (0.00018 at 14 seeds against the exact
+    2 ** (1 - 14)); a probe built that way told 25 methods at 14 seeds, whose
+    300 Holm-corrected pairs are all significant, that none could be (Codex,
+    #269). The probe's differences are distinct, so it reaches the exact floor."""
+    assert _best_case_p("wilcoxon", 14) == 2 ** (1 - 14)
+    n_methods, n_seeds = 25, 14
+    scores = np.array([(np.arange(n_seeds) + 1.0) * (i + 1) for i in range(n_methods)])
+    ds = xr.Dataset(
+        {"score": (("method", "seed"), scores)},
+        coords={
+            "method": [f"m{i}" for i in range(n_methods)],
+            "seed": np.arange(n_seeds),
+        },
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = compare_methods(ds)
+    assert len(df) == 300 and df["significant"].all()
+    assert not [c for c in caught if "cannot reach" in str(c.message)]
