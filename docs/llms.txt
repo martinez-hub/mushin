@@ -35,7 +35,7 @@ experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 - [Home](https://martinez-hub.github.io/mushin/): what mushin is and a tour of its features
 - [Install](https://martinez-hub.github.io/mushin/install/): extras table and the platform, torch and NumPy support matrix
 - [Quickstart](https://martinez-hub.github.io/mushin/quickstart/): run a sweep and get a labeled `xarray.Dataset` back
-- [For AI agents](https://martinez-hub.github.io/mushin/for-agents/): the usage guide for coding agents, and a block to paste into a project's `AGENTS.md` or `CLAUDE.md`
+- [For AI agents](https://martinez-hub.github.io/mushin/for-agents/): the usage guide for coding agents, the Claude Code plugin that installs it as the `/mushin:guide` skill, and a block to paste into a project's `AGENTS.md` or `CLAUDE.md`
 - [Tutorial](https://martinez-hub.github.io/mushin/tutorial/): the full workflow end to end, from sweep to statistical comparison
 - [Core concepts](https://martinez-hub.github.io/mushin/concepts/): workflows, the (method x seed) dataset, significance testing, the task registry
 
@@ -55,7 +55,7 @@ experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 - [Segmentation](https://martinez-hub.github.io/mushin/guides/segmentation/): comparing segmentation models with the segmentation battery
 - [Custom metrics & predict_fn](https://martinez-hub.github.io/mushin/guides/custom/): custom tasks, metrics and prediction functions, `register_task`
 - [Understanding the statistics](https://martinez-hub.github.io/mushin/guides/statistics/): test selection, seed counts and the Holm correction
-- [Analyzing from Claude Code](https://martinez-hub.github.io/mushin/guides/mcp/): the read-only `mushin-mcp` server for inspecting completed runs from an MCP client
+- [Analyzing from Claude Code](https://martinez-hub.github.io/mushin/guides/mcp/): the read-only `mushin-mcp` server for inspecting completed runs from an MCP client; it also serves the agent guide as the `guide` prompt and the `mushin://guide` resource
 
 ## API reference
 

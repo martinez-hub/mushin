@@ -62,7 +62,8 @@ local pass therefore does not cover them, and you should not claim it does.
 | `src/mushin/llm/` | `compare_llms`, `compare_scores`, `llm_judge` (`eval` extra). |
 | `src/mushin/study/` | `Study`: a training sweep routed into `compare`. Its features need the `eval` extra, but `import mushin` loads it. |
 | `src/mushin/lightning/` | `HydraDDP`, `HydraFSDP`, `MetricsCallback`, cluster helpers. |
-| `src/mushin/mcp/` | The read-only `mushin-mcp` server (`mcp` extra). |
+| `src/mushin/mcp/` | The read-only `mushin-mcp` server (`mcp` extra). It also serves the agent guide as the `guide` prompt and the `mushin://guide` resource. |
+| `.claude-plugin/`, `plugins/mushin/` | The Claude Code plugin marketplace and its one plugin, whose `guide` skill prints the installed agent guide. `tests/test_plugin.py` pins the manifests and the skill; after changing them, run `claude plugin validate plugins/mushin` and `claude plugin validate .` by hand (nothing in CI runs Claude Code). |
 | `tests/` | pytest + hypothesis. `tests/plugins/hydra_plugins/` holds a test sweeper plugin. |
 | `examples/` | Runnable scripts; CI runs them through `tests/test_examples*.py`. |
 | `docs/` | The mkdocs-material site. `docs/reference/` renders docstrings via mkdocstrings (`:::`). |

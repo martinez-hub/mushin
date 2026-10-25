@@ -58,6 +58,17 @@ def test_python_m_mushin_guide(capsys):
     assert "guide" in capsys.readouterr().out
 
 
+def test_guide_text_is_what_the_command_prints(capsys):
+    """The MCP prompt and resource return guide_text(); it must be exactly
+    what `python -m mushin guide` prints, so the two can never drift."""
+    from mushin.__main__ import guide_text, main
+
+    assert main(["guide"]) == 0
+    assert capsys.readouterr().out == guide_text()
+    assert guide_text().startswith("<!-- mushin ")
+    assert guide_text().endswith(_text())
+
+
 def test_the_guide_prints_on_a_cp1252_pipe():
     """A Windows pipe writes in the ANSI code page; the guide must survive it."""
     env = {**os.environ, "PYTHONIOENCODING": "cp1252"}

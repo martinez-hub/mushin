@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import re
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +214,65 @@ def test_server_end_to_end_in_memory(tmp_path):
     # root containment must hold across the protocol boundary, as a tool
     # error rather than a crashed server
     assert bad.is_error is True
+
+
+def test_server_serves_the_guide_as_prompt_and_resource(tmp_path):
+    """An MCP client gets the agent guide, matching the installed mushin,
+    without leaving the client: as the `guide` prompt (a slash command in
+    Claude Code) and as the `mushin://guide` resource."""
+    pytest.importorskip("mcp")
+    import anyio
+    from mcp import Client
+
+    from mushin.__main__ import guide_text
+    from mushin.mcp.server import create_server
+
+    server = create_server(root=tmp_path)
+    assert "guide" in server.instructions
+    assert "read-only" in server.instructions.lower()
+
+    async def scenario():
+        async with Client(server, raise_exceptions=True) as client:
+            prompts = await client.list_prompts()
+            prompt = await client.get_prompt("guide")
+            resources = await client.list_resources()
+            resource = await client.read_resource("mushin://guide")
+            return prompts, prompt, resources, resource
+
+    prompts, prompt, resources, resource = anyio.run(scenario)
+    assert [p.name for p in prompts.prompts] == ["guide"]
+    assert [m.content.text for m in prompt.messages] == [guide_text()]
+    assert [(str(r.uri), r.mime_type) for r in resources.resources] == [
+        ("mushin://guide", "text/markdown")
+    ]
+    assert [c.text for c in resource.contents] == [guide_text()]
+    # The docs name the prompt and the resource as the server registers them,
+    # in the forms each page uses (the MCP guide and llms.txt name them, the
+    # For AI agents page shows Claude Code's slash command and @-mention).
+    # Claude Code builds those from the name given to `claude mcp add`, which
+    # the MCP guide's setup line fixes, not from the server's own name.
+    [prompt_name] = [p.name for p in prompts.prompts]
+    [resource_uri] = [str(r.uri) for r in resources.resources]
+    repo = Path(__file__).resolve().parents[2]
+    mcp_guide = (repo / "docs/guides/mcp.md").read_text(encoding="utf-8")
+    [client_name] = re.findall(r"^claude mcp add (\S+) ", mcp_guide, re.M)
+    assert client_name == server.name  # one name everywhere
+    expected = {
+        "docs/guides/mcp.md": (
+            f"`{prompt_name}`",
+            f"`{resource_uri}`",
+            f"/{client_name}:{prompt_name} (MCP)",
+        ),
+        "docs/llms.txt": (f"`{prompt_name}`", f"`{resource_uri}`"),
+        "docs/for-agents.md": (
+            f"/{client_name}:{prompt_name} (MCP)",
+            f"@{client_name}:{resource_uri}",
+        ),
+    }
+    for page, names in expected.items():
+        text = (repo / page).read_text(encoding="utf-8")
+        for name in names:
+            assert name in text, (page, name)
 
 
 def test_main_builds_server_without_running(monkeypatch):

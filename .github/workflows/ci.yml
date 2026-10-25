@@ -289,13 +289,17 @@ jobs:
       # Some docs content is pinned by tests: llms.txt must list every nav page
       # and state facts that match pyproject.toml, the numbers quoted in the
       # statistics guide must match the code, and the agent guide's code must
-      # run and its keywords and links resolve. The `test` job skips docs-only
-      # PRs, which are the ones most likely to break these, so they run here on
-      # every PR as well, after the strict build so a failure here does not hide
-      # a build error. --extra eval: test_docs_claims imports the stats code.
-      # --group docs: the agent guide's render test needs the Markdown extensions.
+      # run and its keywords and links resolve, and the Claude Code plugin's
+      # manifests, skill and documented install commands must agree (nothing
+      # in CI runs Claude Code, and plugins/ is not in the `code` filter, so
+      # this is the one place tests/test_plugin.py runs on a plugin-only PR).
+      # The `test` job skips docs-only PRs, which are the ones most likely to
+      # break these, so they run here on every PR as well, after the strict
+      # build so a failure here does not hide a build error. --extra eval:
+      # test_docs_claims imports the stats code. --group docs: the agent
+      # guide's render test needs the Markdown extensions.
       - name: Docs-pinning tests
-        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py -p no:cacheprovider
+        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py -p no:cacheprovider
 
   core-only:
     # Guards the eval-extra split: a core install (NO extras) must import, run a

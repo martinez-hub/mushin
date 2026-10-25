@@ -7,9 +7,28 @@ results, how to run long sweeps from an agent, and what to check before
 reporting. This page shows the guide from the main branch; from mushin 0.16,
 `python -m mushin guide` prints the copy that matches the installed version.
 
+## Claude Code
+
+Install the guide as a skill from this repository's plugin marketplace, then
+load it with `/mushin:guide` before writing or changing an experiment:
+
+```text
+/plugin marketplace add martinez-hub/mushin
+/plugin install mushin@mushin
+```
+
+On Claude Code 2.1.275 or later, one command does both:
+`/plugin install mushin --marketplace martinez-hub/mushin`.
+
+The skill runs `python -m mushin guide` in your project, so it always shows
+the guide for the installed mushin (0.16 or later; install it first with
+`pip install "mushin-py[eval]"`). With `mushin-mcp` connected (see
+[Analyzing from Claude Code](guides/mcp.md)), the guide is also the
+`/mushin:guide (MCP)` prompt and the `@mushin:mushin://guide` resource.
+
 ## Point your agent at it
 
-Add this to your project's `AGENTS.md` or `CLAUDE.md`:
+For any agent, add this to your project's `AGENTS.md` or `CLAUDE.md`:
 
 ```text
 This project uses mushin. Install it with `pip install "mushin-py[eval]"`
