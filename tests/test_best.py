@@ -86,8 +86,8 @@ def test_best_missing_dir_raises(tmp_path):
 def _run_seeded(wd, *, fail=()):
     """A 2 x 3 (lr x seed) grid where the best SINGLE cell belongs to the
     configuration with the worse MEAN: lr=0.1 scores -5, -5, 10 (mean 0.0) and
-    lr=0.2 scores 1, 1, 1 (mean 1.0). ``only0`` is finite at seed 0 only, so a
-    mean of it is undefined. ``fail`` lists (lr, seed) cells that raise, which
+    lr=0.2 scores 1, 1, 1 (mean 1.0). ``only0`` is finite at seed 0 only and
+    ``signed_inf`` is infinite at seeds 0 and 1, so their means are undefined. ``fail`` lists (lr, seed) cells that raise, which
     ``on_error="nan"`` records as failed."""
     scores = {0.1: [-5.0, -5.0, 10.0], 0.2: [1.0, 1.0, 1.0]}
 
@@ -98,7 +98,11 @@ def _run_seeded(wd, *, fail=()):
                 raise RuntimeError("boom")
             score = scores[lr][seed]
             return dict(
-                score=score, loss=-score, only0=1.0 if seed == 0 else float("nan")
+                score=score,
+                loss=-score,
+                only0=1.0 if seed == 0 else float("nan"),
+                # +inf, -inf, 1.0: a mean over them is undefined (fsum raises)
+                signed_inf=[float("inf"), float("-inf"), 1.0][seed],
             )
 
     W().run(
@@ -110,6 +114,8 @@ def _run_seeded(wd, *, fail=()):
 
 
 def test_best_over_seed_picks_the_best_mean_not_the_lucky_cell(tmp_path):
+    from mushin._resume import read_cell_status
+
     wd = tmp_path / "s"
     _run_seeded(wd)
     single = mushin.best(wd, "score")
@@ -123,8 +129,12 @@ def test_best_over_seed_picks_the_best_mean_not_the_lucky_cell(tmp_path):
     assert r.status == "completed"
     assert r.n == 3
     assert r.dir is None
-    assert len(r.dirs) == 3 and all(Path(d).is_dir() for d in r.dirs)
+    # the winning group's own cells, in job order
+    assert [read_cell_status(d)["combo"] for d in r.dirs] == [
+        {"lr": 0.2, "seed": s} for s in (0, 1, 2)
+    ]
     # means of the metrics finite in every cell; `only0` is NaN at seeds 1, 2
+    # and `signed_inf` is infinite at seeds 0, 1
     assert r.metrics == {"score": pytest.approx(1.0), "loss": pytest.approx(-1.0)}
     assert "n=3" in repr(r)
 
@@ -242,3 +252,23 @@ def test_best_result_without_dir_has_no_dirs():
     r = BestResult({}, "completed", {}, 0.0, None)
     assert r.dirs == [] and r.n == 0
     assert "n=0" in repr(r)
+
+
+def test_best_over_non_finite_metrics_make_a_group_incomplete(tmp_path):
+    """The other half of the completeness rule: a completed cell whose metric
+    is NaN or infinite leaves its group incomplete; +inf and -inf in one group
+    must raise the usual error, not fsum's."""
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    for metric in ("only0", "signed_inf"):
+        with pytest.raises(ValueError, match="no group of cells"):
+            mushin.best(wd, metric, over="seed")
+
+
+def test_best_never_picks_an_infinite_cell(tmp_path):
+    wd = tmp_path / "s"
+    _run_seeded(wd)
+    r = mushin.best(wd, "signed_inf")  # +inf at seed 0 is not finite
+    assert r.combo["seed"] == 2 and r.value == pytest.approx(1.0)
+    r = mushin.best(wd, "signed_inf", mode="min")  # nor is -inf at seed 1
+    assert r.combo["seed"] == 2

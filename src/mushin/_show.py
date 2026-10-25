@@ -9,6 +9,7 @@ before committing to the full ``to_xarray`` load."""
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -289,7 +290,9 @@ class BestResult:
 
 
 def _finite_number(v: Any) -> bool:
-    return isinstance(v, int | float) and not isinstance(v, bool) and v == v
+    # isfinite, not just `v == v`: an inf metric must not be "best", and a group
+    # holding +inf and -inf would make fmean raise instead of being incomplete.
+    return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _is_candidate(cell: dict, metric: str) -> bool:
