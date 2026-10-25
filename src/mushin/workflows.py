@@ -790,9 +790,13 @@ class _TaskRunner:
         if not self.cache_dir or config_hash is None or self.code_hash is None:
             return None
         if deps is None:
-            # The project code could not be fingerprinted: no key would tell
-            # this code era from another, so the cache is not used.
-            return None
+            if self.code_roots:
+                # The project code could not be fingerprinted: no key would
+                # tell this code era from another, so the cache is not used.
+                return None
+            # A runner pickled by an earlier mushin walks nothing: its key is
+            # the two-part one that version used.
+            deps = {}
         import hashlib
 
         payload = f"{config_hash}:{self.code_hash}"
@@ -2439,27 +2443,32 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             file imports), a frozen settings dataclass, and the classes the
             cell's config names (``_target_``, or hydra-zen's ``just()`` and
             ``zen_meta``), by their module's file. Helpers are hashed by their
-            bytecode, so a comment, a docstring or a moved definition in one is
-            not an edit (the task function's own source is compared as text, so
-            a comment in its body is). A module-level value computed on import
-            (``os.cpu_count()``, ``"cuda" if ... else "cpu"``) is compared by
-            the source of its assignment, and a class's constants by its body's
-            source, so they read alike on every node. A changed non-swept
+            bytecode, so a comment, a docstring, a moved definition or most
+            reformatting in one is not an edit (the task function's own source
+            is compared as text, so a comment in its body is). A value computed
+            on import (``os.cpu_count()``, ``"cuda" if ... else "cpu"``), at
+            module level, in a class body or as a default argument, is compared
+            by its source, so it reads alike on every node; a value a decorator
+            or factory captured in a closure is compared by value, so one
+            computed from the host can differ between nodes. A changed non-swept
             value, an edited task body or an edited helper re-runs that cell,
             with a warning naming where the change is (``helpers:scale``). Not
             covered: installed packages other than editable ones (a helper
             replaced by an installed function is not seen), data files, the
             environment, objects and mutable containers (beyond the project
-            code a container holds), a module-level name the project's own code
-            rebinds (a lazily created object, a warn-once flag: state, not
-            code), a class the config names from the driver script itself
+            code a container holds), a module-level name or closure cell the
+            project's own code rebinds (``global`` or ``nonlocal``: a lazily
+            created object, a warn-once flag; state, not code), a class the
+            config names from the driver script itself
             (``__main__``; covered when the task's code uses it), and code
             reached only through some other string. A module imported in the
             task's body, or named by the config, is compared as a whole file
             (any code change in it counts, a moved definition included, though
-            not its comments, docstrings or main block), and is read from
-            disk, so editing it in a running process without reloading records
-            the edit. Where in doubt the guard misses an edit rather than re-running
+            not its comments, docstrings or main block). Such a module, a class
+            body and a value computed on import are read from disk, so after
+            editing one in a running process without reloading it, the record
+            shows the edit while the old code runs: reload or restart before
+            re-running. Where in doubt the guard misses an edit rather than re-running
             unchanged cells, and the walk has a fixed size limit, so a very
             large project is covered only as far as it reaches (with a
             warning). A resume under another Python version does not compare

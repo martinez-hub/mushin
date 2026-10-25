@@ -368,6 +368,22 @@ def _constant_repr(value, depth: int = 0) -> str | None:
 #: part of what the code does.
 _CO_HAS_DOCSTRING = 0x4000000
 _CONST_OPS = frozenset({"LOAD_CONST", "RETURN_CONST"})
+_SKIPPED_OPS = frozenset({"CACHE", "EXTENDED_ARG", "NOP", "RESUME"})
+#: 3.13+ fuse two adjacent local-variable instructions into one only when both
+#: are on the same line, so wrapping a call over several lines changes which
+#: opcodes appear; each is hashed as the instructions it stands for. 3.14's
+#: borrowed loads are the compiler's choice, not the code's.
+_FUSED_OPS = {
+    "LOAD_FAST_LOAD_FAST": ("LOAD_FAST", "LOAD_FAST"),
+    "STORE_FAST_LOAD_FAST": ("STORE_FAST", "LOAD_FAST"),
+    "STORE_FAST_STORE_FAST": ("STORE_FAST", "STORE_FAST"),
+    "LOAD_FAST_BORROW_LOAD_FAST_BORROW": ("LOAD_FAST", "LOAD_FAST"),
+}
+_RENAMED_OPS = {"LOAD_FAST_BORROW": "LOAD_FAST"}
+
+
+def _fused(ins) -> bool:
+    return ins.opname in _FUSED_OPS and isinstance(ins.argval, tuple)
 
 
 def _code_hash(code, function: bool = False) -> str:
@@ -379,11 +395,28 @@ def _code_hash(code, function: bool = False) -> str:
     a moved function is not an edit. Bytecode is stable within a Python minor
     version; the record carries the version, and a resume under another one
     does not compare. ``function`` is kept for callers; every code object is
-    hashed the same way."""
+    hashed the same way. Jumps are hashed by the index of the instruction
+    they reach, since a line number's NOP (dropped here) shifts every later
+    offset, and fused instructions as the ones they stand for, so most
+    reformatting is not an edit either."""
+    import bisect
     import dis
     import types
 
     del function
+    jumps = (
+        set(getattr(dis, "hasjump", ()))
+        | set(getattr(dis, "hasjrel", ()))
+        | set(getattr(dis, "hasjabs", ()))
+    )
+    kept = [i for i in dis.get_instructions(code) if i.opname not in _SKIPPED_OPS]
+    # Where each kept instruction starts in the stream as hashed, in which a
+    # fused instruction counts as the two it stands for.
+    offsets, positions, at = [], [], 0
+    for ins in kept:
+        offsets.append(ins.offset)
+        positions.append(at)
+        at += 2 if _fused(ins) else 1
     parts = [
         repr(code.co_names).encode(),
         repr(code.co_varnames).encode(),
@@ -397,10 +430,13 @@ def _code_hash(code, function: bool = False) -> str:
             )
         ).encode(),
     ]
-    for ins in dis.get_instructions(code):
-        if ins.opname in ("CACHE", "EXTENDED_ARG", "NOP", "RESUME"):
+    for ins in kept:
+        opname = _RENAMED_OPS.get(ins.opname, ins.opname)
+        if _fused(ins):
+            for op, name in zip(_FUSED_OPS[opname], ins.argval, strict=False):
+                parts.append(f"{op} {name!r}".encode())
             continue
-        if ins.opname in _CONST_OPS:
+        if opname in _CONST_OPS:
             const = ins.argval
             if isinstance(const, types.CodeType):
                 arg = _code_hash(const)
@@ -408,9 +444,14 @@ def _code_hash(code, function: bool = False) -> str:
                 # A frozenset constant (``x in {"a", "b"}``) prints in
                 # string-hash order, which differs per process: sorted.
                 arg = _constant_repr(const) or repr(const)
+        elif ins.opcode in jumps and isinstance(ins.argval, int):
+            # The target's index among the kept instructions (a dropped NOP
+            # target resolves to the next kept one).
+            at = bisect.bisect_left(offsets, ins.argval)
+            arg = f"->{positions[at] if at < len(positions) else 'end'}"
         else:
             arg = repr(ins.argval) if ins.argval is not None else ""
-        parts.append(f"{ins.opname} {arg}".encode())
+        parts.append(f"{opname} {arg}".encode())
     return _short_hash(b"\x00".join(parts))
 
 
@@ -483,6 +524,41 @@ def _code_names(code) -> tuple[set[str], set[str], list[tuple[str, int]]]:
                         if isinstance(item, str) and item != "*":
                             imports.append((f"{name}.{item}" if name else item, level))
     return globals_, attrs, imports
+
+
+def _stored_attrs(codes) -> set[str]:
+    """The attribute names some code, or code nested in it, assigns or deletes
+    (``Net.made += 1``, ``cls._cache = ...``): a class attribute its own
+    methods store is state."""
+    import dis
+    import types
+
+    names: set[str] = set()
+    stack = list(codes)
+    while stack:
+        current = stack.pop()
+        stack.extend(k for k in current.co_consts if isinstance(k, types.CodeType))
+        for ins in dis.get_instructions(current):
+            if ins.opname in ("STORE_ATTR", "DELETE_ATTR"):
+                names.add(ins.argval)
+    return names
+
+
+def _rebound_cells(code) -> set[str]:
+    """The free variables a function, or code nested in it, rebinds with
+    ``nonlocal``."""
+    import dis
+    import types
+
+    names: set[str] = set()
+    stack = [code]
+    while stack:
+        current = stack.pop()
+        stack.extend(k for k in current.co_consts if isinstance(k, types.CodeType))
+        for ins in dis.get_instructions(current):
+            if ins.opname in ("STORE_DEREF", "DELETE_DEREF"):
+                names.add(ins.argval)
+    return names & set(code.co_freevars)
 
 
 def _resolve_imports(imports, package: str | None) -> list[str]:
@@ -732,10 +808,11 @@ def _file_imports(tree, name: str, is_package: bool) -> list[str]:
 _FILES_MAX = 400
 
 
-def _file_entries(name: str) -> dict[str, str]:
+def _file_entries(name: str) -> tuple[dict[str, str], bool]:
     """Entries for a module imported inside a function's body and, through
-    their files, every project module it imports in turn: a helper imported
-    lazily that itself imports the constants it uses."""
+    their files, every project module it imports in turn (a helper imported
+    lazily that itself imports the constants it uses), and whether
+    ``_FILES_MAX`` cut the list short."""
     out: dict[str, str] = {}
     pending = [name]
     seen: set[str] = set()
@@ -753,7 +830,7 @@ def _file_entries(name: str) -> dict[str, str]:
             file = _find_file(current) or ""
             is_package = Path(file).name == "__init__.py"
             pending.extend(_file_imports(tree, current, is_package))
-    return out
+    return out, any(p not in seen for p in pending)
 
 
 #: Each project file's module-level bindings and class bodies, per process:
@@ -831,7 +908,7 @@ def _source_index(file: str, module_name: str):
                     )
                 ]
                 class_bodies[qual] = _short_hash(
-                    "|".join(_canonical_dump(b) for b in stmts).encode()
+                    "|".join(_canonical_dump(_sanitized(b)) for b in stmts).encode()
                 )
                 visit_classes(node.body, qual + ".")
                 continue
@@ -883,6 +960,109 @@ def _source_index(file: str, module_name: str):
     return out
 
 
+#: Each project file's default arguments and ``global`` declarations, per
+#: process: (path, mtime_ns, size) -> (defaults, rebound).
+_DEF_CACHE: dict[tuple[str, int, int], tuple[dict, frozenset]] = {}
+
+
+def _default_entry(node) -> tuple[str, object]:
+    """How a default argument is written: ``("literal", value)`` for a literal,
+    else ``("source", digest)`` of its expression with secret-shaped strings
+    blanked (a default computed on import, ``stamp=time.time()``, then reads
+    alike in every process and on every node)."""
+    import ast
+
+    try:
+        return ("literal", ast.literal_eval(node))
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return ("source", _short_hash(_canonical_dump(_sanitized(node)).encode()))
+
+
+def _def_index(file: str) -> tuple[dict, frozenset]:
+    """``(defaults, rebound)`` for a project file. ``defaults`` maps each
+    function's ``(name, first line)`` (its first decorator's line, as
+    ``co_firstlineno`` gives it) to ``{argument: _default_entry}``, or to None
+    when two functions share that key; ``rebound`` holds every name a
+    ``global`` statement in the file declares: state the module's own code
+    rebinds, the same set in every process (a parallel worker's copy of a
+    script's globals holds only the names its pickled functions use)."""
+    import ast
+
+    path = Path(file).resolve()
+    st = path.stat()
+    cache_key = (str(path), st.st_mtime_ns, st.st_size)
+    hit = _DEF_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
+    _, tree = _parsed(path)
+    defaults: dict[tuple[str, int], dict | None] = {}
+    rebound: set[str] = set()
+    for node in ast.walk(tree) if tree is not None else ():
+        if isinstance(node, ast.Global):
+            rebound.update(node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            decorators = getattr(node, "decorator_list", None) or []
+            first = decorators[0].lineno if decorators else node.lineno
+            a = node.args
+            positional = [*a.posonlyargs, *a.args]
+            entries = {
+                arg.arg: _default_entry(d)
+                for arg, d in zip(
+                    positional[len(positional) - len(a.defaults) :],
+                    a.defaults,
+                    strict=False,
+                )
+            }
+            for arg, d in zip(a.kwonlyargs, a.kw_defaults, strict=False):
+                if d is not None:
+                    entries[arg.arg] = _default_entry(d)
+            key = (getattr(node, "name", "<lambda>"), first)
+            defaults[key] = None if key in defaults else entries
+    out = (defaults, frozenset(rebound))
+    while len(_DEF_CACHE) >= _FILE_CACHE_MAX:
+        _DEF_CACHE.pop(next(iter(_DEF_CACHE)))
+    _DEF_CACHE[cache_key] = out
+    return out
+
+
+#: _default_sources' answer for a function generated at runtime (a
+#: dataclass's ``__init__``, a NamedTuple's ``__new__``): its defaults are the
+#: class body's, which the class's entry covers.
+_GENERATED = object()
+#: _default_sources' answer for a function in a module with a file that does
+#: not show its definition where its code says (two lambdas on one line, the
+#: file edited and not reloaded, or unreadable here): its defaults by type
+#: only, rather than by a value that may differ between processes.
+_UNKNOWN_DEFS = object()
+
+
+def _default_sources(fn):
+    """How ``fn``'s defaults are written in its file: ``{argument: entry}``;
+    ``_GENERATED`` for generated code; ``_UNKNOWN_DEFS`` when its module has
+    a file that does not show the definition; None when its module has no
+    file (a notebook), whose defaults are hashed by value."""
+    code = fn.__code__
+    filename = code.co_filename
+    if not isinstance(filename, str):
+        return None
+    if (
+        filename.startswith("<")
+        and filename.endswith(">")
+        and not filename.startswith("<ipython-input-")
+    ):
+        return _GENERATED
+    # Whether the module has a file is the namespace's to say, as for a
+    # class: a notebook cell's code has a file name that exists nowhere.
+    if not isinstance((getattr(fn, "__globals__", None) or {}).get("__file__"), str):
+        return None
+    try:
+        defaults, _ = _def_index(filename)
+    except (OSError, SyntaxError, ValueError, RecursionError):
+        return _UNKNOWN_DEFS
+    found = defaults.get((code.co_name, code.co_firstlineno))
+    return _UNKNOWN_DEFS if found is None else found
+
+
 #: _source_constant's answer for a name assigned one literal (``SCALE =
 #: 10``), with the literal's value: the value that runs is hashed while it
 #: equals the literal. When it does not, the process changed it at runtime
@@ -890,6 +1070,8 @@ def _source_index(file: str, module_name: str):
 #: reloaded: either way no entry, rather than a re-run of unchanged cells.
 _LITERAL = "<literal>"
 _NO_LITERAL = object()
+#: _class_source's answer for a class in a module with no file (a notebook).
+_NO_FILE = object()
 
 
 def _sanitized(node):
@@ -1033,6 +1215,11 @@ class _CodeWalk:
         self._ops = 0
         self.truncated = False
         self._file_memo: dict[str, dict[str, str]] = {}
+        # The module namespace each class was reached through by name: a
+        # class with no functions of its own (an Enum, a constants class) in
+        # the driver script says nothing else about where it is, since in a
+        # parallel worker ``__main__`` is the launcher's module.
+        self._class_home: dict[int, dict] = {}
 
     def run(self) -> None:
         # The walk runs for every sweep, so it must end: at most _WALK_MAX_OPS
@@ -1079,45 +1266,57 @@ class _CodeWalk:
             name = fn.__module__ if isinstance(fn.__module__, str) else "?"
         return _module_label(name, g)
 
-    def _class_label(self, cls) -> str:
-        """The label of a class's module, through one of its functions' globals
-        when it has any (in a parallel worker ``__main__`` is the launcher's
-        module, while a script's class keeps its functions' script globals)."""
+    def _class_namespace(self, cls) -> dict | None:
+        """The globals of the module that defines a class: one of its own
+        functions' globals (in a parallel worker ``__main__`` is the launcher's
+        module, while a script's class keeps its functions' script globals);
+        else the namespace the walk reached it through by name; else its
+        module's, except for a class in ``__main__``, which then has none in
+        every process."""
+        import sys
         import types
 
         try:
             for value in vars(cls).values():
                 func = getattr(value, "__func__", value)
+                # Only a function defined in this class says where the class
+                # is (enum puts its own functions in an Enum subclass).
                 if isinstance(
                     func, types.FunctionType
                 ) and func.__qualname__.startswith(cls.__qualname__ + "."):
-                    return self._here(func)
+                    return func.__globals__
         except Exception:  # noqa: BLE001 - a class whose namespace resists
-            pass
-        return _module_label(cls.__module__)
+            return None
+        home = self._class_home.get(id(cls))
+        if home is not None:
+            return home
+        if cls.__module__ == "__main__":
+            return None
+        try:
+            return vars(sys.modules[cls.__module__])
+        except (KeyError, TypeError):
+            return None
 
-    def _class_source(self, cls) -> str | None:
-        """The digest of a class body's non-method statements, from its file."""
-        import sys
-        import types
+    def _class_label(self, cls) -> str:
+        """The label of a class's module."""
+        namespace = self._class_namespace(cls)
+        if namespace is None:
+            return cls.__module__
+        return _module_label(cls.__module__, namespace)
 
-        for value in vars(cls).values():
-            func = getattr(value, "__func__", value)
-            # Only a function defined in this class says where the class is
-            # (enum puts its own functions in an Enum subclass's namespace).
-            if isinstance(func, types.FunctionType) and func.__qualname__.startswith(
-                cls.__qualname__ + "."
-            ):
-                g = func.__globals__
-                file, name = g.get("__file__"), g.get("__name__")
-                break
-        else:
-            module = sys.modules.get(cls.__module__)
-            file = getattr(module, "__file__", None)
-            name = cls.__module__
-        if not (
-            isinstance(file, str) and file.endswith(".py") and isinstance(name, str)
-        ):
+    def _class_source(self, cls):
+        """The digest of a class body's non-method statements, from its file;
+        ``_NO_FILE`` for a class in a module with no file (a notebook); None
+        when it cannot be told."""
+        namespace = self._class_namespace(cls)
+        if namespace is None:
+            return None
+        file, name = namespace.get("__file__"), namespace.get("__name__")
+        if not isinstance(name, str):
+            return None
+        if file is None:
+            return _NO_FILE
+        if not (isinstance(file, str) and file.endswith(".py")):
             return None
         try:
             _, bodies = _source_index(file, name)
@@ -1141,14 +1340,28 @@ class _CodeWalk:
 
     def _state(self, namespace: dict) -> frozenset[str]:
         """The module-level names the module's own functions and methods rebind
-        (``global x; x = ...``), through decorators: state, whose value changes
-        as the code runs. ``namespace`` is the module's globals."""
+        (``global x; x = ...``): state, whose value changes as the code runs.
+        ``namespace`` is the module's globals. Read from the module's file when
+        it has one; otherwise (a notebook) from its functions' code, through
+        decorators."""
         import dis
         import types
 
         cached = self._state_names.get(id(namespace))
         if cached is not None:
             return cached
+        file = namespace.get("__file__")
+        if isinstance(file, str) and file.endswith(".py"):
+            # From the file's own ``global`` statements: the same in every
+            # process, where a parallel worker's copy of a script's globals
+            # holds only the names its pickled functions use.
+            try:
+                _, out = _def_index(file)
+            except (OSError, SyntaxError, ValueError, RecursionError):
+                pass
+            else:
+                self._state_names[id(namespace)] = out
+                return out
         module_name = namespace.get("__name__")
         codes = []
         for value in list(namespace.values()):
@@ -1240,11 +1453,7 @@ class _CodeWalk:
             module = ".".join(parts[:i])
             if _find_file(module) is None:
                 continue
-            entries = self._file_memo.get(module)
-            if entries is None:
-                entries = self._file_memo[module] = _file_entries(module)
-            for key, digest in entries.items():
-                self._record(key, digest)
+            self._record_files(module)
             return
 
     # -- values -------------------------------------------------------------
@@ -1269,16 +1478,39 @@ class _CodeWalk:
                 )
             )
             named += sorted((fn.__kwdefaults__ or {}).items())
+            sources = _default_sources(fn) if named else None
             for name, value in named:
-                if _secret_name(name, value):
-                    extras.append(f"{name}=<secret>")
-                else:
-                    extras.append(
-                        f"{name}={_constant_repr(value) or self._kind(value)}"
-                    )
+                extras.append(f"{name}={self._default_repr(name, value, sources)}")
             digest = _short_hash("|".join(extras).encode())
             self._object_hash[id(fn)] = digest
         return digest
+
+    def _default_repr(self, name: str, value, sources) -> str:
+        """A default argument as hashed. In a project file, by how it is
+        written, as module-level names are: a literal by its value while the
+        value still equals it, an expression computed on import by its source
+        (it then reads alike on every node). A generated function's defaults
+        by type only (its class's body covers them); with no file (a
+        notebook), by value."""
+        if _secret(name, value):
+            return "<secret>"
+        if sources is _GENERATED or sources is _UNKNOWN_DEFS:
+            return self._kind(value)
+        if sources is None:
+            return _constant_repr(value) or self._kind(value)
+        how, written = sources.get(name, (None, None))
+        if how == "source":
+            return f"<source {written}>"
+        if how == "literal":
+            try:
+                same = type(value) is type(written) and value == written
+            except Exception:  # noqa: BLE001 - a comparison that raises
+                same = False
+            if same:
+                return _constant_repr(value) or self._kind(value)
+        # Changed since import (``__defaults__`` set, or the file edited and
+        # not reloaded), or not found: the type only.
+        return self._kind(value)
 
     def _partial_digest(self, value) -> str:
         parts = []
@@ -1316,9 +1548,15 @@ class _CodeWalk:
         # closure that holds the function itself (a call counter, a recursive
         # inner function) would otherwise be walked forever.
         owner = record_as or f"{here}:{fn.__qualname__}"
+        rebound = _rebound_cells(code) if code.co_freevars else set()
         for cell_name, cell in zip(
             code.co_freevars, fn.__closure__ or (), strict=False
         ):
+            if cell_name in rebound:
+                # ``nonlocal x; x = ...`` (a warn-once flag, a call counter):
+                # state, whose value changes as the code runs.
+                self._record(f"{owner}.<{cell_name}>", _STATE)
+                continue
             try:
                 value = cell.cell_contents
             except ValueError:  # an empty cell
@@ -1343,12 +1581,19 @@ class _CodeWalk:
         # Imports inside the body are recorded by their files, the same in a
         # process that has imported them and one that has not.
         for name in _resolve_imports(imports, package):
-            entries = self._file_memo.get(name)
-            if entries is None:
-                entries = self._file_memo[name] = _file_entries(name)
-                self._ops += len(entries)  # file work counts against the bound
-            for key, digest in entries.items():
-                self._record(key, digest)
+            self._record_files(name)
+
+    def _record_files(self, name: str) -> None:
+        """The file entries for module ``name`` and the project modules its
+        file imports, once per walk."""
+        entries = self._file_memo.get(name)
+        if entries is None:
+            entries, cut = _file_entries(name)
+            self._file_memo[name] = entries
+            self._ops += len(entries)  # file work counts against the bound
+            self.truncated = self.truncated or cut
+        for key, digest in entries.items():
+            self._record(key, digest)
 
     def _walk_module(self, module, attrs: set[str]) -> None:
         """The attributes of a project module that the reaching code uses. A
@@ -1381,6 +1626,8 @@ class _CodeWalk:
         import types
 
         value = namespace[name]
+        if isinstance(value, type) and value.__module__ == namespace.get("__name__"):
+            self._class_home.setdefault(id(value), namespace)
         code_like = (types.FunctionType, types.MethodType, type, types.ModuleType)
         wrapped = None
         if callable(value) and not isinstance(value, (functools.partial, type)):
@@ -1457,6 +1704,13 @@ class _CodeWalk:
         if not self._project(cls):
             return  # installed code: provenance's job, and no entry
         members = self._class_members(cls)
+        home = self._class_namespace(cls)
+        if home is not None:
+            # Its bases and nested classes from the same module live there too.
+            related = [v for _, k, v in members if k == "class"] + list(cls.__bases__)
+            for other in related:
+                if getattr(other, "__module__", None) == cls.__module__:
+                    self._class_home.setdefault(id(other), home)
         digest = self._object_hash.get(id(cls))
         if digest is None:
             parts = [cls.__qualname__]
@@ -1466,10 +1720,19 @@ class _CodeWalk:
                 elif kind == "class":
                     parts.append(f"{attr}=class {value.__qualname__}")
             # Class-level values by the class body's source (a value a method
-            # fills in later, such as a lazy cache, is state, not code); none
-            # for a class with no file.
+            # fills in later, such as a lazy cache, is state, not code). With
+            # no file (a notebook), the immutable ones by value.
             body = self._class_source(cls)
-            if body is not None:
+            if body is _NO_FILE:
+                stored = _stored_attrs(
+                    value.__code__ for _, kind, value in members if kind == "function"
+                )
+                for attr, kind, value in members:
+                    const = _constant_repr(value) if kind == "value" else None
+                    if const is not None and attr not in stored:
+                        secret = _secret(attr, value)
+                        parts.append(f"{attr}={'<secret>' if secret else const}")
+            elif body is not None:
                 parts.append(f"body={body}")
             parts.extend(
                 f"base={self._class_label(b) if self._project(b) else b.__module__}.{b.__qualname__}"
@@ -1699,29 +1962,35 @@ def project_fingerprints(fn, *more, cfg=None, with_body=()) -> dict | None:
         for root in with_body:
             if root is not None:
                 walk.walk_root(root, with_body=True)
-        if walk.truncated and not _TRUNCATION_WARNED:
-            _TRUNCATION_WARNED.append(True)
-            import warnings
-
-            try:
-                warnings.warn(
-                    "resume/cache_dir: the project code this task reaches is larger than "
-                    "the fingerprint walks, so edits past that point are not compared; "
-                    "use a fresh working_dir after a large refactor.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-            except Warning:  # warnings as errors: the walk is best effort
-                pass
         if cfg is not None:
             for target in _config_targets(cfg):
                 walk.walk_target(target)
+        _warn_if_truncated(walk)
         return {
             "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
             "code": walk.hashes,
         }
     except Exception:  # noqa: BLE001 - a best-effort guard never fails the sweep
         return None
+
+
+def _warn_if_truncated(walk: _CodeWalk) -> None:
+    """Warn, once per process, that a walk reached one of its bounds."""
+    if not walk.truncated or _TRUNCATION_WARNED:
+        return
+    _TRUNCATION_WARNED.append(True)
+    import warnings
+
+    try:
+        warnings.warn(
+            "resume/cache_dir: the project code this task reaches is larger than "
+            "the fingerprint walks, so edits past that point are not compared; "
+            "use a fresh working_dir after a large refactor.",
+            UserWarning,
+            stacklevel=4,
+        )
+    except Warning:  # warnings as errors: the walk is best effort
+        pass
 
 
 #: The roots' record per run token, in this process: a parallel worker walks
@@ -1763,6 +2032,7 @@ def cell_project_record(token: str, roots, with_body, cfg) -> dict | None:
                 walk = _CodeWalk()
                 walk.walk_target(target)
                 entries = walk.hashes
+                _warn_if_truncated(walk)
             except Exception:  # noqa: BLE001 - best effort: the roots' record stands
                 entries = {}
             while len(_TARGET_RECORDS) >= _TARGET_RECORDS_MAX:
@@ -1774,12 +2044,13 @@ def cell_project_record(token: str, roots, with_body, cfg) -> dict | None:
 
 def merge_project_records(prior, current):
     """The record to keep for a cell reused under ``current``. A cell keeps its
-    prior record when it has one: only the keys both records share were
-    compared, so writing keys only ``current`` has would declare the cell
-    computed by code it was never checked against (a name reached lazily, an
-    alias pointed elsewhere, another Python version). A cell with no record
-    (written before the field) takes the current one: reusing it already
-    trusted it."""
+    prior record when it has one taken under the same Python version: only the
+    keys both records share were compared, so writing keys only ``current``
+    has would declare the cell computed by code it was never checked against
+    (a name reached lazily, an alias pointed elsewhere). A cell with no record
+    (written before the field), or one taken under another Python version
+    (which can never be compared again), takes the current one: reusing it
+    already trusted it, and the cell is guarded from now on."""
     if (
         isinstance(prior, dict)
         and isinstance(prior.get("code"), dict)
