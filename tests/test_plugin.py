@@ -62,23 +62,22 @@ def test_skill_prints_the_installed_guide_and_nothing_else():
     body = fields["_body"]
     # One shell line, run at invocation and pre-approved, so the skill never
     # holds a copy of the guide that could go stale. It tries `python`, then
-    # `python3` (the only interpreter name on many boxes), then prints a note,
-    # so the line never exits non-zero: a failed injected command aborts the
-    # whole invocation and the fallback paragraph would never be seen. Each
-    # subcommand is pre-approved, or the invocation stops at a prompt.
+    # `python3` (the only interpreter name on many boxes), then `true`, so the
+    # line never exits non-zero: a failed injected command aborts the whole
+    # invocation and the fallback paragraph would never be seen (`|| true` is
+    # the form the Claude Code docs give). Each subcommand is pre-approved, or
+    # the invocation stops at a prompt; `true` is matched exactly.
     assert body.count("!`") == 1
     [command] = re.findall(r"!`([^`]*)`", body)
     parts = [part.strip() for part in command.split("||")]
     attempts = [part.split(" 2>")[0] for part in parts[:-1]]
     assert attempts == [GUIDE_COMMAND, GUIDE_COMMAND.replace("python", "python3")]
-    assert parts[-1].startswith('echo "') and "see the note below" in parts[-1]
+    assert parts[-1] == "true"
     allowed = fields["allowed-tools"]
     if isinstance(allowed, str):  # the docs allow a list or a separated string
         allowed = [a.strip() for a in allowed.split(",")]
-    # The echo is pre-approved exactly, not `echo:*`: a prefix rule would let
-    # any echo, redirections included, run unprompted for the rest of the turn.
-    assert allowed == [f"Bash({s}:*)" for s in attempts] + [f"Bash({parts[-1]})"]
-    assert "mushin-py[eval]" in body  # the note the echo points at
+    assert allowed == [f"Bash({s}:*)" for s in attempts] + ["Bash(true)"]
+    assert "mushin-py[eval]" in body  # the fallback paragraph
     assert SKILL.read_text(encoding="utf-8").isascii()
 
 
@@ -86,12 +85,16 @@ def test_docs_install_commands_name_the_manifests():
     market = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
     plugin = json.loads(PLUGIN.read_text(encoding="utf-8"))
     docs = FOR_AGENTS.read_text(encoding="utf-8")
-    assert "/plugin marketplace add martinez-hub/mushin" in docs
+    # The marketplace is this repository, as the plugin manifest names it.
+    source = plugin["repository"].removeprefix("https://github.com/")
+    assert re.fullmatch(r"[\w.-]+/[\w.-]+", source), source
+    assert market["owner"]["url"] == f"https://github.com/{source.split('/')[0]}"
+    assert f"/plugin marketplace add {source}" in docs
     assert f"/plugin install {plugin['name']}@{market['name']}" in docs
     assert f"/{plugin['name']}:guide" in docs
     # The one-step form (Claude Code 2.1.275 or later) is on both pages, and
     # the README names the version it needs and points at the two-step page.
-    one_step = f"/plugin install {plugin['name']} --marketplace martinez-hub/mushin"
+    one_step = f"/plugin install {plugin['name']} --marketplace {source}"
     readme = README.read_text(encoding="utf-8")
     # The README's Claude Code paragraph only: the page link above it predates
     # this plugin and would satisfy a whole-file check.

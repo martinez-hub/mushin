@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import re
 from pathlib import Path
 
 import numpy as np
@@ -248,19 +249,24 @@ def test_server_serves_the_guide_as_prompt_and_resource(tmp_path):
     # The docs name the prompt and the resource as the server registers them,
     # in the forms each page uses (the MCP guide and llms.txt name them, the
     # For AI agents page shows Claude Code's slash command and @-mention).
+    # Claude Code builds those from the name given to `claude mcp add`, which
+    # the MCP guide's setup line fixes, not from the server's own name.
     [prompt_name] = [p.name for p in prompts.prompts]
     [resource_uri] = [str(r.uri) for r in resources.resources]
     repo = Path(__file__).resolve().parents[2]
+    mcp_guide = (repo / "docs/guides/mcp.md").read_text(encoding="utf-8")
+    [client_name] = re.findall(r"^claude mcp add (\S+) ", mcp_guide, re.M)
+    assert client_name == server.name  # one name everywhere
     expected = {
         "docs/guides/mcp.md": (
             f"`{prompt_name}`",
             f"`{resource_uri}`",
-            f"/{server.name}:{prompt_name} (MCP)",
+            f"/{client_name}:{prompt_name} (MCP)",
         ),
         "docs/llms.txt": (f"`{prompt_name}`", f"`{resource_uri}`"),
         "docs/for-agents.md": (
-            f"/{server.name}:{prompt_name} (MCP)",
-            f"@{server.name}:{resource_uri}",
+            f"/{client_name}:{prompt_name} (MCP)",
+            f"@{client_name}:{resource_uri}",
         ),
     }
     for page, names in expected.items():

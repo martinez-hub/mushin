@@ -90,12 +90,13 @@ the case the guide did not print: install `mushin-py[eval]` (0.16 or later),
 or read the raw-GitHub copy. The skill contains no guide text of its own.
 
 The shell line (revised in review) is
-`python -m mushin guide 2>/dev/null || python3 -m mushin guide 2>/dev/null || echo "..."`:
+`python -m mushin guide 2>/dev/null || python3 -m mushin guide 2>&1 || true`:
 `python3` is the only interpreter name on many machines, and a failing
 injected command aborts the whole invocation before the body is seen, so the
-line must never exit non-zero. `allowed-tools` pre-approves each subcommand,
-the echo by its exact text (a prefix rule would let any echo run unprompted
-for the rest of the turn).
+line must never exit non-zero (`|| true` is the form the Claude Code docs
+give). The last attempt's error prints where the guide would be, so a broken
+install is not read as a missing one. `allowed-tools` pre-approves each
+subcommand, `true` by exact match.
 
 The marketplace lives at the repository root so the install is
 `/plugin marketplace add martinez-hub/mushin` then
@@ -145,8 +146,9 @@ mushin's releases (the skill content comes from the installed mushin).
   The existing CI step that checks the built wheel ships the guide keeps that
   from happening in a release.
 - The skill's shell line cannot fail (see section 2): when mushin is missing,
-  older than 0.16, or not on this shell's `python` or `python3`, the echo
-  stands where the guide would be and the body's fallback paragraph is shown.
+  older than 0.16, or not on this shell's `python` or `python3`, the last
+  attempt's error stands where the guide would be and the body's fallback
+  paragraph is shown.
   The docs section that tells the human how to install repeats it.
 
 ## Alternatives considered
