@@ -677,8 +677,9 @@ class _TaskRunner:
                 if token is not None:
                     _CURRENT_RESUME.reset(token)
                 # The accelerator comes from this process, after the task that
-                # may have imported torch has returned or raised; the record
-                # written above carries the parent's view from before any cell.
+                # may have imported torch or initialized CUDA has returned or
+                # raised; the record written above carries this process's view
+                # from before the task.
                 record_accelerator(cwd, written)
             if isinstance(result, dict):
                 write_metrics_sidecar(cwd, result)

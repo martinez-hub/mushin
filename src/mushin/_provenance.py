@@ -99,8 +99,9 @@ def _accelerator() -> dict | None:
     device on Apple Silicon. ``None`` (not recorded) in a process that has not
     imported torch. With torch loaded, ``cuda`` and ``cudnn`` are the wheel's
     build (None on a CPU-only build) and ``device`` is None until the task
-    initializes CUDA, unless MPS is available. Makes no CUDA call unless the
-    task already initialized CUDA: the device is named once the task has."""
+    initializes CUDA, unless MPS is available. Makes no ``torch.cuda`` call
+    unless the task already initialized CUDA: the device is named once the
+    task has (the cuDNN version is a library constant, read without one)."""
     torch = sys.modules.get("torch")
     if torch is None:
         # Never import torch here. Importing it is the dominant cost of a
@@ -168,7 +169,12 @@ def _seen_accelerator() -> dict | None:
     state = _cuda_initialized(torch)
     seen = _ACCELERATOR_SEEN.get(state)
     if seen is None:
-        seen = _ACCELERATOR_SEEN[state] = _accelerator()
+        seen = _accelerator()
+        # With CUDA initialized the device is always named, so None there is
+        # a query that failed (a sticky CUDA error, say): not an answer to
+        # keep for every later cell of this worker.
+        if not (state and seen.get("device") is None):
+            _ACCELERATOR_SEEN[state] = seen
     # A copy: the record is the caller's to change, the cache is not.
     return dict(seen)
 
@@ -213,6 +219,8 @@ def representative_record(paths) -> dict | None:
     not read whole for a record it does not have."""
     first = None
     for i, p in enumerate(paths):
+        if i >= 8:  # cells looked at, readable or not
+            break
         try:
             data = json.loads(Path(p).read_text())
         except (OSError, ValueError):
@@ -223,8 +231,6 @@ def representative_record(paths) -> dict | None:
             return data
         if first is None:
             first = data
-        if i >= 7:
-            break
     return first
 
 

@@ -372,6 +372,38 @@ def test_cell_in_a_worker_without_torch_records_null_even_if_the_driver_has_it(
         assert prov["accelerator"] is None, d
 
 
+def test_failed_device_query_is_not_cached(tmp_path, monkeypatch):
+    """With CUDA initialized the device is always named, so a None device
+    there is a query that failed; the answer is recorded for this cell but
+    not kept for every later cell of the worker."""
+    import json
+
+    import torch
+
+    from mushin import _provenance
+
+    monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", {})
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        torch.backends.mps, "is_available", lambda: False, raising=False
+    )
+
+    def broken(i):
+        raise RuntimeError("CUDA error: device-side assert triggered")
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", broken)
+    path = tmp_path / "mushin_provenance.json"
+    path.write_text(json.dumps({"accelerator": None}))
+    _provenance.record_accelerator(tmp_path, None)
+    assert json.loads(path.read_text())["accelerator"]["device"] is None
+    assert _provenance._ACCELERATOR_SEEN == {}
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda i: "NVIDIA H100")
+    _provenance.record_accelerator(tmp_path, None)
+    assert json.loads(path.read_text())["accelerator"]["device"] == "NVIDIA H100"
+    assert _provenance._ACCELERATOR_SEEN[True]["device"] == "NVIDIA H100"
+
+
 def test_representative_record_prefers_a_cell_with_an_accelerator(tmp_path):
     """wf.provenance, show and diff stand one cell's record for the sweep. The
     accelerator varies per cell now (a first cell that failed before its task
@@ -406,8 +438,11 @@ def test_representative_record_prefers_a_cell_with_an_accelerator(tmp_path):
         "git": {"sha": "10"},
         "accelerator": None,
     }
+    # Cells without a record count toward that bound too.
+    missing = [tmp_path / "3" / "mushin_provenance.json"] * 10
+    assert representative_record(missing + [paths[2]]) is None
     assert representative_record([]) is None
-    assert representative_record([tmp_path / "3" / "mushin_provenance.json"]) is None
+    assert representative_record(missing[:1]) is None
 
 
 def test_env_snapshot_never_overwrites_prior_run(tmp_path):
