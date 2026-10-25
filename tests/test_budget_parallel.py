@@ -563,7 +563,10 @@ def test_a_vanished_start_file_falls_back_to_this_process(tmp_path, monkeypatch)
     with pytest.warns(UserWarning, match="vanished") as record:
         assert _copy(runner)(_cell(root, 0, monkeypatch)) == {"v": 0.0}
     assert _warned_here(record)
-    # The next cell in this process meets the deadline its fallback fixed.
+    # The next cell in this process meets the deadline its fallback fixed,
+    # once the monotonic clock has moved past it: on Windows before Python
+    # 3.13 it ticks only every 15.6 ms, so wait several ticks.
+    time.sleep(0.05)
     assert isinstance(_copy(runner)(_cell(root, 1, monkeypatch)), _SkippedRun)
 
 
