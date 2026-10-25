@@ -54,6 +54,20 @@ Add an entry to your `claude_desktop_config.json`:
 All tools are read-only. The server never writes files, trains models, or
 launches sweeps.
 
+## Prompt and resource
+
+The server also serves mushin's usage guide for AI coding agents, matching
+the installed version (what `python -m mushin guide` prints):
+
+| | Name | In Claude Code |
+|---|---|---|
+| Prompt | `guide` | `/mushin:guide (MCP)` |
+| Resource | `mushin://guide` | `@mushin:mushin://guide` |
+
+Use it before asking the agent to write or change an experiment. The
+[For AI agents](../for-agents.md) page has the same guide as a plugin skill
+that does not need the server.
+
 ## Example prompts
 
 Once connected, you can ask questions like:

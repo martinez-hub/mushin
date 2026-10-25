@@ -5,8 +5,7 @@
     "url": "https://github.com/martinez-hub"
   },
   "metadata": {
-    "description": "Plugins for mushin, the boilerplate-free sweep engine built on hydra-zen.",
-    "homepage": "https://martinez-hub.github.io/mushin/"
+    "description": "Plugins for mushin, the boilerplate-free sweep engine built on hydra-zen."
   },
   "plugins": [
     {

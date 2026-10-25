@@ -96,6 +96,16 @@ On mushin 0.10 to 0.15, point the agent at the
 [raw guide](https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guide.md)
 instead; before 0.10, upgrade first.
 
+In Claude Code, the guide is also a skill, `/mushin:guide`, installed from
+this repository's plugin marketplace:
+
+```text
+/plugin install mushin --marketplace martinez-hub/mushin
+```
+
+and, with the [`mushin-mcp`](https://martinez-hub.github.io/mushin/guides/mcp/)
+server connected, the `/mushin:guide (MCP)` prompt.
+
 ## What else it does
 
 Each links to a guide with a runnable example:
