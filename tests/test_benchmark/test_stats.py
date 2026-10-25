@@ -231,10 +231,19 @@ def test_warn_if_underpowered_says_nothing_for_a_nan_best_case():
     assert underpowered_warnings(compare_methods, ds, test="welch") == []
 
 
-def test_warn_if_underpowered_rejects_an_unknown_correction():
-    """A typo must not fall back to the laxer single-pair floor."""
+@pytest.mark.parametrize("test, n_seeds", [("wilcoxon", 6), ("welch", 1), ("bogus", 6)])
+def test_warn_if_underpowered_rejects_an_unknown_correction(test, n_seeds):
+    """A typo must not fall back to the laxer single-pair floor, whatever the
+    probe says: also when the test is unknown or its best case is NaN."""
     with pytest.raises(ValueError, match="unknown correction 'Holm'"):
-        warn_if_underpowered("wilcoxon", 6, 0.05, n_comparisons=3, correction="Holm")
+        warn_if_underpowered(test, n_seeds, 0.05, n_comparisons=3, correction="Holm")
+
+
+@pytest.mark.parametrize("n_comparisons", [0, -5])
+def test_warn_if_underpowered_rejects_an_empty_family(n_comparisons):
+    """A miscomputed pair count must not pass as the single-pair floor."""
+    with pytest.raises(ValueError, match="n_comparisons must be at least 1"):
+        warn_if_underpowered("wilcoxon", 6, 0.05, n_comparisons=n_comparisons)
 
 
 def test_warn_if_underpowered_points_at_its_caller():

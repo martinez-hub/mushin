@@ -184,6 +184,13 @@ def available_corrections() -> list[str]:
     return list(_CORRECTIONS)
 
 
+def _check_correction(correction: str) -> None:
+    if correction not in _CORRECTIONS:
+        raise ValueError(
+            f"unknown correction {correction!r}; choose from {available_corrections()}"
+        )
+
+
 def _best_case_p(test: str, n_seeds: int) -> float | None:
     """The smallest p-value ``test`` can produce at ``n_seeds`` seeds, probed on
     maximally separated samples (a paired Wilcoxon over 3 seeds, for example,
@@ -223,14 +230,14 @@ def _underpowered(
     leaves equally extreme p-values unchanged and ``"none"`` adjusts nothing, so
     for those the bar stays ``alpha``. Running the real correction keeps this
     right for any correction added to ``_CORRECTIONS`` later."""
+    # Validated before the probe, so a typo is caught whatever the test says.
+    _check_correction(correction)
+    if n_comparisons < 1:
+        raise ValueError(f"n_comparisons must be at least 1, got {n_comparisons!r}")
     p = _best_case_p(test, n_seeds)
     if p is None:
         return None
-    family = max(int(n_comparisons), 1)
-    if correction not in _CORRECTIONS:
-        raise ValueError(
-            f"unknown correction {correction!r}; choose from {available_corrections()}"
-        )
+    family = int(n_comparisons)
     correct = _CORRECTIONS[correction]
     best = min(correct([p] * family)) if family > 1 else p
     if best < alpha:
@@ -375,10 +382,7 @@ def compare_methods(
         )
     if test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
-    if correction not in _CORRECTIONS:
-        raise ValueError(
-            f"unknown correction {correction!r}; choose from {available_corrections()}"
-        )
+    _check_correction(correction)
     correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])
     func, is_paired = _TESTS[test]
@@ -386,14 +390,12 @@ def compare_methods(
 
     rows = []
     constant_metric_count: dict[str, int] = {}  # method -> #metrics it is constant in
-    n_metrics = 0
     # The family each metric's correction adjusted: masked pairs (NaN p) are
     # outside it, so a constant method shrinks it. The underpowered warning is
     # judged on these after the loop, since with k methods the smallest p-value
     # must clear alpha / m for the m pairs, not alpha.
     families: dict[str, int] = {}
     for metric in ds.data_vars:
-        n_metrics += 1
         vals = {m: ds[metric].sel({"method": m}).values for m in methods}
         # A method with no within-group variance has no sampling distribution.
         # Constancy is judged over the COMPLETED (non-NaN) seeds, so the mask
@@ -501,7 +503,7 @@ def compare_methods(
     # Warn for methods constant across seeds in *every* metric (they ignore the
     # seed): the seeds are duplicated points, not independent samples.
     for m in sorted(methods):
-        if n_metrics and constant_metric_count.get(m, 0) == n_metrics:
+        if families and constant_metric_count.get(m, 0) == len(families):
             warnings.warn(
                 f"method {m!r} produced identical scores across all {n_seeds} "
                 "seeds — it is deterministic or ignores the seed, so seed-based "

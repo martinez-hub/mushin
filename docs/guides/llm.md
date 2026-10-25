@@ -75,7 +75,9 @@ more systems the default Holm correction raises the floor (7 Wilcoxon seeds for
 3 systems, 8 for 4; see
 [Understanding the statistics](statistics.md#underpowered-test-warning)).
 `compare_llms` warns when the test you chose cannot reach `alpha` for the system
-pairs it corrects over.
+pairs it corrects over (the warning comes from `compare_methods` and calls them
+method pairs, as the comparisons table calls systems `method_a` and
+`method_b`).
 
 !!! warning "Paired tests need a *shared* per-seed random effect"
     `wilcoxon`/`ttest_rel` pair trial *k* of one system with trial *k* of the

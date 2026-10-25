@@ -218,3 +218,20 @@ def test_guides_quote_the_holm_seed_floors(guide: Path):
     )
     assert match, f"could not find the seed floors in {guide.name}"
     assert tuple(map(int, match.groups())) == tuple(_holm_floor(k) for k in (2, 3, 4))
+
+
+def test_statistics_guide_quotes_the_warnings_the_code_emits():
+    """Both ``UserWarning`` blocks in the guide are the messages the code formats:
+    the first said ``p=0.2500`` for years where the code prints ``0.25``."""
+    text = STATISTICS_GUIDE.read_text(encoding="utf-8")
+    quoted = [
+        " ".join(block.split())
+        for block in re.findall(r"```\nUserWarning: (.*?)\n```", text, re.S)
+    ]
+    emitted = [
+        underpowered_warnings(warn_if_underpowered, "wilcoxon", n_seeds=3, alpha=ALPHA)[
+            0
+        ],
+        underpowered_warnings(compare_methods, separated(3, 6), alpha=ALPHA)[0],
+    ]
+    assert quoted == emitted
