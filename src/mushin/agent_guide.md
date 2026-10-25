@@ -137,9 +137,14 @@ rules:
   `mushin.original_cwd() / "data" / "train.csv"`.
 - **Check the size first.** Run with `dry_run=True` before anything expensive.
   `confirm_above=N`, or the `MUSHIN_MAX_CELLS` environment variable, refuses a
-  grid of more than `N` cells. `max_total_seconds=` stops starting cells once a
-  time budget runs out, but only with the default launcher: under
-  `launcher="joblib"` it has no effect, so bound such a run another way.
+  grid of more than `N` cells. `max_total_seconds=T` stops starting cells `T`
+  seconds after the first cell that computes, and records the rest as skipped.
+  A later `resume=True` runs them, with no time limit unless it passes
+  `max_total_seconds` again, which starts a new clock. Under
+  `launcher="joblib"` every worker honors the same deadline, so `T` bounds the
+  elapsed time, not the compute summed over the workers, and each worker can
+  finish a cell it started just before the deadline: the sweep can run past
+  `T` by up to one cell per worker.
 - **Failures.** With `on_error="nan"`, the sweep goes on when a cell raises:
   the cell becomes NaN, `experiment.workflow.failures` lists it, and its
   traceback is in `mushin_error.txt` in the cell's directory. `compare_methods`
@@ -209,9 +214,13 @@ rules:
   `mushin.best(root, "score", over="seed")` returns the configuration with
   the best mean, counting only configurations with a result at every seed
   another has (older versions: `ds["score"].mean("seed")`).
-- **On Windows, set `PYTHONUTF8=1`** (or run `python -X utf8`) when mushin's
-  output is captured: `mushin.diff` and the dry-run preview print characters
-  that a Windows console code page may lack.
+- **On Windows, set `PYTHONUTF8=1`** (or run `python -X utf8`) when output is
+  captured: a pipe then writes in the ANSI code page (cp1252 on Western
+  systems), and printing a character it lacks fails. mushin's own console
+  output does not fail there (except `python -m mushin guide --path`, which
+  exits with an error rather than print a path the code page cannot show),
+  but the rest of a run (your code, the libraries it calls, their logs)
+  still can, so set it anyway.
 
 ## Running long sweeps from an agent
 

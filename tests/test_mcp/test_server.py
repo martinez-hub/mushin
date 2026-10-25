@@ -846,6 +846,38 @@ def test_get_failures_surfaces_manifest_and_traceback(tmp_path):
     assert "RuntimeError: boom" in f["traceback"]
 
 
+def test_get_failures_reads_a_traceback_an_earlier_release_wrote(tmp_path, monkeypatch):
+    """Earlier releases wrote mushin_error.txt in the locale's encoding:
+    on a cp1252 machine an accented path is not UTF-8, and must still read as
+    itself there rather than as replacement characters."""
+    import json
+    import locale
+
+    from mushin.mcp.server import _get_failures
+
+    jose = "Jos" + chr(0xE9)
+    base = _make_experiment(tmp_path / "exp")
+    text = f'File "C:\\Users\\{jose}\\task.py", line 3\nRuntimeError: boom'
+    (base / "1" / "mushin_error.txt").write_bytes(text.encode("cp1252"))
+    (base / "mushin_sweep_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "params": ["lr"],
+                "cells": {"lr=0.2": {"dir": "1", "status": "failed"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # In UTF-8 mode too (PYTHONUTF8=1, which the agent guide recommends on
+    # Windows), where getpreferredencoding() says utf-8 but the machine's code
+    # page, the one the file was written in, is still cp1252.
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "utf-8")
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    (f,) = _get_failures(base)["failures"]
+    assert f"C:\\Users\\{jose}\\task.py" in f["traceback"]
+
+
 def test_get_provenance_reads_per_run_records(tmp_path):
     import json
 

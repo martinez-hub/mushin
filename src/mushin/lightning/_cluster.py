@@ -39,7 +39,7 @@ def submitit_slurm_config(
     if "tasks_per_node" in extra:
         raise ValueError(
             "`tasks_per_node` is derived from `gpus_per_node` (one DDP task per "
-            "GPU) and must not be overridden — that desync is the footgun this "
+            "GPU) and must not be overridden: that desync is the footgun this "
             "helper exists to prevent."
         )
     cfg: dict[str, Any] = {
@@ -88,7 +88,9 @@ def seed_everything_per_rank(base: int, workers: bool = True) -> int:
         import json
 
         name = "mushin_seed.json" if rank == 0 else f"mushin_seed_rank{rank}.json"
-        Path(name).write_text(json.dumps({"seed": seed, "rank": rank}))
+        Path(name).write_text(
+            json.dumps({"seed": seed, "rank": rank}), encoding="utf-8"
+        )
     except OSError:
         pass
     return seed

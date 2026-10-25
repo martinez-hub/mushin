@@ -53,6 +53,7 @@ def write_cell_status(
     code_deps: dict | None = None,
     job_num: int | None = None,
     choices: dict[str, str | None] | None = None,
+    budget_id: str | None = None,
 ) -> None:
     """Atomically write this cell's status sidecar into its own dir.
 
@@ -62,7 +63,12 @@ def write_cell_status(
     reader applies, so nothing is recorded that a reload would then reject),
     never one without the other, they let a reload sort the cells and key
     config-group axes without parsing hydra.yaml, which is most of a reload's
-    time; see ``sidecar_job_fields``."""
+    time; see ``sidecar_job_fields``.
+
+    ``budget_id`` names the run whose ``max_total_seconds`` budget the cell
+    started under; the runner records it with 'running', so a cell that a
+    scheduler requeues after the deadline is known to have started before
+    it."""
 
     payload: dict[str, Any] = {
         "status": status,
@@ -78,6 +84,8 @@ def write_cell_status(
     if _records_job_fields(job_num, choices):
         payload["job_num"] = job_num
         payload["choices"] = choices
+    if budget_id is not None:
+        payload["budget_id"] = budget_id
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
 
 
@@ -1824,7 +1832,7 @@ def read_cell_status(cell_dir) -> dict | None:
     if not p.exists():
         return None
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError, RecursionError):
         # ValueError covers JSONDecodeError, a non-UTF-8 file and an integer
         # past Python's digit limit; RecursionError a file nested too deep. All

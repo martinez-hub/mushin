@@ -43,8 +43,8 @@ def table(root, *, path=None, metrics: list[str] | None = None):
     root :
         A sweep ``working_dir``.
     path :
-        If given, write the CSV there and return the ``Path``. Otherwise return
-        the CSV as a string.
+        If given, write the CSV there, in UTF-8 on every platform, and return
+        the ``Path``. Otherwise return the CSV as a string.
     metrics : list[str] | None
         Restrict the metric columns to these names, in this order (default:
         every metric found, discovery order); repeats are deduplicated. A
@@ -84,6 +84,9 @@ def table(root, *, path=None, metrics: list[str] | None = None):
 
     if path is not None:
         path = Path(path)
-        path.write_text(text, newline="")
+        # UTF-8, not the locale's encoding: a cp1252 locale cannot encode
+        # every metric name or value (the write raised), and one file reads
+        # the same on every machine.
+        path.write_text(text, encoding="utf-8", newline="")
         return path
     return text

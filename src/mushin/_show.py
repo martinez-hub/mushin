@@ -14,6 +14,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from ._console import echo
+
 
 def _ordered_union(dicts: list[dict]) -> list[str]:
     """Keys across ``dicts`` in first-seen order (preserves sweep-axis and
@@ -229,7 +231,10 @@ def show(
     elif param_cols:
         rows.sort(key=lambda r: tuple(_sortable(r.get(p)) for p in param_cols))
     table = _render(columns, rows)
-    print(table)
+    # The table holds user data (swept values, metric names). A console that
+    # cannot encode it gets escapes, laid out again from escaped cells so the
+    # columns still line up; one that can gets the table as it is.
+    echo(table, relayout=lambda cell: _render(columns, rows, cell))
     return ShowResult(rows, table)
 
 
@@ -609,20 +614,23 @@ def best(
     )
 
 
-def _render(columns: list[str], rows: list[dict]) -> str:
+def _render(columns: list[str], rows: list[dict], cell=str) -> str:
+    """The table as text. ``cell`` maps each header and formatted value
+    before the column widths are measured (``echo`` passes one that escapes
+    for the console, when ``show`` or ``diff`` cannot print the table as it
+    is)."""
     if not rows:
         return "(no cells found)"
-    cells = [[_fmt(r.get(c)) for c in columns] for r in rows]
-    widths = [
-        max(len(columns[i]), *(len(row[i]) for row in cells))
-        for i in range(len(columns))
-    ]
-    header = "  ".join(columns[i].ljust(widths[i]) for i in range(len(columns)))
-    sep = "  ".join("-" * widths[i] for i in range(len(columns)))
-    body = "\n".join(
-        "  ".join(row[i].ljust(widths[i]) for i in range(len(columns))) for row in cells
-    )
-    return f"{header}\n{sep}\n{body}"
+    lines = [[cell(c) for c in columns]]
+    lines += [[cell(_fmt(r.get(c))) for c in columns] for r in rows]
+    widths = [max(len(text) for text in col) for col in zip(*lines, strict=True)]
+
+    def join(texts) -> str:
+        return "  ".join(t.ljust(w) for t, w in zip(texts, widths, strict=True))
+
+    header, *body = lines
+    sep = "  ".join("-" * w for w in widths)
+    return "\n".join([join(header), sep, *(join(row) for row in body)])
 
 
 def _read_provenance(root) -> dict | None:
@@ -752,23 +760,34 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
 
     provenance = _diff_provenance(_read_provenance(a), _read_provenance(b))
     table = _render_diff(rows, only_in_a, only_in_b, provenance)
-    print(table)
+    # User data, laid out for the console as in show().
+    echo(
+        table,
+        relayout=lambda cell: _render_diff(
+            rows, only_in_a, only_in_b, provenance, cell
+        ),
+    )
     return DiffResult(rows, only_in_a, only_in_b, provenance, table)
 
 
-def _render_diff(rows, only_in_a, only_in_b, provenance) -> str:
+def _render_diff(rows, only_in_a, only_in_b, provenance, cell=str) -> str:
     param_cols = _ordered_union(
         [{k: v for k, v in r.items() if k != "deltas"} for r in rows]
     )
     metric_cols = _ordered_union([r["deltas"] for r in rows])
-    columns = [*param_cols, *(f"Δ{m}" for m in metric_cols)]
+    # "(b-a)" rather than a Greek delta: cp1252 and cp437, the code pages of a
+    # Western Windows pipe and console, have no capital delta, and the header
+    # also says which way the subtraction goes. No space, so a header splits
+    # on whitespace into one token per column, as the Greek-delta one did.
+    delta = {m: f"{m}(b-a)" for m in metric_cols}
+    columns = [*param_cols, *delta.values()]
     flat_rows = []
     for r in rows:
         fr = {p: r.get(p) for p in param_cols}
         for m in metric_cols:
-            fr[f"Δ{m}"] = r["deltas"][m][2] if m in r["deltas"] else None
+            fr[delta[m]] = r["deltas"][m][2] if m in r["deltas"] else None
         flat_rows.append(fr)
-    parts = [_render(columns, flat_rows) if rows else "(no shared cells)"]
+    parts = [_render(columns, flat_rows, cell) if rows else "(no shared cells)"]
     if only_in_a:
         parts.append(f"only in a ({len(only_in_a)}): {only_in_a}")
     if only_in_b:
