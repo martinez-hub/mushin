@@ -4,6 +4,7 @@
 
 import dataclasses
 import functools
+import json
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -553,6 +554,10 @@ class _TaskRunner:
         max_total_seconds=None,
         sampled_indices=None,
         cache_dir=None,
+        code_roots=(),
+        code_body_roots=(),
+        cache_ok=True,
+        script_entries=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -562,14 +567,33 @@ class _TaskRunner:
         self.inject_resume = inject_resume
         self.prior_manifest = prior_manifest
         self.code_hash = code_hash  # hash of the task source (resume guard)
+        # The roots of the project-code record (the task, Study's training
+        # functions, pre_task): the project files their modules import. The
+        # record is taken in each cell's own process (cell_project_record),
+        # since a parallel worker imports the code it runs from disk, and the
+        # code the driver loaded may not be what ran. The token keys the
+        # per-process cache of the roots' record and is shared by pickled
+        # copies.
+        self.code_roots = tuple(code_roots)
+        self.code_body_roots = tuple(code_body_roots)
+        self._code_token = uuid.uuid4().hex
+        # False for a partial task: never cached, as on main, since a key
+        # cannot see into the data it binds (see partial_task_cacheable).
+        self.cache_ok = cache_ok
+        # The driver script's entries, taken by the driver when the run
+        # started (driver_script_entries): a worker runs the driver's pickled
+        # script functions, so this, not the file as it is when the worker
+        # starts, is what its cells run.
+        self.script_entries = dict(script_entries or {})
         # Grid subsampling: the set of Hydra job numbers to actually run (None =
         # run every cell). A cell whose job.num is not selected is skipped
         # (NaN), keyed on the deterministic job index so it's launcher- and
         # axis-type-agnostic and identical across a resume.
         self.sampled_indices = sampled_indices
         # Content-addressed cross-working_dir cache: a directory keyed on
-        # (config fingerprint, code fingerprint). A cell whose config AND task
-        # source match a cached entry reuses it instead of recomputing.
+        # (config fingerprint, code fingerprint, project-code fingerprints). A
+        # cell whose config, task source AND the project code the task reaches
+        # match a cached entry reuses it instead of recomputing.
         self.cache_dir = cache_dir
         # Wall-clock budget: one deadline for the whole sweep, however many
         # processes run its cells. It starts at the first COMPUTED cell in any
@@ -613,6 +637,13 @@ class _TaskRunner:
                 uuid.uuid4().hex if state.get("max_total_seconds") is not None else None
             )
         self.__dict__.setdefault("_shipped", False)
+        # Such a runner has no code roots either: it records no project code
+        # and its cells are compared as that version compared them.
+        self.__dict__.setdefault("code_roots", ())
+        self.__dict__.setdefault("code_body_roots", ())
+        self.__dict__.setdefault("_code_token", "")
+        self.__dict__.setdefault("cache_ok", True)
+        self.__dict__.setdefault("script_entries", {})
 
     def budget_start_path(self, root) -> Path:
         """The file in sweep root ``root`` that holds this run's budget start."""
@@ -762,17 +793,35 @@ class _TaskRunner:
             and status.get("budget_id") == self.budget_id
         )
 
-    def _cache_key(self, config_hash) -> str | None:
+    def _cache_key(self, config_hash, deps) -> str | None:
         """The content-address for this cell: a hash of its resolved-config and
-        task-source fingerprints, or None if either is unavailable (so an
-        unresolvable cell is simply never cached)."""
-        if not self.cache_dir or config_hash is None or self.code_hash is None:
+        task-source fingerprints and of the project code the cell reaches
+        (``deps``, its project-code record), or None if the first two are
+        unavailable (so an unresolvable cell is simply never cached). A cell
+        that reaches no project code keeps the two-part key, so its entries
+        from before the third part are still found."""
+        if (
+            not self.cache_dir
+            or not self.cache_ok
+            or config_hash is None
+            or self.code_hash is None
+        ):
             return None
+        if deps is None:
+            if self.code_roots:
+                # The project code could not be fingerprinted: no key would
+                # tell this code era from another, so the cache is not used.
+                return None
+            # A runner pickled by an earlier mushin walks nothing: its key is
+            # the two-part one that version used.
+            deps = {}
         import hashlib
 
-        return hashlib.sha256(f"{config_hash}:{self.code_hash}".encode()).hexdigest()[
-            :32
-        ]
+        payload = f"{config_hash}:{self.code_hash}"
+        if deps.get("code"):
+            # The code only: its digests read alike on every Python version.
+            payload += ":" + json.dumps(deps["code"], sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     @staticmethod
     def _multi_rank_world() -> bool:
@@ -829,8 +878,11 @@ class _TaskRunner:
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
+            cell_project_record,
+            changed_project_code,
             config_fingerprint,
             discover_last_ckpt,
+            merge_project_records,
             read_cell_status,
             write_cell_status,
         )
@@ -842,6 +894,15 @@ class _TaskRunner:
         )
 
         chash = config_fingerprint(cfg)
+        # This cell's project-code record, taken here, in the process that will
+        # run (or reuse) it: see cell_project_record.
+        deps = cell_project_record(
+            self._code_token,
+            self.code_roots,
+            self.code_body_roots,
+            cfg,
+            scripts=self.script_entries,
+        )
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
         # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
@@ -850,6 +911,7 @@ class _TaskRunner:
             write_cell_status,
             config_hash=chash,
             code_hash=self.code_hash,
+            code_deps=deps,
             job_num=job_num,
             choices=choices,
         )
@@ -888,10 +950,12 @@ class _TaskRunner:
                 prior = read_cell_status(cell_dir) or {}
                 prior_config = prior.get("config_hash")
                 prior_code = prior.get("code_hash")
-                # A completed cell is reused only if BOTH the resolved config
-                # and the task source still match. A missing prior hash (a
-                # pre-fingerprint sweep) can't be checked, so it isn't a reason
-                # to re-run — legacy sweeps still resume.
+                prior_deps = prior.get("code_deps")
+                # A completed cell is reused only if the resolved config, the
+                # task source AND the project code the task reaches all still
+                # match. A missing prior hash (a pre-fingerprint sweep) can't be
+                # checked, so it isn't a reason to re-run — legacy sweeps still
+                # resume.
                 config_changed = (
                     prior_config is not None
                     and chash is not None
@@ -902,14 +966,24 @@ class _TaskRunner:
                     and self.code_hash is not None
                     and prior_code != self.code_hash
                 )
-                if config_changed or code_changed:
-                    what = (
-                        "config and task code"
-                        if config_changed and code_changed
-                        else "config"
-                        if config_changed
-                        else "task code"
-                    )
+                # Judged on the files both records have, on any Python version;
+                # None when they cannot be compared (a sidecar from before the
+                # field, an unknown record).
+                changed_deps = changed_project_code(prior_deps, deps)
+                deps_changed = bool(changed_deps)
+                if config_changed or code_changed or deps_changed:
+                    parts = []
+                    if config_changed:
+                        parts.append("config")
+                    if code_changed:
+                        parts.append("task code")
+                    if deps_changed:
+                        # Name where the change is, so the user sees which
+                        # helper or constant the edit was in.
+                        parts.append(
+                            f"code the task reaches ({', '.join(changed_deps)})"
+                        )
+                    what = " and ".join(parts)
                     warnings.warn(
                         f"resume: cell {key!r} was completed under a different "
                         f"{what} (fingerprint mismatch); re-running it instead "
@@ -928,15 +1002,26 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         cwd = Path.cwd()
                         write_metrics_sidecar(cwd, cached)
-                        write_status(cwd, status="completed", combo=sc, attempt=1)
+                        # Keep the reused cell's prior record (see
+                        # merge_project_records): writing this run's keys would
+                        # declare it checked against code it was not compared
+                        # with, and dropping the record would let a later resume
+                        # reuse the cell unchecked.
+                        write_status(
+                            cwd,
+                            status="completed",
+                            combo=sc,
+                            attempt=1,
+                            code_deps=merge_project_records(prior_deps, deps),
+                        )
                         return cached
 
         # (1.4) content-addressed cache: reuse a cell computed under the same
-        # resolved config AND task source in ANY working_dir. Keyed on the
+        # resolved config, task source AND project code in ANY working_dir. Keyed on the
         # fingerprints (not the combo/dir), so it survives a fresh working_dir.
         # The cache hit refreshes this job dir (metrics + completed status) so
         # the manifest and an offline load see a normal completed cell.
-        cache_key = self._cache_key(chash)
+        cache_key = self._cache_key(chash, deps)
         if cache_key is not None:
             cache_cell = Path(self.cache_dir) / cache_key
             cached = read_metrics_sidecar(cache_cell)
@@ -1069,7 +1154,7 @@ class _TaskRunner:
                 # so a future sweep with the same config+code reuses it. Keyed on
                 # the fingerprints; best-effort (a cache-write failure must never
                 # fail the cell itself).
-                cache_key = self._cache_key(chash)
+                cache_key = self._cache_key(chash, deps)
                 if cache_key is not None:
                     try:
                         cache_cell = Path(self.cache_dir) / cache_key
@@ -1538,8 +1623,9 @@ class BaseWorkflow:
 
         cache_dir : str | None (default: None)
             Content-addressed cache of completed cells shared across
-            ``working_dir``\\ s: a cell whose config AND task source match a
-            cached entry reuses it instead of recomputing.
+            ``working_dir``\\ s: a cell whose config, task source and the
+            project code the task can run match a cached entry reuses it
+            instead of recomputing.
 
         on_error : str (default: "raise")
             Failure policy for the sweep. ``"raise"`` (the default) preserves the
@@ -1918,7 +2004,12 @@ class BaseWorkflow:
                     stacklevel=2,
                 )
 
-        from ._resume import code_fingerprint
+        from ._resume import (
+            _unwrap_task,
+            code_fingerprint,
+            driver_script_entries,
+            partial_task_cacheable,
+        )
 
         # Grid subsampling: pick a deterministic random subset of the job indices
         # 0..num_cells-1. Seeding on (num_cells, sample, sample_seed) makes the
@@ -1933,6 +2024,7 @@ class BaseWorkflow:
             sampled_indices = frozenset(_rng.sample(range(num_cells), sample))
 
         _task_fn, _wants_resume = _prepare_task(self.task)
+        _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
         task_call = _TaskRunner(
             task=task_fn_wrapper(_task_fn),
             pre_task=pre_task_fn_wrapper(self.pre_task),
@@ -1941,10 +2033,20 @@ class BaseWorkflow:
             on_error=on_error,
             inject_resume=_wants_resume,
             prior_manifest=_prior_manifest,
-            code_hash=code_fingerprint(self.task),
+            # A partial task has no source of its own; its function's body is
+            # what runs (main recorded None for it, so older sweeps still
+            # resume). Its bound arguments are not compared, as on main.
+            code_hash=code_fingerprint(_unwrap_task(self.task)),
             max_total_seconds=max_total_seconds,
             sampled_indices=sampled_indices,
             cache_dir=cache_dir,
+            # Further roots a subclass names (Study's training functions,
+            # which its task calls but does not import), and pre_task: the
+            # project files their modules import are recorded like the task's.
+            code_roots=_code_roots,
+            code_body_roots=(self.pre_task,),
+            cache_ok=partial_task_cacheable(self.task),
+            script_entries=driver_script_entries((*_code_roots, self.pre_task)),
         )
 
         self._capture_env = capture_env
@@ -2360,12 +2462,51 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             Skip cells already recorded as completed in ``working_dir`` (their
             metrics are read from the sidecar) and re-run the rest. A completed
             cell is reused only if its swept-parameter combination AND
-            fingerprints of both its resolved config and its task source still
-            match; a changed non-swept value or an edited task body re-runs that
-            cell (with a warning). The fingerprint does not cover helper
-            functions the task calls, module-level constants, or the
-            environment. For a larger refactor, re-run from a fresh
-            ``working_dir`` rather than resuming.
+            fingerprints of its resolved config, its task source and the
+            project code the task can run still match. That project code is
+            every project file the task's module imports (and ``pre_task``'s),
+            directly or through other project files, at any depth (imports
+            inside functions included), and the modules of the classes the
+            cell's config names (``_target_``, or hydra-zen's ``just()`` and
+            ``zen_meta``). Each file is compared as a whole, by its syntax tree
+            without its main block and docstrings: an edit anywhere in it
+            re-runs the cells, and a comment, a docstring or formatting does
+            not (so neither does a prompt a decorator reads from a
+            docstring). The task function's own source is compared as text,
+            as before, so any edit to it re-runs its cells, a comment
+            included. A task defined in the driver script is compared by what
+            its definition can reach by name in the script (a helper, a
+            constant, a star import, a definition a project decorator
+            registers, in the main block too), not by the run call, other
+            top-level calls or prints, or what only they read (``GRID =
+            dict(...)``), so extending the grid or adding a print is not an
+            edit; the script is read when the run starts (a ``_target_``
+            defined in it, when the first cell naming it runs), so editing it
+            while the sweep runs does not change what its cells record. A re-run
+            warns, naming the file (``helpers (file)``). Files are compared as
+            they are on disk: if one changes after this process loaded it and
+            is not reloaded, the old code keeps running while the cells
+            computed now are recorded as the new code's, so reload it (or
+            restart) before resuming. mushin warns when it had recorded that
+            file earlier in the same process. Not
+            covered: installed packages other than editable ones, data files,
+            the environment, code defined in a notebook (the project modules
+            its functions, classes, objects and module values come from are
+            covered, not those its functions import inside their bodies), a
+            top-level statement of the driver script that changes an object in
+            place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
+            in its main block that rebinds a global (``setup()``), a script
+            definition reached only through an ``__init_subclass__`` or
+            metaclass registry, a package ``__init__.py`` above a config
+            ``_target_`` that no project code imports, and code reached only
+            through some other string. The script rule follows names, so an
+            unusual pattern (a decorator alias, a ``match`` capture, an
+            assignment moved between a main guard's branches) can hide an
+            edit: keep helpers in an imported module, which is compared as a
+            whole file, when that matters. A very large project
+            is covered up to a fixed number of files (with a warning). After
+            upgrading a dependency, changing the data or editing such code,
+            re-run from a fresh ``working_dir`` rather than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to
@@ -2436,12 +2577,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             reproducible subset of the same grid.
         cache_dir : str | None (default: None)
             A content-addressed cache of completed cells, shared across
-            ``working_dir``\\ s. A cell whose resolved config AND task source
-            match a cached entry (keyed on the same fingerprints as resume)
-            reuses that result instead of recomputing, so a cell computed in one
-            sweep is free in another. Newly-computed cells are stored there.
-            Complements ``resume`` (which reuses within a single ``working_dir``);
-            a changed config value or edited task body is a cache miss.
+            ``working_dir``\\ s. A cell whose resolved config, task source and
+            the project code the task reaches match a cached entry (keyed on the
+            same fingerprints as resume) reuses that result instead of
+            recomputing, so a cell computed in one sweep is free in another.
+            Newly-computed cells are stored there. Complements ``resume`` (which
+            reuses within a single ``working_dir``); a changed config value, an
+            edited task body or an edited project file is a cache miss. An
+            entry an earlier mushin wrote is recomputed once. Files are read
+            as they are on disk (see ``resume``): after editing a module in a
+            running process, reload it (or restart) before using the cache, or
+            the old code's results are stored under the new code's key. When
+            the project code cannot be fingerprinted (a warning says so), the
+            cache is not used for that cell, and a partial task never uses the
+            cache, as on main: the key cannot see into the data it binds.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for

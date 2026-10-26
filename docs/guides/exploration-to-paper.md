@@ -156,9 +156,11 @@ resuming. Don't, and mushin actively stops you from doing it by accident.
   helpers, and config. If you resumed an exploration directory, some cells would
   carry results from an *older* version of your code and some from the current
   one, silently combined into one dataset. mushin's resume guards on a
-  fingerprint of both the resolved config **and** the task source, so an edited
-  task re-runs its cells rather than reusing a stale result, but the only way to
-  be sure *every* cell in your paper grid came from one code era is to run that
+  fingerprint of the resolved config, the task source **and** the project files
+  the task's module imports (directly or through your other modules), so an
+  edited task or helper re-runs its cells rather than reusing a stale result;
+  an upgraded dependency or changed data is not seen, and the only way to be
+  sure *every* cell in your paper grid came from one code era is to run that
   grid fresh. (See [Resilient & resumable sweeps](resilience.md) for how the
   fingerprint guard works.)
 - **Winner's curse.** The configuration that looked best across a noisy
@@ -169,10 +171,14 @@ resuming. Don't, and mushin actively stops you from doing it by accident.
 
 Two mushin features make the re-run cheap and honest at the same time:
 
-- `cache_dir=` reuse is safe here because it is keyed on config **and** code: a
-  cell only comes from the cache if it is byte-for-byte the same computation. It
-  never mixes code eras. (If you changed anything since exploration, those cells
-  simply recompute.)
+- `cache_dir=` reuse is safe here because it is keyed on config **and** code,
+  the task's and the project files it imports: a cell only comes from the cache
+  if it is the same computation by the same project code, so it does not mix
+  code eras. (If you changed the task or a helper since exploration, those
+  cells simply recompute. The files are read as they are on disk, so run the
+  paper grid in a fresh process, or reload what you edited first. A
+  dependency upgrade is not seen, so after one start a fresh `cache_dir` as
+  well as a fresh `working_dir`.)
 - Because the paper run is a normal sweep, everything else in mushin applies to
   it: [fail-soft + resume](resilience.md) for the flaky cells, `show`/`best` to
   watch it, and the provenance record it writes automatically.

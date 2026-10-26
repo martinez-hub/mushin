@@ -58,8 +58,11 @@ def run_training_sweep(
     renaming, reordering, adding/removing a method, or editing any method's
     body invalidates every completed cell (with a warning) rather than silently
     reusing checkpoints trained by different code. Coarse, but never stale.
-    Like the core resume guard, the fingerprint covers each function's own
-    source only, not helpers it calls or values it closes over.
+    The methods fingerprint covers each function's own source, not values it
+    closes over; the project files each method's module imports are guarded
+    as for any sweep, so an edited helper re-runs the sweep's cells (every
+    method's: one record covers them all) with a warning naming the file.
+    Installed packages and data are not covered.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +125,16 @@ def run_training_sweep(
         return {"checkpoint": str(dest)}
 
     sweep_cls = type(
-        "_StudySweep", (MultiRunMetricsWorkflow,), {"task": staticmethod(task)}
+        "_StudySweep",
+        (MultiRunMetricsWorkflow,),
+        {
+            "task": staticmethod(task),
+            # The task lives in mushin; the project code to guard is what the
+            # training functions' modules import. Recorded per cell like any
+            # sweep's, so an edited helper re-runs the cells and a Study sweep
+            # recorded before this guard resumes without re-training.
+            "_mushin_code_roots": tuple(methods[n] for n in names),
+        },
     )
     wf = sweep_cls()
     wf.run(

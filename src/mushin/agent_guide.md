@@ -155,12 +155,19 @@ rules:
   rest as skipped; a later run with `resume=True` and no `sample` fills them
   in.
 - **Resume.** `resume=True` with the same `working_dir` reruns the cells that
-  are incomplete or whose config or task function changed. It does not see an
-  edit to anything the task calls: the scientist's code, a helper, a constant
-  or an installed package. After such an edit, use a new `working_dir`.
-  `cache_dir=` has the same blind spot. Hydra still lists every cell when a
-  resume launches; the completed ones return their saved metrics without
-  running.
+  are incomplete or whose config, task function or project code changed:
+  every project file the task's module (and `pre_task`'s) imports, directly
+  or through other project files, and the modules of the classes the config
+  names as `_target_`. An edit anywhere in such a file re-runs the cells; a
+  comment, a docstring or formatting does not (any edit to the task
+  function's own source does, a comment included). In the driver script, only what the task's
+  definition can reach by name counts, not the `run(...)` call, top-level
+  calls, `print` calls or what only they read, so extending the grid is not
+  an edit. It does not see an installed package, data files, code defined in
+  a notebook, or code reached only through some other string. After such a
+  change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
+  lists every cell when a resume launches; the completed ones return their
+  saved metrics without running.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string
   `method` values. Select or average away other dims on the Dataset first:
   `ds.sel(lr=0.01)`, or `ds.mean("lr", keep_attrs=True)` (older xarray drops

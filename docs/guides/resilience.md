@@ -103,6 +103,21 @@ compare_methods(wf.to_xarray())  # no longer raises
 without a stable location). The completed cells are not recomputed, so a resume
 of a mostly-successful sweep is cheap.
 
+That holds when the cause was outside your code: a full disk, a lost node, a
+flaky download. If the fix is an edit to the task or to a project file its
+module imports (a helper, a constant), the completed cells were computed by
+the old code, so the resume re-runs them as well, with a warning naming the
+file. An edit anywhere in such a file counts; a comment, a docstring or
+formatting does not. In the driver script, only what the task's definition
+can reach by name counts (its helpers and constants), not the `run(...)`
+call, other top-level calls, `print` calls or what only they read, so
+extending the grid and resuming reuses the completed cells. The task
+function's own source is compared as text, so a comment inside its body is an
+edit. If you edit a module and resume in the same Python process without
+reloading it, the old code still runs: reload it (or restart) first. The
+script rule follows names, so an unusual pattern can hide an edit there;
+helpers kept in an imported module are compared as a whole file.
+
 ### The full loop
 
 ```
