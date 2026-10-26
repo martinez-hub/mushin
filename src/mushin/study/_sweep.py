@@ -60,8 +60,9 @@ def run_training_sweep(
     reusing checkpoints trained by different code. Coarse, but never stale.
     The methods fingerprint covers each function's own source, not values it
     closes over; the project files each method's module imports are guarded
-    as for any sweep, so an edited helper re-runs its cells with a warning
-    naming the file. Installed packages and data are not covered.
+    as for any sweep, so an edited helper re-runs the sweep's cells (every
+    method's: one record covers them all) with a warning naming the file.
+    Installed packages and data are not covered.
     """
     ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)

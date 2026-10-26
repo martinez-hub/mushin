@@ -577,9 +577,8 @@ class _TaskRunner:
         self.code_roots = tuple(code_roots)
         self.code_body_roots = tuple(code_body_roots)
         self._code_token = uuid.uuid4().hex
-        # False for a partial task binding an argument a cache key cannot
-        # tell apart from another of its type (an array): never cached, as
-        # main never cached a partial task (see partial_task_cacheable).
+        # False for a partial task: never cached, as on main, since a key
+        # cannot see into the data it binds (see partial_task_cacheable).
         self.cache_ok = cache_ok
         # The driver script's entries, taken by the driver when the run
         # started (driver_script_entries): a worker runs the driver's pickled
@@ -2036,7 +2035,7 @@ class BaseWorkflow:
             prior_manifest=_prior_manifest,
             # A partial task has no source of its own; its function's body is
             # what runs (main recorded None for it, so older sweeps still
-            # resume), and its bound arguments are in the project-code record.
+            # resume). Its bound arguments are not compared, as on main.
             code_hash=code_fingerprint(_unwrap_task(self.task)),
             max_total_seconds=max_total_seconds,
             sampled_indices=sampled_indices,
@@ -2481,8 +2480,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             registers, in the main block too), not by the run call, other
             top-level calls or prints, or what only they read (``GRID =
             dict(...)``), so extending the grid or adding a print is not an
-            edit; the script is read when the run starts, so editing it while
-            the sweep runs does not change what its cells record. A re-run
+            edit; the script is read when the run starts (a ``_target_``
+            defined in it, when the first cell naming it runs), so editing it
+            while the sweep runs does not change what its cells record. A re-run
             warns, naming the file (``helpers (file)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
             is not reloaded, the old code keeps running while the cells
@@ -2492,9 +2492,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             covered: installed packages other than editable ones, data files,
             the environment, code defined in a notebook (the project modules
             its functions, classes, objects and module values come from are
-            covered), a top-level statement of the driver script that changes
-            an object in place (``CFG["x"] = 2``, ``parser.add_argument(...)``),
-            and code reached only through some other string. A very large project
+            covered, not those its functions import inside their bodies), a
+            top-level statement of the driver script that changes an object in
+            place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
+            in its main block that rebinds a global (``setup()``), a script
+            definition reached only through an ``__init_subclass__`` or
+            metaclass registry, and code reached only through some other
+            string. A very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.

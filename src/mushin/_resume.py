@@ -852,7 +852,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
 #: the root functions and classes it defined, which running it again (IPython's
 #: ``%run``) makes anew.
 _LOAD_BASELINE: dict = {}
-_STALE_WARNED: set[str] = set()
 
 
 def _loaded_digest(name: str, digest: str) -> str:
@@ -871,25 +870,38 @@ def _loaded_digest(name: str, digest: str) -> str:
     return digest
 
 
+def _refs(objects) -> tuple:
+    """Weak references to a load's identity objects where they allow one, so
+    the baseline never keeps a script's namespace (its datasets, its models)
+    alive after the user dropped it."""
+    import weakref
+
+    out = []
+    for obj in objects:
+        try:
+            out.append(weakref.ref(obj))
+        except TypeError:
+            out.append(lambda obj=obj: obj)
+    return tuple(out)
+
+
 def _warn_if_moved(key, what: str, identity: tuple, digest: str) -> None:
     """Record ``digest`` for this load (``identity``) of ``key`` the first
-    time; afterwards, warn when the digest moved within the same load."""
+    time; afterwards, warn (once per load) when the digest moved within it."""
     seen = _LOAD_BASELINE.get(key)
     same = (
         seen is not None
         and len(seen[0]) == len(identity)
-        and all(a is b for a, b in zip(seen[0], identity, strict=True))
+        and all(ref() is obj for ref, obj in zip(seen[0], identity, strict=True))
     )
     if not same:
-        _LOAD_BASELINE[key] = (identity, digest)
-    elif seen[1] != digest:
+        _LOAD_BASELINE[key] = (_refs(identity), digest, [False])
+    elif seen[1] != digest and not seen[2][0]:
+        seen[2][0] = True  # warned for this load; a reload warns again
         _warn_stale(what)
 
 
 def _warn_stale(what: str) -> None:
-    if what in _STALE_WARNED:
-        return
-    _STALE_WARNED.add(what)
     _best_effort_warning(
         f"resume/cache_dir: {what} changed on disk after this process loaded it; "
         "unless it was reloaded, the old code still runs while the cells computed "
@@ -1207,7 +1219,8 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     the same way (``pre_task``; ``Study``'s training functions), and
     ``scripts`` the driver's script entries; the config's ``_target_``\\ s are
     added per cell (``cell_project_record``). A partial task's bound
-    arguments are an entry too.
+    arguments are not compared (as on main); the modules of the functions and
+    classes it binds are followed.
 
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the

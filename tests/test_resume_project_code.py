@@ -2032,3 +2032,34 @@ def test_a_script_helpers_annotations_count(tmp_path):
     one = _digest_of_script(tmp_path, "ann1", text.format(v=2), {"task"})
     two = _digest_of_script(tmp_path, "ann2", text.format(v=20), {"task"})
     assert one != two
+
+
+def test_a_second_stale_episode_after_a_reload_warns_again(project):
+    root, exp = project
+    _code(exp.W.task)
+    _write(root, scale=100)  # edited, not reloaded
+    with pytest.warns(UserWarning, match="changed on disk after this process"):
+        _code(exp.W.task)
+    exp = _reload(exp)
+    _code(exp.W.task)  # the new load's baseline
+    _write(root, scale=1000)  # edited again, not reloaded
+    with pytest.warns(UserWarning, match="changed on disk after this process"):
+        _code(exp.W.task)
+
+
+def test_the_baseline_does_not_keep_a_script_alive(tmp_path):
+    """A notebook re-running a script keeps replacing its functions: the
+    baseline must not pin the old ones (and their namespace)."""
+    import gc
+    import weakref
+
+    from mushin._resume import _script_entry
+
+    path = tmp_path / "mushin_t_pin.py"
+    ns = _script_ns(path, "BIG = list(range(10))\n\n\ndef task(a):\n    return a\n")
+    task = ns.pop("task")
+    probe = weakref.ref(task)
+    _script_entry(str(path), ns, {"task"}, (task,))
+    del task
+    gc.collect()
+    assert probe() is None
