@@ -133,25 +133,45 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
     return (num, choices) if _records_job_fields(num, choices) else None
 
 
-def config_fingerprint(cfg) -> str | None:
+#: What ``resolved_config`` returns for a config that cannot be resolved.
+_UNRESOLVED = object()
+
+
+def resolved_config(cfg):
+    """A job config as plain containers with its interpolations resolved, or
+    ``_UNRESOLVED`` when it cannot be. A cell resolves its config once, here,
+    and its fingerprint and its ``_target_`` scan share the result: resolving
+    a large structured config is not free, and a resolver that reads a clock
+    or a counter then gives both the same values. A config that is already
+    plain containers is returned as it is."""
+    try:
+        from omegaconf import OmegaConf
+
+        return (
+            OmegaConf.to_container(cfg, resolve=True)
+            if OmegaConf.is_config(cfg)
+            else cfg
+        )
+    except Exception:  # noqa: BLE001 - unresolvable config -> no guard
+        return _UNRESOLVED
+
+
+def config_fingerprint(cfg, resolved=None) -> str | None:
     """Stable short hash of the fully-resolved job config, or None if the
-    config cannot be resolved/serialized.
+    config cannot be resolved/serialized. ``resolved`` is the config as
+    ``resolved_config`` returned it, when the caller has it already.
 
     Guards resume reuse: a completed cell's cached metrics are only returned
     when the config that would run now matches the one that produced them;
     otherwise a changed NON-swept value (same combo key) would silently mix
     results from two configurations into one dataset. Task *source* changes are
     guarded separately by ``code_fingerprint``."""
+    data = resolved_config(cfg) if resolved is None else resolved
+    if data is _UNRESOLVED:
+        return None
     try:
-        from omegaconf import OmegaConf
-
-        data = (
-            OmegaConf.to_container(cfg, resolve=True)
-            if OmegaConf.is_config(cfg)
-            else cfg
-        )
         payload = json.dumps(data, sort_keys=True, default=str)
-    except Exception:  # noqa: BLE001 - unresolvable config -> no guard
+    except Exception:  # noqa: BLE001 - unserializable config -> no guard
         return None
     import hashlib
 
@@ -660,6 +680,12 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
             )
         if foreign_tops[top]:
             continue
+        # Importing `pkg.models` runs `pkg/__init__.py` first, so a module's
+        # packages are code it runs, whether or not it imports from them (a
+        # `_target_`, or a task module that imports only the standard library).
+        parent = current.rpartition(".")[0]
+        if parent and parent not in seen:
+            pending.append(parent)
         try:
             found = _file_entry(current)
         except Exception:  # noqa: BLE001 - one unresolvable name, not the record
@@ -1137,16 +1163,11 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
 
 
 def _config_targets(cfg) -> list[str]:
-    """Every ``_target_`` string in a cell's config, at any depth."""
-    try:
-        from omegaconf import OmegaConf
-
-        data = (
-            OmegaConf.to_container(cfg, resolve=True)
-            if OmegaConf.is_config(cfg)
-            else cfg
-        )
-    except Exception:  # noqa: BLE001 - an unresolvable config: no targets
+    """Every ``_target_`` string in a cell's config, at any depth: a config,
+    or one already resolved by ``resolved_config``. An unresolvable config
+    has none."""
+    data = resolved_config(cfg)
+    if data is _UNRESOLVED:
         return []
     found: list[str] = []
     pending = [data]
@@ -1263,6 +1284,7 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
     the roots' record (``roots`` and ``with_body`` alike, cached per process
     for the run ``token``) plus the entries of this cell's config
     ``_target_``\\ s, which can differ from cell to cell (a swept model class).
+    ``cfg`` may be the config already resolved by ``resolved_config``.
     ``scripts`` are the driver's script entries (``driver_script_entries``).
     A target in the driver script gets its own key, ``"<script>:<name>
     (script)"``, so it never replaces the roots' entry for that script."""

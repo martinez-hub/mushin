@@ -2081,3 +2081,196 @@ def test_an_edit_that_keeps_size_and_mtime_is_seen(project):
     assert path.stat().st_mtime_ns == st.st_mtime_ns
     assert _parsed(path)[0] != first
     assert _script_digest(path, frozenset({"K"}))[0] != script_first
+
+
+# --- follow-ups: parent packages, one record per completed cell, one resolve ---
+
+
+def _pkg(root, name, files):
+    pkg = root / name
+    pkg.mkdir()
+    for rel, text in files.items():
+        (pkg / rel).write_text(textwrap.dedent(text))
+    return pkg
+
+
+def _drop(prefix):
+    for name in [n for n in sys.modules if n == prefix or n.startswith(prefix + ".")]:
+        sys.modules.pop(name, None)
+
+
+def test_a_task_modules_parent_package_is_recorded(project):
+    """Importing `pkg.train` runs `pkg/__init__.py` first, so it is code the
+    task's module runs although the module imports nothing from it."""
+    root, _ = project
+    pkg = _pkg(
+        root,
+        "mushin_t_parpkg",
+        {
+            "__init__.py": "SCALE = 2\n",
+            "train.py": "import math\n\n\ndef task(x):\n    return math.floor(x)\n",
+        },
+    )
+    try:
+        mod = importlib.import_module("mushin_t_parpkg.train")
+        before = project_fingerprints(mod.task)
+        assert "mushin_t_parpkg (file)" in before["code"]
+        (pkg / "__init__.py").write_text("SCALE = 20\n")
+        assert _changed(before, mod.task) == ["mushin_t_parpkg (file)"]
+    finally:
+        _drop("mushin_t_parpkg")
+
+
+def test_a_targets_parent_package_is_recorded(project):
+    """Codex's case: `_target_: pkg.models.Model`, where `pkg/__init__.py`
+    configures `Model`. Editing the package's init changes the record."""
+    from mushin._resume import cell_project_record
+
+    root, exp = project
+    pkg = _pkg(
+        root,
+        "mushin_t_tparpkg",
+        {
+            "__init__.py": "from .models import Model\n\nModel.SCALE = 2\n",
+            "models.py": "class Model:\n    SCALE = 1\n",
+        },
+    )
+    cfg = {"m": {"_target_": "mushin_t_tparpkg.models.Model"}}
+    try:
+        before = cell_project_record("tok-tpar-1", (exp.W.task,), (), cfg)
+        assert "mushin_t_tparpkg (file)" in before["code"]
+        assert "mushin_t_tparpkg" not in sys.modules  # still found without importing
+        (pkg / "__init__.py").write_text(
+            "from .models import Model\n\nModel.SCALE = 20\n"
+        )
+        after = cell_project_record("tok-tpar-2", (exp.W.task,), (), cfg)
+        assert changed_project_code(before, after) == ["mushin_t_tparpkg (file)"]
+    finally:
+        _drop("mushin_t_tparpkg")
+
+
+def test_a_notebook_objects_parent_package_is_recorded(project):
+    """The modules a notebook's objects come from bring their packages too."""
+    root, _ = project
+    _pkg(
+        root,
+        "mushin_t_nbpar",
+        {
+            "__init__.py": "FLAG = True\n",
+            "models.py": "class Model:\n    def f(self, x):\n        return x\n",
+        },
+    )
+    try:
+        models = importlib.import_module("mushin_t_nbpar.models")
+        nb = types.ModuleType("mushin_t_nbpar_ns")
+        nb.__dict__["MODEL"] = models.Model()
+        exec("def task(a):\n    return MODEL.f(a)\n", nb.__dict__)
+        assert "mushin_t_nbpar (file)" in project_fingerprints(nb.task)["code"]
+    finally:
+        _drop("mushin_t_nbpar")
+
+
+def test_only_a_completed_status_carries_the_record(project):
+    """The record is read back only from completed cells, so the running,
+    failed and skipped writes leave it out: a cell writes it once."""
+    root, exp = project
+    (root / "mushin_t_probe.py").write_text(
+        textwrap.dedent("""
+            import json
+            from pathlib import Path
+
+            from mushin.workflows import MultiRunMetricsWorkflow
+
+
+            class W(MultiRunMetricsWorkflow):
+                @staticmethod
+                def task(a):
+                    running = json.loads(Path("mushin_cell_status.json").read_text())
+                    if a == 2:
+                        raise ValueError("this cell fails")
+                    return dict(v=float(a), running_has=float("code_deps" in running))
+            """)
+    )
+    sys.modules.pop("mushin_t_probe", None)
+    probe = importlib.import_module("mushin_t_probe")
+    wd = root / "sweep"
+    try:
+        wf = probe.W()
+        wf.run(
+            a=multirun([1, 2, 3]),
+            working_dir=str(wd),
+            on_error="nan",
+            sample=2,
+            seed=0,
+        )
+        by_status = {}
+        for status in wd.rglob(STATUS_FILE):
+            d = json.loads(status.read_text())
+            by_status.setdefault(d["status"], []).append(d)
+        assert set(by_status) == {"completed", "failed", "skipped"}, by_status
+        assert all("code_deps" in d for d in by_status["completed"])
+        assert not any("code_deps" in d for d in by_status["failed"])
+        assert not any("code_deps" in d for d in by_status["skipped"])
+        ds = wf.to_xarray()
+        done = ds["running_has"].dropna("a")
+        assert done.size and float(done.max()) == 0.0  # not in 'running' either
+    finally:
+        sys.modules.pop("mushin_t_probe", None)
+
+
+def test_a_cache_hit_and_a_resume_reuse_record_the_code(project):
+    """The two other completed writes, a cache hit and a resume's reuse, carry
+    the record, so the cell stays guarded on the next resume."""
+    root, exp = project
+    cache = root / "cache"
+    first, second = root / "first", root / "second"
+    recorded = project_fingerprints(exp.W.task)
+
+    def record_of(wd):
+        (status,) = wd.rglob(STATUS_FILE)
+        return json.loads(status.read_text()).get("code_deps")
+
+    exp.W().run(a=multirun([1]), working_dir=str(first), cache_dir=str(cache))
+    exp.W().run(a=multirun([1]), working_dir=str(second), cache_dir=str(cache))
+    assert record_of(first) == recorded
+    assert record_of(second) == recorded  # the cache hit
+    exp.W().run(a=multirun([1]), working_dir=str(second), resume=True)
+    assert record_of(second) == recorded  # the resume's reuse
+
+
+def test_a_cell_resolves_its_config_once(project, monkeypatch):
+    """The config fingerprint and the `_target_` scan share one resolve of
+    the cell's config, and the fingerprint is the one main recorded."""
+    import inspect
+
+    from omegaconf import OmegaConf
+
+    from mushin._resume import config_fingerprint
+
+    root, exp = project
+    real = OmegaConf.to_container
+    calls = []
+
+    def counting(cfg, *args, **kwargs):
+        caller = inspect.currentframe().f_back.f_globals.get("__name__", "")
+        if kwargs.get("resolve") and caller.startswith("mushin"):
+            calls.append(caller)
+        return real(cfg, *args, **kwargs)
+
+    seen = []
+
+    class W(exp.W):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+    monkeypatch.setattr(OmegaConf, "to_container", staticmethod(counting))
+    wd = root / "sweep"
+    W().run(a=multirun([1, 2]), working_dir=str(wd))
+    monkeypatch.setattr(OmegaConf, "to_container", staticmethod(real))
+    assert len(calls) == 2, calls  # one per cell
+    for status in wd.rglob(STATUS_FILE):
+        d = json.loads(status.read_text())
+        cfg = OmegaConf.load(status.parent / ".hydra" / "config.yaml")
+        seen.append(d["config_hash"] == config_fingerprint(cfg))
+    assert seen == [True, True]

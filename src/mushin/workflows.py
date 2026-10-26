@@ -884,6 +884,7 @@ class _TaskRunner:
             discover_last_ckpt,
             merge_project_records,
             read_cell_status,
+            resolved_config,
             write_cell_status,
         )
         from ._sweep_io import (
@@ -893,25 +894,30 @@ class _TaskRunner:
             write_metrics_sidecar,
         )
 
-        chash = config_fingerprint(cfg)
+        # The config is resolved once, for its fingerprint and for the
+        # `_target_`s the project-code record follows.
+        resolved = resolved_config(cfg)
+        chash = config_fingerprint(cfg, resolved=resolved)
         # This cell's project-code record, taken here, in the process that will
         # run (or reuse) it: see cell_project_record.
         deps = cell_project_record(
             self._code_token,
             self.code_roots,
             self.code_body_roots,
-            cfg,
+            resolved,
             scripts=self.script_entries,
         )
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
         # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
+        # The project-code record goes only into the 'completed' writes (each
+        # passes it): a resume reads it from completed cells alone, and at a
+        # project's file cap it is most of a sidecar's size.
         job_num, choices = _current_job_fields()
         write_status = functools.partial(
             write_cell_status,
             config_hash=chash,
             code_hash=self.code_hash,
-            code_deps=deps,
             job_num=job_num,
             choices=choices,
         )
@@ -1029,7 +1035,9 @@ class _TaskRunner:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
                 write_metrics_sidecar(cwd, cached)
-                write_status(cwd, status="completed", combo=combo, attempt=1)
+                write_status(
+                    cwd, status="completed", combo=combo, attempt=1, code_deps=deps
+                )
                 return cached
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
@@ -1162,7 +1170,13 @@ class _TaskRunner:
                         write_metrics_sidecar(cache_cell, result)
                     except OSError:
                         pass
-            write_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
+            write_status(
+                cwd,
+                status="completed",
+                combo=combo,
+                attempt=rc.attempt,
+                code_deps=deps,
+            )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
             if not failed_recorded:
