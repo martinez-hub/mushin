@@ -553,47 +553,42 @@ def test_resume_reuses_when_project_code_is_unchanged(project):
     assert float(ds["v"].sel(a=2)) == 20.0
 
 
-def test_an_edit_this_process_has_not_loaded_records_the_code_that_runs(project):
-    """The file was edited but the process still runs the old code: the record
-    keeps the old code's digest (what runs), so the old cells are reused here,
-    and a process that runs the new code re-runs them."""
+def test_an_edit_this_process_has_not_loaded_warns(project):
+    """The file was edited but the process still runs the old code. The record
+    is the file as it is (under %autoreload, the new code does run), and a
+    warning says to reload or restart: this process cannot tell which code
+    runs."""
     from mushin._resume import _file_entry
 
     root, exp = project
     wd = root / "sweep"
     exp.W().run(a=multirun([1, 2]), working_dir=str(wd))
-    loaded = _file_entry(HELPERS)[1]
     _write(root, scale=100)  # on disk only
+    on_disk = _file_entry(HELPERS)[1]
     with pytest.warns(UserWarning, match="changed on disk after this process"):
-        ds = _resume(exp, str(wd))
-    assert float(ds["v"].sel(a=2)) == 20.0  # the old code ran, and was reused
+        _resume(exp, str(wd))
     for status in wd.rglob(STATUS_FILE):
         code = json.loads(status.read_text())["code_deps"]["code"]
-        assert code[f"{HELPERS} (file)"] == loaded
-    exp = _reload(exp)  # now the process runs the edit
-    with pytest.warns(UserWarning, match="fingerprint mismatch"):
-        ds = _resume(exp, str(wd))
-    assert float(ds["v"].sel(a=2)) == 200.0
+        assert code[f"{HELPERS} (file)"] == on_disk
 
 
-def test_a_script_edited_while_it_runs_records_the_code_that_runs(tmp_path):
-    """The driver keeps running the script it loaded: a second record after
-    the file changed keeps the loaded code's digest, with a warning. A script
-    run again (new functions, as IPython's %run makes) is a new load."""
+def test_a_script_edited_while_it_runs_warns(tmp_path):
+    """The driver keeps running the script it loaded: a later record after the
+    file changed warns. A script run again (new functions, as IPython's %run
+    makes) is a new load and does not."""
     from mushin._resume import _script_entry
 
     path = tmp_path / "mushin_t_live.py"
     src = "OFFSET = {v}\n\n\ndef task(a):\n    return a + OFFSET\n"
     ns = _script_ns(path, src.format(v=0))
-    first = _script_entry(str(path), ns, {"task"}, (ns["task"],))[0]
+    _script_entry(str(path), ns, {"task"}, (ns["task"],))
     path.write_text(src.format(v=5))  # edited while the sweep runs
     with pytest.warns(UserWarning, match="changed on disk after this process"):
-        assert _script_entry(str(path), ns, {"task"}, (ns["task"],))[0] == first
+        _script_entry(str(path), ns, {"task"}, (ns["task"],))
     exec(compile(path.read_bytes(), str(path), "exec", dont_inherit=True), ns)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        rerun = _script_entry(str(path), ns, {"task"}, (ns["task"],))[0]
-    assert rerun != first
+        _script_entry(str(path), ns, {"task"}, (ns["task"],))
 
 
 def test_a_comment_or_docstring_edited_after_import_is_not_stale(project):
@@ -788,28 +783,15 @@ def test_a_runner_with_no_code_roots_keys_the_cache_as_before(tmp_path):
     assert runner._cache_key("cfg", None) is None  # a walk that failed
 
 
-def test_a_partial_task_over_data_is_never_cached():
-    """Main never cached a partial task. One binding only values a key can
-    tell apart (numbers, a list of them, a function) is cached; one binding an
-    object of a type the key cannot see inside (an array) is not."""
+def test_a_partial_task_is_never_cached():
+    """As on main: a cache key cannot tell one partial's bound data from
+    another's, so a partial task never uses the cache. A plain function does."""
     from mushin._resume import partial_task_cacheable
 
     train = _train_for_partials
     assert partial_task_cacheable(train)
-    assert partial_task_cacheable(functools.partial(train, layers=[64, 128]))
-    assert partial_task_cacheable(functools.partial(train, layers=(1,), fn=len))
-    assert not partial_task_cacheable(functools.partial(train, layers=object()))
-
-
-def test_partials_over_different_lists_record_different_bound_arguments():
-    from mushin._resume import _partial_digest
-
-    def train(a, layers):
-        return a
-
-    a = _partial_digest(functools.partial(train, layers=[64, 128]))
-    b = _partial_digest(functools.partial(train, layers=[64, 256]))
-    assert a != b
+    assert not partial_task_cacheable(functools.partial(train, layers=[64, 128]))
+    assert not partial_task_cacheable(functools.partial(train, fn=len))
 
 
 # --- a task defined in the script that runs it --------------------------------
@@ -1580,24 +1562,6 @@ def test_a_target_class_in_the_driver_script_is_covered(tmp_path):
     assert calls.read_text() == "xxxx"
 
 
-def test_a_partial_over_a_closure_a_method_or_a_lambda_is_not_cached():
-    from mushin._resume import partial_task_cacheable
-
-    train = _train_for_partials
-
-    def make(k):
-        return lambda x: x * k
-
-    class M:
-        def predict(self, x):
-            return x
-
-    assert not partial_task_cacheable(functools.partial(train, fn=make(2.0)))
-    assert not partial_task_cacheable(functools.partial(train, fn=M().predict))
-    assert not partial_task_cacheable(functools.partial(train, fn=lambda x: x))
-    assert partial_task_cacheable(functools.partial(train, fn=len))
-
-
 def test_settings_named_like_secrets_are_compared(project):
     """`EOS_TOKEN = "</s>"` is a tokenizer setting: a project file is hashed
     as it is, strings included."""
@@ -1806,14 +1770,6 @@ def test_two_records_of_one_script_with_other_roots_are_not_stale(tmp_path):
     assert not [w for w in caught if "changed on disk" in str(w.message)]
     assert a == _script_digest(path, frozenset({"task"}))[0]
     assert b == _script_digest(path, frozenset({"Net"}))[0]
-    # Edited while both are recorded alternately: each keeps its own first
-    # digest (the code that runs), not the other's baseline reset.
-    path.write_text("class Net:\n    K = 2\n\n\ndef task(a):\n    return a + 1\n")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        for _ in range(2):
-            assert _script_entry(str(path), ns, {"task"}, (ns["task"],))[0] == a
-            assert _script_entry(str(path), ns, {"Net"}, (ns["Net"],))[0] == b
 
 
 def test_a_star_import_in_a_script_is_followed(tmp_path):
@@ -1869,16 +1825,6 @@ def test_a_partial_over_a_closure_or_a_bound_method_is_not_cached():
     assert not partial_task_cacheable(functools.partial(lambda a: a))
 
 
-def test_a_nested_partial_records_every_layers_arguments():
-    def f(a, b, c):
-        return a
-
-    inner = functools.update_wrapper(functools.partial(f, b=1), f)
-    one = project_fingerprints(functools.partial(inner, c=2))["code"]
-    two = project_fingerprints(functools.partial(inner, c=3))["code"]
-    assert one != two
-
-
 def test_a_target_module_not_imported_yet_is_judged_by_its_file(project, monkeypatch):
     """`_target_: mushin_t_tgtpkg.models.Net` while an installed distribution
     also ships that top-level name: before Hydra imports it, its file decides,
@@ -1905,19 +1851,16 @@ def test_a_target_module_not_imported_yet_is_judged_by_its_file(project, monkeyp
         r._foreign_by_path.cache_clear()
 
 
-def test_a_partial_bound_password_never_reaches_a_hash():
-    """A partial's bound arguments are hashed on their own, so a credential
-    there is redacted (as provenance redacts it), and such a partial is not
-    cached: two passwords must not share a cache entry either."""
-    from mushin._resume import _partial_digest, partial_task_cacheable
+def test_a_partials_bound_arguments_are_not_hashed():
+    """A partial's bound arguments are not compared (as on main), so nothing
+    of them, a credential included, reaches a sidecar."""
 
     def task(a, db_password):
         return a
 
-    one = functools.partial(task, db_password="hunter2")
-    two = functools.partial(task, db_password="correct-horse")
-    assert _partial_digest(one) == _partial_digest(two)
-    assert not partial_task_cacheable(one)
+    one = project_fingerprints(functools.partial(task, db_password="hunter2"))
+    two = project_fingerprints(functools.partial(task, db_password="correct-horse"))
+    assert one == two
 
 
 def test_a_setting_shaped_like_a_token_prefix_is_compared(project):
@@ -1963,6 +1906,8 @@ def test_a_nested_namespace_package_does_not_drop_the_record(project):
     try:
         record = project_fingerprints(mod.task)
         assert record is not None and "mushin_t_nsuser (file)" in record["code"]
+        assert "mushin_t_nspkg.sub.mod (file)" in record["code"]
+        assert "mushin_t_nspkg" not in sys.modules  # nothing was imported
     finally:
         sys.modules.pop("mushin_t_nsuser", None)
 
@@ -2008,3 +1953,82 @@ def test_an_old_pickled_runner_keys_the_cache(tmp_path):
     old.__setstate__(state)
     assert old.script_entries == {} and old.cache_ok is True
     assert old._cache_key("cfg", {"python": PY, "code": {"m (file)": "1"}})
+
+
+def test_a_relative_project_decorator_registers(tmp_path):
+    """`python -m pkg.train` with `from .registry import MODELS, register`: a
+    relative import is the script's own package's, so `@register` registers a
+    definition the task reaches through `MODELS`."""
+    text = (
+        "from .registry import MODELS, register\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    )
+    one = _digest_of_script(tmp_path, "rel1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "rel2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_star_imported_project_decorator_registers(project, tmp_path):
+    root, _ = project
+    (root / "mushin_t_starreg.py").write_text(
+        "MODELS = {}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n"
+    )
+    text = (
+        "from mushin_t_starreg import *\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    )
+    one = _digest_of_script(tmp_path, "sr1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "sr2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_generic_helper_in_a_script_counts_what_it_reads(tmp_path):
+    """`def helper[T](x)` (3.12+): the symbol table wraps it in a type
+    parameter scope of the same name."""
+    if sys.version_info < (3, 12):
+        pytest.skip("PEP 695 syntax")
+    text = (
+        "SCALE = {v}\n\n\ndef helper[T](x: T) -> T:\n    return x * SCALE\n\n\n"
+        "def task(a):\n    return helper(a)\n"
+    )
+    one = _digest_of_script(tmp_path, "gen1", text.format(v=2), {"task"})
+    two = _digest_of_script(tmp_path, "gen2", text.format(v=3), {"task"})
+    assert one != two
+
+
+def test_a_second_sweep_in_the_script_is_not_the_firsts_code(tmp_path):
+    """Two `@mushin.sweep` functions in one script: the task reads `mushin`
+    through its own decorator, which does not make the other sweep its code."""
+    text = (
+        "import mushin\n\n\n@mushin.sweep\ndef exp_a(a):\n    return {{'v': a}}\n\n\n"
+        "@mushin.sweep\ndef exp_b(a):\n    return {{'v': a * {k}}}\n"
+    )
+    one = _digest_of_script(tmp_path, "two1", text.format(k=1), {"exp_a"})
+    two = _digest_of_script(tmp_path, "two2", text.format(k=2), {"exp_a"})
+    assert one == two
+
+
+def test_a_main_guard_inside_a_script_helper_counts(tmp_path):
+    """In a driver script `__name__ == "__main__"` holds everywhere, so a
+    helper's guarded branch runs: it is code the task runs."""
+    text = (
+        "def helper(x):\n    if __name__ == '__main__':\n        return x * {k}\n"
+        "    return x\n\n\ndef task(a):\n    return helper(a)\n"
+    )
+    one = _digest_of_script(tmp_path, "mg1", text.format(k=2), {"task"})
+    two = _digest_of_script(tmp_path, "mg2", text.format(k=20), {"task"})
+    assert one != two
+
+
+def test_a_script_helpers_annotations_count(tmp_path):
+    """An annotation is evaluated where the definition is: what it names is
+    code the definition reads (a decorator may act on it)."""
+    text = (
+        "SCALE = {v}\n\n\ndef helper(x, factor: SCALE = 1):\n    return x\n\n\n"
+        "def task(a):\n    return helper(a)\n"
+    )
+    one = _digest_of_script(tmp_path, "ann1", text.format(v=2), {"task"})
+    two = _digest_of_script(tmp_path, "ann2", text.format(v=20), {"task"})
+    assert one != two

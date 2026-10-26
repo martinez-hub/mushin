@@ -325,150 +325,12 @@ def _is_foreign_module(name: str, file: str | None = None) -> bool:
         return False
 
 
-#: Values whose repr is the same in every process, by type: what a partial
-#: task's bound arguments are compared by.
-_CONSTANT_TYPES = (int, float, complex, str, bytes, bool, type(None))
-
-
-def _constant_repr(value, depth: int = 0) -> str | None:
-    """``repr`` of an immutable constant (tuples and frozensets of them too, in
-    a sorted order for frozensets, whose iteration order follows string
-    hashing; an enum member with its value; a path; a frozen dataclass
-    instance by its fields), or None for anything else. A string shaped like a
-    provider token becomes a marker, so its hash is never written anywhere."""
-    import dataclasses
-    import enum
-    import pathlib
-
-    if isinstance(value, enum.Enum):
-        inner = _constant_repr(value.value, depth + 1)
-        return f"{type(value).__qualname__}.{value.name}={inner}" if inner else None
-    if isinstance(value, str) and _secret_value(value):
-        return "<secret>"
-    if isinstance(value, _CONSTANT_TYPES):
-        return repr(value)
-    if isinstance(value, pathlib.PurePath):
-        return f"path({value.as_posix()!r})"
-    if (
-        dataclasses.is_dataclass(value)
-        and not isinstance(value, type)
-        and type(value).__dataclass_params__.frozen
-        and depth < 4
-    ):
-        fields = []
-        for f in dataclasses.fields(value):
-            c = _constant_repr(getattr(value, f.name), depth + 1)
-            if c is None:
-                return None
-            fields.append(f"{f.name}={c}")
-        return f"{type(value).__qualname__}({','.join(fields)})"
-    if isinstance(value, (tuple, frozenset)) and depth < 4 and len(value) <= 1000:
-        items = [_constant_repr(v, depth + 1) for v in value]
-        if any(i is None for i in items):
-            return None
-        if isinstance(value, frozenset):
-            items.sort()
-        return f"{type(value).__name__}({','.join(items)})"
-    return None
-
-
-def _named_callable(value) -> bool:
-    """A function or class its qualified name identifies: defined at module
-    level, not a lambda, closing over nothing (a closure, a bound method or a
-    lambda with the same name can do different things)."""
-    import types
-
-    if isinstance(value, type):
-        return "<" not in value.__qualname__
-    if type(value) is types.BuiltinFunctionType:
-        return getattr(value, "__self__", None) is None or isinstance(
-            value.__self__, types.ModuleType
-        )
-    return (
-        type(value) is types.FunctionType
-        and value.__closure__ is None
-        and "<" not in value.__qualname__
-    )
-
-
-def _bound_repr(value, depth: int = 0) -> str | None:
-    """How a partial task's bound argument is compared: a constant (as
-    ``_constant_repr``), a list, dict or set of them by value, a function or
-    class its name identifies (its code is covered by its module's file);
-    None for anything else (an array, an object, a closure, a bound method),
-    which a cache key cannot tell apart from another of its type."""
-    const = _constant_repr(value, depth)
-    if const is not None:
-        return const
-    if _named_callable(value):
-        return f"<{getattr(value, '__module__', '?')}.{value.__qualname__}>"
-    if depth >= 4:
-        return None
-    if isinstance(value, functools.partial):
-        keywords = sorted((value.keywords or {}).items())
-        inner = [_bound_repr(value.func, depth + 1)]
-        inner += [_bound_repr(a, depth + 1) for a in value.args]
-        inner += [_bound_repr(v, depth + 1) for _, v in keywords]
-        if None in inner:
-            return None
-        names = [""] * (1 + len(value.args)) + [f"{k}=" for k, _ in keywords]
-        return f"partial({','.join(n + i for n, i in zip(names, inner, strict=True))})"
-    if isinstance(value, (list, set)) and len(value) <= 1000:
-        items = [_bound_repr(v, depth + 1) for v in value]
-        if None in items:
-            return None
-        if isinstance(value, set):
-            items.sort()
-        return f"{type(value).__name__}({','.join(items)})"
-    if isinstance(value, dict) and len(value) <= 1000:
-        items = []
-        for k, v in value.items():
-            key, inner = _constant_repr(k, depth + 1), _bound_repr(v, depth + 1)
-            if key is None or inner is None:
-                return None
-            items.append(f"{key}:{inner}")
-        return f"dict({','.join(sorted(items))})"
-    return None
-
-
-def _partial_digest(value) -> str:
-    """A partial task's bound arguments, as ``_bound_repr`` compares them; an
-    argument it cannot represent by its type. A credential (by its keyword, or
-    by its value, as provenance redacts them) is never hashed: these hashes are
-    of the arguments alone, so a short one could be guessed back."""
-
-    def rep(v) -> str:
-        if isinstance(v, str) and _secret_value(v):
-            return "<redacted>"
-        return _bound_repr(v) or f"<{type(v).__module__}.{type(v).__qualname__}>"
-
-    parts = [rep(a) for a in value.args]
-    parts += [
-        f"{k}={'<redacted>' if _secret_key(k) else rep(v)}"
-        for k, v in sorted((value.keywords or {}).items())
-    ]
-    return _short_hash("|".join(parts).encode())
-
-
 def partial_task_cacheable(task) -> bool:
-    """Whether a partial task can be told apart from another of its kind, so a
-    cache key can include it: every bound argument (``_bound_repr``) and the
-    function itself (a closure, a bound method or a lambda carries state its
-    name does not show), none of them redacted. Main never cached a partial
-    task; one that fails this still is not, since two such partials over
-    different data would share an entry. Any other task is cacheable."""
-    if not isinstance(task, functools.partial):
-        return True
-    while isinstance(task, functools.partial):
-        if any(_secret_key(k) for k in (task.keywords or {})):
-            return False
-        values = list(task.args) + list((task.keywords or {}).values())
-        if any(_bound_repr(v) is None for v in values):
-            return False
-        if any(isinstance(v, str) and _secret_value(v) for v in values):
-            return False
-        task = task.func
-    return _named_callable(task)
+    """Whether a task may use ``cache_dir``: any task but a partial, as on
+    main. A partial's bound arguments are data the key cannot see into (an
+    array, a closure, a credential), so two partials over different data
+    would share an entry; its bound functions' modules are still recorded."""
+    return not isinstance(task, functools.partial)
 
 
 def _resolve_imports(imports, package: str | None) -> list[str]:
@@ -513,19 +375,50 @@ def _canonical_dump(node) -> str:
     return repr(node)
 
 
+def _find_in(dotted: str, entries) -> tuple[object, list]:
+    """``(spec, [])`` for module ``dotted`` in the directories ``entries``,
+    or ``(None, portions)``: a namespace package's directories there (none if
+    it is not found). Each directory's own finder, so nothing builds a
+    _NamespacePath, which would need the parent imported."""
+    import importlib.machinery as m
+    import sys
+
+    portions: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        finder = sys.path_importer_cache.get(entry)
+        try:
+            if finder is None:
+                finder = m.FileFinder(
+                    entry,
+                    (m.ExtensionFileLoader, m.EXTENSION_SUFFIXES),
+                    (m.SourceFileLoader, m.SOURCE_SUFFIXES),
+                    (m.SourcelessFileLoader, m.BYTECODE_SUFFIXES),
+                )
+            spec = finder.find_spec(dotted)
+        except Exception:  # noqa: BLE001 - a finder that cannot look here
+            continue
+        if spec is None:
+            continue
+        if spec.loader is not None:
+            return spec, []
+        portions.extend(spec.submodule_search_locations or [])
+    return None, portions
+
+
 def _find_file(name: str) -> str | None:
     """The file a module name denotes, without importing anything: the loaded
-    module's, or the one the path finders would load, walking a dotted name's
-    packages by their search locations."""
-    import importlib.machinery
+    module's, or the one the import system would load, walking a dotted name's
+    packages (namespace packages included) by their directories."""
+    import importlib.util
+    import os
     import sys
 
     loaded = sys.modules.get(name)
     if loaded is not None:
         file = getattr(loaded, "__file__", None)
         return file if isinstance(file, str) and file else None
-    import importlib.util
-
     parts = name.split(".")
     path = None
     spec = None
@@ -541,18 +434,32 @@ def _find_file(name: str) -> str | None:
             path = getattr(loaded, "__path__", None)
             spec = getattr(loaded, "__spec__", None)
             continue
-        try:
-            if i == 0:
-                # Every finder, for the top level only (importing nothing):
-                # an editable install may be found by a meta-path finder.
+        if i == 0:
+            # Every finder, for the top level only (importing nothing): an
+            # editable install may be found by a meta-path finder.
+            try:
                 spec = importlib.util.find_spec(dotted)
+            except Exception:  # noqa: BLE001 - a finder that raises
+                return None
+            if spec is None:
+                return None
+            if spec.origin is None and spec.submodule_search_locations is not None:
+                # A top-level namespace package: its directories on sys.path.
+                path = [
+                    os.path.join(e or os.curdir, dotted)
+                    for e in sys.path
+                    if isinstance(e, str)
+                    and os.path.isdir(os.path.join(e or os.curdir, dotted))
+                ]
             else:
-                spec = importlib.machinery.PathFinder.find_spec(dotted, path)
-        except Exception:  # noqa: BLE001 - a finder that raises (a nested
-            # namespace package whose parent is not imported raises KeyError)
-            return None
+                path = spec.submodule_search_locations
+            continue
+        spec, portions = _find_in(dotted, list(path))
         if spec is None:
-            return None
+            if not portions:
+                return None
+            path = portions  # a namespace portion
+            continue
         path = spec.submodule_search_locations
     if spec is None or not spec.has_location or not spec.origin:
         return None
@@ -573,13 +480,15 @@ def _is_main_guard(node) -> bool:
     return "__name__" in names and "__main__" in consts
 
 
-def _strip_tree(tree):
+def _strip_tree(tree, main_guards: bool = True):
     """A module's syntax tree without what does not run on import or is not
     code: ``if __name__ == "__main__":`` blocks (an imported module's driver
-    block) and docstrings, at any depth."""
+    block) and docstrings, at any depth. ``main_guards=False`` keeps the
+    guards: in a driver script they run, in its helpers too."""
     import ast
 
-    is_main_guard = _is_main_guard
+    def is_main_guard(node) -> bool:
+        return main_guards and _is_main_guard(node)
 
     def is_doc(node) -> bool:
         return (
@@ -723,9 +632,9 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
     """Entries for project modules ``names`` and, through their files, every
     project module they import in turn, at any depth (a helper imported inside
     a function, and the constants it imports); and whether ``_FILES_MAX`` cut
-    the list short. A loaded module whose file changed since this process
-    first recorded it keeps the digest of the code that runs. A name that
-    cannot be resolved costs its own entry only."""
+    the list short. Each file as it is now; one that changed since this
+    process first recorded that load of it warns. A name that cannot be
+    resolved costs its own entry only."""
     import sys
 
     out: dict[str, str] = {}
@@ -796,8 +705,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     table = symtable.symtable(source, str(path), "exec")
     scope_reads: dict[str, set[str]] = {}
     for child in table.get_children():
-        if child.get_type() not in ("function", "class"):
-            continue
+        # Every scope by its name: on 3.12+ a generic definition (`def f[T]`)
+        # is a type-parameter scope named like it, holding the function's.
         names = scope_reads.setdefault(child.get_name(), set())
         stack = [child]
         while stack:
@@ -827,6 +736,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 outer += node.args.defaults + [
                     d for d in node.args.kw_defaults if d is not None
                 ]
+                a = node.args
+                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                outer += [arg.annotation for arg in params if arg and arg.annotation]
+                if node.returns is not None:
+                    outer.append(node.returns)
             return scope_reads.get(node.name, set()) | loads(outer)
         return loads([node])
 
@@ -866,11 +780,16 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     def project_import(node, name: str) -> bool:
         for alias in node.names:
-            if (alias.asname or alias.name).partition(".")[0] != name:
+            bound = (alias.asname or alias.name).partition(".")[0]
+            if bound != name and alias.name != "*":
                 continue
             if isinstance(node, ast.ImportFrom):
-                if node.level or not node.module:
-                    return False  # relative: a script has no package
+                if node.level:
+                    # Relative: the script's own package (`python -m
+                    # pkg.train`), so the project's.
+                    return True
+                if not node.module:
+                    return False
                 module = node.module
             else:
                 module = alias.name
@@ -878,16 +797,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return False
 
     def registers(node, read: set[str]) -> bool:
-        """A decorated definition whose decorator is read by counted code,
-        comes from a project module, or is defined in the script reading what
-        counted code reads."""
+        """A decorated definition whose decorator comes from a project module,
+        or is defined in the script reading what counted code reads. Not one
+        whose decorator is merely read too (``@mushin.sweep`` on the task and
+        on another sweep)."""
         for deco in getattr(node, "decorator_list", ()):
             name = base(deco)
             if name is None:
                 continue
-            if name in read:
-                return True
-            for binder in binders.get(name, ()):
+            # A name no statement binds may come from a star import.
+            star = [b for b in binders.get("*", ()) if not binders.get(name)]
+            for binder in [*binders.get(name, ()), *star]:
                 if isinstance(binder, (ast.Import, ast.ImportFrom)):
                     if project_import(binder, name):
                         return True
@@ -917,7 +837,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
     module = _strip_tree(
-        ast.Module(body=[copy.deepcopy(n) for n in kept], type_ignores=[])
+        ast.Module(body=[copy.deepcopy(n) for n in kept], type_ignores=[]),
+        main_guards=False,  # the script runs as __main__: its guards run too
     )
     result = (_short_hash(_canonical_dump(module).encode()), _import_pairs(module))
     _cache_put(_SCRIPT_CACHE, cache_key, result)
@@ -925,7 +846,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
 
 #: The digest each loaded module (or driver script) had when this process
-#: first recorded that load of it: key -> (the load's identity, digest). A
+#: first recorded that load of it, to warn when its file moves: key -> (the
+#: load's identity, digest). A
 #: module's identity is its ``__spec__``, which a reload replaces; a script's,
 #: the root functions and classes it defined, which running it again (IPython's
 #: ``%run``) makes anew.
@@ -934,24 +856,24 @@ _STALE_WARNED: set[str] = set()
 
 
 def _loaded_digest(name: str, digest: str) -> str:
-    """The digest to record for module ``name``, whose file's digest is now
-    ``digest``: for a module this process loaded before its file changed, and
-    did not reload, the digest of the file as it was first recorded, which is
-    the code that runs (a reload replaces the module's ``__spec__``, and starts
-    afresh). An edit made before the first record is not seen."""
+    """``digest``, the file as it is now, after warning (once) when module
+    ``name`` is loaded and its file changed since this process first recorded
+    that load of it: if it was not reloaded, the old code still runs. The file
+    is recorded either way, since an in-place reload (IPython's %autoreload
+    patches functions without replacing ``__spec__``) does run the new code,
+    and this process cannot tell the two apart."""
     import sys
 
     module = sys.modules.get(name)
-    if module is None:
-        return digest
-    identity = (getattr(module, "__spec__", None) or module,)
-    return _baseline_digest(name, name, identity, digest)
+    if module is not None:
+        identity = (getattr(module, "__spec__", None) or module,)
+        _warn_if_moved(name, name, identity, digest)
+    return digest
 
 
-def _baseline_digest(key, what: str, identity: tuple, digest: str) -> str:
+def _warn_if_moved(key, what: str, identity: tuple, digest: str) -> None:
     """Record ``digest`` for this load (``identity``) of ``key`` the first
-    time and return it; afterwards, the first digest of the same load, with a
-    warning when the file moved since."""
+    time; afterwards, warn when the digest moved within the same load."""
     seen = _LOAD_BASELINE.get(key)
     same = (
         seen is not None
@@ -960,10 +882,8 @@ def _baseline_digest(key, what: str, identity: tuple, digest: str) -> str:
     )
     if not same:
         _LOAD_BASELINE[key] = (identity, digest)
-        return digest
-    if seen[1] != digest:
+    elif seen[1] != digest:
         _warn_stale(what)
-    return seen[1]
 
 
 def _warn_stale(what: str) -> None:
@@ -971,9 +891,10 @@ def _warn_stale(what: str) -> None:
         return
     _STALE_WARNED.add(what)
     _best_effort_warning(
-        f"resume/cache_dir: {what} changed on disk after this process loaded it, "
-        "so cells computed now run the old code and are recorded as computed by "
-        "it; they re-run once it is reloaded or the process restarts."
+        f"resume/cache_dir: {what} changed on disk after this process loaded it; "
+        "unless it was reloaded, the old code still runs while the cells computed "
+        "now are recorded as the new code's: reload it (or restart) before "
+        "resuming."
     )
 
 
@@ -984,21 +905,6 @@ def _best_effort_warning(message: str) -> None:
         warnings.warn(message, UserWarning, stacklevel=4)
     except Warning:  # warnings as errors: the record is best effort
         pass
-
-
-def _secret_value(value: str) -> bool:
-    """A string shaped like a provider token, by provenance's rule (one rule
-    for both, so they cannot drift apart)."""
-    from ._provenance import _REDACT_VALUE_RE
-
-    return bool(_REDACT_VALUE_RE.search(value))
-
-
-def _secret_key(name: str) -> bool:
-    """A keyword shaped like a credential's name, by provenance's rule."""
-    from ._provenance import _REDACT_KEY_RE
-
-    return bool(_REDACT_KEY_RE.search(str(name)))
 
 
 def _namespace_modules(namespace: dict) -> list[str]:
@@ -1049,11 +955,13 @@ def _root_layers(root) -> list:
 
 
 def _bound_callables(value, depth: int = 0):
-    """The functions and classes a partial binds, in lists, tuples and dicts
-    too, whose names identify them."""
+    """The functions, methods and classes a partial binds, in lists, tuples
+    and dicts too: code the task runs, whose modules the record follows."""
+    import types
+
     if depth > 4:
         return
-    if _named_callable(value):
+    if isinstance(value, (types.FunctionType, types.MethodType, type)):
         yield value
     elif isinstance(value, functools.partial):
         yield from _bound_callables(value.func, depth + 1)
@@ -1083,8 +991,7 @@ def _code_global_names(code) -> set[str]:
 def _root_entries(
     root, code: dict[str, str], seeds: list[str], scripts: dict, depth: int = 0
 ):
-    """Add what a root gives: a partial's bound arguments to ``code``, the
-    project modules to follow to ``seeds``, and, for a root defined in a
+    """Add what a root gives: the project modules to follow to ``seeds``, and, for a root defined in a
     driver script, its top-level name and itself to ``scripts[file] =
     (namespace, names, objects)``. A partial's bound functions and classes, and a bound method's
     function and class, are roots too."""
@@ -1093,18 +1000,8 @@ def _root_entries(
 
     for layer in _root_layers(root):
         if isinstance(layer, functools.partial):
-            inner = layer.func
-            while isinstance(inner, functools.partial):
-                inner = inner.func
-            name = getattr(inner, "__qualname__", type(inner).__qualname__)
-            module = getattr(inner, "__module__", "?")
-            key = f"{module}:{name}.<partial>"
-            digest = _partial_digest(layer)
-            # Nested layers (one that update_wrapper kept apart) share a key:
-            # each layer's arguments count.
-            code[key] = (
-                _short_hash(f"{code[key]}|{digest}".encode()) if key in code else digest
-            )
+            # Its bound arguments are not compared (as on main); the code it
+            # binds is followed.
             if depth < 2:
                 bound = [*layer.args, *(layer.keywords or {}).values()]
                 for value in _bound_callables(bound):
@@ -1142,13 +1039,14 @@ def _root_entries(
 
 
 def _script_entry(file: str, namespace: dict, names, objects) -> tuple[str, list]:
-    """``(digest, imports)`` for a driver script defining ``names``: the
-    digest of the script as this process first recorded the same load of it
-    (the same root ``objects``), which is the code that runs, when the file
-    changed since (with a warning)."""
+    """``(digest, imports)`` for a driver script defining ``names``, as the
+    file is now, after warning (once) when it changed since this process first
+    recorded the same load of it (the same root ``objects``: running the
+    script again makes new ones)."""
     digest, imports = _script_digest(Path(file), frozenset(names))
     key = ("script", file, frozenset(names))
-    return _baseline_digest(key, file, tuple(objects), digest), imports
+    _warn_if_moved(key, file, tuple(objects), digest)
+    return digest, imports
 
 
 def driver_script_entries(roots) -> dict:
@@ -1303,8 +1201,9 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     comment, a docstring or formatting is not. A task defined in the driver
     script gives ``"<script> (script)"``, what the task's definition reads in
     the script (see ``_script_digest``), and the project files that imports.
-    A module this process loaded before its file was edited, and did not
-    reload, keeps the digest of the code that runs. ``more`` adds roots taken
+    Files are read as they are now; one that changed since this process
+    first recorded that load of it warns, since unless it was reloaded the
+    old code still runs. ``more`` adds roots taken
     the same way (``pre_task``; ``Study``'s training functions), and
     ``scripts`` the driver's script entries; the config's ``_target_``\\ s are
     added per cell (``cell_project_record``). A partial task's bound
@@ -1344,7 +1243,7 @@ _TARGET_RECORDS: dict[tuple[str, str], dict[str, str]] = {}
 _TARGET_RECORDS_MAX = 4096
 
 
-def cell_project_record(token: str, roots, with_body, cfg, scripts=None) -> dict | None:
+def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
     """The project-code record of one cell, taken in the process that runs it:
     the roots' record (``roots`` and ``with_body`` alike, cached per process
     for the run ``token``) plus the entries of this cell's config

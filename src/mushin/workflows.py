@@ -2483,11 +2483,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             dict(...)``), so extending the grid or adding a print is not an
             edit; the script is read when the run starts, so editing it while
             the sweep runs does not change what its cells record. A re-run
-            warns, naming the file (``helpers (file)``). A file edited after
-            this process first recorded it, and not reloaded, keeps the digest
-            of the code that runs (with a warning), so the cells computed with
-            the old code re-run once a process runs the new one; an edit made
-            after the import but before that first record is not seen. Not
+            warns, naming the file (``helpers (file)``). Files are compared as
+            they are on disk: if one changes after this process loaded it and
+            is not reloaded, the old code keeps running while the cells
+            computed now are recorded as the new code's, so reload it (or
+            restart) before resuming. mushin warns when it had recorded that
+            file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
             the environment, code defined in a notebook (the project modules
             its functions, classes, objects and module values come from are
@@ -2574,11 +2575,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
             edited task body or an edited project file is a cache miss. An
-            entry an earlier mushin wrote is recomputed once. When the project code cannot be fingerprinted (a
-            warning says so), the cache is not used for that cell, and a
-            partial task is never cached when the key cannot tell it apart from
-            another: one binding an array, a credential, a closure or a bound
-            method, or wrapping a lambda.
+            entry an earlier mushin wrote is recomputed once. Files are read
+            as they are on disk (see ``resume``): after editing a module in a
+            running process, reload it (or restart) before using the cache, or
+            the old code's results are stored under the new code's key. When
+            the project code cannot be fingerprinted (a warning says so), the
+            cache is not used for that cell, and a partial task never uses the
+            cache, as on main: the key cannot see into the data it binds.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for

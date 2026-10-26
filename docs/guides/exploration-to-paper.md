@@ -173,10 +173,12 @@ Two mushin features make the re-run cheap and honest at the same time:
 
 - `cache_dir=` reuse is safe here because it is keyed on config **and** code,
   the task's and the project files it imports: a cell only comes from the cache
-  if it is the same computation by the same project code. It never mixes code
-  eras. (If you changed the task or a helper since exploration, those cells
-  simply recompute. A dependency upgrade is not seen, so after one start a
-  fresh `cache_dir` as well as a fresh `working_dir`.)
+  if it is the same computation by the same project code, so it does not mix
+  code eras. (If you changed the task or a helper since exploration, those
+  cells simply recompute. The files are read as they are on disk, so run the
+  paper grid in a fresh process, or reload what you edited first. A
+  dependency upgrade is not seen, so after one start a fresh `cache_dir` as
+  well as a fresh `working_dir`.)
 - Because the paper run is a normal sweep, everything else in mushin applies to
   it: [fail-soft + resume](resilience.md) for the flaky cells, `show`/`best` to
   watch it, and the provenance record it writes automatically.
