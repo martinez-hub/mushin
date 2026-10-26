@@ -114,7 +114,9 @@ call, other top-level calls, `print` calls or what only they read, so
 extending the grid and resuming reuses the completed cells. The task
 function's own source is compared as text, so a comment inside its body is an
 edit. If you edit a module and resume in the same Python process without
-reloading it, the old code still runs: reload it (or restart) first.
+reloading it, the old code still runs: reload it (or restart) first. The
+script rule follows names, so an unusual pattern can hide an edit there;
+helpers kept in an imported module are compared as a whole file.
 
 ### The full loop
 
