@@ -544,7 +544,7 @@ def _resolved(pairs, name: str, is_package: bool, package: str | None = None):
     return _resolve_imports(pairs, package or None)
 
 
-#: Per-process caches keyed by (path, mtime_ns, size), bounded alike. They
+#: Per-process caches keyed by (path, hash of the bytes), bounded alike. They
 #: hold digests and import lists, not syntax trees, so a large project costs
 #: little memory in every worker.
 _FILE_CACHE: dict = {}
@@ -558,9 +558,12 @@ def _cache_put(cache: dict, key, value) -> None:
     cache[key] = value
 
 
-def _stat_key(path: Path) -> tuple[str, int, int]:
-    st = path.stat()
-    return (str(path), st.st_mtime_ns, st.st_size)
+def _content_key(path: Path) -> tuple[bytes, tuple[str, str]]:
+    """A file's bytes and the key the caches use for them: its path and a
+    hash of its bytes, not its modification time, which a same-size edit
+    within one tick of a coarse file clock (Windows) leaves as it was."""
+    data = path.read_bytes()
+    return data, (str(path), _short_hash(data))
 
 
 def _parsed(path: Path):
@@ -574,11 +577,10 @@ def _parsed(path: Path):
     hid ordinary settings (``"hf_tiny_random_gpt2"``)."""
     import ast
 
-    cache_key = _stat_key(path)
+    data, cache_key = _content_key(path)
     hit = _FILE_CACHE.get(cache_key)
     if hit is not None:
         return hit
-    data = path.read_bytes()
     result: tuple[str, list] = (_short_hash(data), [])
     if path.suffix == ".py":
         try:
@@ -692,11 +694,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     import copy
     import symtable
 
-    cache_key = (*_stat_key(path), tuple(sorted(roots)))
+    source, content = _content_key(path)
+    cache_key = (*content, tuple(sorted(roots)))
     hit = _SCRIPT_CACHE.get(cache_key)
     if hit is not None:
         return hit
-    source = path.read_bytes()
     tree = ast.parse(source)
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 

@@ -2063,3 +2063,21 @@ def test_the_baseline_does_not_keep_a_script_alive(tmp_path):
     del task
     gc.collect()
     assert probe() is None
+
+
+def test_an_edit_that_keeps_size_and_mtime_is_seen(project):
+    """A same-size edit within one tick of a coarse file clock (Windows) has
+    the same size and modification time: the file's bytes decide."""
+    from mushin._resume import _parsed, _script_digest
+
+    root, _ = project
+    path = root / "mushin_t_tick.py"
+    path.write_text("K = 2\n")
+    st = path.stat()
+    first = _parsed(path)[0]
+    script_first = _script_digest(path, frozenset({"K"}))[0]
+    path.write_text("K = 3\n")
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert path.stat().st_mtime_ns == st.st_mtime_ns
+    assert _parsed(path)[0] != first
+    assert _script_digest(path, frozenset({"K"}))[0] != script_first
