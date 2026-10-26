@@ -818,15 +818,10 @@ class _TaskRunner:
             deps = {}
         import hashlib
 
-        from ._resume import _STALE
-
-        if _STALE in deps.get("code", {}).values():
-            # Computed by code edited after this process loaded it: never put
-            # in, or taken from, a cache that other processes share.
-            return None
         payload = f"{config_hash}:{self.code_hash}"
         if deps.get("code"):
-            payload += ":" + json.dumps(deps, sort_keys=True)
+            # The code only: its digests read alike on every Python version.
+            payload += ":" + json.dumps(deps["code"], sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     @staticmethod
@@ -972,9 +967,9 @@ class _TaskRunner:
                     and self.code_hash is not None
                     and prior_code != self.code_hash
                 )
-                # Judged on the names both runs reached, under one Python
-                # version; None when they cannot be compared (a sidecar from
-                # before the field, another interpreter, an unknown record).
+                # Judged on the files both records have, on any Python version;
+                # None when they cannot be compared (a sidecar from before the
+                # field, an unknown record).
                 changed_deps = changed_project_code(prior_deps, deps)
                 deps_changed = bool(changed_deps)
                 if config_changed or code_changed or deps_changed:
@@ -2478,22 +2473,27 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             without its main block and docstrings: an edit anywhere in it
             re-runs the cells, and a comment, a docstring or formatting does
             not (so neither does a prompt a decorator reads from a
-            docstring). A task defined in the driver script is compared by
-            what its definition can reach by name in the script (a helper, a
-            constant, a decorated definition, in the main block too), not by
-            the run call, top-level calls or prints, or what only they read
-            (``GRID = dict(...)``), so extending the grid or adding a print is
-            not an edit; the script is read when the run starts, so editing it
-            while the sweep runs does not change what its cells record. A
-            re-run warns, naming the file (``helpers (file)``). A file edited
-            after this process first recorded it, and not reloaded, is
-            recorded as stale, so the cells computed with the old code re-run
-            once a process runs the new one; an edit made after the import
-            but before that first record is not seen. Not covered: installed
-            packages other than editable ones, data files, the environment,
-            code defined in a notebook (the project modules its functions,
-            classes, objects and module values come from are covered), and
-            code reached only through some other string. A very large project
+            docstring). The task function's own source is compared as text,
+            as before, so any edit to it re-runs its cells, a comment
+            included. A task defined in the driver script is compared by what
+            its definition can reach by name in the script (a helper, a
+            constant, a star import, a definition a project decorator
+            registers, in the main block too), not by the run call, other
+            top-level calls or prints, or what only they read (``GRID =
+            dict(...)``), so extending the grid or adding a print is not an
+            edit; the script is read when the run starts, so editing it while
+            the sweep runs does not change what its cells record. A re-run
+            warns, naming the file (``helpers (file)``). A file edited after
+            this process first recorded it, and not reloaded, keeps the digest
+            of the code that runs (with a warning), so the cells computed with
+            the old code re-run once a process runs the new one; an edit made
+            after the import but before that first record is not seen. Not
+            covered: installed packages other than editable ones, data files,
+            the environment, code defined in a notebook (the project modules
+            its functions, classes, objects and module values come from are
+            covered), a top-level statement of the driver script that changes
+            an object in place (``CFG["x"] = 2``, ``parser.add_argument(...)``),
+            and code reached only through some other string. A very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.
@@ -2574,12 +2574,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             Newly-computed cells are stored there. Complements ``resume`` (which
             reuses within a single ``working_dir``); a changed config value, an
             edited task body or an edited project file is a cache miss. An
-            entry an earlier mushin wrote is recomputed once, and a cell
-            computed with code edited after its process loaded it is never
-            cached. When the project code cannot be fingerprinted (a
+            entry an earlier mushin wrote is recomputed once. When the project code cannot be fingerprinted (a
             warning says so), the cache is not used for that cell, and a
-            partial task that binds an argument the key cannot tell apart from
-            another of its type (an array) is never cached.
+            partial task is never cached when the key cannot tell it apart from
+            another: one binding an array, a credential, a closure or a bound
+            method, or wrapping a lambda.
         notes : str | None (default: None)
             A free-form note recorded for the sweep, in the manifest, on
             ``wf.notes``, and as the dataset attr ``mushin_notes``. Lineage for

@@ -244,6 +244,12 @@ NOT_EDITS = {
 }
 
 
+def _train_for_partials(a, layers=None, fn=None):
+    """A module-level task for the partial-task tests: its name identifies
+    it, as a real task's does."""
+    return a
+
+
 def _edited(root, name, src, before, after):
     """The record of ``src`` with ``{v}`` as ``before``, then as ``after``,
     each loaded as a fresh process would."""
@@ -301,14 +307,6 @@ def test_a_module_imported_only_by_a_main_block_is_not_followed(project):
         assert "mushin_t_plot (file)" not in project_fingerprints(mod.task)["code"]
     finally:
         sys.modules.pop("mushin_t_mainonly", None)
-
-
-def test_a_secret_in_a_project_file_does_not_reach_its_hash(project):
-    """A string shaped like a provider token is blanked before hashing."""
-    root, _ = project
-    src = "API_KEY = {v!r}\n\n\ndef task(a):\n    return a\n"
-    a, b = "hf_" + "a" * 30, "hf_" + "b" * 30
-    assert _edited(root, "mushin_t_secretfile", src, a, b) == []
 
 
 def test_the_record_is_the_same_in_every_process(tmp_path):
@@ -555,52 +553,52 @@ def test_resume_reuses_when_project_code_is_unchanged(project):
     assert float(ds["v"].sel(a=2)) == 20.0
 
 
-def test_an_edit_this_process_has_not_loaded_is_recorded_as_stale(project):
-    """The file was edited but the process still runs the old code: the cells
-    it computes are recorded as stale, never as the new code's, and re-run
-    once the module is reloaded."""
-    from mushin._resume import _STALE
+def test_an_edit_this_process_has_not_loaded_records_the_code_that_runs(project):
+    """The file was edited but the process still runs the old code: the record
+    keeps the old code's digest (what runs), so the old cells are reused here,
+    and a process that runs the new code re-runs them."""
+    from mushin._resume import _file_entry
 
     root, exp = project
     wd = root / "sweep"
     exp.W().run(a=multirun([1, 2]), working_dir=str(wd))
+    loaded = _file_entry(HELPERS)[1]
     _write(root, scale=100)  # on disk only
     with pytest.warns(UserWarning, match="changed on disk after this process"):
         ds = _resume(exp, str(wd))
-    assert float(ds["v"].sel(a=2)) == 20.0  # the old code ran
+    assert float(ds["v"].sel(a=2)) == 20.0  # the old code ran, and was reused
     for status in wd.rglob(STATUS_FILE):
         code = json.loads(status.read_text())["code_deps"]["code"]
-        assert code[f"{HELPERS} (file)"] == _STALE
+        assert code[f"{HELPERS} (file)"] == loaded
     exp = _reload(exp)  # now the process runs the edit
     with pytest.warns(UserWarning, match="fingerprint mismatch"):
         ds = _resume(exp, str(wd))
     assert float(ds["v"].sel(a=2)) == 200.0
 
 
-def test_a_script_constant_edited_while_it_runs_is_stale(tmp_path):
-    """A parallel worker unpickles the driver's old values while the file
-    already says otherwise: the record must not describe the edited file."""
-    from mushin._resume import _STALE
+def test_a_script_edited_while_it_runs_records_the_code_that_runs(tmp_path):
+    """The driver keeps running the script it loaded: a second record after
+    the file changed keeps the loaded code's digest, with a warning. A script
+    run again (new functions, as IPython's %run makes) is a new load."""
+    from mushin._resume import _script_entry
 
-    script = tmp_path / "mushin_t_live.py"
+    path = tmp_path / "mushin_t_live.py"
     src = "OFFSET = {v}\n\n\ndef task(a):\n    return a + OFFSET\n"
-    script.write_text(src.format(v=0))
-    ns = {"__name__": "__main__", "__file__": str(script)}
-    # Compiled with this module's __future__ flags, as IPython's %run would
-    # with its own: compile flags are not an edit.
-    exec(compile(script.read_bytes(), str(script), "exec"), ns)
-    key = "mushin_t_live (script)"
-    assert project_fingerprints(ns["task"])["code"][key] != _STALE
-    script.write_text(src.format(v=5))  # edited while the sweep runs
+    ns = _script_ns(path, src.format(v=0))
+    first = _script_entry(str(path), ns, {"task"}, (ns["task"],))[0]
+    path.write_text(src.format(v=5))  # edited while the sweep runs
     with pytest.warns(UserWarning, match="changed on disk after this process"):
-        assert project_fingerprints(ns["task"])["code"][key] == _STALE
+        assert _script_entry(str(path), ns, {"task"}, (ns["task"],))[0] == first
+    exec(compile(path.read_bytes(), str(path), "exec", dont_inherit=True), ns)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rerun = _script_entry(str(path), ns, {"task"}, (ns["task"],))[0]
+    assert rerun != first
 
 
 def test_a_comment_or_docstring_edited_after_import_is_not_stale(project):
     """Only an edit to code makes a loaded module stale: a comment line added
     above its functions, or a docstring reworded, leaves its digest as it was."""
-    from mushin._resume import _STALE
-
     root, exp = project
     before = _code(exp.W.task)[f"{HELPERS} (file)"]
     helpers = root / f"{HELPERS}.py"
@@ -608,7 +606,7 @@ def test_a_comment_or_docstring_edited_after_import_is_not_stale(project):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         after = _code(exp.W.task)[f"{HELPERS} (file)"]
-    assert after == before != _STALE
+    assert after == before
 
 
 def test_sidecar_records_the_project_code(project):
@@ -796,9 +794,7 @@ def test_a_partial_task_over_data_is_never_cached():
     object of a type the key cannot see inside (an array) is not."""
     from mushin._resume import partial_task_cacheable
 
-    def train(a, layers, fn=None):
-        return a
-
+    train = _train_for_partials
     assert partial_task_cacheable(train)
     assert partial_task_cacheable(functools.partial(train, layers=[64, 128]))
     assert partial_task_cacheable(functools.partial(train, layers=(1,), fn=len))
@@ -1458,45 +1454,6 @@ def test_a_fresh_working_dir_with_a_shared_cache_misses_after_an_edit(tmp_path):
     assert calls.read_text() == "xxxx"  # the edited code was computed
 
 
-def test_a_stale_record_never_matches_another_process(project):
-    """The stale marker is this process's own: a record stale here never
-    equals one stale in another process, and the cache is not used for it."""
-    from mushin._resume import _STALE
-
-    probe = (
-        "import sys; sys.path.insert(0, sys.argv[1]); "
-        "from mushin._resume import _STALE; print(_STALE)"
-    )
-    root, _ = project
-    other = subprocess.run(
-        [sys.executable, "-c", probe, str(root)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert other and other != _STALE
-
-
-def test_a_stale_record_is_never_cached():
-    from mushin._resume import _STALE
-    from mushin.workflows import _TaskRunner
-
-    runner = _TaskRunner(
-        task=None,
-        pre_task=None,
-        swept_names=(),
-        base_provenance=None,
-        on_error="raise",
-        inject_resume=False,
-        prior_manifest=None,
-        code_hash="c0de",
-        cache_dir="cache",
-        code_roots=(len,),
-    )
-    assert runner._cache_key("h", {"python": PY, "code": {"m (file)": "1"}})
-    assert runner._cache_key("h", {"python": PY, "code": {"m (file)": _STALE}}) is None
-
-
 MAIN_BLOCK_TASK = """
 import sys
 
@@ -1626,8 +1583,7 @@ def test_a_target_class_in_the_driver_script_is_covered(tmp_path):
 def test_a_partial_over_a_closure_a_method_or_a_lambda_is_not_cached():
     from mushin._resume import partial_task_cacheable
 
-    def train(a, fn):
-        return a
+    train = _train_for_partials
 
     def make(k):
         return lambda x: x * k
@@ -1643,13 +1599,11 @@ def test_a_partial_over_a_closure_a_method_or_a_lambda_is_not_cached():
 
 
 def test_settings_named_like_secrets_are_compared(project):
-    """`EOS_TOKEN = "</s>"` is a tokenizer setting; only a value shaped like a
-    provider token is blanked."""
+    """`EOS_TOKEN = "</s>"` is a tokenizer setting: a project file is hashed
+    as it is, strings included."""
     root, _ = project
     src = "EOS_TOKEN = {v!r}\n\n\ndef task(a):\n    return a\n"
     assert _edited(root, "mushin_t_eos", src, "</s>", "<|endoftext|>") != []
-    token = "sk-" + "a" * 24
-    assert _edited(root, "mushin_t_tok", src, token, "sk-" + "b" * 24) == []
 
 
 def test_a_record_from_another_python_version_is_compared():
@@ -1751,19 +1705,18 @@ def test_a_script_counts_what_the_task_reads_not_its_parameters(tmp_path):
 def test_a_name_both_assigned_and_imported_is_never_stale(tmp_path):
     """`np = None` then `try: import numpy as np`: no check compares a loaded
     value with the file, so a name the script rebinds never reads as stale."""
-    from mushin._resume import _STALE, _script_entry
+    from mushin._resume import _script_entry
 
     path = tmp_path / "mushin_t_np.py"
-    path.write_text(
+    ns = _script_ns(
+        path,
         "np = None\ntry:\n    import json as np\nexcept ImportError:\n    pass\n\n\n"
-        "def task(a):\n    return a if np is None else a + 1\n"
+        "def task(a):\n    return a if np is None else a + 1\n",
     )
-    ns = {"__name__": "__main__", "__file__": str(path)}
-    exec(compile(path.read_bytes(), str(path), "exec"), ns)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        first = _script_entry(str(path), ns, {"task"})[0]
-        assert _script_entry(str(path), ns, {"task"})[0] == first != _STALE
+        first = _script_entry(str(path), ns, {"task"}, (ns["task"],))[0]
+        assert _script_entry(str(path), ns, {"task"}, (ns["task"],))[0] == first
 
 
 def test_a_cell_uses_the_drivers_script_entry(project, tmp_path):
@@ -1826,3 +1779,232 @@ def test_a_notebook_records_the_modules_of_the_objects_it_holds(project):
         assert "mushin_t_nbmodel (file)" in project_fingerprints(nb.task)["code"]
     finally:
         sys.modules.pop("mushin_t_nbmodel", None)
+
+
+# --- the final review: each case where it breaks --------------------------------
+
+
+def _script_ns(path, text):
+    path.write_text(text)
+    ns = {"__name__": "__main__", "__file__": str(path)}
+    exec(compile(path.read_bytes(), str(path), "exec", dont_inherit=True), ns)
+    return ns
+
+
+def test_two_records_of_one_script_with_other_roots_are_not_stale(tmp_path):
+    """A task and a `_target_` class in one script are two records of it, with
+    two sets of roots: neither is taken for an edit."""
+    from mushin._resume import _script_digest, _script_entry
+
+    path = tmp_path / "mushin_t_two.py"
+    ns = _script_ns(path, "class Net:\n    K = 1\n\n\ndef task(a):\n    return a\n")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(2):
+            a = _script_entry(str(path), ns, {"task"}, (ns["task"],))[0]
+            b = _script_entry(str(path), ns, {"Net"}, (ns["Net"],))[0]
+    assert not [w for w in caught if "changed on disk" in str(w.message)]
+    assert a == _script_digest(path, frozenset({"task"}))[0]
+    assert b == _script_digest(path, frozenset({"Net"}))[0]
+    # Edited while both are recorded alternately: each keeps its own first
+    # digest (the code that runs), not the other's baseline reset.
+    path.write_text("class Net:\n    K = 2\n\n\ndef task(a):\n    return a + 1\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for _ in range(2):
+            assert _script_entry(str(path), ns, {"task"}, (ns["task"],))[0] == a
+            assert _script_entry(str(path), ns, {"Net"}, (ns["Net"],))[0] == b
+
+
+def test_a_star_import_in_a_script_is_followed(tmp_path):
+    from mushin._resume import _resolved, _script_digest
+
+    path = tmp_path / "mushin_t_star.py"
+    path.write_text("from starhelp import *\n\n\ndef task(a):\n    return scale(a)\n")
+    _, imports = _script_digest(path, frozenset({"task"}))
+    assert "starhelp" in _resolved(imports, "__main__", False)
+
+
+def test_a_script_saved_with_a_byte_order_mark_is_read(tmp_path):
+    from mushin._resume import _script_digest
+
+    path = tmp_path / "mushin_t_bom.py"
+    path.write_bytes(b"\xef\xbb\xbfSCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n")
+    assert _script_digest(path, frozenset({"task"}))[0]
+
+
+def test_a_foreign_decorator_on_main_does_not_count_a_project_one_does(tmp_path):
+    """`@click.command()` on a `main()` that runs the sweep is not code the
+    task runs; a registry decorator defined in the script is."""
+    text = (
+        "import functools\n\nREGISTRY = {{}}\nGRID = {grid}\n\n\n"
+        "def register(cls):\n    REGISTRY[cls.__name__] = cls\n    return cls\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\n"
+        "def task(a):\n    return a * REGISTRY['Lin'].K\n\n\n"
+        "@functools.lru_cache\ndef main():\n    run(a=GRID)\n"
+    )
+    base = _digest_of_script(
+        tmp_path, "dec1", text.format(grid="[1, 2]", k=1), {"task"}
+    )
+    grid = _digest_of_script(
+        tmp_path, "dec2", text.format(grid="[1, 2, 3]", k=1), {"task"}
+    )
+    lin = _digest_of_script(tmp_path, "dec3", text.format(grid="[1, 2]", k=2), {"task"})
+    assert base == grid
+    assert lin != base
+
+
+def test_a_partial_over_a_closure_or_a_bound_method_is_not_cached():
+    from mushin._resume import partial_task_cacheable
+
+    def make(w):
+        return lambda a: a * w
+
+    class T:
+        def fit(self, a):
+            return a
+
+    assert not partial_task_cacheable(functools.partial(make(2.0)))
+    assert not partial_task_cacheable(functools.partial(T().fit))
+    assert not partial_task_cacheable(functools.partial(lambda a: a))
+
+
+def test_a_nested_partial_records_every_layers_arguments():
+    def f(a, b, c):
+        return a
+
+    inner = functools.update_wrapper(functools.partial(f, b=1), f)
+    one = project_fingerprints(functools.partial(inner, c=2))["code"]
+    two = project_fingerprints(functools.partial(inner, c=3))["code"]
+    assert one != two
+
+
+def test_a_target_module_not_imported_yet_is_judged_by_its_file(project, monkeypatch):
+    """`_target_: mushin_t_tgtpkg.models.Net` while an installed distribution
+    also ships that top-level name: before Hydra imports it, its file decides,
+    so a worker that has not imported it records it as the driver does."""
+    import mushin._resume as r
+
+    root, _ = project
+    pkg = root / "mushin_t_tgtpkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "models.py").write_text("class Net:\n    pass\n")
+    monkeypatch.setattr(
+        r,
+        "_installed_roots",
+        lambda: {"mushin_t_tgtpkg": ((root.parent / "x").resolve(),)},
+    )
+    r._foreign_by_path.cache_clear()
+    try:
+        seeds, scripts = [], {}
+        r._target_entries("mushin_t_tgtpkg.models.Net", seeds, scripts)
+        assert seeds == ["mushin_t_tgtpkg.models"]
+        assert "mushin_t_tgtpkg" not in sys.modules
+    finally:
+        r._foreign_by_path.cache_clear()
+
+
+def test_a_partial_bound_password_never_reaches_a_hash():
+    """A partial's bound arguments are hashed on their own, so a credential
+    there is redacted (as provenance redacts it), and such a partial is not
+    cached: two passwords must not share a cache entry either."""
+    from mushin._resume import _partial_digest, partial_task_cacheable
+
+    def task(a, db_password):
+        return a
+
+    one = functools.partial(task, db_password="hunter2")
+    two = functools.partial(task, db_password="correct-horse")
+    assert _partial_digest(one) == _partial_digest(two)
+    assert not partial_task_cacheable(one)
+
+
+def test_a_setting_shaped_like_a_token_prefix_is_compared(project):
+    root, _ = project
+    src = "MODEL = {v!r}\n\n\ndef task(a):\n    return a\n"
+    a, b = "hf_tiny_random_gpt2_model", "hf_tiny_random_llama_model"
+    assert _edited(root, "mushin_t_hfname", src, a, b) != []
+
+
+def test_the_cache_key_does_not_depend_on_the_python_version():
+    from mushin.workflows import _TaskRunner
+
+    runner = _TaskRunner(
+        task=None,
+        pre_task=None,
+        swept_names=(),
+        base_provenance=None,
+        on_error="raise",
+        inject_resume=False,
+        prior_manifest=None,
+        code_hash="c0de",
+        cache_dir="cache",
+        code_roots=(len,),
+    )
+    code = {"m (file)": "1"}
+    assert runner._cache_key(
+        "h", {"python": "3.11", "code": code}
+    ) == runner._cache_key("h", {"python": "3.13", "code": code})
+
+
+def test_a_nested_namespace_package_does_not_drop_the_record(project):
+    """`import nspkg.sub.mod` inside the task, no `__init__.py` anywhere, the
+    parent not imported: one name that cannot be resolved costs its entry,
+    never the whole record."""
+    root, _ = project
+    (root / "mushin_t_nspkg" / "sub").mkdir(parents=True)
+    (root / "mushin_t_nspkg" / "sub" / "mod.py").write_text("X = 1\n")
+    mod = _module(
+        root,
+        "mushin_t_nsuser",
+        "def task(a):\n    import mushin_t_nspkg.sub.mod as m\n\n    return a + m.X\n",
+    )
+    try:
+        record = project_fingerprints(mod.task)
+        assert record is not None and "mushin_t_nsuser (file)" in record["code"]
+    finally:
+        sys.modules.pop("mushin_t_nsuser", None)
+
+
+def test_a_lambda_root_in_a_script_counts_what_it_reads(tmp_path):
+    """Study methods given as lambdas in the script: `{"a": lambda s: train(s,
+    LR)}` reads `train` and `LR`."""
+    from mushin._resume import driver_script_entries
+
+    path = tmp_path / "mushin_t_lam.py"
+    src = "LR = {v}\n\n\ndef train(s, lr):\n    return s * lr\n\n\nFN = lambda s: train(s, LR)\n"
+    ns = _script_ns(path, src.format(v=0.1))
+    first = driver_script_entries([ns["FN"]])[str(path)][0]
+    path2 = tmp_path / "mushin_t_lam2.py"
+    ns2 = _script_ns(path2, src.format(v=0.2))
+    second = driver_script_entries([ns2["FN"]])[str(path2)][0]
+    assert first != second
+
+
+def test_an_old_pickled_runner_keys_the_cache(tmp_path):
+    """A runner pickled before `cache_ok` and `script_entries` existed still
+    computes a cache key and a record."""
+    from hydra_zen import zen
+
+    from mushin.workflows import _TaskRunner
+
+    runner = _TaskRunner(
+        task=zen(lambda a: dict(v=a)),
+        pre_task=zen(lambda: None),
+        swept_names=(),
+        base_provenance={},
+        on_error="raise",
+        inject_resume=False,
+        prior_manifest=None,
+        cache_dir=str(tmp_path),
+        code_hash="c0de",
+        code_roots=(len,),
+    )
+    state = {
+        k: v for k, v in vars(runner).items() if k not in {"cache_ok", "script_entries"}
+    }
+    old = _TaskRunner.__new__(_TaskRunner)
+    old.__setstate__(state)
+    assert old.script_entries == {} and old.cache_ok is True
+    assert old._cache_key("cfg", {"python": PY, "code": {"m (file)": "1"}})

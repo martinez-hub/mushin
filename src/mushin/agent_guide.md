@@ -159,8 +159,8 @@ rules:
   every project file the task's module (and `pre_task`'s) imports, directly
   or through other project files, and the modules of the classes the config
   names as `_target_`. An edit anywhere in such a file re-runs the cells; a
-  comment, a docstring or formatting does not (a comment in the task
-  function's own body does). In the driver script, only what the task's
+  comment, a docstring or formatting does not (any edit to the task
+  function's own source does, a comment included). In the driver script, only what the task's
   definition can reach by name counts, not the `run(...)` call, top-level
   calls, `print` calls or what only they read, so extending the grid is not
   an edit. It does not see an installed package, data files, code defined in
