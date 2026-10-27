@@ -10,6 +10,7 @@ import contextvars
 import functools
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1138,6 +1139,479 @@ def _namespace_modules(namespace: dict) -> list[str]:
     return sorted(names)
 
 
+# --- code defined in a notebook ----------------------------------------------
+#
+# A notebook has no file to compare, and its cell history is not the code in
+# force (cells run out of order, fail partway, and are replayed after a
+# restart). The kernel's namespace is: a function's code names the cell text
+# of the version now bound, a class is found through its methods, and a plain
+# constant's value is its only record. The record follows the names the
+# roots' code looks up, through those objects, one entry per name. Main
+# compared none of it, so each choice below compares less where a value can
+# move without an edit (see docs/superpowers/specs/
+# 2026-10-27-notebook-code-record-design.md).
+
+#: The key the driver's notebook entries ship under in ``script_entries``: no
+#: script path can be it (those end in ``.py``).
+NOTEBOOK_ENTRIES = "<notebook>"
+
+#: IPython's own names in a kernel's namespace (its input and output history
+#: and helpers): they change with every cell and are never the task's code.
+_IPYTHON_NAME = re.compile(
+    r"_+|_i+|_i?\d+|_oh|_ih|_dh|In|Out|get_ipython|exit|quit|_exit_code"
+)
+
+_PLAIN_TYPES = (int, float, complex, bool, str, bytes, type(None))
+_PLAIN_MAX_ITEMS = 10_000
+_PLAIN_MAX_CHARS = 1_000_000
+_NOTEBOOK_MAX_OBJECTS = 2000
+
+#: Bytecode that looks a name up in the globals, and that rebinds one.
+_GLOBAL_READS = frozenset({"LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS"})
+_GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
+_ATTR_WRITES = frozenset({"STORE_ATTR", "DELETE_ATTR"})
+
+_CELL_TREES: dict[str, object] = {}
+_CODE_NAMES: dict = {}
+
+
+class _NotPlain(Exception):
+    pass
+
+
+def _plain_repr(value) -> str | None:
+    """A plain value's canonical text, or None: exactly ``int``, ``float``,
+    ``complex``, ``bool``, ``str``, ``bytes``, ``None``, and tuples and
+    frozensets of them, within the bounds. Mutable values are never plain: a
+    task that appends to a global list or fills a dict during one run would
+    make the resume re-run every cell. The type is part of the text, so
+    ``1``, ``1.0`` and ``True`` differ; a frozenset's members are sorted,
+    since string hashing is randomized per process."""
+    budget = [_PLAIN_MAX_ITEMS, _PLAIN_MAX_CHARS]
+
+    def text(v, depth: int) -> str:
+        kind = type(v)
+        if kind in _PLAIN_TYPES:
+            if kind in (str, bytes) and len(v) > budget[1]:
+                raise _NotPlain
+            out = f"{kind.__name__}:{v!r}"  # a huge int raises ValueError
+        elif (kind is tuple or kind is frozenset) and depth < 16:
+            budget[0] -= len(v)
+            if budget[0] < 0:
+                raise _NotPlain
+            parts = [text(item, depth + 1) for item in v]
+            if kind is frozenset:
+                parts.sort()
+            out = f"{kind.__name__}({','.join(parts)})"
+        else:
+            raise _NotPlain
+        budget[1] -= len(out)
+        if budget[1] < 0:
+            raise _NotPlain
+        return out
+
+    try:
+        return text(value, 0)
+    except (_NotPlain, ValueError, RecursionError):
+        return None
+
+
+def _looks_secret(name: str, value) -> bool:
+    """A name or a string the provenance record redacts (a key, a token, a
+    password): its value is left out, since a digest of a short string alone
+    can confirm a guess of it."""
+    from ._provenance import _REDACT_KEY_RE, _REDACT_VALUE_RE
+
+    if _REDACT_KEY_RE.search(name):
+        return True
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if type(v) is str and _REDACT_VALUE_RE.search(v):
+            return True
+        if type(v) is bytes and _REDACT_VALUE_RE.search(v.decode("latin-1")):
+            return True
+        if type(v) in (tuple, frozenset):
+            stack.extend(v)
+    return False
+
+
+def _cell_lines(filename) -> list | None:
+    """The text of a notebook cell, as IPython keeps it in ``linecache``: an
+    entry with no modification time (a file on disk has one, and can have
+    changed since the code was compiled)."""
+    import linecache
+
+    entry = linecache.cache.get(filename)
+    if (
+        type(entry) is tuple
+        and len(entry) == 4
+        and entry[1] is None
+        and type(entry[2]) is list
+    ):
+        return entry[2]
+    return None
+
+
+def _cell_tree(lines):
+    """A cell's syntax tree without docstrings, cached by its text; None
+    when it does not parse."""
+    import ast
+
+    text = "".join(lines)
+    key = _short_hash(text.encode())
+    if key in _CELL_TREES:
+        return _CELL_TREES[key]
+    try:
+        # A cell may await at the top level (ipykernel compiles it so).
+        flags = ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+        tree = _strip_tree(compile(text, "<cell>", "exec", flags), main_guards=False)
+    except (SyntaxError, ValueError, RecursionError):
+        tree = None
+    _cache_put(_CELL_TREES, key, tree)
+    return tree
+
+
+def _code_names(code) -> tuple[frozenset, frozenset, frozenset]:
+    """``(reads, writes, attributes)`` of a code object and the code nested
+    in it: the global names it looks up, those it rebinds, and the attribute
+    names it stores. From bytecode, not ``co_names``, which also lists
+    attribute names (``cfg.lr`` would follow a global ``lr``). Bytecode only
+    chooses what to follow; it is never hashed, since records are compared
+    across Python versions."""
+    import dis
+    import types
+
+    hit = _CODE_NAMES.get(code)
+    if hit is not None:
+        return hit
+    reads, writes, attrs = set(), set(), set()
+    stack = [code]
+    while stack:
+        current = stack.pop()
+        for ins in dis.get_instructions(current):
+            if type(ins.argval) is not str:
+                continue
+            if ins.opname in _GLOBAL_READS:
+                reads.add(ins.argval)
+            elif ins.opname in _GLOBAL_WRITES:
+                writes.add(ins.argval)
+            elif ins.opname in _ATTR_WRITES:
+                attrs.add(ins.argval)
+        stack.extend(k for k in current.co_consts if type(k) is types.CodeType)
+    result = (frozenset(reads), frozenset(writes), frozenset(attrs))
+    _cache_put(_CODE_NAMES, code, result)
+    return result
+
+
+def _definition_nodes(code) -> list | None:
+    """The syntax nodes that define a function in its cell: the ``def`` named
+    like it whose first line (or a decorator's, which is a decorated
+    function's first line) is the code's, or for a lambda the lambdas on its
+    line, so a lambda passed to ``run(...)`` does not bring the grid. None
+    when the cell is not kept or names something else."""
+    import ast
+
+    lines = _cell_lines(code.co_filename)
+    tree = _cell_tree(lines) if lines is not None else None
+    if tree is None:
+        return None
+    line = code.co_firstlineno
+    if code.co_name == "<lambda>":
+        found = [
+            n for n in ast.walk(tree) if type(n) is ast.Lambda and n.lineno == line
+        ]
+        return sorted(found, key=lambda n: n.col_offset) or None
+    for node in ast.walk(tree):
+        if (
+            type(node) in (ast.FunctionDef, ast.AsyncFunctionDef)
+            and node.name == code.co_name
+            and (
+                node.lineno == line
+                or any(d.lineno == line for d in node.decorator_list)
+            )
+        ):
+            return [node]
+    return None
+
+
+def _method_functions(value) -> list:
+    """The functions a class attribute holds: a function, a static or class
+    method's, a property's accessors."""
+    import types
+
+    kind = type(value)
+    if kind is types.FunctionType:
+        return [value]
+    if kind in (staticmethod, classmethod):
+        inner = value.__func__
+        return [inner] if type(inner) is types.FunctionType else []
+    if kind is property:
+        accessors = (value.fget, value.fset, value.fdel)
+        return [f for f in accessors if type(f) is types.FunctionType]
+    return []
+
+
+def _class_node(cls, methods):
+    """The ``class`` statement that defined ``cls``, found through a method
+    defined in its body (``inspect.getsource`` cannot find a class in a
+    notebook): the innermost one with its name spanning the method's line."""
+    import ast
+
+    for fn in methods:
+        code = fn.__code__
+        lines = _cell_lines(code.co_filename)
+        tree = _cell_tree(lines) if lines is not None else None
+        if tree is None:
+            continue
+        best = None
+        for node in ast.walk(tree):
+            if (
+                type(node) is ast.ClassDef
+                and node.name == cls.__name__
+                and node.lineno <= code.co_firstlineno <= (node.end_lineno or 0)
+                and (best is None or node.lineno >= best.lineno)
+            ):
+                best = node
+        if best is not None:
+            return best
+    return None
+
+
+def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
+    """The entries of a notebook's code the roots reach: ``{"<name>
+    (notebook)": digest}`` for each name their code looks up (and each root
+    by its name), through the objects bound now. A function defined in a
+    cell is its definition's syntax tree plus the values it captured (its
+    defaults and closure: what runs, not what their names hold now); a class
+    defined there is its ``class`` statement plus its plain attributes; an
+    instance of one is its class; a plain value is its text; a container is
+    the notebook functions and classes it holds (a registry). Left out:
+    anything else (a mutable value's contents, an object's state, data), a
+    name some reached code rebinds or an attribute name it stores (they move
+    during a run), IPython's own names, and what looks like a secret. Objects
+    are inspected by type only, never by reading an attribute of an instance
+    (a lazy proxy must not resolve)."""
+    import inspect
+    import types
+
+    ns_name = namespace.get("__name__")
+    units: dict[int, tuple] = {}  # id -> (kind, object, captured, children)
+    codes: list = []
+    named: dict[str, object] = {}
+
+    def own_function(value):
+        """A function defined in a cell of this notebook, through its
+        decorators' ``__wrapped__``: None for anything else."""
+        for _ in range(8):
+            if type(value) is types.FunctionType:
+                return (
+                    value
+                    if value.__globals__ is namespace
+                    and _cell_lines(value.__code__.co_filename) is not None
+                    else None
+                )
+            try:
+                value = inspect.getattr_static(value, "__wrapped__", None)
+            except Exception:  # noqa: BLE001 - an attribute that raises
+                return None
+            if value is None:
+                return None
+        return None
+
+    def own_class(value):
+        if not issubclass(type(value), type):
+            return None
+        try:
+            module = vars(value).get("__module__")
+        except TypeError:
+            return None
+        return value if module == ns_name else None
+
+    def callables_in(value, depth: int = 0, out=None):
+        out = [] if out is None else out
+        kind = type(value)
+        if depth > 4 or len(out) > _PLAIN_MAX_ITEMS:
+            return out
+        if kind is dict:
+            items = list(value.values())
+        elif kind in (list, tuple, set, frozenset):
+            items = list(value)
+        else:
+            found = own_function(value) or own_class(value)
+            if found is not None:
+                out.append(found)
+            return out
+        for item in items[:_PLAIN_MAX_ITEMS]:
+            callables_in(item, depth + 1, out)
+        return out
+
+    budget = [_NOTEBOOK_MAX_OBJECTS]
+
+    def visit(obj):
+        """Take one function or class into ``units`` and return its id; None
+        past the bound."""
+        if id(obj) in units:
+            return id(obj)
+        if budget[0] <= 0:
+            return None
+        budget[0] -= 1
+        if type(obj) is types.FunctionType:
+            captured = list(obj.__defaults__ or ())
+            captured += [v for _, v in sorted((obj.__kwdefaults__ or {}).items())]
+            for cell in obj.__closure__ or ():
+                try:
+                    captured.append(cell.cell_contents)
+                except ValueError:  # an empty cell
+                    captured.append(None)
+            units[id(obj)] = ("function", obj, captured, [])
+            codes.append(obj.__code__)
+            children = units[id(obj)][3]
+            for value in captured:
+                for found in callables_in(value):
+                    children.append(visit(found))
+            children[:] = [c for c in children if c is not None]
+        else:
+            methods = []
+            for value in vars(obj).values():
+                for fn in _method_functions(value):
+                    if fn.__qualname__.startswith(obj.__qualname__ + ".") and (
+                        own_function(fn) is fn
+                    ):
+                        methods.append(fn)
+            units[id(obj)] = ("class", obj, methods, [])
+            codes.extend(fn.__code__ for fn in methods)
+            children = units[id(obj)][3]
+            for fn in methods:
+                children.append(visit(fn))
+            for base in obj.__bases__:
+                if own_class(base) is not None:
+                    children.append(visit(base))
+            children[:] = [c for c in children if c is not None]
+        return id(obj)
+
+    def unit_of(value):
+        """The id of the unit a name's value is, or None (no entry)."""
+        found = own_function(value) or own_class(value)
+        if found is None and own_class(type(value)) is not None:
+            found = type(value)  # an instance: its class runs
+        return visit(found) if found is not None else None
+
+    root_units: dict[str, int] = {}
+    for key, root in roots:
+        uid = unit_of(root)
+        if uid is not None:
+            root_units[key] = uid
+
+    # Follow the names the reached code looks up, breadth first.
+    followed: set[str] = set()
+    done = 0
+    while done < len(codes):
+        code = codes[done]
+        done += 1
+        reads, _, _ = _code_names(code)
+        for name in sorted(reads):
+            if name in followed or name not in namespace:
+                continue
+            followed.add(name)
+            if (
+                name.startswith("__") and name.endswith("__")
+            ) or _IPYTHON_NAME.fullmatch(name):
+                continue
+            value = namespace[name]
+            named[name] = value
+            if unit_of(value) is None:
+                for found in callables_in(value):
+                    visit(found)
+
+    rebound: set[str] = set()
+    stored: set[str] = set()
+    for code in codes:
+        _, writes, attrs = _code_names(code)
+        rebound |= writes
+        stored |= attrs
+
+    digests: dict[int, str] = {}
+
+    def digest(uid: int, stack: tuple = ()) -> tuple[str, bool]:
+        """``(digest, met a cycle)``: a unit whose digest met a cycle depends
+        on where the walk entered it, so only the others are kept."""
+        if uid in digests:
+            return digests[uid], False
+        if uid in stack:
+            return "cycle", True
+        kind, obj, extra, children = units[uid]
+        parts = [kind]
+        if kind == "function":
+            nodes = _definition_nodes(obj.__code__)
+            parts.append(
+                "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
+            )
+            for value in extra:
+                text = _plain_repr(value)
+                parts.append(
+                    text
+                    if text is not None
+                    else f"{type(value).__module__}.{type(value).__qualname__}"
+                )
+        else:
+            node = _class_node(obj, extra)
+            parts.append("?" if node is None else _canonical_dump(node))
+            for attr, value in sorted(vars(obj).items(), key=lambda kv: str(kv[0])):
+                if (
+                    type(attr) is not str
+                    or (attr.startswith("__") and attr.endswith("__"))
+                    or attr in stored
+                    or _looks_secret(attr, value)
+                ):
+                    continue
+                text = _plain_repr(value)
+                if text is not None:
+                    parts.append(f"{attr}={text}")
+        inner = [digest(c, (*stack, uid)) for c in children]
+        parts.extend(sorted(text for text, _ in inner))
+        out = _short_hash("\n".join(parts).encode())
+        cyclic = any(met for _, met in inner)
+        if not cyclic:
+            digests[uid] = out
+        return out, cyclic
+
+    entries: dict[str, str] = {}
+    for key, uid in root_units.items():
+        entries[f"{key} (notebook)"] = digest(uid)[0]
+    for name, value in named.items():
+        key = f"{name} (notebook)"
+        if key in entries or name in rebound:
+            continue
+        uid = unit_of(value)
+        if uid is not None:
+            entries[key] = digest(uid)[0]
+            continue
+        text = _plain_repr(value)
+        if text is not None:
+            if not _looks_secret(name, value):
+                entries[key] = _short_hash(f"value\n{text}".encode())
+            continue
+        uids = [u for u in (visit(f) for f in callables_in(value)) if u is not None]
+        if uids:
+            parts = sorted(digest(u)[0] for u in uids)
+            entries[key] = _short_hash(("registry\n" + "\n".join(parts)).encode())
+    return entries
+
+
+def _notebook_record(notebooks: dict) -> dict[str, str]:
+    """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
+    root)])}``), best effort: a notebook whose entries cannot be taken gives
+    none (as on main)."""
+    out: dict[str, str] = {}
+    for namespace, roots in notebooks.values():
+        try:
+            out.update(_notebook_entries(namespace, roots))
+        except Exception:  # noqa: BLE001 - never fail the record for this
+            continue
+    return out
+
+
 def _root_layers(root) -> list:
     """A root and what it wraps: a partial's function, a decorator's
     ``__wrapped__``, at most a few layers, each object once."""
@@ -1195,11 +1669,18 @@ def _code_global_names(code) -> set[str]:
 
 
 def _root_entries(
-    root, code: dict[str, str], seeds: list[str], scripts: dict, depth: int = 0
+    root,
+    code: dict[str, str],
+    seeds: list[str],
+    scripts: dict,
+    depth: int = 0,
+    notebooks: dict | None = None,
 ):
     """Add what a root gives: the project modules to follow to ``seeds``, and, for a root defined in a
     driver script, its top-level name and itself to ``scripts[file] =
-    (namespace, names, objects)``. A partial's bound functions and classes, and a bound method's
+    (namespace, names, objects)``; for one defined where there is no file (a
+    notebook), itself to ``notebooks[id(namespace)] = (namespace, [(name,
+    root)])``. A partial's bound functions and classes, and a bound method's
     function and class, are roots too."""
     import sys
     import types
@@ -1211,11 +1692,13 @@ def _root_entries(
             if depth < 2:
                 bound = [*layer.args, *(layer.keywords or {}).values()]
                 for value in _bound_callables(bound):
-                    _root_entries(value, code, seeds, scripts, depth + 1)
+                    _root_entries(value, code, seeds, scripts, depth + 1, notebooks)
             continue
         if type(layer) is types.MethodType:
             if depth < 2:
-                _root_entries(layer.__func__, code, seeds, scripts, depth + 1)
+                _root_entries(
+                    layer.__func__, code, seeds, scripts, depth + 1, notebooks
+                )
             layer = type(layer.__self__)
         if type(layer) is types.FunctionType:
             namespace = layer.__globals__
@@ -1240,6 +1723,11 @@ def _root_entries(
                 objects.append(identity)
         elif not isinstance(file, str):
             seeds.extend(_namespace_modules(namespace))  # a notebook
+            if notebooks is not None:
+                # Its name: `task.__mushin_task__` is @mushin.sweep's copy.
+                key = identity.__qualname__.removesuffix(".__mushin_task__")
+                _, held = notebooks.setdefault(id(namespace), (namespace, []))
+                held.append((key, identity))
         elif not _is_foreign_module(name, file):
             seeds.append(name)
 
@@ -1266,14 +1754,19 @@ def driver_script_entries(roots) -> dict:
         code: dict[str, str] = {}
         seeds: list[str] = []
         scripts: dict = {}
+        notebooks: dict = {}
         for root in roots:
             if root is not None:
-                _root_entries(root, code, seeds, scripts)
-        out = {}
+                _root_entries(root, code, seeds, scripts, notebooks=notebooks)
+        out: dict = {}
         for file, (namespace, names, objects) in scripts.items():
             digest, imports = _script_entry(file, namespace, names, objects)
             package = namespace.get("__package__")
             out[file] = (digest, imports, package if isinstance(package, str) else None)
+        if notebooks:
+            # A worker gets notebook code by value, without its cells' text:
+            # the driver's entries are what its cells record.
+            out[NOTEBOOK_ENTRIES] = _notebook_record(notebooks)
         return out
     except Exception:  # noqa: BLE001 - best effort: each cell takes its own
         return {}
@@ -1299,14 +1792,33 @@ def _script_entries(
         seeds.extend(_resolved(imports, "__main__", False, package=package))
 
 
-def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
+def _target_entries(
+    path: str, seeds: list[str], scripts: dict, notebooks: dict | None = None
+) -> None:
     """A ``_target_`` string's class or function: its module, found without
     importing it, to follow; one in the driver script (``__main__``), the
     script, read from this process's ``__main__`` (only this process can
-    instantiate it). Foreign code gives no entry."""
+    instantiate it); one in a module with no file (a notebook's
+    ``__main__``), the object itself, from ``notebooks``. Foreign code gives
+    no entry."""
     import sys
 
     parts = path.split(".")
+    if notebooks is not None:
+        for i in range(len(parts) - 1, 0, -1):
+            module = sys.modules.get(".".join(parts[:i]))
+            if module is None:
+                continue
+            namespace = getattr(module, "__dict__", None)
+            if type(namespace) is dict and not isinstance(
+                namespace.get("__file__"), str
+            ):
+                value = namespace.get(parts[i])
+                if value is not None:
+                    _, held = notebooks.setdefault(id(namespace), (namespace, []))
+                    held.append((parts[i], value))
+                    return
+            break
     if parts[0] == "__main__":
         main = sys.modules.get("__main__")
         namespace = getattr(main, "__dict__", None) or {}
@@ -1376,12 +1888,16 @@ def _record(roots, targets=(), scripts_given=None) -> dict:
     code: dict[str, str] = {}
     seeds: list[str] = []
     scripts: dict = {}
+    notebooks: dict = {}
     for root in roots:
         if root is not None:
-            _root_entries(root, code, seeds, scripts)
+            _root_entries(root, code, seeds, scripts, notebooks=notebooks)
     for target in targets:
-        _target_entries(target, seeds, scripts)
+        _target_entries(target, seeds, scripts, notebooks)
     _script_entries(scripts, code, seeds, scripts_given or {})
+    if notebooks:
+        shipped = (scripts_given or {}).get(NOTEBOOK_ENTRIES)
+        code.update(shipped if type(shipped) is dict else _notebook_record(notebooks))
     entries, cut = _file_entries(seeds)
     code.update(entries)
     if cut and not _TRUNCATION_WARNED:
@@ -1415,11 +1931,16 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     arguments are not compared (as on main); the modules of the functions and
     classes it binds are followed.
 
+    A root defined where there is no file (a notebook) gives ``"<name>
+    (notebook)"`` for each name its code looks up there, through the objects
+    bound now (see ``_notebook_entries``), and the project modules of the
+    objects its namespace holds; the driver takes these when the run starts
+    and ships them in ``scripts``.
+
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
-    environment, code defined in a notebook (the project modules of the
-    objects its namespace holds are covered), and code reached only through a
-    string that is not a ``_target_`` of the config. None when the record cannot be taken (with a
+    environment, a notebook's mutable values and objects' state, and code
+    reached only through a string that is not a ``_target_`` of the config. None when the record cannot be taken (with a
     warning, once); a resume then does not compare, and ``cache_dir`` is not
     used."""
     try:

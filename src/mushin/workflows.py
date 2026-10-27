@@ -2499,17 +2499,27 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             dict(...)``), so extending the grid or adding a print is not an
             edit. The script is read when the run starts (a ``_target_``
             defined in it, when the first cell naming it runs), so editing it
-            while the sweep runs does not change what its cells record. A re-run
-            warns, naming the file (``helpers (file)``). Files are compared as
+            while the sweep runs does not change what its cells record. A task
+            defined in a notebook is compared by what its code looks up in the
+            kernel as the run starts: each helper and class its cells define
+            (their definitions, and the defaults and class attributes they
+            captured) and each plain constant (a number, a string, a tuple of
+            them) by its value, so re-running an edited cell and resuming
+            re-runs the cells; a value that differs per session (a timestamp, a
+            seed drawn in a cell) re-runs them after a restart. A re-run
+            warns, naming the file (``helpers (file)``) or the notebook name
+            (``helper (notebook)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
             is not reloaded, the old code keeps running while the cells
             computed now are recorded as the new code's, so reload it (or
             restart) before resuming. mushin warns when it had recorded that
             file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
-            the environment, code defined in a notebook (the project modules
-            its functions, classes, objects and module values come from are
-            covered, not those its functions import inside their bodies), a
+            the environment, in a notebook a mutable value (a dict config), an
+            object's state, a name the task rebinds, a value named like a
+            secret, code whose text the kernel does not keep (a ``%%time``
+            cell, ``exec``, a ``%run`` file) and the project modules its
+            functions import inside their bodies, a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script
