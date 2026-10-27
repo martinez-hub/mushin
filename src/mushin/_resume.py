@@ -133,6 +133,29 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
     return (num, choices) if _records_job_fields(num, choices) else None
 
 
+#: What ``resolved_config`` returns for a config that cannot be resolved.
+_UNRESOLVED = object()
+
+
+def resolved_config(cfg):
+    """A job config as plain containers with its interpolations resolved, or
+    ``_UNRESOLVED`` when it cannot be. A cell resolves its config once, here,
+    and its fingerprint and its ``_target_`` scan share the result: resolving
+    a large structured config is not free, and a resolver that reads a clock
+    or a counter then gives both the same values. A config that is already
+    plain containers is returned as it is."""
+    try:
+        from omegaconf import OmegaConf
+
+        return (
+            OmegaConf.to_container(cfg, resolve=True)
+            if OmegaConf.is_config(cfg)
+            else cfg
+        )
+    except Exception:  # noqa: BLE001 - unresolvable config -> no guard
+        return _UNRESOLVED
+
+
 def config_fingerprint(cfg) -> str | None:
     """Stable short hash of the fully-resolved job config, or None if the
     config cannot be resolved/serialized.
@@ -142,16 +165,16 @@ def config_fingerprint(cfg) -> str | None:
     otherwise a changed NON-swept value (same combo key) would silently mix
     results from two configurations into one dataset. Task *source* changes are
     guarded separately by ``code_fingerprint``."""
-    try:
-        from omegaconf import OmegaConf
+    return resolved_config_hash(resolved_config(cfg))
 
-        data = (
-            OmegaConf.to_container(cfg, resolve=True)
-            if OmegaConf.is_config(cfg)
-            else cfg
-        )
+
+def resolved_config_hash(data) -> str | None:
+    """``config_fingerprint`` of a config ``resolved_config`` returned."""
+    if data is _UNRESOLVED:
+        return None
+    try:
         payload = json.dumps(data, sort_keys=True, default=str)
-    except Exception:  # noqa: BLE001 - unresolvable config -> no guard
+    except Exception:  # noqa: BLE001 - unserializable config -> no guard
         return None
     import hashlib
 
@@ -334,8 +357,8 @@ def partial_task_cacheable(task) -> bool:
 
 
 def _resolve_imports(imports, package: str | None) -> list[str]:
-    """Absolute module names for ``(name, level)`` imports, each with its
-    parent packages."""
+    """Absolute module names for ``(name, level)`` imports (their parent
+    packages are added where the names are followed, ``_file_entries``)."""
     import importlib.util
 
     found: list[str] = []
@@ -349,11 +372,8 @@ def _resolve_imports(imports, package: str | None) -> list[str]:
                 )
             except (ImportError, ValueError):
                 continue
-        parts = name.split(".")
-        for i in range(1, len(parts) + 1):
-            dotted = ".".join(parts[:i])
-            if dotted and dotted not in found:
-                found.append(dotted)
+        if name and name not in found:
+            found.append(name)
     return found
 
 
@@ -633,7 +653,8 @@ _NAMES_MAX = 20_000
 def _file_entries(names) -> tuple[dict[str, str], bool]:
     """Entries for project modules ``names`` and, through their files, every
     project module they import in turn, at any depth (a helper imported inside
-    a function, and the constants it imports); and whether ``_FILES_MAX`` cut
+    a function, and the constants it imports), each with the packages it is
+    in (their ``__init__.py`` runs first); and whether ``_FILES_MAX`` cut
     the list short. Each file as it is now; one that changed since this
     process first recorded that load of it warns. A name that cannot be
     resolved costs its own entry only."""
@@ -660,6 +681,12 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
             )
         if foreign_tops[top]:
             continue
+        # Importing `pkg.models` runs `pkg/__init__.py` first, so a module's
+        # packages are code it runs, whether or not it imports from them (a
+        # `_target_`, or a task module that imports only the standard library).
+        parent = current.rpartition(".")[0]
+        if parent and parent not in seen:
+            pending.append(parent)
         try:
             found = _file_entry(current)
         except Exception:  # noqa: BLE001 - one unresolvable name, not the record
@@ -1101,6 +1128,9 @@ def _script_entries(
             package = namespace.get("__package__")
             package = package if isinstance(package, str) else None
         code[f"{Path(file).stem} (script)"] = digest
+        if package:
+            # `python -m pkg.run` runs `pkg/__init__.py` before the script.
+            seeds.append(package)
         seeds.extend(_resolved(imports, "__main__", False, package=package))
 
 
@@ -1137,16 +1167,11 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
 
 
 def _config_targets(cfg) -> list[str]:
-    """Every ``_target_`` string in a cell's config, at any depth."""
-    try:
-        from omegaconf import OmegaConf
-
-        data = (
-            OmegaConf.to_container(cfg, resolve=True)
-            if OmegaConf.is_config(cfg)
-            else cfg
-        )
-    except Exception:  # noqa: BLE001 - an unresolvable config: no targets
+    """Every ``_target_`` string in a cell's config, at any depth: a config,
+    or one already resolved by ``resolved_config``. An unresolvable config
+    has none."""
+    data = resolved_config(cfg)
+    if data is _UNRESOLVED:
         return []
     found: list[str] = []
     pending = [data]
@@ -1209,8 +1234,9 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     each cell's status sidecar: ``{"python": "3.11", "code": {key: hash}}``.
 
     Every project file the task's module imports, directly or through other
-    project files, at any depth (imports inside functions included), is an
-    entry ``"<module> (file)"``, hashed as its syntax tree without its main
+    project files, at any depth (imports inside functions included), and the
+    ``__init__.py`` of each package those modules are in (it runs first), is
+    an entry ``"<module> (file)"``, hashed as its syntax tree without its main
     block and docstrings: an edit anywhere in such a file is a change, and a
     comment, a docstring or formatting is not. A task defined in the driver
     script gives ``"<script> (script)"``, what the task's definition reads in
@@ -1263,6 +1289,7 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
     the roots' record (``roots`` and ``with_body`` alike, cached per process
     for the run ``token``) plus the entries of this cell's config
     ``_target_``\\ s, which can differ from cell to cell (a swept model class).
+    ``cfg`` may be the config already resolved by ``resolved_config``.
     ``scripts`` are the driver's script entries (``driver_script_entries``).
     A target in the driver script gets its own key, ``"<script>:<name>
     (script)"``, so it never replaces the roots' entry for that script."""
@@ -1286,14 +1313,17 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
             try:
                 record = _record((), [target])["code"]
                 parts = target.split(".")
-                entries = {
-                    (
-                        k.replace(" (script)", f":{parts[1]} (script)")
-                        if k.endswith(" (script)") and len(parts) > 1
-                        else k
-                    ): v
-                    for k, v in record.items()
-                }
+                entries = {}
+                for k, v in record.items():
+                    if k.endswith(" (script)") and len(parts) > 1:
+                        k = k.replace(" (script)", f":{parts[1]} (script)")
+                    # Only what the roots' record lacks, by the key as it is
+                    # written: a file both reach keeps the digest the run
+                    # took (a target first named after an edit would read
+                    # the edited file while the old code runs), and the entry
+                    # holds no second copy of the roots'.
+                    if k not in base["code"]:
+                        entries[k] = v
             except Exception:  # noqa: BLE001 - best effort: the roots' record stands
                 entries = {}
             while len(_TARGET_RECORDS) >= _TARGET_RECORDS_MAX:
