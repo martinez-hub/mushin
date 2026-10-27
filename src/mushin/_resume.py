@@ -701,499 +701,344 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
     return out, any(p not in seen for p in pending)
 
 
-def _outer_exprs(node) -> list:
-    """What a ``def``, ``lambda`` or ``class`` evaluates where it is defined
-    (decorators, defaults, annotations, bases, type parameters), not its
-    body."""
-    import ast
-
-    out = list(getattr(node, "decorator_list", ()))
-    out += list(getattr(node, "type_params", ()) or ())
-    if isinstance(node, ast.ClassDef):
-        return out + node.bases + [k.value for k in node.keywords]
-    a = node.args
-    out += a.defaults + [d for d in a.kw_defaults if d is not None]
-    if isinstance(node, ast.Lambda):
-        return out
-    params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-    out += [p.annotation for p in params if p is not None and p.annotation is not None]
-    if node.returns is not None:
-        out.append(node.returns)
-    return out
-
-
-def _bound_names(node) -> set[str]:
-    """The module-level names a top-level statement binds, by Python's
-    scopes: a comprehension's variables, a lambda's parameters and the names
-    a nested ``def`` or ``class`` body binds are their own, while a walrus in
-    a comprehension binds the module's. An annotation without a value binds
-    nothing. A star import binds ``"*"``."""
-    import ast
-
-    out: set[str] = set()
-    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-    comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-
-    def visit(n, in_comp: bool) -> None:
-        if isinstance(n, defs) or isinstance(n, ast.Lambda):
-            if isinstance(n, defs) and not in_comp:
-                out.add(n.name)
-            for sub in _outer_exprs(n):
-                visit(sub, in_comp)
-            return
-        if isinstance(n, ast.NamedExpr):
-            if isinstance(n.target, ast.Name):
-                out.add(n.target.id)
-            visit(n.value, in_comp)
-            return
-        if isinstance(n, comps):
-            in_comp = True
-        elif in_comp:
-            pass  # a comprehension's own targets
-        elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
-            out.add(n.id)
-        elif isinstance(n, ast.AnnAssign) and n.value is None:
-            visit(n.annotation, in_comp)
-            return
-        elif isinstance(n, (ast.Import, ast.ImportFrom)):
-            for alias in n.names:
-                out.add(
-                    "*"
-                    if alias.name == "*"
-                    else (alias.asname or alias.name).partition(".")[0]
-                )
-            return
-        elif isinstance(n, ast.ExceptHandler) and n.name:
-            out.add(n.name)
-        elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
-            out.add(n.name)
-        elif isinstance(n, ast.MatchMapping) and n.rest:
-            out.add(n.rest)
-        for sub in ast.iter_child_nodes(n):
-            visit(sub, in_comp)
-
-    visit(node, False)
-    return out
-
-
-def _eval_loads(node, decorators: bool = True) -> set[str]:
-    """The names a top-level statement reads when it runs: everything but the
-    bodies of the functions and lambdas it defines, which run when called. A
-    class body runs where it is defined, in order: a name it reads before
-    binding it there is the module's (``SCALE = SCALE``), one bound earlier in
-    the body is the class's. ``X += 1`` reads ``X``. ``decorators=False``
-    leaves out what only decorator expressions read."""
-    import ast
-
-    out: set[str] = set()
-
-    def outer(n) -> list:
-        exprs = _outer_exprs(n)
-        if not decorators:
-            exprs = [e for e in exprs if e not in n.decorator_list]
-        return exprs
-
-    def visit(n, local: frozenset) -> None:
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            for sub in outer(n) if not isinstance(n, ast.Lambda) else _outer_exprs(n):
-                visit(sub, local)
-            return
-        if isinstance(n, ast.ClassDef):
-            for sub in outer(n):
-                visit(sub, local)
-            bound: set[str] = set()
-            for stmt in n.body:  # a nested class body does not see the outer's
-                visit(stmt, frozenset(bound))
-                bound |= _bound_names(stmt)
-            return
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
-            if n.id not in local:
-                out.add(n.id)
-        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-            if n.target.id not in local:
-                out.add(n.target.id)
-        for sub in ast.iter_child_nodes(n):
-            visit(sub, local)
-
-    visit(node, frozenset())
-    return out
-
-
-def _body_loads(node) -> set[str]:
-    """The names the bodies of the functions and lambdas in a statement read
-    when they run, by the syntax tree: a local variable's annotation is never
-    evaluated, so it is not one."""
-    import ast
-
-    out: set[str] = set()
-
-    def visit(n, in_function: bool) -> None:
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            for sub in _outer_exprs(n):
-                visit(sub, in_function)
-            for sub in n.body if isinstance(n.body, list) else [n.body]:
-                visit(sub, True)
-            return
-        if in_function:
-            if isinstance(n, ast.AnnAssign):
-                visit(n.target, True)
-                if n.value is not None:
-                    visit(n.value, True)
-                return
-            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
-                out.add(n.id)
-            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                out.add(n.target.id)
-        for sub in ast.iter_child_nodes(n):
-            visit(sub, in_function)
-
-    visit(node, False)
-    return out
-
-
-def _call_reads(node) -> set[str]:
-    """The globals the functions a statement defines read when called: the
-    global names of their bodies in the statement's own symbol table (so two
-    statements on one line, or a top-level ``await`` elsewhere in a cell, do
-    not mix), kept where the syntax tree evaluates them. The same on every
-    Python version: the scopes only some versions have (an inlined
-    comprehension, an annotation scope) read alike. A statement that does not
-    compile alone (a top-level ``await``) defines no function read here."""
-    import ast
-    import symtable
-
-    try:
-        table = symtable.symtable(ast.unparse(node), "<statement>", "exec")
-    except (SyntaxError, ValueError, RecursionError):
-        return set()
-    names: set[str] = set()
-    stack = list(table.get_children())
-    while stack:
-        scope = stack.pop()
-        names.update(
-            sym.get_name()
-            for sym in scope.get_symbols()
-            if sym.is_global() and sym.is_referenced()
-        )
-        stack.extend(scope.get_children())
-    # Only what a function or lambda body reads: the statement's own
-    # comprehensions and class body (scopes on some versions only) are its
-    # evaluation, read from its syntax tree.
-    return names & _body_loads(node)
-
-
-def _decorator_bases(node) -> list[str]:
-    """The base names of the decorators on every ``def`` and ``class`` in a
-    statement outside function and class bodies (a definition in a block)."""
-    import ast
-
-    out: list[str] = []
-
-    def base(expr):
-        while isinstance(expr, (ast.Call, ast.Attribute, ast.Subscript)):
-            expr = expr.func if isinstance(expr, ast.Call) else expr.value
-        return expr.id if isinstance(expr, ast.Name) else None
-
-    def visit(n) -> None:
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            out.extend(b for b in map(base, n.decorator_list) if b)
-            return
-        for sub in ast.iter_child_nodes(n):
-            if isinstance(sub, (ast.stmt, ast.excepthandler, ast.match_case)):
-                visit(sub)
-
-    visit(node)
-    return out
-
-
-class _Stmt:
-    """What the reach rule needs of one top-level statement, taken once: its
-    facts, not its syntax tree (an import statement keeps its node, which
-    says where the import is from)."""
-
-    __slots__ = (
-        "kind",
-        "import_node",
-        "binds",
-        "must",
-        "evals",
-        "calls",
-        "decorators",
-        "dh",
-        "imports",
-        "future",
-        "stars",
-        "plain_reads",
-    )
-
-    def __init__(self, node):
-        import ast
-        import copy
-
-        self.binds = _bound_names(node)
-        must = (
-            ast.Assign,
-            ast.AugAssign,
-            ast.AnnAssign,
-            ast.Import,
-            ast.ImportFrom,
-            ast.FunctionDef,
-            ast.AsyncFunctionDef,
-            ast.ClassDef,
-            ast.Delete,
-            *((ast.TypeAlias,) if hasattr(ast, "TypeAlias") else ()),
-        )
-        # A block may not run what binds a name (`if FAST: SCALE = 5`): the
-        # binding before it stays live too.
-        self.must = self.binds if isinstance(node, must) else set()
-        self.evals = _eval_loads(node)
-        self.calls = _call_reads(node)
-        self.decorators = _decorator_bases(node)
-        # The script runs as __main__: its helpers' guards run too.
-        tree = _strip_tree(
-            ast.Module(body=[copy.deepcopy(node)], type_ignores=[]), main_guards=False
-        )
-        self.dh = _short_hash(_canonical_dump(tree).encode())
-        self.imports = _import_pairs(tree)
-        is_import = isinstance(node, (ast.Import, ast.ImportFrom))
-        self.import_node = node if is_import else None
-        if is_import:
-            self.kind = "import"
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            self.kind = "def"
-        else:
-            self.kind = "other"
-        self.future = isinstance(node, ast.ImportFrom) and node.module == "__future__"
-        # Star imports anywhere in it (`try: from settings import *`), outside
-        # function and class bodies.
-        self.stars = [
-            sub
-            for sub in _module_level_nodes(node)
-            if isinstance(sub, ast.ImportFrom) and any(a.name == "*" for a in sub.names)
-        ]
-        # What it reads other than through a decorator: `@timer` on the task
-        # does not make other `@timer` definitions code the task runs.
-        self.plain_reads = _eval_loads(node, decorators=False) | self.calls
-
-
-def _module_level_nodes(node):
-    """``node`` and what it holds outside function and class bodies."""
-    import ast
-
-    stack = [node]
-    while stack:
-        n = stack.pop()
-        yield n
-        if n is not node and isinstance(
-            n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-        ):
-            continue
-        stack.extend(ast.iter_child_nodes(n))
-
-
-def _statements(nodes) -> list[_Stmt]:
-    return [_Stmt(node) for node in nodes]
-
-
-def _run_statements(tree) -> list:
-    """A source's top-level statements in the order they run as ``__main__``:
-    a main guard's body runs and its ``else`` does not."""
-    out = []
-    for node in tree.body:
-        if _is_main_guard(node):
-            out.extend(node.body)
-        else:
-            out.append(node)
-    return out
-
-
-#: Bounds on one reach: decorator names followed through their binders.
-_REACH_NAMES_MAX = 2000
-
-
-def _reach(stmts: list[_Stmt], roots, is_project_import) -> tuple[str, list]:
-    """What the statements at positions ``roots`` can reach in ``stmts``, a
-    source's top-level statements in the order they ran, as ``(digest,
-    import pairs)``.
-
-    A name a statement reads when it runs is the binding before it (``Y = X
-    * 2`` keeps the ``X`` it was computed from; a binding a block may skip
-    keeps the one before it too). A name a function reads when called is any
-    binding of it: the function may run anywhere, at a call while the script
-    runs (``SCALE = scale()``) or in a run before a rebinding. Also counted:
-    star imports, ``__future__`` imports, and a decorated definition whose
-    decorator reaches, through its bindings (an alias, a helper it calls), a
-    project import or module state that counted code reads (``@register``
-    filling the ``MODELS`` the task reads), or is itself an object of the
-    script that counted code reads other than as a decorator
-    (``@scale.register``, ``@Registry.register``).
-
-    Each reached statement is hashed with what its names resolve to, those
-    read when it ran by their own hashes in turn (``SCALE += 1`` run three
-    times is three statements): the digest is of the set of these, so it
-    does not depend on the order of independent statements, or on how often
-    a cell was run unchanged."""
-    import bisect
-    from collections import deque
-
-    binders: dict[str, list[int]] = {}
-    for pos, s in enumerate(stmts):
-        for name in s.binds:
-            binders.setdefault(name, []).append(pos)
-    stars = [p for p, s in enumerate(stmts) if s.stars]
-
-    def live(name: str, pos: int) -> list[int]:
-        found = []
-        positions = binders.get(name, ())
-        i = bisect.bisect_left(positions, pos) - 1
-        while i >= 0:
-            found.append(positions[i])
-            if name in stmts[positions[i]].must:
-                break
-            i -= 1
-        return found
-
-    def every(name: str) -> list[int]:
-        return list(binders.get(name, ()))
-
-    included: dict[int, tuple[list, list]] = {}
-    read: set[str] = set()
-    plain: set[str] = set()
-    queue = deque(
-        sorted({*roots, *stars, *(p for p, s in enumerate(stmts) if s.future)})
-    )
-
-    def visit(pos: int) -> None:
-        s = stmts[pos]
-        evals = [(n, t) for n in s.evals for t in live(n, pos)]
-        calls = [(n, t) for n in s.calls for t in every(n)]
-        for _, t in (*evals, *calls):
-            if t not in included:
-                queue.append(t)
-        included[pos] = (evals, calls)
-        read.update(s.evals, s.calls)
-        plain.update(s.plain_reads)
-
-    def is_state(name: str) -> bool:
-        """Module state a decorator may write: a name the source binds to a
-        value or a class (a registry), or imports from the project; not a
-        function both call, nor a foreign module both use."""
-        for p in binders.get(name, ()):
-            s = stmts[p]
-            if s.kind == "import":
-                if is_project_import(s.import_node, name):
-                    return True
-            elif s.kind != "def":
-                return True
-        return False
-
-    def registers(name: str, pos: int | None, seen: set) -> bool:
-        if name in seen or len(seen) > _REACH_NAMES_MAX:
-            return False
-        seen.add(name)
-        targets = every(name) if pos is None else live(name, pos)
-        if not targets:
-            # A name nothing binds may come from a star import.
-            return any(
-                is_project_import(node, name) for p in stars for node in stmts[p].stars
-            )
-        if (
-            pos is not None
-            and name in plain
-            and any(stmts[t].kind != "import" for t in targets)
-        ):
-            # An object of the script that counted code reads, registering
-            # what it decorates (`@scale.register`, `@MODELS.register_module()`).
-            return True
-        for t in targets:
-            s = stmts[t]
-            if s.kind == "import":
-                if is_project_import(s.import_node, name):
-                    return True
-                continue
-            reads = s.evals | s.calls
-            if any(is_state(n) for n in sorted(reads & read) if n != name):
-                return True
-            if any(registers(n, None, seen) for n in sorted(reads)):
-                return True
-        return False
-
-    decorated = [p for p, s in enumerate(stmts) if s.decorators]
-    while True:
-        while queue:
-            pos = queue.popleft()
-            if pos not in included:
-                visit(pos)
-        added = False
-        for pos in decorated:
-            if pos in included:
-                continue
-            if any(registers(d, pos, set()) for d in stmts[pos].decorators):
-                queue.append(pos)
-                added = True
-        if not added:
-            break
-
-    # Edges read when a statement ran point to earlier positions, so its
-    # hash through them is taken in position order, with no cycle.
-    esig: dict[int, str] = {}
-    for pos in sorted(included):
-        evals = sorted({f"{n}>{esig[t]}" for n, t in included[pos][0]})
-        esig[pos] = _short_hash((stmts[pos].dh + "|" + ",".join(evals)).encode())
-    sigs = set()
-    imports: list = []
-    for pos in sorted(included):
-        calls = sorted({f"{n}>{esig[t]}" for n, t in included[pos][1]})
-        sigs.add(esig[pos] + "|" + ",".join(calls))
-        imports.extend(stmts[pos].imports)
-    digest = _short_hash("\n".join(sorted(sigs)).encode())
-    return digest, imports
-
-
-def _is_project_import(node, name: str) -> bool:
-    """Whether import statement ``node`` binds ``name`` (or ``*``) from a
-    project module. A relative import is the script's own package's (``python
-    -m pkg.train``), so the project's."""
-    import ast
-
-    for alias in node.names:
-        bound = (alias.asname or alias.name).partition(".")[0]
-        if bound != name and alias.name != "*":
-            continue
-        if isinstance(node, ast.ImportFrom):
-            if node.level:
-                return True
-            if not node.module:
-                return False
-            module = node.module
-        else:
-            module = alias.name
-        return _project_file_of(module) is not None
-    return False
-
-
 def _script_digest(path: Path, roots: frozenset[str]):
     """``(digest, imports)`` for a driver script whose top-level names
     ``roots`` define the task (the class or function holding it,
     ``pre_task``, a ``_target_``): what those definitions can reach by name in
-    the script as it runs (see ``_reach``), so the resilience loop (extend the
-    grid, add a print, resume) is not an edit. The script runs as
-    ``__main__``: its main block's body runs, its ``else`` does not. Not
-    counted: statements that only do something (a call, the run call, an
-    attribute or item set) and what only they read (``GRID``, ``ds =
-    exp.run(...)``). ``imports`` are those of what counts."""
+    the script, so the resilience loop (extend the grid, add a print, resume)
+    is not an edit. Counted: the statements defining ``roots``, every
+    statement, in the main block too, that binds a name counted code reads as
+    a global (function parameters and locals do not count: the script's symbol
+    table says which names are global), a star import (it may bind any name),
+    and a decorated definition, in a block too, whose decorator registers it
+    somewhere counted code reads (``@register`` defined in the script, or an
+    alias of it, or a helper it calls, writing the ``MODELS`` the task reads)
+    or comes from a project module; not one whose decorators are foreign
+    (``@click.command()``, ``@hydra.main``, ``@dataclass``). A ``__future__``
+    import always counts. The script runs as ``__main__``, so a main block's
+    body counts and its ``else`` does not. A name is bound by the statements
+    that bind it in the module's scope (a ``match`` capture does; a
+    comprehension's variable, a nested function's local and an annotation
+    without a value do not), and a class body reads the module's name it
+    reads before binding it (``SCALE = SCALE``). Not counted: statements that
+    only do something (a call, the run call, an attribute or item set) and
+    what only they read (``GRID``, ``ds = exp.run(...)``). ``imports`` are
+    those of what counts."""
     import ast
+    import copy
+    import symtable
 
     source, content = _content_key(path)
     cache_key = (*content, tuple(sorted(roots)))
     hit = _SCRIPT_CACHE.get(cache_key)
     if hit is not None:
         return hit
+    tree = ast.parse(source)
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    # The globals each top-level function or class body reads, by its name.
     # The bytes, so a byte order mark or a coding cookie is honored.
-    stmts = _statements(_run_statements(ast.parse(source)))
-    starts = [pos for pos, s in enumerate(stmts) if s.binds & roots]
-    digest, imports = _reach(stmts, starts, _is_project_import)
-    result = (digest, imports)
+    table = symtable.symtable(source, str(path), "exec")
+    scope_reads: dict[str, set[str]] = {}
+    for child in table.get_children():
+        # Every scope by its name: on 3.12+ a generic definition (`def f[T]`)
+        # is a type-parameter scope named like it, holding the function's.
+        names = scope_reads.setdefault(child.get_name(), set())
+        stack = [child]
+        while stack:
+            t = stack.pop()
+            stack.extend(t.get_children())
+            names.update(
+                sym.get_name()
+                for sym in t.get_symbols()
+                if sym.is_referenced() and sym.is_global()
+            )
+
+    def loads(nodes) -> set[str]:
+        return {
+            sub.id
+            for node in nodes
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
+        }
+
+    def reads(node) -> set[str]:
+        if isinstance(node, defs):
+            # Evaluated where it is defined: decorators, defaults, bases.
+            outer = list(node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                outer += node.bases + [k.value for k in node.keywords]
+            else:
+                outer += node.args.defaults + [
+                    d for d in node.args.kw_defaults if d is not None
+                ]
+                a = node.args
+                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                outer += [arg.annotation for arg in params if arg and arg.annotation]
+                if node.returns is not None:
+                    outer.append(node.returns)
+            # A local variable's annotation is never evaluated; symbol tables
+            # before 3.14 list what it names as read, 3.14's do not.
+            body = scope_reads.get(node.name, set()) - local_annotation_only(node)
+            out = body | loads(outer)
+            if isinstance(node, ast.ClassDef):
+                out |= class_fallback(node)
+            return out
+        return loads([node])
+
+    def local_annotation_only(node) -> set[str]:
+        """Names a definition's function bodies use only in local variable
+        annotations (``x: Hint = 1``), which never run. A class body's
+        annotations do run (a dataclass's fields), so they are reads."""
+        ann: set[str] = set()
+        other: set[str] = set()
+
+        def visit(n, in_function: bool) -> None:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                if not isinstance(n, ast.Lambda):
+                    for sub in reads_outer(n):
+                        visit(sub, in_function)
+                for sub in n.body if isinstance(n.body, list) else [n.body]:
+                    visit(sub, True)
+                return
+            if isinstance(n, ast.ClassDef):
+                for sub in reads_outer(n):
+                    visit(sub, in_function)
+                for sub in n.body:
+                    visit(sub, False)
+                return
+            if in_function and isinstance(n, ast.AnnAssign):
+                ann.update(loads([n.annotation]))
+                visit(n.target, True)
+                if n.value is not None:
+                    visit(n.value, True)
+                return
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                other.add(n.id)
+            for sub in ast.iter_child_nodes(n):
+                visit(sub, in_function)
+
+        visit(node, False)
+        return ann - other
+
+    def direct_loads(node) -> set[str]:
+        """Loads a class-body statement makes in the class scope itself: not
+        inside a nested function, lambda, class or comprehension (whose own
+        reads the symbol table already gives), but in a nested definition's
+        decorators, defaults and annotations, which run there."""
+        found: set[str] = set()
+        nested = (
+            *defs,
+            ast.Lambda,
+            ast.ListComp,
+            ast.SetComp,
+            ast.DictComp,
+            ast.GeneratorExp,
+        )
+
+        def visit(n) -> None:
+            if isinstance(n, nested):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    for sub in reads_outer(n):
+                        visit(sub)
+                return
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                found.add(n.id)
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                found.add(n.target.id)
+            for sub in ast.iter_child_nodes(n):
+                visit(sub)
+
+        visit(node)
+        return found
+
+    def class_fallback(node) -> set[str]:
+        """The names a class body reads before binding them in the body: a
+        class body's name lookup falls back to the module's (``SCALE =
+        SCALE``), which its symbol table records as the class's."""
+        out: set[str] = set()
+        bound: set[str] = set()
+        for stmt in node.body:
+            out |= direct_loads(stmt) - bound
+            bound |= binds(stmt)
+        return out
+
+    def reads_outer(node) -> list:
+        outer = list(node.decorator_list)
+        if isinstance(node, ast.ClassDef):
+            return outer + node.bases + [k.value for k in node.keywords]
+        outer += node.args.defaults + [
+            d for d in node.args.kw_defaults if d is not None
+        ]
+        a = node.args
+        params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+        outer += [arg.annotation for arg in params if arg and arg.annotation]
+        if node.returns is not None:
+            outer.append(node.returns)
+        return outer
+
+    def binds(node) -> set[str]:
+        if isinstance(node, defs):
+            return {node.name}
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return {
+                (alias.asname or alias.name).partition(".")[0] for alias in node.names
+            }
+        names: set[str] = set()
+        comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+        def visit(sub, in_comp: bool) -> None:
+            if isinstance(sub, defs):
+                names.add(sub.name)  # a definition inside `try:` or `if:`
+                return  # its body binds its own names
+            if isinstance(sub, ast.Lambda):
+                return
+            if isinstance(sub, ast.NamedExpr):
+                if isinstance(sub.target, ast.Name):
+                    names.add(sub.target.id)  # the module's, from a comprehension too
+                visit(sub.value, in_comp)
+                return
+            if isinstance(sub, comps):
+                in_comp = True  # its variables are its own
+            elif isinstance(sub, ast.Name) and isinstance(
+                sub.ctx, (ast.Store, ast.Del)
+            ):
+                if not in_comp:
+                    names.add(sub.id)
+            elif isinstance(sub, ast.AnnAssign) and sub.value is None:
+                return  # an annotation alone binds nothing
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                names.update(binds(sub))
+                return
+            elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+                names.add(sub.name)
+            elif isinstance(sub, ast.MatchMapping) and sub.rest:
+                names.add(sub.rest)
+            for child in ast.iter_child_nodes(sub):
+                visit(child, in_comp)
+
+        visit(node, False)
+        return names
+
+    statements = []
+    for node in tree.body:
+        if _is_main_guard(node):
+            statements += node.body  # as __main__, the else does not run
+        else:
+            statements.append(node)
+    candidates = [(n, binds(n)) for n in statements]
+    binders: dict[str, list] = {}
+    for n, names in candidates:
+        for name in names:
+            binders.setdefault(name, []).append(n)
+
+    def base(node):
+        while isinstance(node, (ast.Call, ast.Attribute, ast.Subscript)):
+            node = node.func if isinstance(node, ast.Call) else node.value
+        return node.id if isinstance(node, ast.Name) else None
+
+    def project_import(node, name: str) -> bool:
+        for alias in node.names:
+            bound = (alias.asname or alias.name).partition(".")[0]
+            if bound != name and alias.name != "*":
+                continue
+            if isinstance(node, ast.ImportFrom):
+                if node.level:
+                    # Relative: the script's own package (`python -m
+                    # pkg.train`), so the project's.
+                    return True
+                if not node.module:
+                    return False
+                module = node.module
+            else:
+                module = alias.name
+            return _project_file_of(module) is not None
+        return False
+
+    def writes_counted(name: str, node, read: set[str], seen: set) -> bool:
+        """Whether script code bound to ``name`` reads what counted code
+        reads, directly or through the script names it reads in turn (an
+        alias ``register_model = register``, a helper ``register`` calls):
+        bounded, and through script bindings only."""
+        if name in seen or len(seen) > 200:
+            return False
+        seen.add(name)
+        for binder in binders.get(name, ()):
+            if binder is node or isinstance(binder, (ast.Import, ast.ImportFrom)):
+                continue
+            binder_reads = reads(binder)
+            if binder_reads & read:
+                return True
+            if any(writes_counted(n, node, read, seen) for n in sorted(binder_reads)):
+                return True
+        return False
+
+    def registers(node, read: set[str]) -> bool:
+        """A decorated definition whose decorator comes from a project module,
+        or is defined in the script reading what counted code reads. Not one
+        whose decorator is merely read too (``@mushin.sweep`` on the task and
+        on another sweep)."""
+        for deco in getattr(node, "decorator_list", ()):
+            name = base(deco)
+            if name is None:
+                continue
+            # A name no statement binds may come from a star import.
+            star = [b for b in binders.get("*", ()) if not binders.get(name)]
+            for binder in [*binders.get(name, ()), *star]:
+                if isinstance(binder, (ast.Import, ast.ImportFrom)):
+                    if project_import(binder, name):
+                        return True
+            if writes_counted(name, node, read, set()):
+                return True
+        return False
+
+    def decorated(node) -> list:
+        """The decorated definitions a statement makes in the module's scope:
+        itself, or those inside its blocks (`if ENABLED: @register class`)."""
+        if isinstance(node, defs):
+            return [node] if node.decorator_list else []
+        found = []
+        stack = list(ast.iter_child_nodes(node))
+        while stack:
+            sub = stack.pop()
+            if isinstance(sub, defs):
+                if sub.decorator_list:
+                    found.append(sub)
+            elif isinstance(sub, (ast.stmt, ast.excepthandler, ast.match_case)):
+                stack.extend(ast.iter_child_nodes(sub))
+        return found
+
+    kept = [
+        n
+        for n, names in candidates
+        if names & roots
+        or "*" in names
+        or (isinstance(n, ast.ImportFrom) and n.module == "__future__")
+    ]
+    kept_ids = {id(n) for n in kept}
+    pending = [(n, names) for n, names in candidates if names and id(n) not in kept_ids]
+    read: set[str] = set()
+    for n in kept:
+        read |= reads(n)
+    while True:
+        add = [
+            (n, names)
+            for n, names in pending
+            if names & read or any(registers(d, read) for d in decorated(n))
+        ]
+        if not add:
+            break
+        added = {id(n) for n, _ in add}
+        for n, _ in add:
+            kept.append(n)
+            read |= reads(n)
+        pending = [(n, names) for n, names in pending if id(n) not in added]
+    kept.sort(key=lambda node: node.lineno)
+    module = _strip_tree(
+        ast.Module(body=[copy.deepcopy(n) for n in kept], type_ignores=[]),
+        main_guards=False,  # the script runs as __main__: its guards run too
+    )
+    result = (_short_hash(_canonical_dump(module).encode()), _import_pairs(module))
     _cache_put(_SCRIPT_CACHE, cache_key, result)
     return result
 

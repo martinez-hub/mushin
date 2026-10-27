@@ -2167,6 +2167,33 @@ SCRIPT_EDITS = {
         "SCALE = {k}\n\n\nclass C:\n    def genexpr(self):\n        return SCALE\n\n\n"
         "def task(a):\n    return C().genexpr() * a\n"
     ),
+    "a value a walrus in a branch that did not run left as it was": (
+        "FLAG = False\nX = {k}\nY = (X := 1) if FLAG else 0\nZ = X * 2\n\n\n"
+        "def task(a):\n    return a * Z\n"
+    ),
+    "an annotation read after the definition": (
+        "import typing\n\n\ndef task(a: Hint):\n    return typing.get_type_hints(task)\n\n\n"
+        "Hint = {k}\n"
+    ),
+    "a class body's generator reading the global it shadows": (
+        "n = {k}\n\n\nclass W:\n    n = 1\n    t = sum(n for _ in range(2))\n\n\n"
+        "def task(a):\n    return a * W.t\n"
+    ),
+    "a registry a closure keeps": (
+        "def make_registry():\n    items = {{}}\n\n    def add(fn):\n"
+        "        items[fn.__name__] = fn\n        return fn\n\n    def get(k):\n"
+        "        return items[k]\n\n    return add, get\n\n\nadd, get = make_registry()\n\n\n"
+        "@add\ndef lin(x):\n    return x * {k}\n\n\ndef task(a):\n    return get('lin')(a)\n"
+    ),
+    "an annotation a dataclass in the task reads": (
+        "import dataclasses\n\nHint = {k}\n\n\ndef task(a):\n    @dataclasses.dataclass\n"
+        "    class Row:\n        x: Hint = 0\n\n    return Row\n"
+    ),
+    "a registry imported from elsewhere that a script decorator fills": (
+        "from sys import modules as REG\n\n\ndef register(cls):\n"
+        "    REG[cls.__name__] = cls\n    return cls\n\n\n@register\nclass Lin:\n"
+        "    K = {k}\n\n\ndef task(a):\n    return a * REG['Lin'].K\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2177,6 +2204,13 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a name a function uses only in a local annotation": (
+        "Hint = {k}\n\n\ndef task(a):\n    x: Hint = a\n    return x\n"
+    ),
+    "a definition decorated by a function the task calls": (
+        "def ident(fn):\n    return fn\n\n\ndef task(a):\n    return ident(a)\n\n\n"
+        "@ident\ndef other():\n    return {k}\n"
+    ),
     "another definition that only shares the task's decorator": (
         "def timer(fn):\n    return fn\n\n\n@timer\ndef task(a):\n    return a\n\n\n"
         "@timer\ndef other(a):\n    return a * {k}\n"
@@ -2262,14 +2296,6 @@ def test_a_main_guard_else_branch_does_not_run_in_the_script(tmp_path):
     assert body != other
 
 
-def test_reordering_independent_definitions_is_not_an_edit(tmp_path):
-    first = "SCALE = 2\n\n\ndef helper(x):\n    return x * SCALE\n\n\n"
-    second = "def task(a):\n    return helper(a)\n"
-    one = _digest_of_script(tmp_path, "ord1", first + "\n\n" + second, {"task"})
-    two = _digest_of_script(tmp_path, "ord2", second + "\n\n" + first, {"task"})
-    assert one == two
-
-
 #: One script holding most constructs the rule reads. Its digest must be the
 #: same on every supported Python (records are compared across versions, and
 #: a digest that moved with the interpreter would re-run every cell).
@@ -2320,7 +2346,7 @@ if __name__ == "__main__":
     GRID = list(range(3))
 '''
 
-CROSS_VERSION_DIGEST = "26c4d5445c6ba3f4"
+CROSS_VERSION_DIGEST = "f586de8941011e4b"
 
 
 def test_a_script_digest_is_the_same_on_every_python(tmp_path):
@@ -2721,4 +2747,41 @@ def test_a_class_bodys_own_names_are_not_the_modules(tmp_path):
     )
     one = _digest_of_script(tmp_path, "cl1", text.format(k=3), {"W"})
     two = _digest_of_script(tmp_path, "cl2", text.format(k=4), {"W"})
+    assert one == two
+
+
+def test_removing_a_main_block_override_is_an_edit(tmp_path):
+    """`LR = 0.1` set again in the main block is the value the task runs
+    with: removing it is an edit, though the same statements remain above."""
+    head = "LR = 0.1\nLR = 0.01\n\n\ndef task(a):\n    return a * LR\n\n\n"
+    with_override = head + "if __name__ == '__main__':\n    LR = 0.1\n    run(task)\n"
+    without = head + "if __name__ == '__main__':\n    run(task)\n"
+    one = _digest_of_script(tmp_path, "ov1", with_override, {"task"})
+    two = _digest_of_script(tmp_path, "ov2", without, {"task"})
+    assert one != two
+
+
+def test_a_long_unreached_expression_is_read(tmp_path):
+    """A generated statement the task never reaches (a long sum) does not
+    stop the script from being read."""
+    text = (
+        "SCALE = 2\nTOTAL = "
+        + " + ".join(["1"] * 400)
+        + "\n\n\ndef task(a):\n    return a * SCALE\n"
+    )
+    assert _digest_of_script(tmp_path, "long", text, {"task"})
+
+
+def test_a_decorator_that_only_logs_through_a_project_helper_registers_nothing(
+    project, tmp_path
+):
+    """`@timer` calling a project logger does not make what it decorates
+    code the task runs."""
+    text = (
+        f"from {HELPERS} import scale as log\n\n\ndef timer(fn):\n"
+        "    def wrapper(*a):\n        log(1)\n        return fn(*a)\n\n    return wrapper\n\n\n"
+        "def task(a):\n    return a\n\n\n@timer\ndef other():\n    return {k}\n"
+    )
+    one = _digest_of_script(tmp_path, "lg1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "lg2", text.format(k=2), {"task"})
     assert one == two
