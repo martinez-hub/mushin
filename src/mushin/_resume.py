@@ -818,10 +818,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     def direct_loads(node) -> set[str]:
         """Loads a class-body statement makes in the class scope itself: not
-        inside a nested function, lambda, class or comprehension, nor in an
-        annotation (the symbol table gives those, and knows whether
-        annotations are evaluated), but in a nested definition's decorators,
-        defaults and bases, which run there."""
+        inside a nested function, lambda or class, nor in a comprehension past
+        its first iterable, nor in an annotation (the symbol table gives
+        those, and knows whether annotations are evaluated), but in a nested
+        definition's decorators, defaults and bases, which run there."""
         found: set[str] = set()
         stack = [node]
         while stack:
@@ -829,6 +829,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(n, nested_scopes):
                 if isinstance(n, defs):
                     stack.extend(run_here(n))
+                elif not isinstance(n, ast.Lambda):
+                    # A comprehension's first iterable runs here.
+                    stack.append(n.generators[0].iter)
                 continue
             if isinstance(n, ast.AnnAssign):
                 stack.append(n.target)
@@ -985,6 +988,30 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 return True
         return False
 
+    def header(node) -> list:
+        """What a block evaluates to decide what of it runs: an ``if``'s or
+        ``while``'s test, a ``for``'s iterable, a ``with``'s items, a
+        ``match``'s subject (not its body)."""
+        found = []
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (ast.If, ast.While)):
+                found.append(n.test)
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                found.append(n.iter)
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                found.extend(item.context_expr for item in n.items)
+            elif isinstance(n, ast.Match):
+                found.append(n.subject)
+            if not isinstance(n, defs):
+                stack.extend(
+                    c
+                    for c in ast.iter_child_nodes(n)
+                    if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+                )
+        return found
+
     def decorated(node) -> list:
         """The decorated definitions a statement makes in the module's scope:
         itself, or those inside its blocks (`if ENABLED: @register class`)."""
@@ -1014,17 +1041,32 @@ def _script_digest(path: Path, roots: frozenset[str]):
     for n in kept:
         read |= reads(n)
     while True:
-        add = [
-            (n, names)
-            for n, names in pending
-            if names & read or any(registers(d, read, n) for d in decorated(n))
+        add = [(n, names) for n, names in pending if names & read]
+        # A definition a block registers counts by itself, with the names the
+        # block's own condition reads (`if ENABLED:`), not the whole block (a
+        # grid in it).
+        registered = [
+            (n, d)
+            for n, _ in pending
+            if not any(n is m for m, _ in add)
+            for d in decorated(n)
+            if id(d) not in kept_ids and registers(d, read, n)
         ]
-        if not add:
+        if not add and not registered:
             break
         added = {id(n) for n, _ in add}
         for n, _ in add:
             kept.append(n)
+            kept_ids.add(id(n))
             read |= reads(n)
+        for n, d in registered:
+            if id(d) in kept_ids:
+                continue
+            kept.append(d)
+            kept_ids.add(id(d))
+            read |= reads(d)
+            if d is not n:
+                read |= loads(header(n))
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
     module = _strip_tree(

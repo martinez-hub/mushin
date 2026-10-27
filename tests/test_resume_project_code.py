@@ -2197,6 +2197,31 @@ SCRIPT_EDITS = {
         "if True:\n\n    def helper(x=(SCALE := {k})):\n        return x\n\n\n"
         "def task(a):\n    return a * SCALE\n"
     ),
+    "a star capture": (
+        "CFG = [1, {k}]\nmatch CFG:\n    case [_, *REST]:\n        pass\n\n\n"
+        "def task(a):\n    return a * REST[0]\n"
+    ),
+    "a mapping rest capture": (
+        "CFG = {{'a': 1, 'b': {k}}}\nmatch CFG:\n    case {{'a': _, **REST}}:\n        pass\n\n\n"
+        "def task(a):\n    return a * REST['b']\n"
+    ),
+    "a class body updating the module's name": (
+        "COUNT = {k}\n\n\nclass C:\n    COUNT += 1\n\n\ndef task(a):\n    return a * C.COUNT\n"
+    ),
+    "a class body's comprehension over the module's name": (
+        "VALS = [1, {k}]\n\n\nclass C:\n    VALS = [v * 2 for v in VALS]\n\n\n"
+        "def task(a):\n    return a * sum(C.VALS)\n"
+    ),
+    "a registration in an except handler": (
+        "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n\n\n"
+        "try:\n    import mushin_t_nothing_here\nexcept ImportError:\n\n    @register\n"
+        "    class Lin:\n        K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "the condition of a block that registers": (
+        "MODELS = {{}}\nENABLED = {k} > 1\n\n\ndef register(cls):\n"
+        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif ENABLED:\n\n    @register\n"
+        "    class Lin:\n        K = 1\n\n\ndef task(a):\n    return a * MODELS.get('Lin', 0)\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2207,6 +2232,21 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "an edit in the main block's else": (
+        "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
+        "if __name__ == '__main__':\n    run(task)\nelse:\n    SCALE = {k}\n"
+    ),
+    "a grid in the block that registers a definition": (
+        "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n\n\n"
+        "if True:\n\n    @register\n    class Lin:\n        K = 1\n\n    GRID = list(range({k}))\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a CLI group whose callback seeds what the task uses": (
+        "import click\nimport torch\n\n\ndef set_seed(seed):\n    torch.manual_seed(seed)\n\n\n"
+        "def task(lr):\n    return float(torch.tensor(lr))\n\n\n@click.group()\n"
+        "def cli():\n    set_seed(0)\n\n\n@cli.command()\ndef sweep():\n"
+        "    run(task, lr=list(range({k})))\n"
+    ),
     "a class body's loop variable named like a global": (
         "i = {k}\n\n\nclass Table:\n    rows = []\n    for i in range(2):\n"
         "        rows.append(i)\n\n\ndef task(a):\n    return a * len(Table.rows)\n"
