@@ -2480,16 +2480,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             registers, in the main block too), not by the run call, other
             top-level calls or prints, or what only they read (``GRID =
             dict(...)``), so extending the grid or adding a print is not an
-            edit. A name resolves as the script runs: to the binding it has
-            where it is read (a main block's body runs, its ``else`` does
-            not), through an alias, a block, a ``match`` capture or a
-            function that assigns the global. The script is read when the run
+            edit. A name resolves as the script runs: a name read while a
+            statement runs is the binding before it (a main block's body runs,
+            its ``else`` does not), through an alias, a block or a ``match``
+            capture, and a name a function reads is any binding of it. The
+            script is read when the run
             starts (a ``_target_`` defined in it, when the first cell naming
             it runs), so editing it while the sweep runs does not change what
             its cells record. A task defined in a notebook (IPython, Jupyter)
             is compared the same way through the cells the kernel ran, in the
             order it ran them, so re-running a cell unchanged, or the cell
-            that extends the grid, is not an edit. A re-run
+            that extends the grid, is not an edit; a cell that raised counts
+            up to the statement that raised, once the kernel has run a sweep.
+            A re-run
             warns, naming the file (``helpers (file)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
             is not reloaded, the old code keeps running while the cells
@@ -2499,8 +2502,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             covered: installed packages other than editable ones, data files,
             the environment, a statement of the driver script or a notebook
             cell that changes an object in place (``CFG["x"] = 2``,
-            ``parser.add_argument(...)``), a definition reached only through
-            an ``__init_subclass__`` or metaclass registry, state reached
+            ``parser.add_argument(...)``), a function that rebinds a global
+            when it is called (``global DEVICE`` in a ``setup()``), a
+            definition reached only through an ``__init_subclass__`` or
+            metaclass registry, state reached
             through ``globals()``, ``exec`` or ``%run`` (the modules of the
             objects they made are covered in a notebook), code defined where
             there is no file and no IPython (a plain REPL; the project

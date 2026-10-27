@@ -552,8 +552,8 @@ _SCRIPT_CACHE: dict = {}
 _FILE_CACHE_MAX = 2048
 
 
-def _cache_put(cache: dict, key, value) -> None:
-    while len(cache) >= _FILE_CACHE_MAX:
+def _cache_put(cache: dict, key, value, limit: int = _FILE_CACHE_MAX) -> None:
+    while len(cache) >= limit:
         cache.pop(next(iter(cache)))
     cache[key] = value
 
@@ -774,41 +774,81 @@ def _eval_loads(node) -> set[str]:
     return out
 
 
-#: Symbol-table scopes that only evaluate where they are, so their reads are
-#: the statement's own (read from its syntax tree): comprehensions (which
-#: Python 3.12+ inlines and earlier versions do not), and the annotation and
-#: type-parameter scopes some versions add. Their nested functions still run
-#: when called.
+#: Symbol-table scopes that only evaluate where they are, so a statement's own
+#: comprehensions are read from its syntax tree (Python 3.12+ inlines them and
+#: earlier versions do not). Inside a function they are part of its body.
 _EAGER_SCOPES = ("listcomp", "setcomp", "dictcomp", "genexpr")
 
 
-def _call_scope_facts(scopes) -> tuple[set[str], set[str]]:
-    """``(reads, writes)`` of the functions a statement defines, from its
-    symbol-table scopes: the globals their bodies read when called, and the
-    globals they assign (``global DEVICE``; a call can rebind the module's
-    name). A function's comprehensions and nested classes are part of its
-    body. The same on every Python version: the scopes only some versions
-    have (an inlined comprehension, an annotation scope) are read alike."""
-    reads: set[str] = set()
-    writes: set[str] = set()
-    stack = [(scope, False) for scope in scopes]
+def _body_loads(node) -> set[str]:
+    """The names the bodies of the functions and lambdas in a statement read
+    when they run, by the syntax tree: a local variable's annotation is never
+    evaluated, so it is not one."""
+    import ast
+
+    out: set[str] = set()
+
+    def visit(n, in_function: bool) -> None:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for sub in _outer_exprs(n):
+                visit(sub, in_function)
+            for sub in n.body if isinstance(n.body, list) else [n.body]:
+                visit(sub, True)
+            return
+        if in_function:
+            if isinstance(n, ast.AnnAssign):
+                visit(n.target, True)
+                if n.value is not None:
+                    visit(n.value, True)
+                return
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                out.add(n.id)
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                out.add(n.target.id)
+        for sub in ast.iter_child_nodes(n):
+            visit(sub, in_function)
+
+    visit(node, False)
+    return out
+
+
+def _call_reads(node) -> set[str]:
+    """The globals the functions a statement defines read when called: the
+    global names of their bodies in the statement's own symbol table (so two
+    statements on one line, or a top-level ``await`` elsewhere in a cell, do
+    not mix), kept where the syntax tree evaluates them. The same on every
+    Python version: the scopes only some versions have (an inlined
+    comprehension, an annotation scope) read alike. A statement that does not
+    compile alone (a top-level ``await``) defines no function read here."""
+    import ast
+    import symtable
+
+    try:
+        table = symtable.symtable(ast.unparse(node), "<statement>", "exec")
+    except (SyntaxError, ValueError, RecursionError):
+        return set()
+    is_def = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    names: set[str] = set()
+    stack = [(child, False) for child in table.get_children()]
     while stack:
-        table, in_function = stack.pop()
-        kind = table.get_type()
-        is_function = kind == "function"
-        if is_function and table.get_name() in _EAGER_SCOPES and not in_function:
-            is_function = False  # at module level: the statement's syntax tree
+        scope, in_function = stack.pop()
+        is_function = scope.get_type() == "function"
+        if (
+            is_function
+            and not in_function
+            and not is_def  # `def genexpr()` is a function, not a comprehension
+            and scope.get_name() in _EAGER_SCOPES
+        ):
+            is_function = False
         counts = in_function or is_function
         if counts:
-            for sym in table.get_symbols():
-                if not sym.is_global():
-                    continue
-                if sym.is_referenced():
-                    reads.add(sym.get_name())
-                if sym.is_assigned() and sym.is_declared_global():
-                    writes.add(sym.get_name())
-        stack.extend((child, counts) for child in table.get_children())
-    return reads, writes
+            names.update(
+                sym.get_name()
+                for sym in scope.get_symbols()
+                if sym.is_global() and sym.is_referenced()
+            )
+        stack.extend((child, counts) for child in scope.get_children())
+    return names & _body_loads(node)
 
 
 def _decorator_bases(node) -> list[str]:
@@ -839,24 +879,28 @@ def _decorator_bases(node) -> list[str]:
 
 
 class _Stmt:
-    """What the reach rule needs of one top-level statement."""
+    """What the reach rule needs of one top-level statement, taken once: its
+    facts, not its syntax tree (an import statement keeps its node, which
+    says where the import is from)."""
 
     __slots__ = (
-        "node",
+        "kind",
+        "import_node",
         "binds",
         "must",
         "evals",
         "calls",
-        "writes",
         "decorators",
-        "_dh",
-        "_imports",
+        "dh",
+        "imports",
+        "future",
+        "span",
     )
 
-    def __init__(self, node, scopes):
+    def __init__(self, node):
         import ast
+        import copy
 
-        self.node = node
         self.binds = _bound_names(node)
         must = (
             ast.Assign,
@@ -874,63 +918,31 @@ class _Stmt:
         # binding before it stays live too.
         self.must = self.binds if isinstance(node, must) else set()
         self.evals = _eval_loads(node)
-        self.calls, self.writes = _call_scope_facts(scopes)
+        self.calls = _call_reads(node)
         self.decorators = _decorator_bases(node)
-        self._dh = None
-        self._imports = None
-
-    @property
-    def star(self) -> bool:
-        return "*" in self.binds
-
-    @property
-    def future(self) -> bool:
-        import ast
-
-        return (
-            isinstance(self.node, ast.ImportFrom) and self.node.module == "__future__"
-        )
-
-    def stripped(self):
-        import ast
-        import copy
-
         # The script runs as __main__: its helpers' guards run too.
-        return _strip_tree(
-            ast.Module(body=[copy.deepcopy(self.node)], type_ignores=[]),
-            main_guards=False,
+        tree = _strip_tree(
+            ast.Module(body=[copy.deepcopy(node)], type_ignores=[]), main_guards=False
         )
-
-    def dh(self) -> str:
-        if self._dh is None:
-            tree = self.stripped()
-            self._dh = _short_hash(_canonical_dump(tree).encode())
-            self._imports = _import_pairs(tree)
-        return self._dh
-
-    def imports(self) -> list:
-        self.dh()
-        return self._imports
-
-
-def _statements(nodes, table) -> list[_Stmt]:
-    """A ``_Stmt`` for each top-level statement ``nodes`` of one source, with
-    the symbol-table scopes ``table`` holds mapped to the statement they are
-    in by line (two definitions of one name are two statements)."""
-    spans = []
-    for node in nodes:
+        self.dh = _short_hash(_canonical_dump(tree).encode())
+        self.imports = _import_pairs(tree)
+        is_import = isinstance(node, (ast.Import, ast.ImportFrom))
+        self.import_node = node if is_import else None
+        if is_import:
+            self.kind = "import"
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            self.kind = "def"
+        else:
+            self.kind = "other"
+        self.future = isinstance(node, ast.ImportFrom) and node.module == "__future__"
         start = min(
             [node.lineno, *(d.lineno for d in getattr(node, "decorator_list", ()))]
         )
-        spans.append((start, getattr(node, "end_lineno", None) or node.lineno))
-    scopes: list[list] = [[] for _ in nodes]
-    for child in table.get_children():
-        line = child.get_lineno()
-        for i, (start, end) in enumerate(spans):
-            if start <= line <= end:
-                scopes[i].append(child)
-                break
-    return [_Stmt(node, s) for node, s in zip(nodes, scopes, strict=True)]
+        self.span = (start, getattr(node, "end_lineno", None) or node.lineno)
+
+
+def _statements(nodes) -> list[_Stmt]:
+    return [_Stmt(node) for node in nodes]
 
 
 def _run_statements(tree) -> list:
@@ -954,33 +966,32 @@ def _reach(
 ) -> tuple[str, list, set]:
     """What the statements at positions ``roots`` can reach in ``stmts``, a
     source's top-level statements in the order they ran, as ``(digest,
-    import pairs, unbound names)``.
+    import pairs, names read)``.
 
     A name a statement reads when it runs is the binding before it (``Y = X
-    * 2`` keeps the ``X`` it was computed from); a name a function reads when
-    called is the latest binding. A binding a block may skip keeps the one
-    before it live too, and a function that assigns a global is a binding of
-    it wherever it is. Also counted: star imports, ``__future__`` imports, and
-    a decorated definition whose decorator reaches, through its bindings (an
-    alias, a helper it calls), a project import or module state that counted
-    code reads (``@register`` filling the ``MODELS`` the task reads).
+    * 2`` keeps the ``X`` it was computed from; a binding a block may skip
+    keeps the one before it too). A name a function reads when called is any
+    binding of it: the function may run anywhere, at a call while the script
+    runs (``SCALE = scale()``) or in a run before a rebinding. Also counted:
+    star imports, ``__future__`` imports, and a decorated definition whose
+    decorator reaches, through its bindings (an alias, a helper it calls), a
+    project import or module state that counted code reads (``@register``
+    filling the ``MODELS`` the task reads). ``names`` are roots too, by every
+    binding.
 
-    The digest is of the set of reached statements, each with the statements
-    its names resolve to, so it depends on what runs, not on the order of
-    independent statements or on how often a cell was run unchanged.
-    ``names`` are roots too, by their latest binding."""
-    import ast
+    Each reached statement is hashed with what its names resolve to, those
+    read when it ran by their own hashes in turn (``SCALE += 1`` run three
+    times is three statements): the digest is of the set of these, so it
+    does not depend on the order of independent statements, or on how often
+    a cell was run unchanged."""
     import bisect
     from collections import deque
 
     binders: dict[str, list[int]] = {}
-    writers: dict[str, list[int]] = {}
     for pos, s in enumerate(stmts):
         for name in s.binds:
             binders.setdefault(name, []).append(pos)
-        for name in s.writes:
-            writers.setdefault(name, []).append(pos)
-    stars = [p for p in binders.get("*", ())]
+    stars = list(binders.get("*", ()))
 
     def live(name: str, pos: int) -> list[int]:
         found = []
@@ -991,66 +1002,60 @@ def _reach(
             if name in stmts[positions[i]].must:
                 break
             i -= 1
-        # A function that assigns the global can have run before `pos` only
-        # if it was defined before it.
-        return found + [p for p in writers.get(name, ()) if p < pos and p not in found]
+        return found
 
-    included: dict[int, list] = {}
-    counted: set[str] = set()
-    unbound: set[str] = set()
+    def every(name: str) -> list[int]:
+        return list(binders.get(name, ()))
+
+    included: dict[int, tuple[list, list]] = {}
+    read: set[str] = set()
     queue = deque(
         sorted({*roots, *stars, *(p for p, s in enumerate(stmts) if s.future)})
     )
-    end = len(stmts)
-    for name in names:
-        queue.extend(live(name, end))
+    for name in sorted(names):
+        queue.extend(every(name))
 
     def visit(pos: int) -> None:
         s = stmts[pos]
-        edges = []
-        for names, at in ((s.evals, pos), (s.calls, end)):
-            for name in names:
-                targets = live(name, at)
-                if not targets:
-                    unbound.add(name)
-                for t in targets:
-                    edges.append((name, t))
-                    if t not in included:
-                        queue.append(t)
-        included[pos] = edges
-        counted.update(s.evals, s.calls)
+        evals = [(n, t) for n in s.evals for t in live(n, pos)]
+        calls = [(n, t) for n in s.calls for t in every(n)]
+        for _, t in (*evals, *calls):
+            if t not in included:
+                queue.append(t)
+        included[pos] = (evals, calls)
+        read.update(s.evals, s.calls)
 
     def is_state(name: str) -> bool:
         """Module state a decorator may write: a name the source binds to a
         value or a class (a registry), or imports from the project; not a
         function both call, nor a foreign module both use."""
         for p in binders.get(name, ()):
-            node = stmts[p].node
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                if is_project_import(node, name):
+            s = stmts[p]
+            if s.kind == "import":
+                if is_project_import(s.import_node, name):
                     return True
-            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            elif s.kind != "def":
                 return True
         return False
 
-    def registers(name: str, pos: int, seen: set) -> bool:
+    def registers(name: str, pos: int | None, seen: set) -> bool:
         if name in seen or len(seen) > _REACH_NAMES_MAX:
             return False
         seen.add(name)
-        targets = live(name, pos)
+        targets = every(name) if pos is None else live(name, pos)
         if not targets:
             # A name nothing binds may come from a star import.
-            return any(is_project_import(stmts[p].node, name) for p in stars)
+            return any(is_project_import(stmts[p].import_node, name) for p in stars)
         for t in targets:
-            node = stmts[t].node
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                if is_project_import(node, name):
+            s = stmts[t]
+            if s.kind == "import":
+                if is_project_import(s.import_node, name):
                     return True
                 continue
-            reads = stmts[t].evals | stmts[t].calls
-            if any(is_state(n) for n in reads & counted if n != name):
+            reads = s.evals | s.calls
+            if any(is_state(n) for n in sorted(reads & read) if n != name):
                 return True
-            if any(registers(n, end, seen) for n in reads):
+            if any(registers(n, None, seen) for n in sorted(reads)):
                 return True
         return False
 
@@ -1070,15 +1075,20 @@ def _reach(
         if not added:
             break
 
+    # Edges read when a statement ran point to earlier positions, so its
+    # hash through them is taken in position order, with no cycle.
+    esig: dict[int, str] = {}
+    for pos in sorted(included):
+        evals = sorted({f"{n}>{esig[t]}" for n, t in included[pos][0]})
+        esig[pos] = _short_hash((stmts[pos].dh + "|" + ",".join(evals)).encode())
     sigs = set()
     imports: list = []
-    for pos, edges in included.items():
-        s = stmts[pos]
-        resolved = sorted({f"{name}>{stmts[t].dh()}" for name, t in edges})
-        sigs.add(s.dh() + "|" + ",".join(resolved))
-        imports.extend(s.imports())
+    for pos in sorted(included):
+        calls = sorted({f"{n}>{esig[t]}" for n, t in included[pos][1]})
+        sigs.add(esig[pos] + "|" + ",".join(calls))
+        imports.extend(stmts[pos].imports)
     digest = _short_hash("\n".join(sorted(sigs)).encode())
-    return digest, imports, unbound
+    return digest, imports, read
 
 
 def _is_project_import(node, name: str) -> bool:
@@ -1114,17 +1124,14 @@ def _script_digest(path: Path, roots: frozenset[str]):
     attribute or item set) and what only they read (``GRID``, ``ds =
     exp.run(...)``). ``imports`` are those of what counts."""
     import ast
-    import symtable
 
     source, content = _content_key(path)
     cache_key = (*content, tuple(sorted(roots)))
     hit = _SCRIPT_CACHE.get(cache_key)
     if hit is not None:
         return hit
-    tree = ast.parse(source)
     # The bytes, so a byte order mark or a coding cookie is honored.
-    table = symtable.symtable(source, str(path), "exec")
-    stmts = _statements(_run_statements(tree), table)
+    stmts = _statements(_run_statements(ast.parse(source)))
     starts = [pos for pos, s in enumerate(stmts) if s.binds & roots]
     digest, imports, _ = _reach(stmts, starts, _is_project_import)
     result = (digest, imports)
@@ -1347,11 +1354,18 @@ def _root_entries(
 #: cells (or a REPL's, which cannot be read).
 _NOTEBOOK = "<notebook>"
 
-#: Cell statements by the cell's text, bounded like the file caches.
+#: Each cell's statements by the cell's text: their facts, with the lines
+#: each spans in the cell, not their syntax trees.
 _CELL_CACHE: dict = {}
+_CELL_CACHE_MAX = 20_000
 
-#: The most recent cells of a notebook that are read.
-_CELLS_MAX = 5000
+#: A notebook's history past this many statements is not read: its record
+#: falls back to the project modules its namespace holds.
+_NOTEBOOK_STATEMENTS_MAX = 200_000
+
+#: Per IPython shell, the cells that raised once mushin watched it: execution
+#: number -> the line the cell stopped at (None: nothing in it ran).
+_FAILED_CELLS: dict = {}
 
 
 def _ipython_shell_of(namespace):
@@ -1369,6 +1383,51 @@ def _ipython_shell_of(namespace):
     if shell is None or getattr(shell, "user_ns", None) is not namespace:
         return None
     return shell
+
+
+def _watch_failures(shell) -> dict:
+    """The cells of ``shell`` that raised, noted from now on by a
+    ``post_run_cell`` hook: a cell stops at its first failing statement, so
+    what follows it never ran. Registered once per shell, at its first
+    record; a cell that failed before that is read as if it ran."""
+    import weakref
+
+    key = id(shell)
+    found = _FAILED_CELLS.get(key)
+    if found is not None and found[0]() is shell:
+        return found[1]
+    failed: dict = {}
+
+    def note(result) -> None:
+        try:
+            if result.success or result.execution_count is None:
+                return
+            error = result.error_in_exec
+            line = None  # failed before running (an input transformer)
+            if error is not None:
+                tb = error.__traceback__
+                while tb is not None:
+                    frame = tb.tb_frame
+                    if (
+                        frame.f_globals is shell.user_ns
+                        and frame.f_code.co_name == "<module>"
+                    ):
+                        line = tb.tb_lineno
+                        break
+                    tb = tb.tb_next
+            failed[result.execution_count] = line
+        except Exception:  # noqa: BLE001 - never break the user's cell
+            pass
+
+    try:
+        shell.events.register("post_run_cell", note)
+    except Exception:  # noqa: BLE001 - an IPython without events: as before
+        return failed
+    try:
+        _FAILED_CELLS[key] = (weakref.ref(shell), failed)
+    except TypeError:  # no weak reference to it: watched, not remembered
+        pass
+    return failed
 
 
 #: The magics that run their code in the notebook's namespace, by how IPython
@@ -1400,43 +1459,60 @@ def _magic_code(node) -> str | None:
     return None
 
 
-def _cell_statements(text: str, depth: int = 0):
-    """The statements of one cell, cached by its text, or None for a cell
-    that does not parse (it never ran). The code a ``%time`` or ``%%time``
-    runs stands in for the magic's call."""
+def _cell_statements(text: str, transform=None, depth: int = 0):
+    """``[(span, statement)]`` for one cell, cached by its text: each
+    statement with the lines it spans in the cell, or None for a cell that
+    does not parse (it never ran). The code a ``%time`` or ``%%time`` runs,
+    as IPython ``transform`` s it, stands in for the magic's call, spanning
+    its line."""
     import ast
-    import symtable
 
     key = _short_hash(text.encode("utf-8", "surrogatepass"))
     if key in _CELL_CACHE:
         return _CELL_CACHE[key]
     try:
-        tree = ast.parse(text)
-        stmts = _statements(
-            _run_statements(tree), symtable.symtable(text, "<cell>", "exec")
-        )
+        nodes = _run_statements(ast.parse(text))
     except (SyntaxError, ValueError, RecursionError):
-        stmts = None
-    if stmts is not None and depth < 4:
-        expanded = []
-        for stmt in stmts:
-            code = _magic_code(stmt.node)
+        nodes = None
+    out = None
+    if nodes is not None:
+        out = []
+        for node in nodes:
+            stmt = _Stmt(node)
+            code = _magic_code(node) if depth < 4 else None
             if code is None:
-                expanded.append(stmt)
-            else:
-                expanded.extend(_cell_statements(code, depth + 1) or [])
-        stmts = expanded
-    _cache_put(_CELL_CACHE, key, stmts)
-    return stmts
+                out.append((stmt.span, stmt))
+                continue
+            if transform is not None:
+                try:
+                    code = transform(code)
+                except Exception:  # noqa: BLE001 - read it as it is
+                    pass
+            inner = _cell_statements(code, transform, depth + 1) or []
+            out.extend((stmt.span, s) for _, s in inner)
+    _cache_put(_CELL_CACHE, key, out, _CELL_CACHE_MAX)
+    return out
 
 
 def _code_of(obj):
     """The code object that places ``obj`` in a cell: a function's, or a
-    class's own method's."""
+    class's own method's, through any decorator that wraps it."""
     import types
 
+    def unwrap(fn):
+        for _ in range(16):
+            inner = (
+                getattr(fn, "__wrapped__", None)
+                if isinstance(fn, types.FunctionType)
+                else None
+            )
+            if not isinstance(inner, types.FunctionType):
+                return fn
+            fn = inner
+        return fn
+
     if isinstance(obj, types.FunctionType):
-        return obj.__code__
+        return obj.__code__  # a wrapper's layers are roots of their own
     if isinstance(obj, type):
         for value in vars(obj).values():
             fn = (
@@ -1444,6 +1520,7 @@ def _code_of(obj):
                 or getattr(value, "fget", None)
                 or value
             )
+            fn = unwrap(fn) if isinstance(fn, types.FunctionType) else fn
             if isinstance(fn, types.FunctionType) and fn.__qualname__.startswith(
                 obj.__qualname__ + "."
             ):
@@ -1452,10 +1529,13 @@ def _code_of(obj):
 
 
 def _cell_position(obj, cells: list[str], starts: list[tuple[int, list]]):
-    """The position of the statement that made ``obj``, in the latest run of
-    the cell its code comes from (IPython registers each cell's text in
-    linecache under the cell's file name), or None."""
+    """The position of the statement that made ``obj``, in the run of the cell
+    its code comes from (IPython registers each cell's text in linecache under
+    the cell's file name): the run its file name numbers (``<ipython-input-N-
+    ...>``), else the latest run of that text (a Jupyter kernel names a cell
+    by its text alone). None when it is not found."""
     import linecache
+    import re
 
     code = _code_of(obj)
     if code is None:
@@ -1464,17 +1544,17 @@ def _cell_position(obj, cells: list[str], starts: list[tuple[int, list]]):
     if not lines:
         return None
     text = "".join(lines).rstrip("\n")
-    for i in range(len(cells) - 1, -1, -1):
+    order = list(range(len(cells) - 1, -1, -1))
+    numbered = re.fullmatch(r"<ipython-input-(\d+)-[0-9a-f]+>", code.co_filename)
+    if numbered and int(numbered.group(1)) < len(cells):
+        order.insert(0, int(numbered.group(1)))
+    line = code.co_firstlineno  # a decorated def's first decorator
+    for i in order:
         if cells[i].rstrip("\n") != text:
             continue
         start, part = starts[i]
-        line = code.co_firstlineno  # a decorated def's first decorator
-        for j, stmt in enumerate(part):
-            node = stmt.node
-            first = min(
-                [node.lineno, *(d.lineno for d in getattr(node, "decorator_list", ()))]
-            )
-            if first <= line <= (node.end_lineno or node.lineno):
+        for j, (span, _) in enumerate(part):
+            if span[0] <= line <= span[1]:
                 return start + j
         return None
     return None
@@ -1484,23 +1564,36 @@ def _notebook_entry(namespace: dict, names, objects):
     """``(digest, imports)`` for code defined in an IPython notebook (or
     console): what the roots can reach by name through the cells the kernel
     ran, in the order it ran them (see ``_reach``), so re-running a cell
-    unchanged, or the cell that extends the grid, is not an edit. Each root is
-    the statement that made it, in the latest run of its cell (a sweep built
-    before its task's cell changed runs the old task), else its name's latest
-    binding. A name no cell binds (``%run``, an extension) brings the project
-    module of its value's type. None outside IPython, or when no root is
-    found in the cells."""
+    unchanged, or the cell that extends the grid, is not an edit. A cell that
+    raised counts up to the statement that raised. Each root is the statement
+    that made it, in its run of its cell (a sweep built before its task's cell
+    changed runs the old task), else every binding of its name. The project
+    modules of the values the reached code reads are followed by their types
+    (an object a cell made through foreign code: a loaded checkpoint, a
+    `%run`). None outside IPython, past ``_NOTEBOOK_STATEMENTS_MAX``, or when
+    no root is found in the cells."""
     shell = _ipython_shell_of(namespace)
     if shell is None:
         return None
-    cells = [c for c in shell.history_manager.input_hist_parsed if isinstance(c, str)]
-    cells = cells[-_CELLS_MAX:]
+    failed = _watch_failures(shell)
+    # Index n holds the cell whose execution number is n.
+    cells = [
+        c if isinstance(c, str) else "" for c in shell.history_manager.input_hist_parsed
+    ]
+    transform = getattr(shell, "transform_cell", None)
     stmts: list[_Stmt] = []
     starts: list[tuple[int, list]] = []
-    for text in cells:
-        part = _cell_statements(text) or []
+    for n, text in enumerate(cells):
+        part = _cell_statements(text, transform) or []
+        if n in failed:
+            stop = failed[n]
+            part = [
+                (span, s) for span, s in part if stop is not None and span[1] < stop
+            ]
         starts.append((len(stmts), part))
-        stmts.extend(part)
+        stmts.extend(s for _, s in part)
+        if len(stmts) > _NOTEBOOK_STATEMENTS_MAX:
+            return None
     roots, unplaced = [], set()
     for obj in objects:
         pos = _cell_position(obj, cells, starts)
@@ -1510,8 +1603,8 @@ def _notebook_entry(namespace: dict, names, objects):
             roots.append(pos)
     if not roots and not any(n in s.binds for s in stmts for n in unplaced):
         return None
-    digest, imports, unbound = _reach(stmts, roots, _is_project_import, names=unplaced)
-    values = {n: namespace[n] for n in unbound if n in namespace}
+    digest, imports, read = _reach(stmts, roots, _is_project_import, names=unplaced)
+    values = {n: namespace[n] for n in sorted(read) if n in namespace}
     modules = [m for m in _namespace_modules(values) if m != "__main__"]
     return digest, [*imports, *((m, 0) for m in modules)]
 

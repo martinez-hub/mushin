@@ -249,3 +249,131 @@ def test_a_notebook_resume_reruns_after_a_helper_cell_edit(shell, tmp_path):
     assert calls.read_text() == "xxxx"
     statuses = list(pathlib.Path(wd).rglob(STATUS_FILE))
     assert len(statuses) == 2
+
+
+# --- the cells as they ran (#277's review) -------------------------------------
+
+
+def test_each_run_of_an_augmented_assignment_cell_counts(shell):
+    run(shell, "SCALE = 1")
+    run(shell, "def task(a):\n    return a * SCALE\n")
+    seen = []
+    for _ in range(3):
+        run(shell, "SCALE += 1")
+        seen.append(code(shell, "task")[KEY])
+    assert len(set(seen)) == 3
+
+
+def test_a_cell_that_raised_counts_only_up_to_the_error(shell):
+    """IPython stops a cell at its first failing statement: what follows it
+    did not run, so it is not the code the task reads."""
+    run(shell, "SCALE = 2")
+    run(shell, "def task(a):\n    return a * SCALE\n")
+    before = code(shell, "task")[KEY]
+    result = shell.run_cell("undefined_name\nSCALE = 3", store_history=True)
+    assert not result.success and shell.user_ns["SCALE"] == 2
+    assert code(shell, "task")[KEY] == before
+    run(shell, "SCALE = 3")
+    assert code(shell, "task")[KEY] != before
+
+
+def test_a_cell_with_top_level_await_is_read(shell):
+    run(shell, "import asyncio\nSCALE = 2")
+    run(shell, "def task(a):\n    return a * SCALE\n")
+    before = code(shell, "task")[KEY]
+    run(shell, "SCALE = 3\nawait asyncio.sleep(0)")
+    assert code(shell, "task")[KEY] != before
+
+
+def test_a_value_a_cell_made_through_foreign_code_brings_its_module(
+    shell, tmp_path, monkeypatch
+):
+    """`model = loader(...)` makes a project object no cell imports: its
+    class's module is followed, by type."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "mushin_t_nbpk.py").write_text(
+        "class Model:\n    def __call__(self, x):\n        return x\n"
+    )
+    importlib.invalidate_caches()
+    try:
+        run(
+            shell,
+            "import importlib\nmodel = importlib.import_module('mushin_t_nbpk').Model()",
+        )
+        run(shell, "def task(a):\n    return model(a)\n")
+        assert "mushin_t_nbpk (file)" in code(shell, "task")
+    finally:
+        sys.modules.pop("mushin_t_nbpk", None)
+
+
+def test_a_target_class_with_a_wrapped_method_is_placed_by_its_own_cell(shell):
+    run(
+        shell,
+        "import functools\n\ndef timed(f):\n    @functools.wraps(f)\n"
+        "    def w(*a):\n        return f(*a)\n    return w\n",
+    )
+    run(shell, "class Net:\n    @timed\n    def f(self, x):\n        return x * 2\n")
+    run(shell, "def task(net, a):\n    return net.f(a)\n")
+    task = shell.user_ns["task"]
+    cfg = {"net": {"_target_": "__main__.Net"}}
+    key = "__main__:Net (notebook)"
+    before = cell_project_record("tok-nbw-1", (task,), (), cfg)["code"][key]
+    run(shell, "class Net:\n    @timed\n    def f(self, x):\n        return x * 3\n")
+    after = cell_project_record("tok-nbw-2", (task,), (), cfg)["code"][key]
+    assert after != before
+
+
+def test_a_kept_task_is_placed_at_the_run_of_its_cell_that_made_it(shell):
+    """IPython names each run of a cell apart (`<ipython-input-N-...>`): a
+    task kept from an earlier run of an identical cell is that run's, whose
+    default read the SCALE of its time."""
+    run(shell, "SCALE = 2")
+    run(shell, "def task(a, s=SCALE):\n    return a * s\n")
+    run(shell, "KEPT = task")
+    before = code(shell, "KEPT")[KEY]
+    run(shell, "SCALE = 3")
+    run(shell, "def task(a, s=SCALE):\n    return a * s\n")
+    assert code(shell, "KEPT")[KEY] == before
+
+
+def test_a_cell_magic_body_is_read_as_ipython_runs_it(shell):
+    """A `%%time` body is itself IPython input: a shell line in it does not
+    hide the cell's bindings."""
+    run(shell, "SCALE = 2")
+    run(shell, "def task(a):\n    return a * SCALE\n")
+    before = code(shell, "task")[KEY]
+    run(shell, "%%time\n!true\nSCALE = 3\n")
+    assert code(shell, "task")[KEY] != before
+
+
+def test_a_notebook_sweep_under_joblib_resumes_from_the_drivers_entry(shell, tmp_path):
+    """A real parallel run from the shell: the workers record the driver's
+    entry, so an unchanged re-run of the helper's cell resumes every cell."""
+    pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
+    calls = tmp_path / "calls"
+    wd = tmp_path / "wd"
+    run(shell, f"CALLS = {str(calls)!r}\nWD = {str(wd)!r}")
+    run(shell, "SCALE = 2\n\ndef helper(x):\n    return x * SCALE\n")
+    run(
+        shell,
+        SWEEP_CELL.replace(
+            'with open(CALLS, "a") as f:\n            f.write("x")',
+            "import os, uuid\n        os.makedirs(CALLS, exist_ok=True)\n"
+            '        open(os.path.join(CALLS, uuid.uuid4().hex), "w").close()',
+        ),
+    )
+    shell.user_ns["multirun"] = multirun
+    sweep = (
+        "W().run(a=multirun([1, 2]), working_dir=WD, resume=True,"
+        " launcher='joblib', launcher_config={'n_jobs': 2})"
+    )
+    run(shell, sweep)
+    assert len(list(calls.iterdir())) == 2
+    entry = driver_script_entries([shell.user_ns["W"].task])["<notebook>"][0]
+    for status in pathlib.Path(wd).rglob(STATUS_FILE):
+        import json
+
+        assert json.loads(status.read_text())["code_deps"]["code"][KEY] == entry
+    run(shell, "def helper(x):\n    return x * SCALE\n")
+    run(shell, sweep)
+    assert len(list(calls.iterdir())) == 2  # unchanged: reused

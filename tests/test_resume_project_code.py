@@ -2114,10 +2114,6 @@ SCRIPT_EDITS = {
         "SCALE = {k}\n\n\nclass Config:\n    SCALE = SCALE\n\n\n"
         "def task(a):\n    return a * Config.SCALE\n"
     ),
-    "a function that sets a global": (
-        "DEVICE = 'cpu'\n\n\ndef configure():\n    global DEVICE\n"
-        "    DEVICE = 'cuda:{k}'\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
-    ),
     "a value a conditional rebinding may keep": (
         "FAST = False\nSCALE = {k}\nif FAST:\n    SCALE = 5\n\n\n"
         "def task(a):\n    return a * SCALE\n"
@@ -2127,6 +2123,24 @@ SCRIPT_EDITS = {
     ),
     "a constant computed from another": (
         "BASE = {k}\nSCALE = BASE * 10\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value rebound before the task reads it (a function may run between)": (
+        "SCALE = {k}\nSCALE = 5\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value a function computes while the script runs": (
+        "BASE = {k}\n\n\ndef scale():\n    return BASE * 10\n\n\nSCALE = scale()\n"
+        "BASE = 100\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value rebound after the run call": (
+        "MODE = 'm{k}'\n\n\ndef task(a):\n    return len(MODE) * a\n\n\n"
+        "if __name__ == '__main__':\n    first = run(task)\n    MODE = 'slow'\n"
+    ),
+    "a lambda after a semicolon": (
+        "SCALE = {k}\nA = 1; F = lambda a: a * SCALE\n\n\ndef task(a):\n    return F(a)\n"
+    ),
+    "a helper named like a comprehension": (
+        "SCALE = {k}\n\n\ndef genexpr(x):\n    return x * SCALE\n\n\n"
+        "def task(a):\n    return genexpr(a)\n"
     ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
@@ -2138,6 +2152,11 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a run function that sets a global": (
+        "DEVICE = 'cpu'\n\n\ndef task(a):\n    return len(DEVICE) * a\n\n\n"
+        "def main():\n    global DEVICE\n    DEVICE = 'cpu'\n"
+        "    run(task, a=list(range({k})))\n"
+    ),
     "a comprehension variable named like a global": (
         "SCALE = 2\nGRID = [SCALE for SCALE in range({k})]\n\n\n"
         "def task(a):\n    return a * SCALE\n"
@@ -2145,9 +2164,6 @@ SCRIPT_NOT_EDITS = {
     "a helper's local inside a block": (
         "SCALE = 2\nif True:\n\n    def make():\n        SCALE = 3\n        return SCALE\n\n"
         "    GRID = list(range({k}))\n\n\ndef task(a):\n    return a * SCALE\n"
-    ),
-    "a value rebound before the task reads it": (
-        "SCALE = {k}\nSCALE = 5\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
     "a declaration without a value after the binding": (
         "SCALE = 2\nSCALE: 'v{k}'\n\n\ndef task(a):\n    return a * SCALE\n"
@@ -2169,6 +2185,19 @@ def test_a_script_change_the_task_cannot_see_is_not_an_edit(tmp_path, case):
     one = _digest_of_script(tmp_path, "sn1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "sn2", text.format(k=2), {"task"})
     assert one == two
+
+
+def test_each_run_of_an_augmented_assignment_counts(tmp_path):
+    """`SCALE += 1` twice and three times are different values: a chain of
+    identical statements is not one statement."""
+    base = "SCALE = 1\n{incs}\n\ndef task(a):\n    return a * SCALE\n"
+    two = _digest_of_script(
+        tmp_path, "inc2", base.format(incs="SCALE += 1\n" * 2), {"task"}
+    )
+    three = _digest_of_script(
+        tmp_path, "inc3", base.format(incs="SCALE += 1\n" * 3), {"task"}
+    )
+    assert two != three
 
 
 def test_a_future_import_in_a_script_counts(tmp_path):
@@ -2229,6 +2258,7 @@ BASE = 2
 SCALED = [BASE * v for v in range(2)]
 BASE = 5
 FN = lambda s: s * SCALE
+Hint = int
 
 
 class Config:
@@ -2253,14 +2283,15 @@ def helper(x, *, factor: int = SCALE):
 def task(a):
     global LAST
     LAST = a
-    return helper(a), FN(a), TABLE, GEN, SCALED
+    local: Hint = Config()  # a local annotation is never evaluated
+    return helper(a), FN(a), TABLE, GEN, SCALED, local
 
 
 if __name__ == "__main__":
     GRID = list(range(3))
 '''
 
-CROSS_VERSION_DIGEST = "e0128ffdf7cad4fe"
+CROSS_VERSION_DIGEST = "26c4d5445c6ba3f4"
 
 
 def test_a_script_digest_is_the_same_on_every_python(tmp_path):
