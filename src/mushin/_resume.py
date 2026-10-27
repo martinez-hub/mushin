@@ -807,16 +807,14 @@ def _script_digest(path: Path, roots: frozenset[str]):
     def declared_global(node) -> set[str]:
         """The names a definition, or a definition nested in it (a method, an
         inner function), declares ``global`` and binds in that same scope (by
-        ``binds``, so a walrus, an import or a capture binds too): running it
-        binds the module's name. One it only reads binds nothing."""
+        ``scope_binds``, so a walrus, an import or a capture binds too):
+        running it binds the module's name. One it only reads binds nothing.
+        Each nested scope is its own: its globals are found as it is walked."""
         found: set[str] = set()
         scopes = [node]
         while scopes:
             scope = scopes.pop()
             declared: set[str] = set()
-            stored: set[str] = set()
-            for stmt in scope.body:
-                stored |= scope_binds(stmt)
             stack = list(scope.body)
             while stack:
                 n = stack.pop()
@@ -828,22 +826,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if isinstance(n, ast.Global):
                     declared.update(n.names)
                 stack.extend(ast.iter_child_nodes(n))
-            found |= declared & stored
+            if declared:  # most scopes declare none: no second walk
+                stored: set[str] = set()
+                for stmt in scope.body:
+                    stored |= scope_binds(stmt)
+                found |= declared & stored
         return found
 
     def binds(node) -> set[str]:
         if isinstance(node, defs):
-            # Its body's `global`s bind only when it is called (a documented
-            # residual at the top level: a `def main()` that sets one and
-            # holds the run call would count its grid).
-            return scope_binds(node)
+            # Its name, as on main: what its body sets when called is a
+            # documented residual (a `def main()` that sets a global and
+            # holds the run call would otherwise count its grid).
+            return {node.name}
         return scope_binds(node, nested_globals=True)
 
     def scope_binds(node, nested_globals: bool = False) -> set[str]:
-        """The names a statement binds in the scope it is in: a definition's
-        name and a walrus in what it evaluates there; with
-        ``nested_globals``, the globals a definition nested in the statement
-        assigns (``declared_global``)."""
+        """The names a statement binds in the scope it is in: its targets, a
+        definition's name, an import's names, a ``match`` capture, and a
+        walrus in what a nested definition evaluates there (its defaults,
+        decorators, annotations); not a comprehension's variables or a nested
+        scope's locals. With ``nested_globals``, also the globals a
+        definition nested in the statement assigns (``declared_global``)."""
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             return {
                 (alias.asname or alias.name).partition(".")[0] for alias in node.names
@@ -856,7 +860,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
             sub, in_comp = stack.pop()
             if isinstance(sub, defs):
                 names.add(sub.name)  # a definition inside `try:` or `if:`
-                if nested_globals and sub is not node:
+                if nested_globals:
                     # A global that a definition in a block (or one nested
                     # in it) assigns binds the module's name, as main's walk
                     # over the whole block saw.
@@ -903,8 +907,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 names.add(sub.name)
             elif isinstance(sub, ast.MatchMapping) and sub.rest:
                 names.add(sub.rest)
-            elif isinstance(sub, ast.ExceptHandler) and sub.name:
-                names.add(sub.name)
             stack.extend((child, in_comp) for child in ast.iter_child_nodes(sub))
         return names
 

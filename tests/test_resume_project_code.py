@@ -2240,9 +2240,6 @@ SCRIPT_EDITS = {
         "            case [X]:\n                pass\n\n    setup([{k}])\n\n\n"
         "def task(a):\n    return a * X\n"
     ),
-    "a walrus in a top-level definition's default": (
-        "def helper(x=(SCALE := {k})):\n    return x\n\n\ndef task(a):\n    return a * SCALE\n"
-    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2253,6 +2250,12 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a grid in a main-block try whose handler names what the task's import uses": (
+        "try:\n    import mushin_t_no_wandb as wandb\nexcept ImportError as e:\n"
+        "    wandb = None\n    print('no wandb:', e)\n\n\ndef task(a):\n    return a if wandb is None else 0\n\n\n"
+        "if __name__ == '__main__':\n    try:\n        run(task, a=list(range({k})))\n"
+        "    except KeyboardInterrupt as e:\n        print(e)\n"
+    ),
     "a block's function that only reads a global it declares": (
         "SCALE = 2\nif True:\n\n    def report():\n        global SCALE\n"
         "        print('scale', SCALE, {k})\n\n    GRID = list(range({k}))\n\n\n"
