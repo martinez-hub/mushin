@@ -762,7 +762,15 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
         }
 
+    read_cache: dict[int, set[str]] = {}
+
     def reads(node) -> set[str]:
+        hit = read_cache.get(id(node))
+        if hit is None:
+            hit = read_cache[id(node)] = _reads(node)
+        return hit
+
+    def _reads(node) -> set[str]:
         if isinstance(node, defs):
             # Evaluated where it is defined: decorators, defaults, bases.
             outer = list(node.decorator_list)
@@ -841,7 +849,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
         out: set[str] = set()
         bound: set[str] = set()
         for stmt in node.body:
-            out |= direct_loads(stmt) - bound
+            loaded = direct_loads(stmt)
+            if isinstance(stmt, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+                # Its targets are bound before its body reads them.
+                loaded -= binds(stmt)
+            out |= loaded - bound
             bound |= binds(stmt)
         return out
 

@@ -2207,6 +2207,10 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a class body's loop variable named like a global": (
+        "i = {k}\n\n\nclass Table:\n    rows = []\n    for i in range(2):\n"
+        "        rows.append(i)\n\n\ndef task(a):\n    return a * len(Table.rows)\n"
+    ),
     "a decorator whose wrapper only shares a module with the task": (
         "import math\n\n\ndef _sync():\n    return math.floor(1.0)\n\n\n"
         "def timed(fn):\n    def wrapper(*a):\n        _sync()\n        return fn(*a)\n\n"
