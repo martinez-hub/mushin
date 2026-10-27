@@ -2503,10 +2503,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             defined in a notebook is compared by what its code looks up in the
             kernel as the run starts: each helper and class its cells define
             (their definitions, and the defaults and class attributes they
-            captured) and each plain constant (a number, a string, a tuple of
-            them) by its value, so re-running an edited cell and resuming
-            re-runs the cells; a value that differs per session (a timestamp, a
-            seed drawn in a cell) re-runs them after a restart. A re-run
+            captured) and each number (or tuple of numbers) by its value, so
+            re-running an edited cell and resuming re-runs the cells; a value
+            that differs per session (a timestamp, a seed drawn in a cell), or
+            state the task changes through ``setattr``, ``globals()`` or
+            ``exec``, re-runs them on the next resume. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name
             (``helper (notebook)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
@@ -2515,9 +2516,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             restart) before resuming. mushin warns when it had recorded that
             file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
-            the environment, in a notebook a mutable value (a dict config), an
-            object's state, a name or closure variable the task rebinds, a
-            value named like a secret, code whose text the kernel does not keep (a ``%%time``
+            the environment, in a notebook a string constant (only through
+            the code that reads it: a digest of one could confirm a guess of
+            a secret), a mutable value (a dict config), an object's state, a
+            name or closure variable the task rebinds, a ``_target_`` defined
+            there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its
             functions import inside their bodies, a
             top-level statement of the driver script that changes an object in

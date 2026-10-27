@@ -164,11 +164,11 @@ rules:
   included). In the driver script, only what the task's definition can
   reach by name counts, not the `run(...)` call, top-level
   calls, `print` calls or what only they read, so extending the grid is not
-  an edit. In a notebook, the helpers, classes and plain constants its cells
-  define that the task reaches count, as the kernel holds them when the run
-  starts; a dict config or an object's state does not. It does not see an
-  installed package, data files, or code reached only through some other
-  string. After such a
+  an edit. In a notebook, the helpers, classes and numbers its cells define
+  that the task reaches count, as the kernel holds them when the run starts;
+  a string constant (a model name), a dict config or an object's state does
+  not. It does not see an installed package, data files, or code reached only
+  through some other string. After such a
   change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
   lists every cell when a resume launches; the completed ones return their
   saved metrics without running.

@@ -123,18 +123,22 @@ are compared as a whole file.
 
 In a notebook, what counts is what the task's code looks up in the kernel when
 the run starts: each helper and class defined in a cell (its definition, and
-the defaults and class attributes it captured) and each plain constant (a
-number, a string, a tuple of them) by its value. Re-run the edited cell, then
+the defaults and class attributes it captured) and each number (or tuple of
+numbers) by its value. Re-run the edited cell, then
 resume, and the cells re-run with a warning naming it (`helper (notebook)`). A
 flag the task reads counts too, so to retry only the failed cells after an
 outage, keep the outage's state outside the code (a file, a service, a dict
 item), as notebooks 04 and 08 do. A
-mutable value (a dict config, a list), an object's state, a name or closure
-variable the task rebinds and a value named like a secret are not compared,
-nor is code whose
-text the kernel does not keep (a `%%time` cell, `exec`, a `%run` file). A value
-that differs per session, such as a timestamp or a seed drawn in a cell,
-re-runs the cells after a restart; pass it to the task as a parameter instead.
+string is compared only through the code that reads it, never by value (a
+digest of one could confirm a guess of a secret), so after editing a string
+constant such as a model name, use a new `working_dir` or make it a swept
+parameter. A mutable value (a dict config, a list), an object's state, a name
+or closure variable the task rebinds, a `_target_` defined in the notebook and
+code whose text the kernel does not keep (a `%%time` cell, `exec`, a `%run`
+file) are not compared either. A value that differs per session, such as a
+timestamp or a seed drawn in a cell, re-runs the cells after a restart; pass it
+to the task as a parameter instead. So does state the task changes while it
+runs through `setattr`, `globals()` or `exec`.
 
 ### The full loop
 

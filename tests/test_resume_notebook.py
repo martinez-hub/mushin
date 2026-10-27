@@ -22,6 +22,8 @@ import types
 import warnings
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from mushin._resume import cell_project_record, project_fingerprints
 
@@ -228,31 +230,38 @@ NOTEBOOK_EDITS = {
         ["MAX_TOKENS = 256\n\n\ndef task(a):\n    return a * MAX_TOKENS\n"],
         ["MAX_TOKENS = 512\n"],
     ),
-    "one handler of a closure dispatch table": (
+    "one function of a ring of closures": (
         [
-            "def make():\n    table = {}\n\n"
+            "def make():\n"
             + "".join(
-                f"    def h{i}(x):\n        return table['h{(i + 1) % 12}'](x - 1) "
-                f"if x > 0 else {i}\n\n"
+                f"    def h{i}(x):\n        return h{(i + 1) % 12}(x - 1) "
+                f"+ h{(i + 2) % 12}(x - 2) if x > 0 else {i}\n\n"
                 for i in range(12)
             )
-            + "    table.update({"
-            + ", ".join(f"'h{i}': h{i}" for i in range(12))
-            + "})\n    return table\n",
-            "TABLE = make()\n",
-            "def task(a):\n    return TABLE['h0'](a)\n",
+            + "    return h0\n",
+            "task = make()\n",
         ],
         [
-            "def make():\n    table = {}\n\n"
+            "def make():\n"
             + "".join(
-                f"    def h{i}(x):\n        return table['h{(i + 1) % 12}'](x - 1) "
-                f"if x > 0 else {i if i != 5 else 50}\n\n"
+                f"    def h{i}(x):\n        return h{(i + 1) % 12}(x - 1) "
+                f"+ h{(i + 2) % 12}(x - 2) if x > 0 else {i if i != 5 else 50}\n\n"
                 for i in range(12)
             )
-            + "    table.update({"
-            + ", ".join(f"'h{i}': h{i}" for i in range(12))
-            + "})\n    return table\n",
-            "TABLE = make()\n",
+            + "    return h0\n",
+            "task = make()\n",
+        ],
+    ),
+    "a helper a closure captures": (
+        [
+            "def make():\n    def inner(x):\n        return x * 2\n\n"
+            "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
+            "task = make()\n",
+        ],
+        [
+            "def make():\n    def inner(x):\n        return x * 3\n\n"
+            "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
+            "task = make()\n",
         ],
     ),
     "a decorated helper": (
@@ -347,6 +356,51 @@ NOTEBOOK_NOT_EDITS = {
         ],
         ["@hook\ndef log(x):\n    return x\n"],
     ),
+    "a lazily set nonlocal implementation": (
+        [
+            "def make():\n    impl = None\n\n    def helper(x):\n        nonlocal impl\n"
+            "        if impl is None:\n            impl = lambda v: v * 2\n"
+            "        return impl(x)\n\n    return helper\n\n\nhelper = make()\n",
+            TASK,
+        ],
+        ["task(1)\ntask(2)\n"],
+    ),
+    "a writer held in a partial": (
+        [
+            "import functools\n\nBEST = 0\n\n\ndef set_best(x):\n    global BEST\n"
+            "    BEST = max(BEST, x)\n\n\nRECORD = functools.partial(set_best)\n",
+            "def task(a):\n    RECORD(a)\n    return a + BEST\n",
+        ],
+        ["task(5)\ntask(7)\n"],
+    ),
+    "a registry the task fills with closures": (
+        [
+            "FNS = {}\n\n\ndef make_fn(k):\n    def fn(x):\n        return x * k\n\n"
+            "    return fn\n",
+            "def task(a):\n    FNS.setdefault(a, make_fn(a))\n    return FNS[a](a)\n",
+        ],
+        ["task(1)\ntask(2)\n"],
+    ),
+    "a task setting a helper's keyword defaults": (
+        [
+            "def helper(x, *, k=2):\n    return x * k\n",
+            "def task(a):\n    helper.__kwdefaults__ = {'k': a}\n    return helper(a)\n",
+        ],
+        ["task(5)\n"],
+    ),
+    "a task setting a closure cell's contents": (
+        [
+            "def make(k):\n    def helper(x):\n        return x * k\n\n    return helper\n"
+            "\n\nhelper = make(2)\n",
+            "def task(a):\n    helper.__closure__[0].cell_contents = a\n"
+            "    return helper(a)\n",
+        ],
+        ["task(5)\n"],
+    ),
+    "an equal frozenset built in another order": (
+        ["NUMS = frozenset([1, 9, 17])\n\n\ndef task(a):\n    return a in NUMS\n"],
+        ["NUMS = frozenset([17, 9, 1])\n"],
+    ),
     "a module the task reads": (
         ["import math\n\n\ndef task(a):\n    return math.sqrt(a)\n"],
         ["import math\n"],
@@ -377,7 +431,7 @@ def test_a_restart_replaying_the_cells_gives_the_same_record():
     """A new kernel running the same cells, in other cell numbers: the cell
     names are not in the record."""
     cells = [
-        "import dataclasses\nSCALE = 2\nNAMES = frozenset({'a', 'b', 'c'})\n",
+        "import dataclasses\nSCALE = 2\nNAMES = frozenset({1.5, 2, 3})\n",
         "def helper(x, s=SCALE):\n    return x * s * len(NAMES)\n",
         "@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
         "class Model:\n    K = 2\n\n    def f(self, x):\n        return helper(x) * self.K\n",
@@ -483,6 +537,7 @@ def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
     import mushin._resume as resume
 
     monkeypatch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 3)
+    monkeypatch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
     _run_cells(
         kernel,
         [
@@ -492,7 +547,8 @@ def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
             + "\n",
         ],
     )
-    assert _record(kernel, "task") == {}
+    with pytest.warns(UserWarning, match="larger than the record covers"):
+        assert _record(kernel, "task") == {}
 
 
 def test_ipython_before_8_6_keeps_its_cells_too():
@@ -509,6 +565,41 @@ def test_ipython_before_8_6_keeps_its_cells_too():
         legacy.close()
 
 
+@settings(max_examples=200)
+@given(
+    st.integers(min_value=1, max_value=8).flatmap(
+        lambda n: st.lists(
+            st.lists(st.integers(min_value=0, max_value=n - 1), max_size=n),
+            min_size=n,
+            max_size=n,
+        )
+    )
+)
+def test_components_match_reachability(edges):
+    """Two nodes share a component exactly when each reaches the other, and
+    an edge between components points to one closed earlier."""
+    from mushin._resume import _components
+
+    children = dict(enumerate(edges))
+    comp_of = _components(children)
+
+    def reach(a):
+        seen, todo = {a}, [a]
+        while todo:
+            for c in children[todo.pop()]:
+                if c not in seen:
+                    seen.add(c)
+                    todo.append(c)
+        return seen
+
+    reached = {a: reach(a) for a in children}
+    for a in children:
+        for b in children:
+            assert (comp_of[a] == comp_of[b]) == (b in reached[a] and a in reached[b])
+        for c in children[a]:
+            assert comp_of[c] <= comp_of[a]
+
+
 def test_ipythons_own_names_are_not_compared(kernel):
     kernel.run("_ = 1\n_i3 = 'x'\n\n\ndef task(a):\n    return (_, _i3, a)\n")
     record = _record(kernel, "task")
@@ -523,48 +614,44 @@ def test_a_function_whose_text_is_not_kept_is_not_compared(kernel):
     assert "helper (notebook)" not in record and "task (notebook)" in record
 
 
-def test_a_value_that_looks_secret_is_not_compared(kernel):
-    """A digest of a short string alone can confirm a guess of it: a name or
-    a value the provenance record redacts is left out."""
-    kernel.run(
-        "DB_PASSWORD = 'hunter2'\nENDPOINT = 'hf_' + 'a' * 12\nNAME = 'resnet'\n\n\n"
-        "def task(a):\n    return (DB_PASSWORD, ENDPOINT, NAME, a)\n"
-    )
-    record = _record(kernel, "task")
-    assert "DB_PASSWORD (notebook)" not in record
-    assert "ENDPOINT (notebook)" not in record
-    assert "NAME (notebook)" in record
-
-
 @pytest.mark.parametrize(
     "cells",
     [
-        # A password read at run time, captured as a default under an
-        # innocent parameter name, or under the global's own name.
+        # Strings, under any name and from any source: a digest of one alone,
+        # or of a known definition with it, can confirm a guess of a secret.
+        ["PW = ''.join(['hun', 'ter{k}'])\n", "def task(a):\n    return (PW, a)\n"],
         [
-            "DB_PASSWORD = ''.join(['hun', 'ter{k}'])\n",
-            "def task(a, password=DB_PASSWORD):\n    return a\n",
+            "ENV = {{'PW': ''.join(['hun', 'ter{k}'])}}\n",
+            "def task(a, pw=ENV['PW']):\n    return a\n",
         ],
-        [
-            "DB_PASSWORD = ''.join(['hun', 'ter{k}'])\n",
-            "def task(a, pw=DB_PASSWORD):\n    return a\n",
-        ],
-        # A provider token in a closure.
         [
             "def make(t):\n    def task(a):\n        return (t, a)\n\n    return task\n",
-            "task = make('hf_' + 'abcdefgh{k}')\n",
+            "task = make(''.join(['abc', 'defgh{k}']))\n",
         ],
-        # A class attribute bound from a secret.
         [
-            "DB_PASSWORD = ''.join(['hun', 'ter{k}'])\n",
-            "class Conn:\n    pw = DB_PASSWORD\n\n    def get(self):\n        return self.pw\n",
-            "def task(a):\n    return Conn().get()\n",
+            "SECRET = ''.join(['hun', 'ter{k}'])\n",
+            "import dataclasses\n\n\n@dataclasses.dataclass\nclass DBConfig:\n"
+            "    user: str = 'admin'\n    pw: str = SECRET\n",
+            "def task(a):\n    return DBConfig().user\n",
         ],
+        [
+            "SECRET = ''.join(['hun', 'ter{k}'])\n",
+            "task = lambda a, pw=SECRET: sorted([a], key=lambda r: r)\n",
+        ],
+        # A string constant: compared only through the code that reads it.
+        [
+            "MODEL = ''.join(['resnet', '{k}'])\n",
+            "def task(a):\n    return (MODEL, a)\n",
+        ],
+        # A number whose name, or whose parameter's, says it is a secret.
+        ["DB_PASSWORD = 123{k}\n", "def task(a):\n    return DB_PASSWORD + a\n"],
+        ["PIN = 123{k}\n", "def task(a, password=PIN):\n    return a\n"],
     ],
 )
-def test_a_captured_secret_is_not_compared(kernel, cells):
+def test_a_string_or_a_secret_number_is_never_compared(kernel, cells):
     _run_cells(kernel, [c.format(k=2) for c in cells])
     one = _record(kernel, "task")
+    assert one  # the task itself is recorded
     _run_cells(kernel, [c.format(k=3) for c in cells])
     assert _record(kernel, "task") == one
 
@@ -595,9 +682,11 @@ def test_the_record_does_not_resolve_a_lazy_object(kernel):
     assert kernel.ns["RESOLVED"] == []
 
 
-def test_a_notebook_target_is_followed(kernel):
-    """A config `_target_` naming a class defined in the notebook, as a serial
-    run instantiates it."""
+def test_a_notebook_target_is_not_compared(kernel):
+    """A config `_target_` naming a class defined in the notebook gives no
+    entry, as on main: the task's record cannot see what the task changes
+    in it, and hydra-zen's `builds` puts the class's defaults in the config,
+    which is compared."""
     _run_cells(
         kernel,
         [
@@ -606,29 +695,8 @@ def test_a_notebook_target_is_followed(kernel):
         ],
     )
     cfg = {"model": {"_target_": f"{KERNEL}.Model"}}
-    one = _notebook(cell_project_record("t1", (kernel.ns["task"],), (), cfg))
-    assert "Model (notebook)" in one
-    kernel.run("class Model:\n    def f(self, x):\n        return x * 3\n")
-    two = _notebook(cell_project_record("t2", (kernel.ns["task"],), (), cfg))
-    assert two["Model (notebook)"] != one["Model (notebook)"]
-
-
-def test_a_notebook_main_target_is_followed(kernel, monkeypatch):
-    """`builds(Cfg)` on a dataclass defined in a cell names `__main__.Cfg`:
-    a kernel's `__main__` is the notebook, a class without methods too."""
-    _run_cells(
-        kernel,
-        [
-            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
-            "def task(a):\n    return a\n",
-        ],
-    )
-    monkeypatch.setitem(sys.modules, "__main__", kernel.module)
-    cfg = {"cfg": {"_target_": "__main__.Cfg"}}
-    one = _notebook(cell_project_record("m1", (kernel.ns["task"],), (), cfg))
-    kernel.run("@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n")
-    two = _notebook(cell_project_record("m2", (kernel.ns["task"],), (), cfg))
-    assert one["Cfg (notebook)"] != two["Cfg (notebook)"]
+    record = _notebook(cell_project_record("t1", (kernel.ns["task"],), (), cfg))
+    assert "Model (notebook)" not in record and "task (notebook)" in record
 
 
 def test_a_target_in_a_module_without_a_file_keeps_mains_entries(tmp_path, monkeypatch):
@@ -675,7 +743,7 @@ def test_the_driver_ships_the_notebook_entries(kernel):
 # every supported Python: the record is compared across versions.
 CROSS_VERSION_CELLS = [
     "import dataclasses\nimport functools\n\nSCALE = 2\nLRS = (0.1, 0.2)\n"
-    "NAMES = frozenset({'a', 'b', 'c'})\nFLAG = True\nNOTE = b'x'\n",
+    "NAMES = frozenset({1.5, 2, 3})\nFLAG = True\nNOTE = b'x'\n",
     "def helper(x, s=SCALE):\n    '''Doc.'''\n    return x * s * len(NAMES)\n",
     "def make(k):\n    def inner(x):\n        return x * k\n\n    return inner\n\n\n"
     "triple = make(3)\n",
@@ -683,10 +751,13 @@ CROSS_VERSION_CELLS = [
     "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return helper(x) * self.K\n",
     "@functools.lru_cache\ndef cached(x):\n    return x + LRS[0]\n",
     "model = Model()\n",
-    "def task(a):\n    return model.f(a) * Cfg().lr + triple(a) + cached(a) + FLAG"
+    # `k` is a cell of `scaled` on 3.11 (its comprehension is a scope) and a
+    # plain local on 3.12+: neither is a rebind of `triple`'s own `k`.
+    "def scaled(a):\n    k = 2\n    return sum([triple(x) * k for x in range(a)])\n",
+    "def task(a):\n    return model.f(a) * Cfg().lr + scaled(a) + cached(a) + FLAG"
     " + len(NOTE)\n",
 ]
-CROSS_VERSION_DIGEST = "8d626dc73fd4efee"
+CROSS_VERSION_DIGEST = "b85556f9e6c49459"
 
 
 def test_the_record_reads_alike_on_every_supported_python(kernel):
@@ -697,7 +768,8 @@ def test_the_record_reads_alike_on_every_supported_python(kernel):
 
 
 def test_the_record_does_not_depend_on_the_hash_seed(tmp_path):
-    """A frozenset of strings iterates in an order set by PYTHONHASHSEED."""
+    """Nothing in the record follows an order set by PYTHONHASHSEED (a set's
+    iteration, an id)."""
     script = tmp_path / "seeded.py"
     script.write_text(
         "import json, sys\n"

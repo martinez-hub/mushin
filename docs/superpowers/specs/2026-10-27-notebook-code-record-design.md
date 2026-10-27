@@ -104,9 +104,13 @@ From each root, a worklist over `(namespace, name)` pairs, bounded (at most
 - **Rebound names are left out.** A name any reached code stores or deletes
   as a global (`STORE_GLOBAL`, `DELETE_GLOBAL`: a task counting its calls in
   `global CALLS`) is not recorded: its value moves during a run. Likewise a
-  closure variable it rebinds (`STORE_DEREF`: a timing decorator's `nonlocal
-  total`) and an attribute name it stores are recorded by type only, and so
-  are all defaults when it stores `__defaults__` or `__kwdefaults__`.
+  closure variable it rebinds (`STORE_DEREF` to one of the storing code's own
+  free variables: a timing decorator's `nonlocal total`; a store to a local a
+  nested scope captures is not one, and 3.12 compiles that differently), all
+  defaults when it stores `__defaults__` or `__kwdefaults__`, and every
+  closure cell when it stores `cell_contents`, are recorded as moved: not
+  their value, not their type, and not as an edge. An attribute name it
+  stores leaves that class attribute out.
 - **IPython's own names are left out:** `_`, `__`, `___`, `_i`, `_ii`,
   `_iii`, `_iN`, `_N`, `_oh`, `_ih`, `_dh`, `In`, `Out`, `get_ipython`,
   `exit`, `quit`, `_exit_code`, and dunder names.
@@ -135,11 +139,11 @@ a re-run says which name changed (`code the task reaches (helper
 
 | Bound to | Entry | Followed further |
 | --- | --- | --- |
-| A function defined in the notebook (through `inspect.unwrap`) | The canonical dump of its definition node, docstrings stripped, from the cell text; plus its captured values (below) | Its read-set; callables among its defaults and closure cells |
+| A function defined in the notebook (through `__wrapped__` and a `partial`'s function) | The canonical dump of its definition node, docstrings stripped, from the cell text; plus its captured values (below) | Its read-set; a notebook function or class a default or closure cell holds directly |
 | A class defined in the notebook (its `__module__` is the namespace's `__name__`) | Its `ClassDef` dump, located through a method (below), plus its plain class attributes | Its notebook bases; its methods' read-sets |
 | An instance of a notebook class | Its class's entry | As its class |
-| A plain value | `(type name, canonical repr)` | Nothing |
-| A list, tuple, dict or set holding notebook functions or classes (a registry) | The sorted entries of those callables (the container's other contents are not compared) | Those callables |
+| A plain value (numbers) | `(type name, canonical repr)` | Nothing |
+| A list, tuple, dict or set the task reads, holding notebook functions or classes the notebook also binds by name (a registry filled by decorators) | The set of those callables' digests (the container's other contents are not compared) | Those callables |
 | A module, anything else | No entry (`_namespace_modules` still seeds project modules) | Nothing |
 
 Details:
@@ -165,19 +169,24 @@ Details:
   default holds what the definition captured when it ran, which is what
   runs: `def f(x=SCALE)` keeps the old default until its cell is re-run, so
   following `SCALE` by name would record a value the function does not use.
-- **Secrets.** A plain global, a class attribute and every captured value
-  is checked under its own name, its parameter or closure variable's name,
-  and the name its source reads (`pw=DB_PASSWORD`, `pw = DB_PASSWORD`):
-  `password`, `passwd`, `secret`, `api_key` and `credential` hide any value,
-  `token` and `auth` only a string (`MAX_TOKENS = 512` is a setting), and a
-  provider-token-shaped string is hidden under any name. A hidden value is
-  recorded by type only.
-- **Plain values** are exactly `int`, `float`, `complex`, `bool`, `str`,
-  `bytes`, `None`, and `tuple`/`frozenset` of plain values (exact types, so a
-  `NamedTuple` or an `IntEnum` is not one), at most 10,000 elements and
-  1,000,000 characters of repr in all, else no entry. The type name is part
-  of the digest, so `1`, `1.0` and `True` differ. A frozenset's members are
-  sorted by their repr (string hashing is randomized per process).
+  A captured container is not walked: only a function or class a capture
+  holds directly is followed (an edge), so a memo dict of closures the task
+  fills cannot move the record.
+- **Strings are never compared by value**, as a global, a class attribute, a
+  captured value or inside a tuple. A digest of a short string alone, or of a
+  known definition with it, can confirm a guess of a secret, and round 2 of
+  the review showed no rule over names covers every way one arrives (an
+  alias `PW = DB_PASSWORD`, `os.environ[...]`, a factory argument, a config
+  dataclass field). A string constant is compared only through the code
+  that reads it. A number whose own, parameter or closure variable name
+  matches `password`, `passwd`, `secret`, `api_key` or `credential` is
+  recorded by type only (`MAX_TOKENS = 512` is a setting).
+- **Plain values** are exactly `int`, `float`, `complex`, `bool`, `None`,
+  and `tuple`/`frozenset` of plain values (exact types, so a `NamedTuple` or
+  an `IntEnum` is not one), at most 10,000 elements and 1,000,000 characters
+  of repr in all, else no entry. The type name is part of the digest, so
+  `1`, `1.0` and `True` differ. A frozenset's members are sorted by their
+  repr: two equal frozensets built in another order iterate differently.
 - **Mutable values are not compared** (a dict config, a list), and the
   reason stays written here so nobody "improves" it: a task that appends to a
   global `LOG = []` or fills `RESULTS = {}` changes the value during run 1,
@@ -196,13 +205,11 @@ snapshot was shipped (the driver could not take it), the cell's process takes
 its own; in a worker that has no cell text, only plain values come out, and
 records compare on shared keys, so that is never an edit.
 
-A config `_target_` naming `__main__.X` in a notebook is followed the same
-way, in the cell's process (`cell_project_record` takes targets per cell):
-any function defined in a cell and any class there, a config dataclass with
-no methods included. Another module with no file (an extension's submodule)
-is followed only for an object defined in a cell; otherwise main's path
-records its package's files. Only the serial launcher can instantiate a
-notebook target; a worker's `__main__` is not the kernel.
+A config `_target_` naming a class defined in the notebook is not followed,
+as on main. It is taken per cell, after the task has run, and apart from the
+roots, so the writes it must exclude are the task's, which its own walk
+cannot see; round 2 reproduced spurious re-runs through it. hydra-zen's
+`builds` puts a class's defaults in the config, which is compared.
 
 IPython 8.6 and later write a cell's `linecache` entry with no mtime;
 earlier versions (7.x to 8.5, the floor of the dev group's ipykernel) write
@@ -225,10 +232,16 @@ with `pytest.importorskip`.
   decorators).
 - A function that rebinds a global, and names or closure variables it
   rebinds.
-- A container deeper than 4 levels, or past 10,000 items in one walk; a
-  notebook reaching more than 2000 functions and classes (warns).
-- A secret under an innocent name inside a tuple or a string, as
-  provenance's value-shape rule also accepts.
+- A string constant (a model name, a prompt), compared only through the code
+  that reads it; a number derived from a secret under an innocent name.
+- A `_target_` defined in the notebook.
+- A lambda or closure kept in a registry (only callables the notebook binds
+  by name count), and a registry deeper than 4 levels or past 10,000 items;
+  a notebook reaching more than 2000 functions and classes (warns).
+- State the task changes while it runs other than by rebinding a name, an
+  attribute or a closure variable (`setattr`, `globals()`, `exec`, a
+  function's defaults changed in place) re-runs the cells on the next
+  resume, naming the entry: keep such state outside the notebook's code.
 - A value that differs per session, which re-runs cells after a restart
   (accepted above).
 
