@@ -158,18 +158,19 @@ rules:
   are incomplete or whose config, task function or project code changed:
   every project file the task's module (and `pre_task`'s) imports, directly
   or through other project files, and the modules of the classes the config
-  names as `_target_`. An edit anywhere in such a file re-runs the cells; a
-  comment, a docstring or formatting does not (any edit to the task
-  function's own source does, a comment included). In the driver script, only what the task's
-  definition can reach by name counts, not the `run(...)` call, top-level
-  calls, `print` calls or what only they read, so extending the grid is not
-  an edit; a task defined in a notebook is compared the same way through
-  the cells the kernel ran. It does not see an installed package, data
-  files, a statement that changes an object in place (`CFG["lr"] = 0.1`),
-  or code reached only through some other string. After such a
-  change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
-  lists every cell when a resume launches; the completed ones return their
-  saved metrics without running.
+  names as `_target_`, each with its packages' `__init__.py`. An edit anywhere
+  in such a file re-runs the cells; a comment, a docstring or formatting
+  does not (any edit to the task function's own source does, a comment
+  included). In the driver script, only what the task's definition can
+  reach by name counts, not the `run(...)` call, top-level calls, `print`
+  calls or what only they read, so extending the grid is not an edit; a
+  task defined in a notebook is compared the same way through the cells the
+  kernel ran. It does not see an installed package, data files, a statement
+  that changes an object in place (`CFG["lr"] = 0.1`), or code reached only
+  through some other string. After such a change, use a new `working_dir`.
+  `cache_dir=` keys on the same fingerprints. Hydra still lists every cell
+  when a resume launches; the completed ones return their saved metrics
+  without running.
 - **`compare_methods` needs exactly two dims, `method` and `seed`,** and string
   `method` values. Select or average away other dims on the Dataset first:
   `ds.sel(lr=0.01)`, or `ds.mean("lr", keep_attrs=True)` (older xarray drops

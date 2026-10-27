@@ -880,10 +880,11 @@ class _TaskRunner:
             build_resume_context,
             cell_project_record,
             changed_project_code,
-            config_fingerprint,
             discover_last_ckpt,
             merge_project_records,
             read_cell_status,
+            resolved_config,
+            resolved_config_hash,
             write_cell_status,
         )
         from ._sweep_io import (
@@ -893,25 +894,21 @@ class _TaskRunner:
             write_metrics_sidecar,
         )
 
-        chash = config_fingerprint(cfg)
-        # This cell's project-code record, taken here, in the process that will
-        # run (or reuse) it: see cell_project_record.
-        deps = cell_project_record(
-            self._code_token,
-            self.code_roots,
-            self.code_body_roots,
-            cfg,
-            scripts=self.script_entries,
-        )
+        # The config is resolved once, for its fingerprint and for the
+        # `_target_`s the project-code record follows.
+        resolved = resolved_config(cfg)
+        chash = resolved_config_hash(resolved)
         # Hydra's job number and config-group choices go into every status
         # write below, so a reload of this sweep sorts and keys its cells from
         # mushin's own sidecar instead of parsing hydra.yaml (`load_from_dir`).
+        # The project-code record goes only into the 'completed' writes (each
+        # passes it): a resume reads it from completed cells alone, and at a
+        # project's file cap it is most of a sidecar's size.
         job_num, choices = _current_job_fields()
         write_status = functools.partial(
             write_cell_status,
             config_hash=chash,
             code_hash=self.code_hash,
-            code_deps=deps,
             job_num=job_num,
             choices=choices,
         )
@@ -935,6 +932,17 @@ class _TaskRunner:
                 except OSError:
                     pass
                 return _SkippedRun("not sampled")
+
+        # This cell's project-code record, taken here, in the process that will
+        # run (or reuse) it (see cell_project_record), and only by a cell that
+        # can compare or store it: an unsampled cell above never does.
+        deps = cell_project_record(
+            self._code_token,
+            self.code_roots,
+            self.code_body_roots,
+            resolved,
+            scripts=self.script_entries,
+        )
 
         # (1) resume short-circuit — before pre_task/instrument, only when resuming
         if self.prior_manifest is not None:
@@ -1029,7 +1037,9 @@ class _TaskRunner:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
                 write_metrics_sidecar(cwd, cached)
-                write_status(cwd, status="completed", combo=combo, attempt=1)
+                write_status(
+                    cwd, status="completed", combo=combo, attempt=1, code_deps=deps
+                )
                 return cached
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
@@ -1162,7 +1172,13 @@ class _TaskRunner:
                         write_metrics_sidecar(cache_cell, result)
                     except OSError:
                         pass
-            write_status(cwd, status="completed", combo=combo, attempt=rc.attempt)
+            write_status(
+                cwd,
+                status="completed",
+                combo=combo,
+                attempt=rc.attempt,
+                code_deps=deps,
+            )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
             if not failed_recorded:
@@ -2468,7 +2484,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             directly or through other project files, at any depth (imports
             inside functions included), and the modules of the classes the
             cell's config names (``_target_``, or hydra-zen's ``just()`` and
-            ``zen_meta``). Each file is compared as a whole, by its syntax tree
+            ``zen_meta``), each with the ``__init__.py`` of the packages it is
+            in, which importing it runs. Each file is compared as a whole, by its syntax tree
             without its main block and docstrings: an edit anywhere in it
             re-runs the cells, and a comment, a docstring or formatting does
             not (so neither does a prompt a decorator reads from a

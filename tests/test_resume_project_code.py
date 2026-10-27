@@ -2297,3 +2297,387 @@ CROSS_VERSION_DIGEST = "26c4d5445c6ba3f4"
 def test_a_script_digest_is_the_same_on_every_python(tmp_path):
     digest = _digest_of_script(tmp_path, "xver", CROSS_VERSION_SCRIPT, {"task"})
     assert digest == CROSS_VERSION_DIGEST
+
+
+# --- follow-ups: parent packages, one record per completed cell, one resolve ---
+
+
+def _pkg(root, name, files):
+    pkg = root / name
+    pkg.mkdir()
+    for rel, text in files.items():
+        (pkg / rel).write_text(textwrap.dedent(text))
+    return pkg
+
+
+def _drop(prefix):
+    for name in [n for n in sys.modules if n == prefix or n.startswith(prefix + ".")]:
+        sys.modules.pop(name, None)
+
+
+def test_a_task_modules_parent_package_is_recorded(project):
+    """Importing `pkg.train` runs `pkg/__init__.py` first, so it is code the
+    task's module runs although the module imports nothing from it."""
+    root, _ = project
+    pkg = _pkg(
+        root,
+        "mushin_t_parpkg",
+        {
+            "__init__.py": "SCALE = 2\n",
+            "train.py": "import math\n\n\ndef task(x):\n    return math.floor(x)\n",
+        },
+    )
+    try:
+        mod = importlib.import_module("mushin_t_parpkg.train")
+        before = project_fingerprints(mod.task)
+        assert "mushin_t_parpkg (file)" in before["code"]
+        (pkg / "__init__.py").write_text("SCALE = 20\n")
+        assert _changed(before, mod.task) == ["mushin_t_parpkg (file)"]
+    finally:
+        _drop("mushin_t_parpkg")
+
+
+def test_a_targets_parent_package_is_recorded(project):
+    """`_target_: pkg.models.Model`, where `pkg/__init__.py` configures
+    `Model` (sets a class attribute): editing the package's init changes the
+    record."""
+    from mushin._resume import cell_project_record
+
+    root, exp = project
+    pkg = _pkg(
+        root,
+        "mushin_t_tparpkg",
+        {
+            "__init__.py": "from .models import Model\n\nModel.SCALE = 2\n",
+            "models.py": "class Model:\n    SCALE = 1\n",
+        },
+    )
+    cfg = {"m": {"_target_": "mushin_t_tparpkg.models.Model"}}
+    try:
+        before = cell_project_record("tok-tpar-1", (exp.W.task,), (), cfg)
+        assert "mushin_t_tparpkg (file)" in before["code"]
+        assert "mushin_t_tparpkg" not in sys.modules  # still found without importing
+        (pkg / "__init__.py").write_text(
+            "from .models import Model\n\nModel.SCALE = 20\n"
+        )
+        after = cell_project_record("tok-tpar-2", (exp.W.task,), (), cfg)
+        assert changed_project_code(before, after) == ["mushin_t_tparpkg (file)"]
+    finally:
+        _drop("mushin_t_tparpkg")
+
+
+def test_a_notebook_objects_parent_package_is_recorded(project):
+    """The modules a notebook's objects come from bring their packages too."""
+    root, _ = project
+    _pkg(
+        root,
+        "mushin_t_nbpar",
+        {
+            "__init__.py": "FLAG = True\n",
+            "models.py": "class Model:\n    def f(self, x):\n        return x\n",
+        },
+    )
+    try:
+        models = importlib.import_module("mushin_t_nbpar.models")
+        nb = types.ModuleType("mushin_t_nbpar_ns")
+        nb.__dict__["MODEL"] = models.Model()
+        exec("def task(a):\n    return MODEL.f(a)\n", nb.__dict__)
+        assert "mushin_t_nbpar (file)" in project_fingerprints(nb.task)["code"]
+    finally:
+        _drop("mushin_t_nbpar")
+
+
+def test_only_a_completed_status_carries_the_record(project):
+    """The record is read back only from completed cells, so the running,
+    failed and skipped writes leave it out: a cell writes it once."""
+    root, exp = project
+    (root / "mushin_t_probe.py").write_text(
+        textwrap.dedent("""
+            import json
+            from pathlib import Path
+
+            from mushin.workflows import MultiRunMetricsWorkflow
+
+
+            class W(MultiRunMetricsWorkflow):
+                @staticmethod
+                def task(a):
+                    running = json.loads(Path("mushin_cell_status.json").read_text())
+                    if a == 2:
+                        raise ValueError("this cell fails")
+                    return dict(v=float(a), running_has=float("code_deps" in running))
+            """)
+    )
+    sys.modules.pop("mushin_t_probe", None)
+    probe = importlib.import_module("mushin_t_probe")
+
+    def statuses(wd):
+        out = {}
+        for status in wd.rglob(STATUS_FILE):
+            d = json.loads(status.read_text())
+            out.setdefault(d["status"], []).append(d)
+        return out
+
+    try:
+        wf = probe.W()
+        failing = root / "failing"
+        wf.run(a=multirun([1, 2]), working_dir=str(failing), on_error="nan")
+        seen = statuses(failing)
+        assert {k: len(v) for k, v in seen.items()} == {"completed": 1, "failed": 1}
+        assert "code_deps" in seen["completed"][0]
+        assert "code_deps" not in seen["failed"][0]
+        assert float(wf.to_xarray()["running_has"].sel(a=1)) == 0.0  # nor 'running'
+        sampled = root / "sampled"
+        probe.W().run(a=multirun([1, 3]), working_dir=str(sampled), sample=1)
+        seen = statuses(sampled)
+        assert {k: len(v) for k, v in seen.items()} == {"completed": 1, "skipped": 1}
+        assert "code_deps" in seen["completed"][0]
+        assert "code_deps" not in seen["skipped"][0]
+    finally:
+        sys.modules.pop("mushin_t_probe", None)
+
+
+def test_a_cache_hit_and_a_resume_reuse_record_the_code(project):
+    """The two other completed writes, a cache hit and a resume's reuse, carry
+    the record, so the cell stays guarded on the next resume."""
+    root, exp = project
+    cache = root / "cache"
+    first, second = root / "first", root / "second"
+    recorded = project_fingerprints(exp.W.task)
+
+    def record_of(wd):
+        (status,) = wd.rglob(STATUS_FILE)
+        return json.loads(status.read_text()).get("code_deps")
+
+    exp.W().run(a=multirun([1]), working_dir=str(first), cache_dir=str(cache))
+    exp.W().run(a=multirun([1]), working_dir=str(second), cache_dir=str(cache))
+    assert record_of(first) == recorded
+    assert record_of(second) == recorded  # the cache hit
+    exp.W().run(a=multirun([1]), working_dir=str(second), resume=True)
+    assert record_of(second) == recorded  # the resume's reuse
+
+
+def test_a_cell_resolves_its_config_once(project, monkeypatch):
+    """The config fingerprint and the `_target_` scan share one resolve of
+    the cell's config, and the fingerprint is the one main recorded."""
+    import inspect
+
+    from omegaconf import OmegaConf
+
+    from mushin._resume import config_fingerprint
+
+    root, exp = project
+    real = OmegaConf.to_container
+    calls = []
+
+    def counting(cfg, *args, **kwargs):
+        caller = inspect.currentframe().f_back.f_globals.get("__name__", "")
+        if kwargs.get("resolve") and caller.startswith("mushin"):
+            calls.append(caller)
+        return real(cfg, *args, **kwargs)
+
+    seen = []
+
+    class W(exp.W):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+    monkeypatch.setattr(OmegaConf, "to_container", staticmethod(counting))
+    wd = root / "sweep"
+    W().run(a=multirun([1, 2]), working_dir=str(wd))
+    monkeypatch.setattr(OmegaConf, "to_container", staticmethod(real))
+    assert len(calls) == 2, calls  # one per cell
+    for status in wd.rglob(STATUS_FILE):
+        d = json.loads(status.read_text())
+        cfg = OmegaConf.load(status.parent / ".hydra" / "config.yaml")
+        # main's formula, written out, so the hash cannot move with the code.
+        mains = hashlib.sha256(
+            json.dumps(
+                OmegaConf.to_container(cfg, resolve=True), sort_keys=True, default=str
+            ).encode()
+        ).hexdigest()[:16]
+        seen.append(d["config_hash"] == config_fingerprint(cfg) == mains)
+    assert seen == [True, True]
+
+
+def test_a_target_never_replaces_the_runs_digest_of_a_file(project):
+    """A package whose `__init__.py` imports the task's module: a `_target_`
+    in it, first named after that module was edited mid-run, reaches the
+    task's module too. The cell keeps the digest the run took, the code the
+    process runs; it does not take the edited file's."""
+    from mushin._resume import cell_project_record
+
+    root, _ = project
+    pkg = _pkg(
+        root,
+        "mushin_t_reexp",
+        {
+            "__init__.py": "from .models import Model\nfrom .train import task\n",
+            "models.py": "class Model:\n    pass\n",
+            "train.py": "def task(x):\n    return x * 1\n",
+        },
+    )
+    try:
+        train = importlib.import_module("mushin_t_reexp.train")
+        token = "tok-reexp"
+        first = cell_project_record(token, (train.task,), (), None)["code"]
+        (pkg / "train.py").write_text("def task(x):\n    return x * 2\n")
+        cfg = {"m": {"_target_": "mushin_t_reexp.models.Model"}}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the stale-load warning
+            second = cell_project_record(token, (train.task,), (), cfg)["code"]
+        key = "mushin_t_reexp.train (file)"
+        assert second[key] == first[key]
+        assert "mushin_t_reexp.models (file)" in second
+    finally:
+        _drop("mushin_t_reexp")
+
+
+def test_a_script_run_as_a_module_records_its_package(project, tmp_path):
+    """`python -m pkg.run` runs `pkg/__init__.py` first: the script's own
+    package is code its task runs, though it imports nothing from it."""
+    from mushin._resume import driver_script_entries
+
+    root, _ = project
+    pkg = _pkg(
+        root,
+        "mushin_t_mpkg",
+        {
+            "__init__.py": "SCALE = 2\n",
+            "run.py": "import math\n\n\ndef task(x):\n    return math.floor(x)\n",
+        },
+    )
+    path = pkg / "run.py"
+
+    def record():
+        ns = {
+            "__name__": "__main__",
+            "__file__": str(path),
+            "__package__": "mushin_t_mpkg",
+        }
+        exec(compile(path.read_bytes(), str(path), "exec"), ns)
+        given = driver_script_entries([ns["task"]])
+        return project_fingerprints(ns["task"], scripts=given)
+
+    try:
+        before = record()
+        assert "mushin_t_mpkg (file)" in before["code"]
+        (pkg / "__init__.py").write_text("SCALE = 20\n")
+        assert changed_project_code(before, record()) == ["mushin_t_mpkg (file)"]
+    finally:
+        _drop("mushin_t_mpkg")
+
+
+def test_an_unsampled_cell_takes_no_record(project, monkeypatch):
+    """A cell the sample leaves out writes 'skipped' and returns: the record
+    it would compare or store is not taken."""
+    import mushin._resume as r
+
+    root, exp = project
+    real = r.cell_project_record
+    taken = []
+
+    def counting(*args, **kwargs):
+        taken.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(r, "cell_project_record", counting)
+    exp.W().run(a=multirun([1, 2, 3]), working_dir=str(root / "wd"), sample=1)
+    assert len(taken) == 1
+
+
+def test_a_nested_packages_inits_are_each_recorded(project):
+    """`_target_: pkg.sub.models.Model` runs `pkg/__init__.py` and then
+    `pkg/sub/__init__.py`: each is recorded, and an edit to the inner one is
+    seen."""
+    from mushin._resume import cell_project_record
+
+    root, exp = project
+    pkg = _pkg(root, "mushin_t_nest", {"__init__.py": "A = 1\n"})
+    sub = pkg / "sub"
+    sub.mkdir()
+    (sub / "__init__.py").write_text("B = 1\n")
+    (sub / "models.py").write_text("class Model:\n    pass\n")
+    cfg = {"m": {"_target_": "mushin_t_nest.sub.models.Model"}}
+    try:
+        before = cell_project_record("tok-nest-1", (exp.W.task,), (), cfg)
+        assert {"mushin_t_nest (file)", "mushin_t_nest.sub (file)"} <= set(
+            before["code"]
+        )
+        (sub / "__init__.py").write_text("B = 2\n")
+        after = cell_project_record("tok-nest-2", (exp.W.task,), (), cfg)
+        assert changed_project_code(before, after) == ["mushin_t_nest.sub (file)"]
+    finally:
+        _drop("mushin_t_nest")
+
+
+def test_a_config_that_cannot_be_resolved_has_no_hash_and_no_targets(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from mushin._resume import (
+        _config_targets,
+        config_fingerprint,
+        resolved_config,
+        resolved_config_hash,
+    )
+
+    monkeypatch.delenv("MUSHIN_T_UNSET_VAR", raising=False)
+    cfg = OmegaConf.create(
+        {"x": "${oc.env:MUSHIN_T_UNSET_VAR}", "m": {"_target_": "pkg.Model"}}
+    )
+    resolved = resolved_config(cfg)
+    assert config_fingerprint(cfg) is None
+    assert resolved_config_hash(resolved) is None
+    assert _config_targets(resolved) == []
+    assert _config_targets(cfg) == []
+
+
+BOTH_SCRIPT = """
+import sys
+
+from hydra_zen import builds, make_config
+
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+
+class Net:
+    def f(self, x):
+        return x * {scale}
+
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(net, a):
+        with open({calls!r}, "a") as f:
+            f.write("x")
+        return dict(v=net.f(a))
+
+
+if __name__ == "__main__":
+    W(eval_task_cfg=make_config(net=builds(Net))).run(
+        a=multirun([1, 2]), working_dir={wd!r}, resume="resume" in sys.argv
+    )
+"""
+
+
+def test_a_target_class_in_the_script_that_defines_the_task_is_covered(tmp_path):
+    """The task and a `_target_` class in one driver script: the target's
+    entry is the script read for the class, under its own key, beside the
+    roots' entry for the same script."""
+    calls = tmp_path / "calls.txt"
+    script = tmp_path / "both_script.py"
+
+    def write(scale):
+        script.write_text(
+            BOTH_SCRIPT.format(scale=scale, calls=str(calls), wd=str(tmp_path / "wd"))
+        )
+
+    run = _script_runner(tmp_path, script)
+    write(1.0)
+    run()
+    write(5.0)
+    err = run("resume")
+    assert "code the task reaches (both_script:Net (script))" in err, err
+    assert calls.read_text() == "xxxx"
