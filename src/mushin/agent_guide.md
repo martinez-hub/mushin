@@ -158,7 +158,7 @@ rules:
   are incomplete or whose config, task function or project code changed:
   every project file the task's module (and `pre_task`'s) imports, directly
   or through other project files, and the modules of the classes the config
-  names as `_target_`, with their packages' `__init__.py`. An edit anywhere
+  names as `_target_`, each with its packages' `__init__.py`. An edit anywhere
   in such a file re-runs the cells; a comment, a docstring or formatting
   does not (any edit to the task function's own source does, a comment
   included). In the driver script, only what the task's definition can

@@ -156,17 +156,20 @@ def resolved_config(cfg):
         return _UNRESOLVED
 
 
-def config_fingerprint(cfg, resolved=None) -> str | None:
+def config_fingerprint(cfg) -> str | None:
     """Stable short hash of the fully-resolved job config, or None if the
-    config cannot be resolved/serialized. ``resolved`` is the config as
-    ``resolved_config`` returned it, when the caller has it already.
+    config cannot be resolved/serialized.
 
     Guards resume reuse: a completed cell's cached metrics are only returned
     when the config that would run now matches the one that produced them;
     otherwise a changed NON-swept value (same combo key) would silently mix
     results from two configurations into one dataset. Task *source* changes are
     guarded separately by ``code_fingerprint``."""
-    data = resolved_config(cfg) if resolved is None else resolved
+    return resolved_config_hash(resolved_config(cfg))
+
+
+def resolved_config_hash(data) -> str | None:
+    """``config_fingerprint`` of a config ``resolved_config`` returned."""
     if data is _UNRESOLVED:
         return None
     try:
@@ -354,8 +357,8 @@ def partial_task_cacheable(task) -> bool:
 
 
 def _resolve_imports(imports, package: str | None) -> list[str]:
-    """Absolute module names for ``(name, level)`` imports, each with its
-    parent packages."""
+    """Absolute module names for ``(name, level)`` imports (their parent
+    packages are added where the names are followed, ``_file_entries``)."""
     import importlib.util
 
     found: list[str] = []
@@ -369,11 +372,8 @@ def _resolve_imports(imports, package: str | None) -> list[str]:
                 )
             except (ImportError, ValueError):
                 continue
-        parts = name.split(".")
-        for i in range(1, len(parts) + 1):
-            dotted = ".".join(parts[:i])
-            if dotted and dotted not in found:
-                found.append(dotted)
+        if name and name not in found:
+            found.append(name)
     return found
 
 
@@ -653,7 +653,8 @@ _NAMES_MAX = 20_000
 def _file_entries(names) -> tuple[dict[str, str], bool]:
     """Entries for project modules ``names`` and, through their files, every
     project module they import in turn, at any depth (a helper imported inside
-    a function, and the constants it imports); and whether ``_FILES_MAX`` cut
+    a function, and the constants it imports), each with the packages it is
+    in (their ``__init__.py`` runs first); and whether ``_FILES_MAX`` cut
     the list short. Each file as it is now; one that changed since this
     process first recorded that load of it warns. A name that cannot be
     resolved costs its own entry only."""
@@ -1127,6 +1128,9 @@ def _script_entries(
             package = namespace.get("__package__")
             package = package if isinstance(package, str) else None
         code[f"{Path(file).stem} (script)"] = digest
+        if package:
+            # `python -m pkg.run` runs `pkg/__init__.py` before the script.
+            seeds.append(package)
         seeds.extend(_resolved(imports, "__main__", False, package=package))
 
 
@@ -1230,8 +1234,9 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     each cell's status sidecar: ``{"python": "3.11", "code": {key: hash}}``.
 
     Every project file the task's module imports, directly or through other
-    project files, at any depth (imports inside functions included), is an
-    entry ``"<module> (file)"``, hashed as its syntax tree without its main
+    project files, at any depth (imports inside functions included), and the
+    ``__init__.py`` of each package those modules are in (it runs first), is
+    an entry ``"<module> (file)"``, hashed as its syntax tree without its main
     block and docstrings: an edit anywhere in such a file is a change, and a
     comment, a docstring or formatting is not. A task defined in the driver
     script gives ``"<script> (script)"``, what the task's definition reads in
@@ -1308,6 +1313,10 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
             try:
                 record = _record((), [target])["code"]
                 parts = target.split(".")
+                # Only what the roots' record lacks: a file both reach keeps
+                # the digest the run took (a target first named after an
+                # edit would read the edited file while the old code runs),
+                # and the entry does not hold a second copy of the roots'.
                 entries = {
                     (
                         k.replace(" (script)", f":{parts[1]} (script)")
@@ -1315,6 +1324,7 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
                         else k
                     ): v
                     for k, v in record.items()
+                    if k not in base["code"]
                 }
             except Exception:  # noqa: BLE001 - best effort: the roots' record stands
                 entries = {}

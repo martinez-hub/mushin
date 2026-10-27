@@ -2122,8 +2122,9 @@ def test_a_task_modules_parent_package_is_recorded(project):
 
 
 def test_a_targets_parent_package_is_recorded(project):
-    """Codex's case: `_target_: pkg.models.Model`, where `pkg/__init__.py`
-    configures `Model`. Editing the package's init changes the record."""
+    """`_target_: pkg.models.Model`, where `pkg/__init__.py` configures
+    `Model` (sets a class attribute): editing the package's init changes the
+    record."""
     from mushin._resume import cell_project_record
 
     root, exp = project
@@ -2193,27 +2194,29 @@ def test_only_a_completed_status_carries_the_record(project):
     )
     sys.modules.pop("mushin_t_probe", None)
     probe = importlib.import_module("mushin_t_probe")
-    wd = root / "sweep"
-    try:
-        wf = probe.W()
-        wf.run(
-            a=multirun([1, 2, 3]),
-            working_dir=str(wd),
-            on_error="nan",
-            sample=2,
-            seed=0,
-        )
-        by_status = {}
+
+    def statuses(wd):
+        out = {}
         for status in wd.rglob(STATUS_FILE):
             d = json.loads(status.read_text())
-            by_status.setdefault(d["status"], []).append(d)
-        assert set(by_status) == {"completed", "failed", "skipped"}, by_status
-        assert all("code_deps" in d for d in by_status["completed"])
-        assert not any("code_deps" in d for d in by_status["failed"])
-        assert not any("code_deps" in d for d in by_status["skipped"])
-        ds = wf.to_xarray()
-        done = ds["running_has"].dropna("a")
-        assert done.size and float(done.max()) == 0.0  # not in 'running' either
+            out.setdefault(d["status"], []).append(d)
+        return out
+
+    try:
+        wf = probe.W()
+        failing = root / "failing"
+        wf.run(a=multirun([1, 2]), working_dir=str(failing), on_error="nan")
+        seen = statuses(failing)
+        assert {k: len(v) for k, v in seen.items()} == {"completed": 1, "failed": 1}
+        assert "code_deps" in seen["completed"][0]
+        assert "code_deps" not in seen["failed"][0]
+        assert float(wf.to_xarray()["running_has"].sel(a=1)) == 0.0  # nor 'running'
+        sampled = root / "sampled"
+        probe.W().run(a=multirun([1, 3]), working_dir=str(sampled), sample=1)
+        seen = statuses(sampled)
+        assert {k: len(v) for k, v in seen.items()} == {"completed": 1, "skipped": 1}
+        assert "code_deps" in seen["completed"][0]
+        assert "code_deps" not in seen["skipped"][0]
     finally:
         sys.modules.pop("mushin_t_probe", None)
 
@@ -2272,5 +2275,143 @@ def test_a_cell_resolves_its_config_once(project, monkeypatch):
     for status in wd.rglob(STATUS_FILE):
         d = json.loads(status.read_text())
         cfg = OmegaConf.load(status.parent / ".hydra" / "config.yaml")
-        seen.append(d["config_hash"] == config_fingerprint(cfg))
+        # main's formula, written out, so the hash cannot move with the code.
+        mains = hashlib.sha256(
+            json.dumps(
+                OmegaConf.to_container(cfg, resolve=True), sort_keys=True, default=str
+            ).encode()
+        ).hexdigest()[:16]
+        seen.append(d["config_hash"] == config_fingerprint(cfg) == mains)
     assert seen == [True, True]
+
+
+def test_a_target_never_replaces_the_runs_digest_of_a_file(project):
+    """A package whose `__init__.py` imports the task's module: a `_target_`
+    in it, first named after that module was edited mid-run, reaches the
+    task's module too. The cell keeps the digest the run took, the code the
+    process runs; it does not take the edited file's."""
+    from mushin._resume import cell_project_record
+
+    root, _ = project
+    pkg = _pkg(
+        root,
+        "mushin_t_reexp",
+        {
+            "__init__.py": "from .models import Model\nfrom .train import task\n",
+            "models.py": "class Model:\n    pass\n",
+            "train.py": "def task(x):\n    return x * 1\n",
+        },
+    )
+    try:
+        train = importlib.import_module("mushin_t_reexp.train")
+        token = "tok-reexp"
+        first = cell_project_record(token, (train.task,), (), None)["code"]
+        (pkg / "train.py").write_text("def task(x):\n    return x * 2\n")
+        cfg = {"m": {"_target_": "mushin_t_reexp.models.Model"}}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the stale-load warning
+            second = cell_project_record(token, (train.task,), (), cfg)["code"]
+        key = "mushin_t_reexp.train (file)"
+        assert second[key] == first[key]
+        assert "mushin_t_reexp.models (file)" in second
+    finally:
+        _drop("mushin_t_reexp")
+
+
+def test_a_script_run_as_a_module_records_its_package(project, tmp_path):
+    """`python -m pkg.run` runs `pkg/__init__.py` first: the script's own
+    package is code its task runs, though it imports nothing from it."""
+    from mushin._resume import driver_script_entries
+
+    root, _ = project
+    pkg = _pkg(
+        root,
+        "mushin_t_mpkg",
+        {
+            "__init__.py": "SCALE = 2\n",
+            "run.py": "import math\n\n\ndef task(x):\n    return math.floor(x)\n",
+        },
+    )
+    path = pkg / "run.py"
+
+    def record():
+        ns = {
+            "__name__": "__main__",
+            "__file__": str(path),
+            "__package__": "mushin_t_mpkg",
+        }
+        exec(compile(path.read_bytes(), str(path), "exec"), ns)
+        given = driver_script_entries([ns["task"]])
+        return project_fingerprints(ns["task"], scripts=given)
+
+    try:
+        before = record()
+        assert "mushin_t_mpkg (file)" in before["code"]
+        (pkg / "__init__.py").write_text("SCALE = 20\n")
+        assert changed_project_code(before, record()) == ["mushin_t_mpkg (file)"]
+    finally:
+        _drop("mushin_t_mpkg")
+
+
+def test_an_unsampled_cell_takes_no_record(project, monkeypatch):
+    """A cell the sample leaves out writes 'skipped' and returns: the record
+    it would compare or store is not taken."""
+    import mushin._resume as r
+
+    root, exp = project
+    real = r.cell_project_record
+    taken = []
+
+    def counting(*args, **kwargs):
+        taken.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(r, "cell_project_record", counting)
+    exp.W().run(a=multirun([1, 2, 3]), working_dir=str(root / "wd"), sample=1)
+    assert len(taken) == 1
+
+
+def test_a_nested_packages_inits_are_each_recorded(project):
+    """`_target_: pkg.sub.models.Model` runs `pkg/__init__.py` and then
+    `pkg/sub/__init__.py`: each is recorded, and an edit to the inner one is
+    seen."""
+    from mushin._resume import cell_project_record
+
+    root, exp = project
+    pkg = _pkg(root, "mushin_t_nest", {"__init__.py": "A = 1\n"})
+    sub = pkg / "sub"
+    sub.mkdir()
+    (sub / "__init__.py").write_text("B = 1\n")
+    (sub / "models.py").write_text("class Model:\n    pass\n")
+    cfg = {"m": {"_target_": "mushin_t_nest.sub.models.Model"}}
+    try:
+        before = cell_project_record("tok-nest-1", (exp.W.task,), (), cfg)
+        assert {"mushin_t_nest (file)", "mushin_t_nest.sub (file)"} <= set(
+            before["code"]
+        )
+        (sub / "__init__.py").write_text("B = 2\n")
+        after = cell_project_record("tok-nest-2", (exp.W.task,), (), cfg)
+        assert changed_project_code(before, after) == ["mushin_t_nest.sub (file)"]
+    finally:
+        _drop("mushin_t_nest")
+
+
+def test_a_config_that_cannot_be_resolved_has_no_hash_and_no_targets(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from mushin._resume import (
+        _config_targets,
+        config_fingerprint,
+        resolved_config,
+        resolved_config_hash,
+    )
+
+    monkeypatch.delenv("MUSHIN_T_UNSET_VAR", raising=False)
+    cfg = OmegaConf.create(
+        {"x": "${oc.env:MUSHIN_T_UNSET_VAR}", "m": {"_target_": "pkg.Model"}}
+    )
+    resolved = resolved_config(cfg)
+    assert config_fingerprint(cfg) is None
+    assert resolved_config_hash(resolved) is None
+    assert _config_targets(resolved) == []
+    assert _config_targets(cfg) == []
