@@ -572,8 +572,8 @@ _SCRIPT_CACHE: dict = {}
 _FILE_CACHE_MAX = 2048
 
 
-def _cache_put(cache: dict, key, value, limit: int = _FILE_CACHE_MAX) -> None:
-    while len(cache) >= limit:
+def _cache_put(cache: dict, key, value) -> None:
+    while len(cache) >= _FILE_CACHE_MAX:
         cache.pop(next(iter(cache)))
     cache[key] = value
 
@@ -776,35 +776,47 @@ def _bound_names(node) -> set[str]:
     return out
 
 
-def _eval_loads(node) -> set[str]:
+def _eval_loads(node, decorators: bool = True) -> set[str]:
     """The names a top-level statement reads when it runs: everything but the
     bodies of the functions and lambdas it defines, which run when called. A
-    class body runs where it is defined, and a name it reads before binding
-    it there is the module's (``SCALE = SCALE``). ``X += 1`` reads ``X``."""
+    class body runs where it is defined, in order: a name it reads before
+    binding it there is the module's (``SCALE = SCALE``), one bound earlier in
+    the body is the class's. ``X += 1`` reads ``X``. ``decorators=False``
+    leaves out what only decorator expressions read."""
     import ast
 
     out: set[str] = set()
 
-    def visit(n) -> None:
+    def outer(n) -> list:
+        exprs = _outer_exprs(n)
+        if not decorators:
+            exprs = [e for e in exprs if e not in n.decorator_list]
+        return exprs
+
+    def visit(n, local: frozenset) -> None:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            for sub in _outer_exprs(n):
-                visit(sub)
+            for sub in outer(n) if not isinstance(n, ast.Lambda) else _outer_exprs(n):
+                visit(sub, local)
+            return
+        if isinstance(n, ast.ClassDef):
+            for sub in outer(n):
+                visit(sub, local)
+            bound: set[str] = set()
+            for stmt in n.body:  # a nested class body does not see the outer's
+                visit(stmt, frozenset(bound))
+                bound |= _bound_names(stmt)
             return
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
-            out.add(n.id)
+            if n.id not in local:
+                out.add(n.id)
         elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-            out.add(n.target.id)
+            if n.target.id not in local:
+                out.add(n.target.id)
         for sub in ast.iter_child_nodes(n):
-            visit(sub)
+            visit(sub, local)
 
-    visit(node)
+    visit(node, frozenset())
     return out
-
-
-#: Symbol-table scopes that only evaluate where they are, so a statement's own
-#: comprehensions are read from its syntax tree (Python 3.12+ inlines them and
-#: earlier versions do not). Inside a function they are part of its body.
-_EAGER_SCOPES = ("listcomp", "setcomp", "dictcomp", "genexpr")
 
 
 def _body_loads(node) -> set[str]:
@@ -854,33 +866,25 @@ def _call_reads(node) -> set[str]:
         table = symtable.symtable(ast.unparse(node), "<statement>", "exec")
     except (SyntaxError, ValueError, RecursionError):
         return set()
-    is_def = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     names: set[str] = set()
-    stack = [(child, False) for child in table.get_children()]
+    stack = list(table.get_children())
     while stack:
-        scope, in_function = stack.pop()
-        is_function = scope.get_type() == "function"
-        if (
-            is_function
-            and not in_function
-            and not is_def  # `def genexpr()` is a function, not a comprehension
-            and scope.get_name() in _EAGER_SCOPES
-        ):
-            is_function = False
-        counts = in_function or is_function
-        if counts:
-            names.update(
-                sym.get_name()
-                for sym in scope.get_symbols()
-                if sym.is_global() and sym.is_referenced()
-            )
-        stack.extend((child, counts) for child in scope.get_children())
+        scope = stack.pop()
+        names.update(
+            sym.get_name()
+            for sym in scope.get_symbols()
+            if sym.is_global() and sym.is_referenced()
+        )
+        stack.extend(scope.get_children())
+    # Only what a function or lambda body reads: the statement's own
+    # comprehensions and class body (scopes on some versions only) are its
+    # evaluation, read from its syntax tree.
     return names & _body_loads(node)
 
 
 def _decorator_bases(node) -> list[str]:
     """The base names of the decorators on every ``def`` and ``class`` in a
-    statement outside function bodies (in a block, or on a class's methods)."""
+    statement outside function and class bodies (a definition in a block)."""
     import ast
 
     out: list[str] = []
@@ -893,9 +897,6 @@ def _decorator_bases(node) -> list[str]:
     def visit(n) -> None:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             out.extend(b for b in map(base, n.decorator_list) if b)
-            if isinstance(n, ast.ClassDef):
-                for sub in n.body:
-                    visit(sub)
             return
         for sub in ast.iter_child_nodes(n):
             if isinstance(sub, (ast.stmt, ast.excepthandler, ast.match_case)):
@@ -921,7 +922,8 @@ class _Stmt:
         "dh",
         "imports",
         "future",
-        "span",
+        "stars",
+        "plain_reads",
     )
 
     def __init__(self, node):
@@ -962,10 +964,31 @@ class _Stmt:
         else:
             self.kind = "other"
         self.future = isinstance(node, ast.ImportFrom) and node.module == "__future__"
-        start = min(
-            [node.lineno, *(d.lineno for d in getattr(node, "decorator_list", ()))]
-        )
-        self.span = (start, getattr(node, "end_lineno", None) or node.lineno)
+        # Star imports anywhere in it (`try: from settings import *`), outside
+        # function and class bodies.
+        self.stars = [
+            sub
+            for sub in _module_level_nodes(node)
+            if isinstance(sub, ast.ImportFrom) and any(a.name == "*" for a in sub.names)
+        ]
+        # What it reads other than through a decorator: `@timer` on the task
+        # does not make other `@timer` definitions code the task runs.
+        self.plain_reads = _eval_loads(node, decorators=False) | self.calls
+
+
+def _module_level_nodes(node):
+    """``node`` and what it holds outside function and class bodies."""
+    import ast
+
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        if n is not node and isinstance(
+            n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        ):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
 
 
 def _statements(nodes) -> list[_Stmt]:
@@ -988,12 +1011,10 @@ def _run_statements(tree) -> list:
 _REACH_NAMES_MAX = 2000
 
 
-def _reach(
-    stmts: list[_Stmt], roots, is_project_import, names=()
-) -> tuple[str, list, set]:
+def _reach(stmts: list[_Stmt], roots, is_project_import) -> tuple[str, list]:
     """What the statements at positions ``roots`` can reach in ``stmts``, a
     source's top-level statements in the order they ran, as ``(digest,
-    import pairs, names read)``.
+    import pairs)``.
 
     A name a statement reads when it runs is the binding before it (``Y = X
     * 2`` keeps the ``X`` it was computed from; a binding a block may skip
@@ -1003,8 +1024,9 @@ def _reach(
     star imports, ``__future__`` imports, and a decorated definition whose
     decorator reaches, through its bindings (an alias, a helper it calls), a
     project import or module state that counted code reads (``@register``
-    filling the ``MODELS`` the task reads). ``names`` are roots too, by every
-    binding.
+    filling the ``MODELS`` the task reads), or is itself an object of the
+    script that counted code reads other than as a decorator
+    (``@scale.register``, ``@Registry.register``).
 
     Each reached statement is hashed with what its names resolve to, those
     read when it ran by their own hashes in turn (``SCALE += 1`` run three
@@ -1018,7 +1040,7 @@ def _reach(
     for pos, s in enumerate(stmts):
         for name in s.binds:
             binders.setdefault(name, []).append(pos)
-    stars = list(binders.get("*", ()))
+    stars = [p for p, s in enumerate(stmts) if s.stars]
 
     def live(name: str, pos: int) -> list[int]:
         found = []
@@ -1036,11 +1058,10 @@ def _reach(
 
     included: dict[int, tuple[list, list]] = {}
     read: set[str] = set()
+    plain: set[str] = set()
     queue = deque(
         sorted({*roots, *stars, *(p for p, s in enumerate(stmts) if s.future)})
     )
-    for name in sorted(names):
-        queue.extend(every(name))
 
     def visit(pos: int) -> None:
         s = stmts[pos]
@@ -1051,6 +1072,7 @@ def _reach(
                 queue.append(t)
         included[pos] = (evals, calls)
         read.update(s.evals, s.calls)
+        plain.update(s.plain_reads)
 
     def is_state(name: str) -> bool:
         """Module state a decorator may write: a name the source binds to a
@@ -1072,7 +1094,17 @@ def _reach(
         targets = every(name) if pos is None else live(name, pos)
         if not targets:
             # A name nothing binds may come from a star import.
-            return any(is_project_import(stmts[p].import_node, name) for p in stars)
+            return any(
+                is_project_import(node, name) for p in stars for node in stmts[p].stars
+            )
+        if (
+            pos is not None
+            and name in plain
+            and any(stmts[t].kind != "import" for t in targets)
+        ):
+            # An object of the script that counted code reads, registering
+            # what it decorates (`@scale.register`, `@MODELS.register_module()`).
+            return True
         for t in targets:
             s = stmts[t]
             if s.kind == "import":
@@ -1115,7 +1147,7 @@ def _reach(
         sigs.add(esig[pos] + "|" + ",".join(calls))
         imports.extend(stmts[pos].imports)
     digest = _short_hash("\n".join(sorted(sigs)).encode())
-    return digest, imports, read
+    return digest, imports
 
 
 def _is_project_import(node, name: str) -> bool:
@@ -1160,7 +1192,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
     # The bytes, so a byte order mark or a coding cookie is honored.
     stmts = _statements(_run_statements(ast.parse(source)))
     starts = [pos for pos, s in enumerate(stmts) if s.binds & roots]
-    digest, imports, _ = _reach(stmts, starts, _is_project_import)
+    digest, imports = _reach(stmts, starts, _is_project_import)
     result = (digest, imports)
     _cache_put(_SCRIPT_CACHE, cache_key, result)
     return result
@@ -1365,275 +1397,10 @@ def _root_entries(
                 _, names, objects = scripts.setdefault(file, (namespace, set(), []))
                 names |= tops
                 objects.append(identity)
-        elif name == "__main__" and file is None:
-            # No file: a notebook's cells, read by `_notebook_entry` (in a
-            # parallel worker, which has the task by value, the driver's).
-            _, names, objects = scripts.setdefault(_NOTEBOOK, (namespace, set(), []))
-            names |= tops
-            objects.append(identity)
         elif not isinstance(file, str):
             seeds.extend(_namespace_modules(namespace))  # a notebook
         elif not _is_foreign_module(name, file):
             seeds.append(name)
-
-
-#: The ``scripts`` key of code defined where there is no file: a notebook's
-#: cells (or a REPL's, which cannot be read).
-_NOTEBOOK = "<notebook>"
-
-#: Each cell's statements by the cell's text: their facts, with the lines
-#: each spans in the cell, not their syntax trees.
-_CELL_CACHE: dict = {}
-_CELL_CACHE_MAX = 20_000
-
-#: A notebook's history past this many statements is not read: its record
-#: falls back to the project modules its namespace holds.
-_NOTEBOOK_STATEMENTS_MAX = 200_000
-
-#: Per IPython shell, the cells that raised once mushin watched it: execution
-#: number -> the line the cell stopped at (None: nothing in it ran).
-_FAILED_CELLS: dict = {}
-
-
-def _ipython_shell_of(namespace):
-    """The IPython shell whose namespace ``namespace`` is, or None. IPython is
-    never imported here: a shell exists only if it already is."""
-    import sys
-
-    module = sys.modules.get("IPython")
-    if module is None:
-        return None
-    try:
-        shell = module.get_ipython()
-    except Exception:  # noqa: BLE001 - an IPython that cannot answer
-        return None
-    if shell is None or getattr(shell, "user_ns", None) is not namespace:
-        return None
-    return shell
-
-
-def _watch_failures(shell) -> dict:
-    """The cells of ``shell`` that raised, noted from now on by a
-    ``post_run_cell`` hook: a cell stops at its first failing statement, so
-    what follows it never ran. Registered once per shell, at its first
-    record; a cell that failed before that is read as if it ran."""
-    import weakref
-
-    key = id(shell)
-    found = _FAILED_CELLS.get(key)
-    if found is not None and found[0]() is shell:
-        return found[1]
-    failed: dict = {}
-
-    def note(result) -> None:
-        try:
-            if result.success or result.execution_count is None:
-                return
-            error = result.error_in_exec
-            line = None  # failed before running (an input transformer)
-            if error is not None:
-                tb = error.__traceback__
-                while tb is not None:
-                    frame = tb.tb_frame
-                    if (
-                        frame.f_globals is shell.user_ns
-                        and frame.f_code.co_name == "<module>"
-                    ):
-                        line = tb.tb_lineno
-                        break
-                    tb = tb.tb_next
-            failed[result.execution_count] = line
-        except Exception:  # noqa: BLE001 - never break the user's cell
-            pass
-
-    try:
-        shell.events.register("post_run_cell", note)
-    except Exception:  # noqa: BLE001 - an IPython without events: as before
-        return failed
-    try:
-        _FAILED_CELLS[key] = (weakref.ref(shell), failed)
-    except TypeError:  # no weak reference to it: watched, not remembered
-        pass
-    return failed
-
-
-#: The magics that run their code in the notebook's namespace, by how IPython
-#: rewrites a cell that uses them: ``%time x = 1`` is
-#: ``get_ipython().run_line_magic('time', 'x = 1')``.
-_LINE_MAGICS_RUN = ("time",)
-_CELL_MAGICS_RUN = ("time", "capture")
-
-
-def _magic_code(node) -> str | None:
-    """The code a statement runs through one of those magics, or None."""
-    import ast
-
-    if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)):
-        return None
-    func, args = node.value.func, node.value.args
-    if not (
-        isinstance(func, ast.Attribute)
-        and isinstance(func.value, ast.Call)
-        and isinstance(func.value.func, ast.Name)
-        and func.value.func.id == "get_ipython"
-        and all(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in args)
-    ):
-        return None
-    if func.attr == "run_line_magic" and len(args) == 2:
-        return args[1].value if args[0].value in _LINE_MAGICS_RUN else None
-    if func.attr == "run_cell_magic" and len(args) == 3:
-        return args[2].value if args[0].value in _CELL_MAGICS_RUN else None
-    return None
-
-
-def _cell_statements(text: str, transform=None, depth: int = 0):
-    """``[(span, statement)]`` for one cell, cached by its text: each
-    statement with the lines it spans in the cell, or None for a cell that
-    does not parse (it never ran). The code a ``%time`` or ``%%time`` runs,
-    as IPython ``transform`` s it, stands in for the magic's call, spanning
-    its line."""
-    import ast
-
-    key = _short_hash(text.encode("utf-8", "surrogatepass"))
-    if key in _CELL_CACHE:
-        return _CELL_CACHE[key]
-    try:
-        nodes = _run_statements(ast.parse(text))
-    except (SyntaxError, ValueError, RecursionError):
-        nodes = None
-    out = None
-    if nodes is not None:
-        out = []
-        for node in nodes:
-            stmt = _Stmt(node)
-            code = _magic_code(node) if depth < 4 else None
-            if code is None:
-                out.append((stmt.span, stmt))
-                continue
-            if transform is not None:
-                try:
-                    code = transform(code)
-                except Exception:  # noqa: BLE001 - read it as it is
-                    pass
-            inner = _cell_statements(code, transform, depth + 1) or []
-            out.extend((stmt.span, s) for _, s in inner)
-    _cache_put(_CELL_CACHE, key, out, _CELL_CACHE_MAX)
-    return out
-
-
-def _code_of(obj):
-    """The code object that places ``obj`` in a cell: a function's, or a
-    class's own method's, through any decorator that wraps it."""
-    import types
-
-    def unwrap(fn):
-        for _ in range(16):
-            inner = (
-                getattr(fn, "__wrapped__", None)
-                if isinstance(fn, types.FunctionType)
-                else None
-            )
-            if not isinstance(inner, types.FunctionType):
-                return fn
-            fn = inner
-        return fn
-
-    if isinstance(obj, types.FunctionType):
-        return obj.__code__  # a wrapper's layers are roots of their own
-    if isinstance(obj, type):
-        for value in vars(obj).values():
-            fn = (
-                getattr(value, "__func__", None)
-                or getattr(value, "fget", None)
-                or value
-            )
-            fn = unwrap(fn) if isinstance(fn, types.FunctionType) else fn
-            if isinstance(fn, types.FunctionType) and fn.__qualname__.startswith(
-                obj.__qualname__ + "."
-            ):
-                return fn.__code__
-    return None
-
-
-def _cell_position(obj, cells: list[str], starts: list[tuple[int, list]]):
-    """The position of the statement that made ``obj``, in the run of the cell
-    its code comes from (IPython registers each cell's text in linecache under
-    the cell's file name): the run its file name numbers (``<ipython-input-N-
-    ...>``), else the latest run of that text (a Jupyter kernel names a cell
-    by its text alone). None when it is not found."""
-    import linecache
-    import re
-
-    code = _code_of(obj)
-    if code is None:
-        return None
-    lines = linecache.getlines(code.co_filename)
-    if not lines:
-        return None
-    text = "".join(lines).rstrip("\n")
-    order = list(range(len(cells) - 1, -1, -1))
-    numbered = re.fullmatch(r"<ipython-input-(\d+)-[0-9a-f]+>", code.co_filename)
-    if numbered and int(numbered.group(1)) < len(cells):
-        order.insert(0, int(numbered.group(1)))
-    line = code.co_firstlineno  # a decorated def's first decorator
-    for i in order:
-        if cells[i].rstrip("\n") != text:
-            continue
-        start, part = starts[i]
-        for j, (span, _) in enumerate(part):
-            if span[0] <= line <= span[1]:
-                return start + j
-        return None
-    return None
-
-
-def _notebook_entry(namespace: dict, names, objects):
-    """``(digest, imports)`` for code defined in an IPython notebook (or
-    console): what the roots can reach by name through the cells the kernel
-    ran, in the order it ran them (see ``_reach``), so re-running a cell
-    unchanged, or the cell that extends the grid, is not an edit. A cell that
-    raised counts up to the statement that raised. Each root is the statement
-    that made it, in its run of its cell (a sweep built before its task's cell
-    changed runs the old task), else every binding of its name. The project
-    modules of the values the reached code reads are followed by their types
-    (an object a cell made through foreign code: a loaded checkpoint, a
-    `%run`). None outside IPython, past ``_NOTEBOOK_STATEMENTS_MAX``, or when
-    no root is found in the cells."""
-    shell = _ipython_shell_of(namespace)
-    if shell is None:
-        return None
-    failed = _watch_failures(shell)
-    # Index n holds the cell whose execution number is n.
-    cells = [
-        c if isinstance(c, str) else "" for c in shell.history_manager.input_hist_parsed
-    ]
-    transform = getattr(shell, "transform_cell", None)
-    stmts: list[_Stmt] = []
-    starts: list[tuple[int, list]] = []
-    for n, text in enumerate(cells):
-        part = _cell_statements(text, transform) or []
-        if n in failed:
-            stop = failed[n]
-            part = [
-                (span, s) for span, s in part if stop is not None and span[1] < stop
-            ]
-        starts.append((len(stmts), part))
-        stmts.extend(s for _, s in part)
-        if len(stmts) > _NOTEBOOK_STATEMENTS_MAX:
-            return None
-    roots, unplaced = [], set()
-    for obj in objects:
-        pos = _cell_position(obj, cells, starts)
-        if pos is None:
-            unplaced = set(names)
-        else:
-            roots.append(pos)
-    if not roots and not any(n in s.binds for s in stmts for n in unplaced):
-        return None
-    digest, imports, read = _reach(stmts, roots, _is_project_import, names=unplaced)
-    values = {n: namespace[n] for n in sorted(read) if n in namespace}
-    modules = [m for m in _namespace_modules(values) if m != "__main__"]
-    return digest, [*imports, *((m, 0) for m in modules)]
 
 
 def _script_entry(file: str, namespace: dict, names, objects) -> tuple[str, list]:
@@ -1663,11 +1430,6 @@ def driver_script_entries(roots) -> dict:
                 _root_entries(root, code, seeds, scripts)
         out = {}
         for file, (namespace, names, objects) in scripts.items():
-            if file == _NOTEBOOK:
-                found = _notebook_entry(namespace, names, objects)
-                if found is not None:
-                    out[file] = (*found, None)
-                continue
             digest, imports = _script_entry(file, namespace, names, objects)
             package = namespace.get("__package__")
             out[file] = (digest, imports, package if isinstance(package, str) else None)
@@ -1681,25 +1443,8 @@ def _script_entries(
 ) -> None:
     """The entry for each driver script a root or a target is defined in (the
     driver's, from ``given``, when it took one), and the project modules its
-    counted code imports. Code defined where there is no file is a notebook's
-    cells when they can be read, else the project modules its namespace holds
-    (a REPL, or a worker the driver gave no entry)."""
+    counted code imports."""
     for file, (namespace, names, objects) in scripts.items():
-        if file == _NOTEBOOK:
-            entry = given.get(file)
-            if entry is None:
-                try:
-                    found = _notebook_entry(namespace, names, objects)
-                except Exception:  # noqa: BLE001 - best effort: as before
-                    found = None
-                entry = None if found is None else (*found, None)
-            if entry is None:
-                seeds.extend(_namespace_modules(namespace))
-                continue
-            digest, imports, package = entry
-            code["__main__ (notebook)"] = digest
-            seeds.extend(_resolved(imports, "__main__", False, package=package))
-            continue
         if file in given:
             digest, imports, package = given[file]
         else:
@@ -1725,22 +1470,15 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
         main = sys.modules.get("__main__")
         namespace = getattr(main, "__dict__", None) or {}
         file = namespace.get("__file__")
-        if len(parts) < 2:
-            return
-        if file is None:
-            # A class defined in a notebook cell.
-            key = _NOTEBOOK
-        elif isinstance(file, str) and file.endswith(".py"):
-            if _foreign_by_path(file, "__main__"):
-                return
-            key = file
-        else:
-            return
-        _, names, objects = scripts.setdefault(key, (namespace, set(), []))
-        names.add(parts[1])
-        target = namespace.get(parts[1])
-        if target is not None:
-            objects.append(target)
+        if (
+            len(parts) > 1
+            and isinstance(file, str)
+            and file.endswith(".py")
+            and not _foreign_by_path(file, "__main__")
+        ):
+            _, names, objects = scripts.setdefault(file, (namespace, set(), []))
+            names.add(parts[1])
+            objects.append(namespace.get(parts[1]))
         return
     # Not judged by name first: a module not imported yet would be, and a
     # checkout's `utils` would read as an installed one. _file_entries
@@ -1836,15 +1574,11 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     arguments are not compared (as on main); the modules of the functions and
     classes it binds are followed.
 
-    A task defined in a notebook gives ``"__main__ (notebook)"``, the same
-    reach through the cells IPython ran (``_notebook_entry``).
-
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
-    environment, code defined where there is no file and no IPython (a plain
-    REPL: the project modules of the objects its namespace holds are
-    covered), and code reached only through a string that is not a
-    ``_target_`` of the config. None when the record cannot be taken (with a
+    environment, code defined in a notebook (the project modules of the
+    objects its namespace holds are covered), and code reached only through a
+    string that is not a ``_target_`` of the config. None when the record cannot be taken (with a
     warning, once); a resume then does not compare, and ``cache_dir`` is not
     used."""
     try:
@@ -1882,8 +1616,7 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
     ``cfg`` may be the config already resolved by ``resolved_config``.
     ``scripts`` are the driver's script entries (``driver_script_entries``).
     A target in the driver script gets its own key, ``"<script>:<name>
-    (script)"`` (``"__main__:<name> (notebook)"`` in a notebook), so it never
-    replaces the roots' entry for that script."""
+    (script)"``, so it never replaces the roots' entry for that script."""
     if token in _ROOT_RECORDS:
         base = _ROOT_RECORDS[token]
     else:
@@ -1906,11 +1639,8 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
                 parts = target.split(".")
                 entries = {}
                 for k, v in record.items():
-                    head, sep, kind = k.rpartition(" (")
-                    if sep and kind in ("script)", "notebook)") and len(parts) > 1:
-                        # A target in the driver script or a notebook: a
-                        # key of its own, never the roots' entry for it.
-                        k = f"{head}:{parts[1]} ({kind}"
+                    if k.endswith(" (script)") and len(parts) > 1:
+                        k = k.replace(" (script)", f":{parts[1]} (script)")
                     # Only what the roots' record lacks, by the key as it is
                     # written: a file both reach keeps the digest the run
                     # took (a target first named after an edit would read

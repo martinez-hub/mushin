@@ -2142,6 +2142,31 @@ SCRIPT_EDITS = {
         "SCALE = {k}\n\n\ndef genexpr(x):\n    return x * SCALE\n\n\n"
         "def task(a):\n    return genexpr(a)\n"
     ),
+    "a star import inside a block, beside a definition it may decorate": (
+        "SCALE = {k}\ntry:\n    from mushin_t_no_settings import *\nexcept ImportError:\n"
+        "    pass\n\n\n@cached\ndef report():\n    return 1\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a function registered on the function the task calls": (
+        "import functools\n\n\n@functools.singledispatch\ndef scale(x):\n    return x\n\n\n"
+        "@scale.register(int)\ndef _(x):\n    return x * {k}\n\n\n"
+        "def task(a):\n    return scale(a)\n"
+    ),
+    "a function registered on a class the task reads": (
+        "class Registry:\n    items = {{}}\n\n    @classmethod\n    def register(cls, fn):\n"
+        "        cls.items[fn.__name__] = fn\n        return fn\n\n\n@Registry.register\n"
+        "def lin(x):\n    return x * {k}\n\n\ndef task(a):\n    return Registry.items['lin'](a)\n"
+    ),
+    "a function registered on an object the task reads": (
+        "class Reg:\n    def __init__(self):\n        self.d = {{}}\n\n    def add(self, fn):\n"
+        "        self.d[fn.__name__] = fn\n        return fn\n\n\nMODELS = Reg()\n\n\n"
+        "@MODELS.add\ndef lin(x):\n    return x * {k}\n\n\n"
+        "def task(a):\n    return MODELS.d['lin'](a)\n"
+    ),
+    "a method named like a comprehension": (
+        "SCALE = {k}\n\n\nclass C:\n    def genexpr(self):\n        return SCALE\n\n\n"
+        "def task(a):\n    return C().genexpr() * a\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2152,6 +2177,10 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "another definition that only shares the task's decorator": (
+        "def timer(fn):\n    return fn\n\n\n@timer\ndef task(a):\n    return a\n\n\n"
+        "@timer\ndef other(a):\n    return a * {k}\n"
+    ),
     "a run function that sets a global": (
         "DEVICE = 'cpu'\n\n\ndef task(a):\n    return len(DEVICE) * a\n\n\n"
         "def main():\n    global DEVICE\n    DEVICE = 'cpu'\n"
@@ -2681,3 +2710,15 @@ def test_a_target_class_in_the_script_that_defines_the_task_is_covered(tmp_path)
     err = run("resume")
     assert "code the task reaches (both_script:Net (script))" in err, err
     assert calls.read_text() == "xxxx"
+
+
+def test_a_class_bodys_own_names_are_not_the_modules(tmp_path):
+    """`n = 1` then `m = n + 1` in a class body reads the class's `n`, and a
+    method default `b=n` too: the module's `n` is not code the task reads."""
+    text = (
+        "n = {k}\n\n\nclass W:\n    n = 1\n    m = n + 1\n\n    @staticmethod\n"
+        "    def task(a, b=n):\n        return a * b\n"
+    )
+    one = _digest_of_script(tmp_path, "cl1", text.format(k=3), {"W"})
+    two = _digest_of_script(tmp_path, "cl2", text.format(k=4), {"W"})
+    assert one == two

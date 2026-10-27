@@ -113,15 +113,12 @@ can reach by name counts (its helpers and constants), not the `run(...)`
 call, other top-level calls, `print` calls or what only they read, so
 extending the grid and resuming reuses the completed cells. The task
 function's own source is compared as text, so a comment inside its body is an
-edit. A task defined in a notebook is compared the same way through the
-cells the kernel ran, so re-running a cell unchanged, or the cell that
-extends the grid, is not an edit either, while re-running an edited helper
-cell is. If you edit a module and resume in the same Python process without
+edit. If you edit a module and resume in the same Python process without
 reloading it, the old code still runs: reload it (or restart) first. The
-script and notebook rule follows names, so a statement that changes an
-object in place (`CFG["lr"] = 0.1`), a function that rebinds a global when
-called, or a registry filled by `__init_subclass__` can hide an edit; helpers
-kept in an imported module are compared as a whole file.
+script rule follows names, so a statement that changes an object in place
+(`CFG["lr"] = 0.1`), a function that rebinds a global when called, or a
+registry filled by `__init_subclass__` can hide an edit there; helpers kept in
+an imported module are compared as a whole file.
 
 ### The full loop
 

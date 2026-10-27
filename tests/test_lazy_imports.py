@@ -48,19 +48,6 @@ def test_import_mushin_does_not_load_eval_dependencies():
     assert out == "False False"
 
 
-def test_import_mushin_and_a_sweep_record_do_not_load_ipython():
-    # The project-code record reads a notebook's cells only when IPython is
-    # loaded already (a kernel); it never imports it.
-    out = _fresh_import_probe(
-        "import sys, mushin\n"
-        "from mushin._resume import project_fingerprints\n"
-        "def task(a):\n    return a\n"
-        "project_fingerprints(task)\n"
-        "print('IPython' in sys.modules)"
-    )
-    assert out == "False"
-
-
 def test_lightning_names_resolve_lazily():
     out = _fresh_import_probe(
         "import sys, mushin;"

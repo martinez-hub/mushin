@@ -2497,19 +2497,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             registers, in the main block too), not by the run call, other
             top-level calls or prints, or what only they read (``GRID =
             dict(...)``), so extending the grid or adding a print is not an
-            edit. A name resolves as the script runs: a name read while a
+            edit. A name resolves as the script runs: one read while a
             statement runs is the binding before it (a main block's body runs,
             its ``else`` does not), through an alias, a block or a ``match``
-            capture, and a name a function reads is any binding of it. The
-            script is read when the run
-            starts (a ``_target_`` defined in it, when the first cell naming
-            it runs), so editing it while the sweep runs does not change what
-            its cells record. A task defined in a notebook (IPython, Jupyter)
-            is compared the same way through the cells the kernel ran, in the
-            order it ran them, so re-running a cell unchanged, or the cell
-            that extends the grid, is not an edit; a cell that raised counts
-            up to the statement that raised, once the kernel has run a sweep.
-            A re-run
+            capture, and one a function reads is any binding of it. The
+            script is read when the run starts (a ``_target_``
+            defined in it, when the first cell naming it runs), so editing it
+            while the sweep runs does not change what its cells record. A re-run
             warns, naming the file (``helpers (file)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
             is not reloaded, the old code keeps running while the cells
@@ -2517,20 +2511,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             restart) before resuming. mushin warns when it had recorded that
             file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
-            the environment, a statement of the driver script or a notebook
-            cell that changes an object in place (``CFG["x"] = 2``,
-            ``parser.add_argument(...)``), a function that rebinds a global
-            when it is called (``global DEVICE`` in a ``setup()``), a
+            the environment, code defined in a notebook (the project modules
+            its functions, classes, objects and module values come from are
+            covered, not those its functions import inside their bodies), a
+            top-level statement of the driver script that changes an object in
+            place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
+            in its main block that rebinds a global (``setup()``), a script
             definition reached only through an ``__init_subclass__`` or
-            metaclass registry, state reached
-            through ``globals()``, ``exec`` or ``%run`` (the modules of the
-            objects they made are covered in a notebook), code defined where
-            there is no file and no IPython (a plain REPL; the project
-            modules its namespace holds are covered), a package
-            ``__init__.py`` above a config ``_target_`` that no project code
-            imports, and code reached only through some other string. Keep
-            helpers in an imported module, which is compared as a whole file,
-            when that matters. A very large project
+            metaclass registry, and code reached only through some other
+            string. The script rule follows names, so state reached another
+            way (``globals()``, ``exec``) can hide an edit: keep helpers in an
+            imported module, which is compared as a whole file, when that
+            matters. A very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.
