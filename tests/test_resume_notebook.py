@@ -33,26 +33,37 @@ class Kernel:
     name that linecache serves from memory (no mtime, as IPython writes it),
     run in a module that has no file."""
 
-    def __init__(self, name: str = KERNEL):
+    def __init__(self, name: str = KERNEL, legacy: bool = False):
         self.module = types.ModuleType(name)
         sys.modules[name] = self.module
         self.ns = self.module.__dict__
         self.names: list[str] = []
         self.count = 0
+        # IPython before 8.6 wrote an mtime, and kept its cells in its own
+        # linecache._ipython_cache as well.
+        self.legacy = legacy
 
     def run(self, text: str) -> None:
         self.count += 1
         text = textwrap.dedent(text)
         digest = hashlib.sha1(text.encode()).hexdigest()[:12]
         name = f"<ipython-input-{self.count}-{digest}>"
-        linecache.cache[name] = (len(text), None, text.splitlines(True), name)
+        if self.legacy:
+            entry = (len(text), 1793100000.0, text.splitlines(True), name)
+            linecache.__dict__.setdefault("_ipython_cache", {})[name] = entry
+        else:
+            entry = (len(text), None, text.splitlines(True), name)
+        linecache.cache[name] = entry
         self.names.append(name)
-        exec(compile(text, name, "exec"), self.ns)
+        # As IPython compiles a cell: without this module's future flags
+        # (`annotations` would hide what 3.14 generates for a class body).
+        exec(compile(text, name, "exec", dont_inherit=True), self.ns)
 
     def close(self) -> None:
         sys.modules.pop(self.module.__name__, None)
         for name in self.names:
             linecache.cache.pop(name, None)
+            linecache.__dict__.get("_ipython_cache", {}).pop(name, None)
 
 
 @pytest.fixture
@@ -179,6 +190,71 @@ NOTEBOOK_EDITS = {
         ],
         ["helper = make(3)\n"],
     ),
+    "a method calling super()": (
+        [
+            "class Base:\n    def f(self, x):\n        return x\n",
+            "class Model(Base):\n    def f(self, x):\n        return super().f(x) * 2\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        [
+            "class Model(Base):\n    def f(self, x):\n        return super().f(x) * 3\n",
+        ],
+    ),
+    "a helper a library decorator wraps": (
+        [
+            "import contextlib\n\n\n@contextlib.contextmanager\ndef scaled(x):\n"
+            "    yield x * 2\n",
+            "def task(a):\n    with scaled(a) as v:\n        return v\n",
+        ],
+        ["@contextlib.contextmanager\ndef scaled(x):\n    yield x * 3\n"],
+    ),
+    "a decorator wrapping the task": (
+        [
+            "import functools\n\n\ndef twice(fn):\n    @functools.wraps(fn)\n"
+            "    def inner(*a):\n        return fn(*a) * 2\n\n    return inner\n",
+            "@twice\ndef task(a):\n    return a\n",
+        ],
+        [
+            "def twice(fn):\n    @functools.wraps(fn)\n"
+            "    def inner(*a):\n        return fn(*a) * 3\n\n    return inner\n",
+            "@twice\ndef task(a):\n    return a\n",
+        ],
+    ),
+    "a lambda helper": (
+        ["act = lambda x: x * 2\n", "def task(a):\n    return act(a)\n"],
+        ["act = lambda x: x * 3\n"],
+    ),
+    "an int named like a token count": (
+        ["MAX_TOKENS = 256\n\n\ndef task(a):\n    return a * MAX_TOKENS\n"],
+        ["MAX_TOKENS = 512\n"],
+    ),
+    "one handler of a closure dispatch table": (
+        [
+            "def make():\n    table = {}\n\n"
+            + "".join(
+                f"    def h{i}(x):\n        return table['h{(i + 1) % 12}'](x - 1) "
+                f"if x > 0 else {i}\n\n"
+                for i in range(12)
+            )
+            + "    table.update({"
+            + ", ".join(f"'h{i}': h{i}" for i in range(12))
+            + "})\n    return table\n",
+            "TABLE = make()\n",
+            "def task(a):\n    return TABLE['h0'](a)\n",
+        ],
+        [
+            "def make():\n    table = {}\n\n"
+            + "".join(
+                f"    def h{i}(x):\n        return table['h{(i + 1) % 12}'](x - 1) "
+                f"if x > 0 else {i if i != 5 else 50}\n\n"
+                for i in range(12)
+            )
+            + "    table.update({"
+            + ", ".join(f"'h{i}': h{i}" for i in range(12))
+            + "})\n    return table\n",
+            "TABLE = make()\n",
+        ],
+    ),
     "a decorated helper": (
         [
             "import functools\n\n\n@functools.lru_cache\ndef helper(x):\n"
@@ -245,6 +321,32 @@ NOTEBOOK_NOT_EDITS = {
         ],
         ["task(1)\ntask(2)\n"],
     ),
+    "a timing decorator keeping a nonlocal total": (
+        [
+            "import time\n\n\ndef timed(fn):\n    total = 0.0\n\n    def inner(*a):\n"
+            "        nonlocal total\n        t = time.perf_counter()\n"
+            "        out = fn(*a)\n        total += time.perf_counter() - t + 1.0\n"
+            "        return out\n\n    return inner\n",
+            "@timed\ndef helper(x):\n    return x * 2\n",
+            TASK,
+        ],
+        ["task(1)\ntask(2)\n"],
+    ),
+    "a task resetting a helper's defaults": (
+        [
+            "def helper(x, k=2):\n    return x * k\n",
+            "def task(a):\n    helper.__defaults__ = (a,)\n    return helper(a)\n",
+        ],
+        ["task(5)\n"],
+    ),
+    "an unchanged registration cell run again into a set": (
+        [
+            "HOOKS = set()\n\n\ndef hook(fn):\n    HOOKS.add(fn)\n    return fn\n",
+            "@hook\ndef log(x):\n    return x\n",
+            "def task(a):\n    return [h(a) for h in HOOKS]\n",
+        ],
+        ["@hook\ndef log(x):\n    return x\n"],
+    ),
     "a module the task reads": (
         ["import math\n\n\ndef task(a):\n    return math.sqrt(a)\n"],
         ["import math\n"],
@@ -279,7 +381,8 @@ def test_a_restart_replaying_the_cells_gives_the_same_record():
         "def helper(x, s=SCALE):\n    return x * s * len(NAMES)\n",
         "@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
         "class Model:\n    K = 2\n\n    def f(self, x):\n        return helper(x) * self.K\n",
-        "def task(a):\n    return Model().f(a) * Cfg().lr\n",
+        "class Sub(Model):\n    def f(self, x):\n        return super().f(x) + 1\n",
+        "def task(a):\n    return Sub().f(a) * Cfg().lr\n",
     ]
     first = Kernel()
     try:
@@ -297,7 +400,7 @@ def test_a_restart_replaying_the_cells_gives_the_same_record():
     assert one == two
     assert set(one) == {
         "task (notebook)",
-        "Model (notebook)",
+        "Sub (notebook)",
         "Cfg (notebook)",
         "helper (notebook)",
         "NAMES (notebook)",
@@ -327,11 +430,83 @@ def test_an_inline_lambda_task_does_not_record_the_grid(kernel):
     kernel.run("SCALE = 2\nF, GRID = (lambda a: a * SCALE), [1, 2, 3]\n")
     assert _record(kernel, "F") == one
     assert "SCALE (notebook)" in one
+    kernel.run("SCALE = 2\nF, GRID = (lambda a: a * SCALE * 10), [1, 2, 3]\n")
+    assert _record(kernel, "F")["<lambda> (notebook)"] != one["<lambda> (notebook)"]
 
 
 def test_a_value_past_the_bound_is_not_compared(kernel):
     kernel.run("BIG = tuple(range(20000))\n\n\ndef task(a):\n    return BIG[a]\n")
     assert "BIG (notebook)" not in _record(kernel, "task")
+
+
+def test_a_large_data_global_is_walked_once(kernel, monkeypatch):
+    """A container is walked for the notebook functions it holds within one
+    bound shared by the whole walk, each container once: an aliased board
+    costs its distinct lists, not their product."""
+    import mushin._resume as resume
+
+    seen = []
+    walk = resume._container_items
+
+    def counting(value):
+        items = walk(value)
+        seen.append(len(items))
+        return items
+
+    monkeypatch.setattr(resume, "_container_items", counting)
+    kernel.run(
+        "BOARD = [[0] * 3000] * 3000\n\n\ndef task(a):\n    return BOARD[a][0]\n"
+    )
+    _record(kernel, "task")
+    assert sum(seen) <= 2 * 3000 + 10
+
+
+def test_a_registry_past_the_bound_gives_no_entry(kernel, monkeypatch):
+    """Which callables a cut walk finds depends on a set's order, which is per
+    process: past the bound the entry is left out, not taken from a part."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_CONTAINER_BUDGET", 5)
+    kernel.run(
+        "".join(f"def h{i}(x):\n    return x + {i}\n\n\n" for i in range(20))
+        + "HOOKS = [h0, h1, {"
+        + ", ".join(f"h{i}" for i in range(2, 20))
+        + "}]\n\n\ndef task(a):\n    return [h(a) for h in HOOKS[:2]] + [h0(a), h1(a)]\n"
+    )
+    record = _record(kernel, "task")
+    assert "task (notebook)" in record and "HOOKS (notebook)" not in record
+
+
+def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
+    """Past the object bound, which objects were taken depends on the walk's
+    order: no notebook entry is recorded rather than a part of them."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 3)
+    _run_cells(
+        kernel,
+        [
+            "".join(f"def h{i}(x):\n    return x + {i}\n\n\n" for i in range(10)),
+            "def task(a):\n    return "
+            + " + ".join(f"h{i}(a)" for i in range(10))
+            + "\n",
+        ],
+    )
+    assert _record(kernel, "task") == {}
+
+
+def test_ipython_before_8_6_keeps_its_cells_too():
+    """IPython 7 to 8.5 wrote an mtime into a cell's linecache entry and kept
+    the cell in linecache._ipython_cache: its cells are read the same."""
+    legacy = Kernel(legacy=True)
+    try:
+        _run_cells(legacy, ["def helper(x):\n    return x * 2\n", TASK])
+        one = _record(legacy, "task")
+        legacy.run("def helper(x):\n    return x * 3\n")
+        assert "helper (notebook)" in one
+        assert _record(legacy, "task")["helper (notebook)"] != one["helper (notebook)"]
+    finally:
+        legacy.close()
 
 
 def test_ipythons_own_names_are_not_compared(kernel):
@@ -361,12 +536,46 @@ def test_a_value_that_looks_secret_is_not_compared(kernel):
     assert "NAME (notebook)" in record
 
 
+@pytest.mark.parametrize(
+    "cells",
+    [
+        # A password read at run time, captured as a default under an
+        # innocent parameter name, or under the global's own name.
+        [
+            "DB_PASSWORD = ''.join(['hun', 'ter{k}'])\n",
+            "def task(a, password=DB_PASSWORD):\n    return a\n",
+        ],
+        [
+            "DB_PASSWORD = ''.join(['hun', 'ter{k}'])\n",
+            "def task(a, pw=DB_PASSWORD):\n    return a\n",
+        ],
+        # A provider token in a closure.
+        [
+            "def make(t):\n    def task(a):\n        return (t, a)\n\n    return task\n",
+            "task = make('hf_' + 'abcdefgh{k}')\n",
+        ],
+        # A class attribute bound from a secret.
+        [
+            "DB_PASSWORD = ''.join(['hun', 'ter{k}'])\n",
+            "class Conn:\n    pw = DB_PASSWORD\n\n    def get(self):\n        return self.pw\n",
+            "def task(a):\n    return Conn().get()\n",
+        ],
+    ],
+)
+def test_a_captured_secret_is_not_compared(kernel, cells):
+    _run_cells(kernel, [c.format(k=2) for c in cells])
+    one = _record(kernel, "task")
+    _run_cells(kernel, [c.format(k=3) for c in cells])
+    assert _record(kernel, "task") == one
+
+
 def test_a_function_from_a_file_is_not_compared(kernel, tmp_path):
     """A file run into the notebook (`%run`): the file can change after it
     ran, so its text is not the code in force."""
     path = tmp_path / "helpers.py"
     path.write_text("def helper(x):\n    return x * 2\n")
     exec(compile(path.read_text(), str(path), "exec"), kernel.ns)
+    linecache.getlines(str(path))  # as a traceback or a warning from it would
     kernel.run(TASK)
     record = _record(kernel, "task")
     path.write_text("def helper(x):\n    return x * 3\n")
@@ -404,6 +613,51 @@ def test_a_notebook_target_is_followed(kernel):
     assert two["Model (notebook)"] != one["Model (notebook)"]
 
 
+def test_a_notebook_main_target_is_followed(kernel, monkeypatch):
+    """`builds(Cfg)` on a dataclass defined in a cell names `__main__.Cfg`:
+    a kernel's `__main__` is the notebook, a class without methods too."""
+    _run_cells(
+        kernel,
+        [
+            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
+            "def task(a):\n    return a\n",
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "__main__", kernel.module)
+    cfg = {"cfg": {"_target_": "__main__.Cfg"}}
+    one = _notebook(cell_project_record("m1", (kernel.ns["task"],), (), cfg))
+    kernel.run("@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n")
+    two = _notebook(cell_project_record("m2", (kernel.ns["task"],), (), cfg))
+    assert one["Cfg (notebook)"] != two["Cfg (notebook)"]
+
+
+def test_a_target_in_a_module_without_a_file_keeps_mains_entries(tmp_path, monkeypatch):
+    """An extension's submodule has no file (pybind11's def_submodule): its
+    target is not notebook code, and its package's file is recorded as on
+    main. A builtin is neither."""
+    from mushin._resume import _record as record_of
+
+    root = tmp_path / "proj"
+    (root / "mushin_t_extpkg").mkdir(parents=True)
+    (root / "mushin_t_extpkg" / "__init__.py").write_text("X = 1\n")
+    monkeypatch.syspath_prepend(str(root))
+    import importlib
+
+    pkg = importlib.import_module("mushin_t_extpkg")
+    ext = types.ModuleType("mushin_t_extpkg.ext")
+    ext.op = len  # a builtin, as an extension's function is
+    monkeypatch.setitem(sys.modules, "mushin_t_extpkg.ext", ext)
+    monkeypatch.setattr(pkg, "ext", ext, raising=False)
+    try:
+        code = record_of((), ["mushin_t_extpkg.ext.op"])["code"]
+        assert "mushin_t_extpkg (file)" in code
+        assert not [k for k in code if k.endswith(" (notebook)")]
+        builtin = record_of((), ["builtins.dict"])["code"]
+        assert not [k for k in builtin if k.endswith(" (notebook)")]
+    finally:
+        sys.modules.pop("mushin_t_extpkg", None)
+
+
 def test_the_driver_ships_the_notebook_entries(kernel):
     """A worker gets the task by value, without the kernel's cell text: the
     driver's entries, shipped with the run, are the ones its cells record."""
@@ -432,7 +686,7 @@ CROSS_VERSION_CELLS = [
     "def task(a):\n    return model.f(a) * Cfg().lr + triple(a) + cached(a) + FLAG"
     " + len(NOTE)\n",
 ]
-CROSS_VERSION_DIGEST = "076d190ba63cbc87"
+CROSS_VERSION_DIGEST = "8d626dc73fd4efee"
 
 
 def test_the_record_reads_alike_on_every_supported_python(kernel):
