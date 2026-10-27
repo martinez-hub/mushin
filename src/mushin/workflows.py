@@ -2500,14 +2500,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             edit. The script is read when the run starts (a ``_target_``
             defined in it, when the first cell naming it runs), so editing it
             while the sweep runs does not change what its cells record. A task
-            defined in a notebook is compared by what its code looks up in the
-            kernel as the run starts: each helper and class its cells define
-            (their definitions, and the defaults and closure values they
-            captured) and each number (or tuple of numbers) by its value, so
-            re-running an edited cell and resuming re-runs the cells; a value
-            that differs per session (a timestamp, a seed drawn in a cell), or
-            state the task changes through ``setattr``, ``globals()`` or
-            ``exec``, re-runs them on the next resume. A re-run
+            defined in a notebook is compared by the definitions its code
+            reaches by name in the kernel as the run starts: each function and
+            class its cells define (through decorators, a ``partial``, a bound
+            method or an instance), so re-running an edited cell and resuming
+            re-runs the cells. No value is compared (a number, a string, a
+            dict config, what a default or a closure holds): pass one as a
+            swept parameter, or use a new ``working_dir`` after editing it. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name
             (``helper (notebook)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
@@ -2516,14 +2515,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             restart) before resuming. mushin warns when it had recorded that
             file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
-            the environment, in a notebook a string constant (only through
-            the code that reads it: a digest of one could confirm a guess of
-            a secret), a number named like a secret (``password``, ``pin``),
-            a class's attribute values, a function reached only through a
-            container (a registry), a mutable value (a dict config), an
-            object's state, a global any notebook function rebinds, a
-            closure variable one rebinds, a ``_target_`` defined there, code
-            whose text the kernel does not keep (a ``%%time``
+            the environment, in a notebook its values, a function reached
+            only through a container (a registry), a closure or a default, a
+            class's attribute values beyond its text, a ``_target_`` defined
+            there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its
             functions import inside their bodies, a
             top-level statement of the driver script that changes an object in

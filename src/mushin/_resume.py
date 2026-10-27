@@ -1144,14 +1144,14 @@ def _namespace_modules(namespace: dict) -> list[str]:
 # A notebook has no file to compare, and its cell history is not the code in
 # force (cells run out of order, fail partway, and are replayed after a
 # restart). The kernel's namespace is: a function's code names the cell text
-# of the version now bound, a class is found through its methods, and a
-# plain number's value is its only record. The record follows the names the
-# roots' code looks up, through those objects, one entry per name. Main
-# compared none of it, so each choice below compares less where a value can
-# move without an edit or could confirm a guess of a secret, and a walk cut
-# short by a bound leaves out what it feeds rather than recording a part
-# chosen by the walk's order (see
-# docs/superpowers/specs/2026-10-27-notebook-code-record-design.md).
+# of the version now bound, and a class is found through its methods. The
+# record follows the names the roots' code looks up, through those objects,
+# and compares their definitions, one entry per name. It compares no value:
+# a value is only safe to compare when every writer of it is found, and in a
+# notebook a writer can sit wherever a value can (four review rounds found
+# them in containers, instances, bound methods and decorator closures).
+# Definitions are static. See
+# docs/superpowers/specs/2026-10-27-notebook-code-record-design.md.
 
 #: The key the driver's notebook entries ship under in ``script_entries``: no
 #: script path can be it (those end in ``.py``).
@@ -1163,77 +1163,17 @@ _IPYTHON_NAME = re.compile(
     r"_+|_i+|_i?\d+|_oh|_ih|_dh|In|Out|get_ipython|exit|quit|_exit_code"
 )
 
-#: Names whose number is a secret: strings are never compared, so this is all
-#: a number needs. ``token`` is not one: ``MAX_TOKENS = 512`` is a setting.
-_SECRET_NAME = re.compile(
-    r"(?i)(api[_-]?key|secret|password|passwd|credential"
-    r"|(?:^|_)(?:pin|otp|passcode)(?:_|$))"
-)
-
-_PLAIN_TYPES = (int, float, complex, bool, type(None))
-_PLAIN_MAX_ITEMS = 10_000
-_PLAIN_MAX_CHARS = 1_000_000
 #: The functions and classes one record takes.
 _NOTEBOOK_MAX_OBJECTS = 2000
 _CELL_TREES_MAX = 128
 
-#: Bytecode that looks a name up in the globals, that rebinds one, and that
-#: stores an attribute.
+#: Bytecode that looks a name up in the globals, and that rebinds one.
 _GLOBAL_READS = frozenset({"LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS"})
 _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
-_ATTR_WRITES = frozenset({"STORE_ATTR", "DELETE_ATTR"})
 
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
-_NONLOCALS: dict = {}
 _NOTEBOOK_TRUNCATION_WARNED: list = []
-
-
-class _NotPlain(Exception):
-    pass
-
-
-def _plain_repr(value) -> str | None:
-    """A plain value's canonical text, or None: exactly ``int``, ``float``,
-    ``complex``, ``bool``, ``None``, and tuples and frozensets of them,
-    within the bounds. A string is never plain: a digest of a short string
-    alone, or of a known definition with it, can confirm a guess of a secret
-    (``PW = os.environ[...]``), and no rule over names catches every way one
-    arrives. Mutable values are never plain: a task that appends to a global
-    list or fills a dict during one run would make the resume re-run every
-    cell. The type is part of the text, so ``1``, ``1.0`` and ``True``
-    differ; a frozenset's members are sorted, so its text does not depend on
-    the order it iterates in."""
-    budget = [_PLAIN_MAX_ITEMS, _PLAIN_MAX_CHARS]
-
-    def text(v, depth: int) -> str:
-        kind = type(v)
-        if kind in _PLAIN_TYPES:
-            out = f"{kind.__name__}:{v!r}"  # a huge int raises ValueError
-        elif (kind is tuple or kind is frozenset) and depth < 16:
-            budget[0] -= len(v)
-            if budget[0] < 0:
-                raise _NotPlain
-            parts = [text(item, depth + 1) for item in v]
-            if kind is frozenset:
-                parts.sort()
-            out = f"{kind.__name__}({','.join(parts)})"
-        else:
-            raise _NotPlain
-        budget[1] -= len(out)
-        if budget[1] < 0:
-            raise _NotPlain
-        return out
-
-    try:
-        return text(value, 0)
-    except (_NotPlain, ValueError, RecursionError):
-        return None
-
-
-def _secret_name(name) -> bool:
-    """Whether a number's name says it is a secret (a PIN)."""
-    return type(name) is str and _SECRET_NAME.search(name) is not None
 
 
 def _cell_entry(entry) -> bool:
@@ -1279,53 +1219,33 @@ def _cell_tree(lines):
     return tree
 
 
-def _code_names(code) -> tuple[frozenset, frozenset, frozenset]:
-    """``(reads, writes, attributes)`` of a code object and the code nested in
-    it: the global names it looks up, those it rebinds, and the attribute
-    names it stores. From bytecode, not ``co_names``, which also lists
-    attribute names (``cfg.lr`` would follow a global ``lr``). Bytecode only
-    chooses what to follow and what to leave out; it is never hashed, since
-    records are compared across Python versions."""
+def _code_names(code) -> tuple[frozenset, frozenset]:
+    """``(reads, writes)`` of a code object and the code nested in it: the
+    global names it looks up and those it rebinds. From bytecode, not
+    ``co_names``, which also lists attribute names (``cfg.lr`` would follow a
+    global ``lr``). Bytecode only chooses what to follow; it is never hashed,
+    since records are compared across Python versions."""
     import dis
     import types
 
     hit = _CODE_NAMES.get(code)
     if hit is not None:
         return hit
-    found: tuple[set, set, set] = (set(), set(), set())
-    kinds = (_GLOBAL_READS, _GLOBAL_WRITES, _ATTR_WRITES)
+    reads: set[str] = set()
+    writes: set[str] = set()
     stack = [code]
     while stack:
         current = stack.pop()
         for ins in dis.get_instructions(current):
             if type(ins.argval) is not str:
                 continue
-            for names, ops in zip(found, kinds, strict=True):
-                if ins.opname in ops:
-                    names.add(ins.argval)
+            if ins.opname in _GLOBAL_READS:
+                reads.add(ins.argval)
+            elif ins.opname in _GLOBAL_WRITES:
+                writes.add(ins.argval)
         stack.extend(k for k in current.co_consts if type(k) is types.CodeType)
-    result = (frozenset(found[0]), frozenset(found[1]), frozenset(found[2]))
+    result = (frozenset(reads), frozenset(writes))
     _cache_put(_CODE_NAMES, code, result)
-    return result
-
-
-def _nonlocal_names(code) -> frozenset:
-    """The closure variables a cell function (or a function nested in it)
-    rebinds: its ``nonlocal`` statements, read from its syntax tree. Bytecode
-    would not do: 3.11 and 3.12 compile a comprehension's variables
-    differently, so a store to a closure's cell there is not a rebind."""
-    import ast
-
-    hit = _NONLOCALS.get(code)
-    if hit is not None:
-        return hit
-    names: set[str] = set()
-    for node in _definition_nodes(code) or ():
-        for sub in ast.walk(node):
-            if type(sub) is ast.Nonlocal:
-                names.update(sub.names)
-    result = frozenset(names)
-    _cache_put(_NONLOCALS, code, result)
     return result
 
 
@@ -1412,8 +1332,8 @@ def _cell_function(value, namespace):
     """A function defined in a cell of ``namespace``, through decorators'
     ``__wrapped__``, a library's too (``@contextmanager``,
     ``@torch.no_grad()``), and through a ``functools.partial``'s function
-    (its bound arguments are not compared, as for a partial task) and a bound
-    method's function: None for anything else. Only a function's or an ``lru_cache`` wrapper's own
+    (its bound arguments are not compared, as for a partial task): None for
+    anything else. Only a function's or an ``lru_cache`` wrapper's own
     ``__dict__`` is read, so an arbitrary object (a lazy proxy) is never
     asked for an attribute."""
     import types
@@ -1431,8 +1351,6 @@ def _cell_function(value, namespace):
             value = vars(value).get("__wrapped__")
         elif kind is functools.partial:
             value = value.func
-        elif kind is types.MethodType:
-            value = value.__func__
         else:
             return None
     return None
@@ -1463,10 +1381,20 @@ def _class_methods(cls, namespace) -> list:
 
 def _notebook_object(value, namespace):
     """What a value stands for in the notebook's code: a function defined in
-    a cell (see ``_cell_function``), a class defined there, or an instance's
-    class (its methods run); None for anything else. One resolver for the
-    roots, the names the code reads and the values it captured, so a method
-    reached through an instance counts wherever it is found."""
+    a cell (see ``_cell_function``), a class defined there, an instance's
+    class (its methods run), or for a bound method its instance's (or its
+    class method's) class, since the method can call the others through
+    ``self``; None for anything else. One resolver for the roots and the
+    names the code reads."""
+    import types
+
+    if type(value) is types.MethodType:
+        owner = value.__self__
+        cls = _notebook_class(owner, namespace) or _notebook_class(
+            type(owner), namespace
+        )
+        if cls is not None:
+            return cls
     found = _cell_function(value, namespace) or _notebook_class(value, namespace)
     if found is None and _notebook_class(type(value), namespace) is not None:
         found = type(value)
@@ -1521,112 +1449,46 @@ def _components(children: dict) -> dict:
 def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
     """The entries of a notebook's code the roots reach: ``{"<name>
     (notebook)": digest}`` for each name their code looks up (and each root
-    by its name), through the objects bound now. A function defined in a
-    cell is its definition's syntax tree plus the values it captured (its
-    defaults and closure: what runs, not what their names hold now); a class
-    defined there is its ``class`` statement; an instance of one is its
-    class; a plain number is its text. A digest covers what its object
-    reaches through captured callables, methods and bases, a cycle (a method
-    calling ``super()``) as one component.
+    by its name) that stands for a function or class defined in a cell. A
+    function is its definition's syntax tree; a class its ``class``
+    statement; an instance, a bound method's instance, its class. A digest
+    covers what its object reaches through edges the run cannot move: a
+    class's methods and notebook bases, a wrapper's ``__wrapped__``.
 
-    Left out, since each can move without an edit or confirm a guess of a
-    secret: a string, a class's attribute values, a mutable value and what a
-    container holds, an object's state, data; a name any notebook function
-    rebinds, a closure variable one rebinds (``nonlocal``), every default
-    when one stores ``__defaults__``; IPython's own names; a number whose
-    name says it is a secret. The writes are taken from every function and
-    method the notebook binds (closures made at run time are in their
-    factory's code), before the walk, since a writer can sit wherever a
-    value can (an instance, a bound method, a hook in a captured tuple). A
-    record past its object bound has no notebook entries (with a warning):
-    what a cut walk finds depends on its order. Objects are inspected by
-    type, and only a function's own ``__dict__`` is read, so a lazy proxy is
-    never resolved."""
+    No value is compared, a closure's or a default's contents neither: a
+    value is only safe to compare when every writer of it is found, and in a
+    notebook a writer can sit wherever a value can. A name the reached code
+    rebinds (``global helper; helper = fast``) is left out. A record past its
+    object bound has no notebook entries (with a warning): which objects a
+    cut walk took depends on its order. Objects are inspected by type, and
+    only a function's own ``__dict__`` is read, so a lazy proxy is never
+    resolved."""
     import types
 
     def resolve(value):
         return _notebook_object(value, namespace)
 
-    def ignored(name) -> bool:
-        return type(name) is not str or bool(
-            (name.startswith("__") and name.endswith("__"))
-            or _IPYTHON_NAME.fullmatch(name)
-        )
-
-    # The writes, from all the notebook's code, before the walk.
-    scanned: list = []
-    sources = [v for k, v in list(namespace.items()) if not ignored(k)]
-    for value in [*sources, *(root for _, root in roots)]:
-        found = resolve(value)
-        if type(found) is types.FunctionType:
-            scanned.append(found)
-        elif found is not None:
-            scanned.extend(_class_methods(found, namespace))
-    rebound: set[str] = set()
-    attrs: set[str] = set()
-    cells: set[str] = set()
-    for fn in scanned:
-        _, writes, stores = _code_names(fn.__code__)
-        rebound |= writes
-        attrs |= stores
-        cells |= _nonlocal_names(fn.__code__)
-    moves = {
-        "default": "__defaults__" in attrs,
-        "kwdefault": "__kwdefaults__" in attrs,
-        "cell": "cell_contents" in attrs,
-    }
-
-    def moved(where: str, name: str) -> bool:
-        return moves[where] or (where == "cell" and name in cells)
-
-    # uid -> [kind, object, captures or methods, children]
+    # uid -> [kind, object, children, methods]
     units: dict[int, list] = {}
     codes: list = []
     over = [False]
 
     def visit(obj) -> int | None:
-        """Take a function or class into ``units``, with what it reaches
-        through a capture the run cannot move, its methods and its bases;
-        None past the bound."""
+        """Take a function or class into ``units``; None past the bound."""
         if id(obj) in units:
             return id(obj)
         if len(units) >= _NOTEBOOK_MAX_OBJECTS:
             over[0] = True
             return None
-        unit = units[id(obj)] = [None, obj, None, []]
+        unit = units[id(obj)] = [None, obj, [], []]
         if type(obj) is types.FunctionType:
-            code = obj.__code__
-            defaults = obj.__defaults__ or ()
-            positional = code.co_varnames[: code.co_argcount]
-            captures = [
-                ("default", name, value)
-                # `__defaults__` can be assigned any length.
-                for name, value in zip(
-                    positional[len(positional) - len(defaults) :],
-                    defaults,
-                    strict=False,
-                )
-            ]
-            captures += [
-                ("kwdefault", name, value)
-                for name, value in sorted((obj.__kwdefaults__ or {}).items())
-            ]
-            for name, cell in zip(
-                code.co_freevars, obj.__closure__ or (), strict=False
-            ):
-                try:
-                    captures.append(("cell", name, cell.cell_contents))
-                except ValueError:  # an empty cell
-                    captures.append(("cell", name, None))
-            unit[0], unit[2] = "function", captures
-            codes.append(code)
-            targets = [
-                resolve(v) for where, name, v in captures if not moved(where, name)
-            ]
+            unit[0] = "function"
+            codes.append(obj.__code__)
+            # A notebook decorator's wrapper is a cell function itself.
+            targets = [resolve(obj.__dict__.get("__wrapped__"))]
         else:
             methods = _class_methods(obj, namespace)
-            unit[0], unit[2] = "class", methods
-            codes.extend(fn.__code__ for fn in methods)
+            unit[0], unit[3] = "class", methods  # each method adds its code
             targets = [
                 *methods,
                 *(_notebook_class(b, namespace) for b in obj.__bases__),
@@ -1634,7 +1496,7 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         for target in targets:
             uid = visit(target) if target is not None else None
             if uid is not None:
-                unit[3].append(uid)
+                unit[2].append(uid)
         return id(obj)
 
     root_units: dict[str, list[int]] = {}
@@ -1655,11 +1517,13 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
             if name in followed or name not in namespace:
                 continue
             followed.add(name)
-            if ignored(name):
+            if (
+                name.startswith("__") and name.endswith("__")
+            ) or _IPYTHON_NAME.fullmatch(name):
                 continue
-            value = named[name] = namespace[name]
-            found = resolve(value)
+            found = resolve(namespace[name])
             if found is not None:
+                named[name] = found
                 visit(found)
     if over[0]:
         if not _NOTEBOOK_TRUNCATION_WARNED:
@@ -1670,42 +1534,35 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
                 "working_dir after editing it."
             )
         return {}
+    rebound: set[str] = set()
+    for code in codes:
+        rebound |= _code_names(code)[1]
 
     def own(uid: int) -> str:
-        """A unit's own parts, without what it reaches."""
-        kind, obj, extra, _ = units[uid]
-        parts = [kind]
+        """A unit's own definition, without what it reaches."""
+        kind, obj, _, methods = units[uid]
         if kind == "function":
             nodes = _definition_nodes(obj.__code__)
-            parts.append(
-                "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
-            )
-            for where, name, value in extra:
-                if moved(where, name):
-                    # Not even its type: the run can change that too.
-                    parts.append(f"{where}:{name}=moved")
-                    continue
-                text = _plain_repr(value)
-                if text is None or _secret_name(name):
-                    text = f"{type(value).__module__}.{type(value).__qualname__}"
-                parts.append(f"{where}:{name}={text}")
+            text = "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
         else:
-            node = _class_node(obj, extra)
-            parts.append("?" if node is None else _canonical_dump(node))
-        return _short_hash("\n".join(parts).encode())
+            node = _class_node(obj, methods)
+            text = "?" if node is None else _canonical_dump(node)
+        return _short_hash(f"{kind}\n{text}".encode())
 
-    # A component hashes its members' own parts and the digests of the
-    # components it reaches, which close first: a digest does not depend on
-    # the order the walk took, and a cycle costs one pass.
+    # A component hashes its members' own definitions and the digests of the
+    # components it reaches, which close first, so a digest does not depend
+    # on the order the walk took. Without captures the edges form no cycle
+    # (methods, bases and __wrapped__ only point down); components keep that
+    # true if one ever appears.
     owns = {uid: own(uid) for uid in units}
-    comp_of = _components({uid: unit[3] for uid, unit in units.items()})
+    comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}
     for uid, ci in comp_of.items():
         members.setdefault(ci, []).append(uid)
     comp_digest: dict[int, str] = {}
     for ci in sorted(members):
         reached = {
-            comp_of[c] for m in members[ci] for c in units[m][3] if comp_of[c] != ci
+            comp_of[c] for m in members[ci] for c in units[m][2] if comp_of[c] != ci
         }
         text = "\n".join(sorted(owns[m] for m in members[ci]))
         text += "\n--\n" + "\n".join(sorted({comp_digest[r] for r in reached}))
@@ -1720,17 +1577,10 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         entries[f"{key} (notebook)"] = (
             found[0] if len(found) == 1 else _short_hash("\n".join(found).encode())
         )
-    for name, value in named.items():
+    for name, obj in named.items():
         key = f"{name} (notebook)"
-        if key in entries or name in rebound:
-            continue
-        found = resolve(value)
-        if found is not None:
-            entries[key] = digest(id(found))
-            continue
-        text = _plain_repr(value)
-        if text is not None and not _secret_name(name):
-            entries[key] = _short_hash(f"value\n{text}".encode())
+        if key not in entries and name not in rebound:
+            entries[key] = digest(id(obj))
     return entries
 
 
@@ -2048,16 +1898,16 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     classes it binds are followed.
 
     A root defined where there is no file (a notebook) gives ``"<name>
-    (notebook)"`` for each name its code looks up there, through the objects
-    bound now (see ``_notebook_entries``), and the project modules of the
-    objects its namespace holds; the driver takes these when the run starts
-    and ships them in ``scripts``.
+    (notebook)"`` for each function or class defined in its cells that its
+    code reaches by name, by its definition (see ``_notebook_entries``), and
+    the project modules of the objects its namespace holds; the driver takes
+    these when the run starts and ships them in ``scripts``.
 
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
-    environment, a notebook's strings, class attribute values, mutable
-    values, objects' state and the functions reached only through a container,
-    a ``_target_`` defined in a notebook, and code reached only through a
+    environment, a notebook's values and the functions reached only through a
+    container, a closure or a default, a ``_target_`` defined in a notebook,
+    and code reached only through a
     string that is not a ``_target_`` of the config. None when the record cannot be taken (with a
     warning, once); a resume then does not compare, and ``cache_dir`` is not
     used."""

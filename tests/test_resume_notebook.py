@@ -101,30 +101,6 @@ NOTEBOOK_EDITS = {
         ["def helper(x):\n    return x * 2\n", TASK],
         ["def helper(x):\n    return x * 3\n"],
     ),
-    "a constant a helper reads": (
-        ["SCALE = 2\n\n\ndef helper(x):\n    return x * SCALE\n", TASK],
-        ["SCALE = 3\n"],
-    ),
-    "a constant the task reads": (
-        ["SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n"],
-        ["SCALE = 3\n"],
-    ),
-    "a tuple constant": (
-        ["LRS = (0.1, 0.2)\n\n\ndef task(a):\n    return a * LRS[1]\n"],
-        ["LRS = (0.1, 0.3)\n"],
-    ),
-    "an int replaced by a bool": (
-        ["FLAG = 1\n\n\ndef task(a):\n    return a * FLAG\n"],
-        ["FLAG = True\n"],
-    ),
-    "a default captured from a global, its cell run again": (
-        [
-            "SCALE = 2\n",
-            "def helper(x, s=SCALE):\n    return x * s\n",
-            TASK,
-        ],
-        ["SCALE = 3\n", "def helper(x, s=SCALE):\n    return x * s\n"],
-    ),
     "a class's method": (
         [
             "class Model:\n    def f(self, x):\n        return x * 2\n",
@@ -155,14 +131,6 @@ NOTEBOOK_EDITS = {
         [
             "class Model:\n    def f(self, x):\n        return x * 3\n\n\nmodel = Model()\n"
         ],
-    ),
-    "a closure's captured value": (
-        [
-            "def make(k):\n    def helper(x):\n        return x * k\n\n    return helper\n",
-            "helper = make(2)\n",
-            TASK,
-        ],
-        ["helper = make(3)\n"],
     ),
     "a method calling super()": (
         [
@@ -198,44 +166,6 @@ NOTEBOOK_EDITS = {
         ["act = lambda x: x * 2\n", "def task(a):\n    return act(a)\n"],
         ["act = lambda x: x * 3\n"],
     ),
-    "an int named like a token count": (
-        ["MAX_TOKENS = 256\n\n\ndef task(a):\n    return a * MAX_TOKENS\n"],
-        ["MAX_TOKENS = 512\n"],
-    ),
-    "one function of a ring of closures": (
-        [
-            "def make():\n"
-            + "".join(
-                f"    def h{i}(x):\n        return h{(i + 1) % 12}(x - 1) "
-                f"+ h{(i + 2) % 12}(x - 2) if x > 0 else {i}\n\n"
-                for i in range(12)
-            )
-            + "    return h0\n",
-            "task = make()\n",
-        ],
-        [
-            "def make():\n"
-            + "".join(
-                f"    def h{i}(x):\n        return h{(i + 1) % 12}(x - 1) "
-                f"+ h{(i + 2) % 12}(x - 2) if x > 0 else {i if i != 5 else 50}\n\n"
-                for i in range(12)
-            )
-            + "    return h0\n",
-            "task = make()\n",
-        ],
-    ),
-    "a helper a closure captures": (
-        [
-            "def make():\n    def inner(x):\n        return x * 2\n\n"
-            "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
-            "task = make()\n",
-        ],
-        [
-            "def make():\n    def inner(x):\n        return x * 3\n\n"
-            "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
-            "task = make()\n",
-        ],
-    ),
     "a method reached through a bound-method alias": (
         [
             "class Model:\n    def f(self, x):\n        return x * 2\n\n\nscore = Model().f\n",
@@ -254,6 +184,39 @@ NOTEBOOK_EDITS = {
         [
             "def scale(x, k):\n    return x * k * 10\n\n\n"
             "helper = functools.partial(scale, k=2)\ndel scale\n",
+        ],
+    ),
+    "a helper a notebook decorator wraps": (
+        [
+            "import functools\n\n\ndef logged(fn):\n    @functools.wraps(fn)\n"
+            "    def inner(*a):\n        return fn(*a)\n\n    return inner\n",
+            "@logged\ndef helper(x):\n    return x * 2\n",
+            TASK,
+        ],
+        ["@logged\ndef helper(x):\n    return x * 3\n"],
+    ),
+    "a method a bound method calls through self": (
+        [
+            "class Model:\n    def f(self, x):\n        return self.g(x)\n\n"
+            "    def g(self, x):\n        return x * 2\n\n\nscore = Model().f\n",
+            "def task(a):\n    return score(a)\n",
+        ],
+        [
+            "class Model:\n    def f(self, x):\n        return self.g(x)\n\n"
+            "    def g(self, x):\n        return x * 3\n\n\nscore = Model().f\n",
+        ],
+    ),
+    "a base class's method": (
+        [
+            "class Base:\n    def g(self, x):\n        return x * 2\n",
+            "class Model(Base):\n    def f(self, x):\n        return self.g(x)\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        [
+            # Model's cell runs again, unchanged, so it subclasses the new Base
+            # (until then the old Base is what runs, and the record says so).
+            "class Base:\n    def g(self, x):\n        return x * 3\n",
+            "class Model(Base):\n    def f(self, x):\n        return self.g(x)\n",
         ],
     ),
     "a decorated helper": (
@@ -469,6 +432,91 @@ NOTEBOOK_NOT_EDITS = {
         ],
         ["del _7\n"],
     ),
+    "a constant a helper reads (documented: values are not compared)": (
+        ["SCALE = 2\n\n\ndef helper(x):\n    return x * SCALE\n", TASK],
+        ["SCALE = 3\n"],
+    ),
+    "a constant the task reads (documented)": (
+        ["SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n"],
+        ["SCALE = 3\n"],
+    ),
+    "a tuple constant (documented)": (
+        ["LRS = (0.1, 0.2)\n\n\ndef task(a):\n    return a * LRS[1]\n"],
+        ["LRS = (0.1, 0.3)\n"],
+    ),
+    "an int replaced by a bool (documented)": (
+        ["FLAG = 1\n\n\ndef task(a):\n    return a * FLAG\n"],
+        ["FLAG = True\n"],
+    ),
+    "a default captured from a global, its cell run again (documented)": (
+        [
+            "SCALE = 2\n",
+            "def helper(x, s=SCALE):\n    return x * s\n",
+            TASK,
+        ],
+        ["SCALE = 3\n", "def helper(x, s=SCALE):\n    return x * s\n"],
+    ),
+    "a closure's captured value (documented)": (
+        [
+            "def make(k):\n    def helper(x):\n        return x * k\n\n    return helper\n",
+            "helper = make(2)\n",
+            TASK,
+        ],
+        ["helper = make(3)\n"],
+    ),
+    "an int named like a token count (documented)": (
+        ["MAX_TOKENS = 256\n\n\ndef task(a):\n    return a * MAX_TOKENS\n"],
+        ["MAX_TOKENS = 512\n"],
+    ),
+    "one function of a ring of closures (documented: closures are not followed)": (
+        [
+            "def make():\n"
+            + "".join(
+                f"    def h{i}(x):\n        return h{(i + 1) % 12}(x - 1) "
+                f"+ h{(i + 2) % 12}(x - 2) if x > 0 else {i}\n\n"
+                for i in range(12)
+            )
+            + "    return h0\n",
+            "task = make()\n",
+        ],
+        [
+            "def make():\n"
+            + "".join(
+                f"    def h{i}(x):\n        return h{(i + 1) % 12}(x - 1) "
+                f"+ h{(i + 2) % 12}(x - 2) if x > 0 else {i if i != 5 else 50}\n\n"
+                for i in range(12)
+            )
+            + "    return h0\n",
+            "task = make()\n",
+        ],
+    ),
+    "a helper a closure captures (documented)": (
+        [
+            "def make():\n    def inner(x):\n        return x * 2\n\n"
+            "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
+            "task = make()\n",
+        ],
+        [
+            "def make():\n    def inner(x):\n        return x * 3\n\n"
+            "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
+            "task = make()\n",
+        ],
+    ),
+    "a task rebinding a helper to another function": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x\n\n\nhelper = slow\n",
+            "def task(a):\n    global helper\n    helper = fast\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a global function named like an attribute the task reads": (
+        [
+            "import types\n\nns = types.SimpleNamespace(scale=abs)\n\n\n"
+            "def scale(x):\n    return x * 2\n",
+            "def task(a):\n    return ns.scale(a)\n",
+        ],
+        ["def scale(x):\n    return x * 3\n"],
+    ),
     "a module the task reads": (
         ["import math\n\n\ndef task(a):\n    return math.sqrt(a)\n"],
         ["import math\n"],
@@ -525,7 +573,6 @@ def test_a_restart_replaying_the_cells_gives_the_same_record():
         "Sub (notebook)",
         "Cfg (notebook)",
         "helper (notebook)",
-        "NAMES (notebook)",
     }
 
 
@@ -537,11 +584,7 @@ def test_the_entries_name_what_the_task_reaches(kernel):
             "def task(a):\n    return helper(a)\n",
         ],
     )
-    assert set(_record(kernel, "task")) == {
-        "task (notebook)",
-        "helper (notebook)",
-        "SCALE (notebook)",
-    }
+    assert set(_record(kernel, "task")) == {"task (notebook)", "helper (notebook)"}
 
 
 def test_an_inline_lambda_task_does_not_record_the_grid(kernel):
@@ -551,14 +594,8 @@ def test_an_inline_lambda_task_does_not_record_the_grid(kernel):
     one = _record(kernel, "F")
     kernel.run("SCALE = 2\nF, GRID = (lambda a: a * SCALE), [1, 2, 3]\n")
     assert _record(kernel, "F") == one
-    assert "SCALE (notebook)" in one
     kernel.run("SCALE = 2\nF, GRID = (lambda a: a * SCALE * 10), [1, 2, 3]\n")
     assert _record(kernel, "F")["<lambda> (notebook)"] != one["<lambda> (notebook)"]
-
-
-def test_a_value_past_the_bound_is_not_compared(kernel):
-    kernel.run("BIG = tuple(range(20000))\n\n\ndef task(a):\n    return BIG[a]\n")
-    assert "BIG (notebook)" not in _record(kernel, "task")
 
 
 def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
@@ -631,7 +668,11 @@ def test_components_match_reachability(edges):
 
 
 def test_ipythons_own_names_are_not_compared(kernel):
-    kernel.run("_ = 1\n_i3 = 'x'\n\n\ndef task(a):\n    return (_, _i3, a)\n")
+    """An output IPython keeps (`_`, `_3`) changes with every cell."""
+    kernel.run(
+        "def f(x):\n    return x\n\n\n_ = f\n_i3 = f\n\n\n"
+        "def task(a):\n    return (_(a), _i3(a))\n"
+    )
     record = _record(kernel, "task")
     assert "_ (notebook)" not in record and "_i3 (notebook)" not in record
 
@@ -647,8 +688,9 @@ def test_a_function_whose_text_is_not_kept_is_not_compared(kernel):
 @pytest.mark.parametrize(
     "cells",
     [
-        # Strings, under any name and from any source: a digest of one alone,
-        # or of a known definition with it, can confirm a guess of a secret.
+        # No value is compared, under any name and from any source (a string,
+        # a secret, a number), nor what a default or a closure holds: only a
+        # definition, whose text the notebook already holds.
         ["PW = ''.join(['hun', 'ter{k}'])\n", "def task(a):\n    return (PW, a)\n"],
         [
             "ENV = {{'PW': ''.join(['hun', 'ter{k}'])}}\n",
@@ -668,18 +710,18 @@ def test_a_function_whose_text_is_not_kept_is_not_compared(kernel):
             "SECRET = ''.join(['hun', 'ter{k}'])\n",
             "task = lambda a, pw=SECRET: sorted([a], key=lambda r: r)\n",
         ],
-        # A string constant: compared only through the code that reads it.
         [
             "MODEL = ''.join(['resnet', '{k}'])\n",
             "def task(a):\n    return (MODEL, a)\n",
         ],
-        # A number whose name, or whose parameter's, says it is a secret.
         ["DB_PASSWORD = 123{k}\n", "def task(a):\n    return DB_PASSWORD + a\n"],
         ["PIN = 123{k}\n", "def task(a, password=PIN):\n    return a\n"],
         ["PIN = 482{k}\n", "def task(a):\n    return a + PIN\n"],
     ],
 )
-def test_a_string_or_a_secret_number_is_never_compared(kernel, cells):
+def test_no_value_is_compared(kernel, cells):
+    """A value is only safe to compare when every writer of it is found, and
+    a digest of a short value alone can confirm a guess of a secret."""
     _run_cells(kernel, [c.format(k=2) for c in cells])
     one = _record(kernel, "task")
     assert one  # the task itself is recorded
@@ -795,7 +837,7 @@ CROSS_VERSION_CELLS = [
     "def task(a):\n    return model.f(a) * Cfg().lr + scaled(a) + cached(a) + FLAG"
     " + len(NOTE) + len(walrus(a)) + shadow(a)\n",
 ]
-CROSS_VERSION_DIGEST = "46d45ec92c9cdde2"
+CROSS_VERSION_DIGEST = "a765645c7f2d03eb"
 
 
 def test_the_record_reads_alike_on_every_supported_python(kernel):
@@ -842,10 +884,10 @@ def test_a_resume_after_a_notebook_edit_reruns_and_returns_the_new_values(
         ds = _sweep(kernel, wd, [1, 2, 3], resume=True)
     assert list(ds["v"].values) == [20, 40, 60]
 
-    kernel.run("SCALE = 3\n")
-    with pytest.warns(UserWarning, match=r"SCALE \(notebook\)"):
+    kernel.run("def helper(x):\n    return x * SCALE * 100\n")
+    with pytest.warns(UserWarning, match=r"helper \(notebook\)"):
         ds = _sweep(kernel, wd, [1, 2, 3], resume=True)
-    assert list(ds["v"].values) == [30, 60, 90]
+    assert list(ds["v"].values) == [200, 400, 600]
 
 
 def test_cache_dir_keys_on_the_notebook_code(kernel, tmp_path):
@@ -855,7 +897,7 @@ def test_cache_dir_keys_on_the_notebook_code(kernel, tmp_path):
     assert kernel.ns["CALLS"] == [1, 2]
     _sweep(kernel, tmp_path / "two", [1, 2], cache_dir=cache)
     assert kernel.ns["CALLS"] == [1, 2]  # reused
-    kernel.run("SCALE = 5\n")
+    kernel.run("def helper(x):\n    return x * 5\n")
     ds = _sweep(kernel, tmp_path / "three", [1, 2], cache_dir=cache)
     assert kernel.ns["CALLS"] == [1, 2, 1, 2]
     assert list(ds["v"].values) == [5, 10]
