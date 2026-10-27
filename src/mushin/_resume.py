@@ -805,16 +805,36 @@ def _script_digest(path: Path, roots: frozenset[str]):
         ]
 
     def declared_global(node) -> set[str]:
-        """The names a definition's own body declares ``global`` (not its
-        nested definitions')."""
+        """The names a definition, or a definition nested in it (a method, an
+        inner function), declares ``global`` and assigns in that same scope:
+        running it binds the module's name. One it only reads binds nothing."""
         found: set[str] = set()
-        stack = list(node.body)
-        while stack:
-            n = stack.pop()
-            if isinstance(n, ast.Global):
-                found.update(n.names)
-            elif not isinstance(n, (*defs, ast.Lambda)):
+        scopes = [node]
+        while scopes:
+            scope = scopes.pop()
+            declared: set[str] = set()
+            stored: set[str] = set()
+            stack = list(scope.body)
+            while stack:
+                n = stack.pop()
+                if isinstance(n, defs):
+                    stored.add(n.name)
+                    scopes.append(n)
+                    continue
+                if isinstance(n, ast.Lambda):
+                    continue
+                if isinstance(n, ast.Global):
+                    declared.update(n.names)
+                elif isinstance(n, ast.Name) and isinstance(
+                    n.ctx, (ast.Store, ast.Del)
+                ):
+                    stored.add(n.id)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    stored.update(
+                        (a.asname or a.name).partition(".")[0] for a in n.names
+                    )
                 stack.extend(ast.iter_child_nodes(n))
+            found |= declared & stored
         return found
 
     def binds(node) -> set[str]:
@@ -989,9 +1009,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     for n in kept:
         c = copy.deepcopy(n)
         if id(n) in in_else:
-            c = ast.If(
-                test=copy.deepcopy(in_else[id(n)]), body=[ast.Pass()], orelse=[c]
-            )
+            # A fixed marker, not the guard's own test: both spellings of the
+            # guard are one guard.
+            marker = ast.Name(id="__main_else__", ctx=ast.Load())
+            c = ast.If(test=marker, body=[ast.Pass()], orelse=[c])
         body.append(c)
     module = _strip_tree(
         ast.Module(body=body, type_ignores=[]),

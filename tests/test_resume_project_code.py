@@ -2211,6 +2211,15 @@ SCRIPT_EDITS = {
         "DEVICE = 'cpu'\nif True:\n\n    def setup():\n        global DEVICE\n"
         "        DEVICE = 'cuda:{k}'\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
     ),
+    "a global a method of a class in a block declares": (
+        "DEVICE = 'cpu'\ntry:\n\n    class Setup:\n        def go(self):\n"
+        "            global DEVICE\n            DEVICE = 'cuda:{k}'\n\n    Setup().go()\n"
+        "except Exception:\n    pass\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
+    ),
+    "a global an inner function in a block declares": (
+        "X = 0\nif True:\n\n    def outer():\n        def inner():\n            global X\n"
+        "            X = {k}\n\n        inner()\n\n    outer()\n\n\ndef task(a):\n    return a * X\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2221,6 +2230,11 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a block's function that only reads a global it declares": (
+        "SCALE = 2\nif True:\n\n    def report():\n        global SCALE\n"
+        "        print('scale', SCALE, {k})\n\n    GRID = list(range({k}))\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
     "a decorator alias that rebinds the name it aliases": (
         "def register(fn):\n    return fn\n\n\na = register\nregister = a\n\n\n"
         "@a\ndef other():\n    return {k}\n\n\ndef task(x):\n    return x\n"
@@ -2904,3 +2918,19 @@ def test_a_walrus_in_a_nested_definitions_return_annotation_binds(tmp_path):
     one = _digest_of_script(tmp_path, "wr1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "wr2", text.format(k=2), {"task"})
     assert one != two
+
+
+def test_the_main_guards_spelling_is_not_an_edit(tmp_path):
+    """`__name__ == "__main__"` and `"__main__" == __name__` are one guard:
+    flipping it is not an edit, though its else holds counted code."""
+    text = (
+        "def task(a):\n    return a * SCALE\n\n\n"
+        "if {guard}:\n    pass\nelse:\n    SCALE = 3\n"
+    )
+    one = _digest_of_script(
+        tmp_path, "gs1", text.format(guard="__name__ == '__main__'"), {"task"}
+    )
+    two = _digest_of_script(
+        tmp_path, "gs2", text.format(guard="'__main__' == __name__"), {"task"}
+    )
+    assert one == two
