@@ -2499,17 +2499,28 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             dict(...)``), so extending the grid or adding a print is not an
             edit. The script is read when the run starts (a ``_target_``
             defined in it, when the first cell naming it runs), so editing it
-            while the sweep runs does not change what its cells record. A re-run
-            warns, naming the file (``helpers (file)``). Files are compared as
+            while the sweep runs does not change what its cells record. A task
+            defined in a notebook is compared by the definitions its code
+            reaches by name in the kernel as the run starts: each function and
+            class its cells define (through decorators, a ``partial``, a bound
+            method or an instance), so re-running an edited cell and resuming
+            re-runs the cells. No value is compared (a number, a string, a
+            dict config, what a default or a closure holds): pass one as a
+            swept parameter, or use a new ``working_dir`` after editing it. A re-run
+            warns, naming the file (``helpers (file)``) or the notebook name
+            (``helper (notebook)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
             is not reloaded, the old code keeps running while the cells
             computed now are recorded as the new code's, so reload it (or
             restart) before resuming. mushin warns when it had recorded that
             file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
-            the environment, code defined in a notebook (the project modules
-            its functions, classes, objects and module values come from are
-            covered, not those its functions import inside their bodies), a
+            the environment, in a notebook its values, a function reached
+            only through a container (a registry), a closure or a default, a
+            class's attribute values beyond its text, a ``_target_`` defined
+            there, code whose text the kernel does not keep (a ``%%time``
+            cell, ``exec``, a ``%run`` file) and the project modules its
+            functions import inside their bodies, a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

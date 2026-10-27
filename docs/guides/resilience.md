@@ -121,6 +121,21 @@ definition registered inside a block, or a registry filled by
 `__init_subclass__` can hide an edit there; helpers kept in an imported module
 are compared as a whole file.
 
+In a notebook, what counts is the definitions the task's code reaches by name
+in the kernel when the run starts: each function and class defined in a cell,
+through decorators, a `partial`, a bound method or an instance. Re-run the
+edited cell, then resume, and the cells re-run with a warning naming it
+(`helper (notebook)`). No value is compared: not a number, a string, a dict
+config, nor what a default or a closure holds. A value is only safe to compare
+when every writer of it is known, and in a notebook a writer can sit anywhere
+a value can. So pass a value the results depend on (a model name, a scale) to
+the task as a swept parameter, or use a new `working_dir` after editing one. A
+function reached only through a container (a registry), a closure or a
+default, a `_target_` defined in the notebook, and code whose text the kernel
+does not keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
+To retry only the failed cells after an outage, keep the outage's state outside
+the code (a file, a service), as notebooks 04 and 08 do.
+
 ### The full loop
 
 ```
