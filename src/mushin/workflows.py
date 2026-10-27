@@ -2502,7 +2502,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             while the sweep runs does not change what its cells record. A task
             defined in a notebook is compared by what its code looks up in the
             kernel as the run starts: each helper and class its cells define
-            (their definitions, and the defaults and class attributes they
+            (their definitions, and the defaults and closure values they
             captured) and each number (or tuple of numbers) by its value, so
             re-running an edited cell and resuming re-runs the cells; a value
             that differs per session (a timestamp, a seed drawn in a cell), or
@@ -2518,9 +2518,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             covered: installed packages other than editable ones, data files,
             the environment, in a notebook a string constant (only through
             the code that reads it: a digest of one could confirm a guess of
-            a secret), a mutable value (a dict config), an object's state, a
-            name or closure variable the task rebinds, a ``_target_`` defined
-            there, code whose text the kernel does not keep (a ``%%time``
+            a secret), a number named like a secret (``password``, ``pin``),
+            a class's attribute values, a function reached only through a
+            container (a registry), a mutable value (a dict config), an
+            object's state, a global any notebook function rebinds, a
+            closure variable one rebinds, a ``_target_`` defined there, code
+            whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its
             functions import inside their bodies, a
             top-level statement of the driver script that changes an object in

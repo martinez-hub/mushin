@@ -158,7 +158,7 @@ resuming. Don't, and mushin actively stops you from doing it by accident.
   one, silently combined into one dataset. mushin's resume guards on a
   fingerprint of the resolved config, the task source **and** the project files
   the task's module imports (directly or through your other modules; in a
-  notebook, the helpers, classes and plain constants its cells define), so an
+  notebook, the helpers, classes and numbers its cells define), so an
   edited task or helper re-runs its cells rather than reusing a stale result;
   an upgraded dependency or changed data is not seen, and the only way to be
   sure *every* cell in your paper grid came from one code era is to run that

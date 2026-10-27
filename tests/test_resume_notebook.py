@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import linecache
-import os
 import subprocess
 import sys
 import textwrap
@@ -140,24 +139,6 @@ NOTEBOOK_EDITS = {
         ],
         ["class Model:\n    K = 3\n\n    def f(self, x):\n        return x * self.K\n"],
     ),
-    "a class attribute read from a global when the class ran": (
-        [
-            "SCALE = 2\n",
-            "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return x * self.K\n",
-            "def task(a):\n    return Model().f(a)\n",
-        ],
-        [
-            "SCALE = 3\n",
-            "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return x * self.K\n",
-        ],
-    ),
-    "a dataclass's default": (
-        [
-            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
-            "def task(a):\n    return a * Cfg().lr\n",
-        ],
-        ["@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n"],
-    ),
     "a helper only a class's method reaches": (
         [
             "def helper(x):\n    return x * 2\n",
@@ -174,15 +155,6 @@ NOTEBOOK_EDITS = {
         [
             "class Model:\n    def f(self, x):\n        return x * 3\n\n\nmodel = Model()\n"
         ],
-    ),
-    "a callable reached through a registry": (
-        [
-            "MODELS = {}\n\n\ndef register(fn):\n    MODELS[fn.__name__] = fn\n"
-            "    return fn\n",
-            "@register\ndef cnn(x):\n    return x * 2\n",
-            "def task(a):\n    return MODELS['cnn'](a)\n",
-        ],
-        ["@register\ndef cnn(x):\n    return x * 3\n"],
     ),
     "a closure's captured value": (
         [
@@ -262,6 +234,26 @@ NOTEBOOK_EDITS = {
             "def make():\n    def inner(x):\n        return x * 3\n\n"
             "    def outer(x):\n        return inner(x) + 1\n\n    return outer\n",
             "task = make()\n",
+        ],
+    ),
+    "a method reached through a bound-method alias": (
+        [
+            "class Model:\n    def f(self, x):\n        return x * 2\n\n\nscore = Model().f\n",
+            "def task(a):\n    return score(a)\n",
+        ],
+        [
+            "class Model:\n    def f(self, x):\n        return x * 3\n\n\nscore = Model().f\n"
+        ],
+    ),
+    "a helper reached through a partial": (
+        [
+            "import functools\n\n\ndef scale(x, k):\n    return x * k\n\n\n"
+            "helper = functools.partial(scale, k=2)\ndel scale\n",
+            TASK,
+        ],
+        [
+            "def scale(x, k):\n    return x * k * 10\n\n\n"
+            "helper = functools.partial(scale, k=2)\ndel scale\n",
         ],
     ),
     "a decorated helper": (
@@ -401,6 +393,82 @@ NOTEBOOK_NOT_EDITS = {
         ["NUMS = frozenset([1, 9, 17])\n\n\ndef task(a):\n    return a in NUMS\n"],
         ["NUMS = frozenset([17, 9, 1])\n"],
     ),
+    "a class attribute captured from a global (documented: not compared)": (
+        [
+            "SCALE = 2\n",
+            "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return x * self.K\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        [
+            "SCALE = 3\n",
+            "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return x * self.K\n",
+        ],
+    ),
+    "a method-less dataclass's default (documented: not compared)": (
+        [
+            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
+            "def task(a):\n    return a * Cfg().lr\n",
+        ],
+        ["@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n"],
+    ),
+    "a callable reached only through a container (documented)": (
+        [
+            "MODELS = {}\n\n\ndef register(fn):\n    MODELS[fn.__name__] = fn\n"
+            "    return fn\n",
+            "@register\ndef cnn(x):\n    return x * 2\n",
+            "def task(a):\n    return MODELS['cnn'](a)\n",
+        ],
+        ["@register\ndef cnn(x):\n    return x * 3\n"],
+    ),
+    "a hook in a tuple default writing a global": (
+        [
+            "N = 0\n\n\ndef bump(a):\n    global N\n    N += a\n",
+            "def task(a, hooks=(bump,)):\n    for h in hooks:\n        h(a)\n"
+            "    return N\n",
+        ],
+        ["task(1)\ntask(2)\n"],
+    ),
+    "a global written by a hook in a captured list": (
+        [
+            "N = 0\n\n\ndef bump(a):\n    global N\n    N += a\n",
+            "def make(hooks):\n    def task(a):\n        for h in hooks:\n            h(a)\n"
+            "        return N\n\n    return task\n\n\ntask = make([bump])\n",
+        ],
+        ["task(1)\ntask(2)\n"],
+    ),
+    "a global written through a bound-method alias": (
+        [
+            "best = 0.0\n\n\nclass Tracker:\n    def update(self, v):\n"
+            "        global best\n        best = max(best, v)\n\n\n"
+            "record_best = Tracker().update\n",
+            "def task(a):\n    record_best(a)\n    return a + best\n",
+        ],
+        ["task(5)\ntask(7)\n"],
+    ),
+    "a global written through an instance default": (
+        [
+            "best = 0.0\n\n\nclass Tracker:\n    def update(self, v):\n"
+            "        global best\n        best = max(best, v)\n",
+            "def task(a, tracker=Tracker()):\n    tracker.update(a)\n    return a + best\n",
+        ],
+        ["task(5)\ntask(7)\n"],
+    ),
+    "a closure caching lambdas in a captured dict": (
+        [
+            "def make():\n    cache = {}\n\n    def helper(x):\n        if x not in cache:\n"
+            "            cache[x] = lambda v: v * x\n        return cache[x](x)\n\n"
+            "    return helper\n\n\nhelper = make()\n",
+            TASK,
+        ],
+        ["task(1)\ntask(2)\n"],
+    ),
+    "an output that held a writer, cleared": (
+        [
+            "N = 1\n\n\ndef setter():\n    global N\n    N = 5\n\n\n_7 = setter\ndel setter\n",
+            "def task(a):\n    return a + N\n",
+        ],
+        ["del _7\n"],
+    ),
     "a module the task reads": (
         ["import math\n\n\ndef task(a):\n    return math.sqrt(a)\n"],
         ["import math\n"],
@@ -491,44 +559,6 @@ def test_an_inline_lambda_task_does_not_record_the_grid(kernel):
 def test_a_value_past_the_bound_is_not_compared(kernel):
     kernel.run("BIG = tuple(range(20000))\n\n\ndef task(a):\n    return BIG[a]\n")
     assert "BIG (notebook)" not in _record(kernel, "task")
-
-
-def test_a_large_data_global_is_walked_once(kernel, monkeypatch):
-    """A container is walked for the notebook functions it holds within one
-    bound shared by the whole walk, each container once: an aliased board
-    costs its distinct lists, not their product."""
-    import mushin._resume as resume
-
-    seen = []
-    walk = resume._container_items
-
-    def counting(value):
-        items = walk(value)
-        seen.append(len(items))
-        return items
-
-    monkeypatch.setattr(resume, "_container_items", counting)
-    kernel.run(
-        "BOARD = [[0] * 3000] * 3000\n\n\ndef task(a):\n    return BOARD[a][0]\n"
-    )
-    _record(kernel, "task")
-    assert sum(seen) <= 2 * 3000 + 10
-
-
-def test_a_registry_past_the_bound_gives_no_entry(kernel, monkeypatch):
-    """Which callables a cut walk finds depends on a set's order, which is per
-    process: past the bound the entry is left out, not taken from a part."""
-    import mushin._resume as resume
-
-    monkeypatch.setattr(resume, "_CONTAINER_BUDGET", 5)
-    kernel.run(
-        "".join(f"def h{i}(x):\n    return x + {i}\n\n\n" for i in range(20))
-        + "HOOKS = [h0, h1, {"
-        + ", ".join(f"h{i}" for i in range(2, 20))
-        + "}]\n\n\ndef task(a):\n    return [h(a) for h in HOOKS[:2]] + [h0(a), h1(a)]\n"
-    )
-    record = _record(kernel, "task")
-    assert "task (notebook)" in record and "HOOKS (notebook)" not in record
 
 
 def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
@@ -646,6 +676,7 @@ def test_a_function_whose_text_is_not_kept_is_not_compared(kernel):
         # A number whose name, or whose parameter's, says it is a secret.
         ["DB_PASSWORD = 123{k}\n", "def task(a):\n    return DB_PASSWORD + a\n"],
         ["PIN = 123{k}\n", "def task(a, password=PIN):\n    return a\n"],
+        ["PIN = 482{k}\n", "def task(a):\n    return a + PIN\n"],
     ],
 )
 def test_a_string_or_a_secret_number_is_never_compared(kernel, cells):
@@ -754,10 +785,17 @@ CROSS_VERSION_CELLS = [
     # `k` is a cell of `scaled` on 3.11 (its comprehension is a scope) and a
     # plain local on 3.12+: neither is a rebind of `triple`'s own `k`.
     "def scaled(a):\n    k = 2\n    return sum([triple(x) * k for x in range(a)])\n",
+    # A walrus in a comprehension (a store to the comprehension's free variable
+    # on 3.11), and a comprehension variable shadowing a captured name that a
+    # lambda captures (a store to the function's free variable on 3.12+):
+    # neither is a `nonlocal` rebind.
+    "def walrus(a):\n    return [(k := x) for x in range(a)]\n",
+    "def make2(i):\n    def inner(x):\n        fs = [lambda: i for i in range(x)]\n"
+    "        return len(fs) + i\n\n    return inner\n\n\nshadow = make2(3)\n",
     "def task(a):\n    return model.f(a) * Cfg().lr + scaled(a) + cached(a) + FLAG"
-    " + len(NOTE)\n",
+    " + len(NOTE) + len(walrus(a)) + shadow(a)\n",
 ]
-CROSS_VERSION_DIGEST = "b85556f9e6c49459"
+CROSS_VERSION_DIGEST = "46d45ec92c9cdde2"
 
 
 def test_the_record_reads_alike_on_every_supported_python(kernel):
@@ -765,31 +803,6 @@ def test_the_record_reads_alike_on_every_supported_python(kernel):
     record = _record(kernel, "task")
     digest = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
     assert digest[:16] == CROSS_VERSION_DIGEST, record
-
-
-def test_the_record_does_not_depend_on_the_hash_seed(tmp_path):
-    """Nothing in the record follows an order set by PYTHONHASHSEED (a set's
-    iteration, an id)."""
-    script = tmp_path / "seeded.py"
-    script.write_text(
-        "import json, sys\n"
-        f"sys.path.insert(0, {os.path.dirname(__file__)!r})\n"
-        "from test_resume_notebook import Kernel, _record, CROSS_VERSION_CELLS, _run_cells\n"
-        "k = Kernel()\n"
-        "_run_cells(k, CROSS_VERSION_CELLS)\n"
-        "print(json.dumps(_record(k, 'task'), sort_keys=True))\n"
-    )
-    outs = {
-        subprocess.run(
-            [sys.executable, str(script)],
-            capture_output=True,
-            text=True,
-            check=True,
-            env={**os.environ, "PYTHONHASHSEED": seed},
-        ).stdout
-        for seed in ("0", "1", "2", "3")
-    }
-    assert len(outs) == 1, outs
 
 
 # --- end to end: what a resume does with the record -------------------------------

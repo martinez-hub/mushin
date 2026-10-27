@@ -101,16 +101,22 @@ From each root, a worklist over `(namespace, name)` pairs, bounded (at most
   whose text lives in an in-memory `linecache` entry (one IPython wrote,
   with no mtime) is followed. Generated code (a dataclass's `__init__`,
   `co_filename == "<string>"`) is not.
-- **Rebound names are left out.** A name any reached code stores or deletes
-  as a global (`STORE_GLOBAL`, `DELETE_GLOBAL`: a task counting its calls in
-  `global CALLS`) is not recorded: its value moves during a run. Likewise a
-  closure variable it rebinds (`STORE_DEREF` to one of the storing code's own
-  free variables: a timing decorator's `nonlocal total`; a store to a local a
-  nested scope captures is not one, and 3.12 compiles that differently), all
-  defaults when it stores `__defaults__` or `__kwdefaults__`, and every
-  closure cell when it stores `cell_contents`, are recorded as moved: not
-  their value, not their type, and not as an edge. An attribute name it
-  stores leaves that class attribute out.
+- **Rebound names are left out, and the writes come first.** Before the
+  walk, the code of every function and notebook-class method the namespace
+  binds (through the one resolver: decorators, a `partial`, a bound method,
+  an instance's class), and the roots', is scanned; a closure made at run
+  time is in its factory's code (`co_consts`). A writer can sit wherever a
+  value can (an instance, a bound method, a hook in a captured tuple), so
+  scanning only what the walk reaches missed writers in round 3. A name any
+  of that code stores or deletes as a global (`STORE_GLOBAL`,
+  `DELETE_GLOBAL`: a task counting its calls in `global CALLS`) is not
+  recorded: its value moves during a run. A closure variable it declares
+  `nonlocal` (from the syntax tree: bytecode differs between 3.11 and 3.12
+  for comprehensions), all defaults when it stores `__defaults__` or
+  `__kwdefaults__`, and every closure cell when it stores `cell_contents`,
+  are recorded as moved: not their value, not their type, and not followed.
+  IPython's own names are not scanned, so the output history cannot change
+  what is left out.
 - **IPython's own names are left out:** `_`, `__`, `___`, `_i`, `_ii`,
   `_iii`, `_iN`, `_N`, `_oh`, `_ih`, `_dh`, `In`, `Out`, `get_ipython`,
   `exit`, `quit`, `_exit_code`, and dunder names.
@@ -119,11 +125,10 @@ From each root, a worklist over `(namespace, name)` pairs, bounded (at most
   an `lru_cache` wrapper's own `__dict__` is read for `__wrapped__`, so a
   library's wrapper is followed), as `_namespace_modules` already is: a lazy
   proxy must not resolve (`test_the_record_never_resolves_a_lazy_object`).
-- **Bounds omit, never truncate.** A container walk visits each container
-  once, breadth first, within 10,000 items; past that, the entries it feeds
-  are left out. Past 2000 functions and classes the record has no notebook
-  entries, with a warning. A cut walk's findings depend on a set's
-  per-process order, so a part of them would re-run cells after a restart.
+- **Bounds omit, never truncate.** Past 2000 functions and classes the
+  record has no notebook entries, with a warning: which objects a cut walk
+  took depends on its order. No container is walked (round 3 removed the
+  registry rule: what a container holds is state the task can change).
 - **Digests per component.** A digest covers what its object reaches
   through captured values, methods and bases. The graph is condensed into
   strongly connected components (iterative Tarjan): a component hashes its
@@ -140,10 +145,9 @@ a re-run says which name changed (`code the task reaches (helper
 | Bound to | Entry | Followed further |
 | --- | --- | --- |
 | A function defined in the notebook (through `__wrapped__` and a `partial`'s function) | The canonical dump of its definition node, docstrings stripped, from the cell text; plus its captured values (below) | Its read-set; a notebook function or class a default or closure cell holds directly |
-| A class defined in the notebook (its `__module__` is the namespace's `__name__`) | Its `ClassDef` dump, located through a method (below), plus its plain class attributes | Its notebook bases; its methods' read-sets |
+| A class defined in the notebook (its `__module__` is the namespace's `__name__`) | Its `ClassDef` dump, located through a method (below); not its attribute values | Its notebook bases; its methods' read-sets |
 | An instance of a notebook class | Its class's entry | As its class |
 | A plain value (numbers) | `(type name, canonical repr)` | Nothing |
-| A list, tuple, dict or set the task reads, holding notebook functions or classes the notebook also binds by name (a registry filled by decorators) | The set of those callables' digests (the container's other contents are not compared) | Those callables |
 | A module, anything else | No entry (`_namespace_modules` still seeds project modules) | Nothing |
 
 Details:
@@ -159,11 +163,7 @@ Details:
   `staticmethod`, `classmethod`, `property`), one whose `__qualname__` starts
   with `cls.__qualname__ + "."` and whose code lives in a cell; the innermost
   `ClassDef` named `cls.__name__` in that cell spanning the method's line. A
-  class with no such method (a dataclass with fields only) has no dump; its
-  plain attributes are its entry.
-- **Plain attributes of a class:** the non-dunder names in `vars(cls)` bound
-  to plain values, sorted. This also captures what the class body read when
-  it ran (`K = SCALE` holds the value it captured, not today's `SCALE`).
+  class with no such method (a dataclass with fields only) has no dump.
 - **Captured values of a function:** its `__defaults__`, `__kwdefaults__`
   and closure cells, each a plain value's repr or else its type name. A
   default holds what the definition captured when it ran, which is what
@@ -235,9 +235,14 @@ with `pytest.importorskip`.
 - A string constant (a model name, a prompt), compared only through the code
   that reads it; a number derived from a secret under an innocent name.
 - A `_target_` defined in the notebook.
-- A lambda or closure kept in a registry (only callables the notebook binds
-  by name count), and a registry deeper than 4 levels or past 10,000 items;
-  a notebook reaching more than 2000 functions and classes (warns).
+- A function or class reached only through a container (a registry
+  `MODELS["cnn"]`): a container is state the task can change.
+- A class's attribute values: a class attribute captured from a global
+  (`K = SCALE`), a method-less dataclass's default (its class statement
+  cannot be located). A literal in a located class statement still counts.
+- A global any notebook function rebinds, even one the task never calls.
+- A writer whose factory has left the namespace (its code is not scanned).
+- A notebook reaching more than 2000 functions and classes (warns).
 - State the task changes while it runs other than by rebinding a name, an
   attribute or a closure variable (`setattr`, `globals()`, `exec`, a
   function's defaults changed in place) re-runs the cells on the next
@@ -261,20 +266,34 @@ Not an edit (the record is unchanged):
   `global`;
 - a helper the task does not reach; a cell that failed before it could
   redefine the helper;
-- a lambda passed inline to `run(...)` with a longer grid.
+- a lambda passed inline to `run(...)` with a longer grid;
+- the review rounds' reproductions: a timing decorator's `nonlocal` total, a
+  lazily set `nonlocal` implementation, a writer held in a `partial`, behind
+  a bound-method alias, an instance default or a hook in a captured tuple or
+  list, a task setting a function's defaults or a closure cell, a closure
+  caching lambdas in a captured dict, an equal frozenset built in another
+  order, an IPython output that held a writer, cleared;
+- each documented residual, pinned as not compared (a string, a number named
+  like a secret, a class attribute captured from a global, a method-less
+  dataclass's default, a callable reached only through a container).
 
 An edit (the record changes):
 - a helper's body edited and re-run; a constant changed; a default captured
-  from a global, after its cell is re-run; a class's method; a class
-  attribute; a method-less dataclass's default; a callable reached through a
-  registry dict; a closure's captured value; a helper only a class's method
-  reaches.
+  from a global, after its cell is re-run; a class's method; a literal class
+  attribute; a closure's captured value; a helper only a class's method
+  reaches; a method reached through a bound-method alias; a helper reached
+  through a `partial`, a library decorator or a `functools.wraps` decorator;
+  a lambda helper; a method calling `super()`; a ring of closures; a helper a
+  closure captures; an int named like a token count (`MAX_TOKENS`).
 
 End to end, the invariant: in a shell, run a sweep with `resume=True`, edit a
 helper, resume, and read the metrics back: each cell's value is the one the
 current code computes, then an unchanged resume reuses every cell. The same
 with `cache_dir=`. One notebook pinned to a single digest on Python 3.11 to
-3.14. The lazy-proxy test stays green.
+3.14, including both comprehension shapes that compile differently on 3.11
+and 3.12. `_components` checked against brute-force reachability. The bound,
+through a monkeypatched limit, and its warning. The lazy-proxy test stays
+green.
 
 ## Docs inventory
 
