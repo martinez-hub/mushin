@@ -2497,8 +2497,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             registers, in the main block too), not by the run call, other
             top-level calls or prints, or what only they read (``GRID =
             dict(...)``), so extending the grid or adding a print is not an
-            edit; a main block's body counts and its ``else``, which does not
-            run, does not. The script is read when the run starts (a ``_target_``
+            edit. The script is read when the run starts (a ``_target_``
             defined in it, when the first cell naming it runs), so editing it
             while the sweep runs does not change what its cells record. A re-run
             warns, naming the file (``helpers (file)``). Files are compared as

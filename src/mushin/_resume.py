@@ -715,8 +715,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
     writing the ``MODELS`` the task reads)
     or comes from a project module; not one whose decorators are foreign
     (``@click.command()``, ``@hydra.main``, ``@dataclass``). A ``__future__``
-    import always counts. The script runs as ``__main__``, so a main block's
-    body counts and its ``else`` does not. A name is bound by the statements
+    import always counts. A main block's body and its ``else`` (which runs
+    where the script is imported, as in a spawn child) both count, the
+    ``else`` marked as such. A name is bound by the statements
     that bind it in the module's scope (a ``match`` capture does; a
     comprehension's variable, a nested function's local and an annotation
     without a value do not). Not counted: statements that
@@ -803,6 +804,19 @@ def _script_digest(path: Path, roots: frozenset[str]):
             *(d for d in args.kw_defaults if d is not None),
         ]
 
+    def declared_global(node) -> set[str]:
+        """The names a definition's own body declares ``global`` (not its
+        nested definitions')."""
+        found: set[str] = set()
+        stack = list(node.body)
+        while stack:
+            n = stack.pop()
+            if isinstance(n, ast.Global):
+                found.update(n.names)
+            elif not isinstance(n, (*defs, ast.Lambda)):
+                stack.extend(ast.iter_child_nodes(n))
+        return found
+
     def binds(node) -> set[str]:
         if isinstance(node, defs):
             return {node.name}
@@ -818,6 +832,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
             sub, in_comp = stack.pop()
             if isinstance(sub, defs):
                 names.add(sub.name)  # a definition inside `try:` or `if:`
+                # A `global` in its body binds the module's name, as the
+                # walk over the whole block did before.
+                names.update(declared_global(sub))
                 # Its body binds its own names; what it evaluates here (a
                 # walrus in a default or an annotation) binds the module's.
                 stack.extend((e, in_comp) for e in run_here(sub))
@@ -864,9 +881,15 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return names
 
     statements = []
+    in_else: dict[int, object] = {}
     for node in tree.body:
         if _is_main_guard(node):
-            statements += node.body  # as __main__, the else does not run
+            # The body runs as __main__; the else runs where the script is
+            # imported (a spawn child re-imports it as __mp_main__). Both
+            # count, the else marked as such, so moving a statement between
+            # them is an edit.
+            statements += node.body + node.orelse
+            in_else.update((id(stmt), node.test) for stmt in node.orelse)
         else:
             statements.append(node)
     candidates = [(n, binds(n)) for n in statements]
@@ -961,8 +984,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
             read |= reads(n)
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
+
+    body = []
+    for n in kept:
+        c = copy.deepcopy(n)
+        if id(n) in in_else:
+            c = ast.If(
+                test=copy.deepcopy(in_else[id(n)]), body=[ast.Pass()], orelse=[c]
+            )
+        body.append(c)
     module = _strip_tree(
-        ast.Module(body=[copy.deepcopy(n) for n in kept], type_ignores=[]),
+        ast.Module(body=body, type_ignores=[]),
         main_guards=False,  # the script runs as __main__: its guards run too
     )
     result = (_short_hash(_canonical_dump(module).encode()), _import_pairs(module))

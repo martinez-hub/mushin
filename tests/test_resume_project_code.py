@@ -2195,6 +2195,22 @@ SCRIPT_EDITS = {
         "CFG = {{'a': 1, 'b': {k}}}\nmatch CFG:\n    case {{'a': _, **REST}}:\n        pass\n\n\n"
         "def task(a):\n    return a * REST['b']\n"
     ),
+    "a value set in the main block's else, which a spawned child runs": (
+        "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
+        "if __name__ == '__main__':\n    run(task)\nelse:\n    SCALE = {k}\n"
+    ),
+    "a decorator aliased from a class attribute": (
+        "MODELS = {{}}\n\n\nclass Reg:\n    @staticmethod\n    def add(cls):\n"
+        "        MODELS[cls.__name__] = cls\n        return cls\n\n\nregister = Reg.add\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a walrus in a lambda default": (
+        "F = lambda x=(SCALE := {k}): x\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a global a function in a block declares": (
+        "DEVICE = 'cpu'\nif True:\n\n    def setup():\n        global DEVICE\n"
+        "        DEVICE = 'cuda:{k}'\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2205,6 +2221,13 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a decorator alias that rebinds the name it aliases": (
+        "def register(fn):\n    return fn\n\n\na = register\nregister = a\n\n\n"
+        "@a\ndef other():\n    return {k}\n\n\ndef task(x):\n    return x\n"
+    ),
+    "a walrus in a lambda body": (
+        "F = lambda: (SCALE := {k})\nSCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
     "a loop over the grid beside a registration in its block": (
         "MODELS = {{}}\nGRID = list(range({k}))\n\n\ndef register(cls):\n"
         "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif True:\n\n    @register\n"
@@ -2219,10 +2242,6 @@ SCRIPT_NOT_EDITS = {
         "err = {k}\n\n\nclass Cfg:\n    try:\n        X = 1 / 0\n"
         "    except ZeroDivisionError as err:\n        X = str(err)\n\n\n"
         "def task(a):\n    return len(Cfg.X) * a\n"
-    ),
-    "an edit in the main block's else": (
-        "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
-        "if __name__ == '__main__':\n    run(task)\nelse:\n    SCALE = {k}\n"
     ),
     "a grid in the block that registers a definition": (
         "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n\n\n"
@@ -2323,9 +2342,10 @@ def test_a_future_import_in_a_script_counts(tmp_path):
     assert plain != future
 
 
-def test_a_main_guard_else_branch_does_not_run_in_the_script(tmp_path):
-    """The driver script runs as `__main__`: its main block's body runs and
-    its `else` does not, so moving an assignment between them is an edit."""
+def test_moving_a_statement_between_the_main_blocks_branches_is_an_edit(tmp_path):
+    """The main block's body runs as `__main__`, its `else` where the script
+    is imported (a spawn child): moving an assignment between them is an
+    edit, though both count."""
     text = (
         "def task(a):\n    return a * SCALE\n\n\n"
         "if __name__ == '__main__':\n    SCALE = 2\n{moved}else:\n{other}"
@@ -2871,4 +2891,16 @@ def test_a_decorator_from_a_star_import_inside_a_block_registers(project, tmp_pa
     )
     one = _digest_of_script(tmp_path, "sb1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "sb2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_walrus_in_a_nested_definitions_return_annotation_binds(tmp_path):
+    if sys.version_info >= (3, 14):
+        pytest.skip("a named expression is not allowed in an annotation on 3.14")
+    text = (
+        "if True:\n\n    def helper(x) -> (SCALE := {k}):\n        return x\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    )
+    one = _digest_of_script(tmp_path, "wr1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "wr2", text.format(k=2), {"task"})
     assert one != two
