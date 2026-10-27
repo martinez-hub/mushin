@@ -898,25 +898,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return _project_file_of(module) is not None
         return False
 
-    def writes_counted(name: str, node, read: set[str], seen: set) -> bool:
-        """Whether the script code bound to decorator ``name`` reads what
-        counted code reads (``@register`` writing the ``MODELS`` the task
-        reads), through an alias of it too (``register_model = register``)."""
+    def decorator_registers(name: str, node, read: set[str], seen: set) -> bool:
+        """Main's rule for decorator ``name``: one of its binders (or, for a
+        name no statement binds, a star import) is a project import, or is
+        script code reading what counted code reads. Followed through an alias
+        of it too (``register_model = register``), bounded."""
         if name in seen or len(seen) > 50:
             return False
         seen.add(name)
-        for binder in binders.get(name, ()):
-            if binder is node:
-                continue
+        # A name no statement binds may come from a star import.
+        star = [b for b in binders.get("*", ()) if not binders.get(name)]
+        for binder in [*binders.get(name, ()), *star]:
             if isinstance(binder, (ast.Import, ast.ImportFrom)):
-                continue
-            if reads(binder) & read:
+                if project_import(binder, name):
+                    return True
+            elif binder is not node and reads(binder) & read:
                 return True
+        for binder in binders.get(name, ()):
             if isinstance(binder, ast.Assign) and isinstance(
                 binder.value, (ast.Name, ast.Attribute)
             ):
                 alias = base(binder.value)
-                if alias and writes_counted(alias, node, read, seen):
+                if alias and decorator_registers(alias, node, read, seen):
                     return True
         return False
 
@@ -927,15 +930,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         on another sweep)."""
         for deco in getattr(node, "decorator_list", ()):
             name = base(deco)
-            if name is None:
-                continue
-            # A name no statement binds may come from a star import.
-            star = [b for b in binders.get("*", ()) if not binders.get(name)]
-            for binder in [*binders.get(name, ()), *star]:
-                if isinstance(binder, (ast.Import, ast.ImportFrom)):
-                    if project_import(binder, name):
-                        return True
-            if writes_counted(name, node, read, set()):
+            if name is not None and decorator_registers(name, node, read, set()):
                 return True
         return False
 

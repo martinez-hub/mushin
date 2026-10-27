@@ -2083,7 +2083,7 @@ def test_an_edit_that_keeps_size_and_mtime_is_seen(project):
     assert _script_digest(path, frozenset({"K"}))[0] != script_first
 
 
-# --- the script rule follows what runs (Codex's cases on #270) ------------------
+# --- the script rule follows what runs (review cases from #270) ----------------
 #
 # Each text is a driver script whose task is `task`; `{k}` is the edit. An
 # EDIT changes what the task computes, so the script's digest must change; a
@@ -2855,4 +2855,20 @@ def test_a_walrus_in_a_bare_annotation_binds(tmp_path):
     text = "x: (SCALE := {k})\n\n\ndef task(a):\n    return a * SCALE\n"
     one = _digest_of_script(tmp_path, "ba1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "ba2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_decorator_from_a_star_import_inside_a_block_registers(project, tmp_path):
+    """`try: from helpers import *`: the `@register` it provides fills the
+    `MODELS` the task reads, as with a top-level star import."""
+    root, _ = project
+    (root / "mushin_t_starreg_blk.py").write_text(
+        "MODELS = {}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n"
+    )
+    text = (
+        "try:\n    from mushin_t_starreg_blk import *\nexcept ImportError:\n    pass\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    )
+    one = _digest_of_script(tmp_path, "sb1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "sb2", text.format(k=2), {"task"})
     assert one != two
