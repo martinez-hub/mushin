@@ -2081,3 +2081,185 @@ def test_an_edit_that_keeps_size_and_mtime_is_seen(project):
     assert path.stat().st_mtime_ns == st.st_mtime_ns
     assert _parsed(path)[0] != first
     assert _script_digest(path, frozenset({"K"}))[0] != script_first
+
+
+# --- the script rule follows what runs (Codex's cases on #270) ------------------
+#
+# Each text is a driver script whose task is `task`; `{k}` is the edit. An
+# EDIT changes what the task computes, so the script's digest must change; a
+# NOT_EDIT does not, so it must not (extending a grid, renaming nothing).
+
+SCRIPT_EDITS = {
+    "a decorator alias": (
+        "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n"
+        "    return cls\n\n\nregister_model = register\n\n\n@register_model\n"
+        "class Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a decorator that registers through a helper": (
+        "MODELS = {{}}\n\n\ndef _add(cls):\n    MODELS[cls.__name__] = cls\n\n\n"
+        "def register(cls):\n    _add(cls)\n    return cls\n\n\n@register\n"
+        "class Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a registration inside a block": (
+        "MODELS = {{}}\nENABLED = True\n\n\ndef register(cls):\n"
+        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif ENABLED:\n\n"
+        "    @register\n    class Lin:\n        K = {k}\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a match capture": (
+        "CFG = {{'scale': {k}}}\nmatch CFG:\n    case {{'scale': SCALE}}:\n"
+        "        pass\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a class body reading the global it shadows": (
+        "SCALE = {k}\n\n\nclass Config:\n    SCALE = SCALE\n\n\n"
+        "def task(a):\n    return a * Config.SCALE\n"
+    ),
+    "a function that sets a global": (
+        "DEVICE = 'cpu'\n\n\ndef configure():\n    global DEVICE\n"
+        "    DEVICE = 'cuda:{k}'\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
+    ),
+    "a value a conditional rebinding may keep": (
+        "FAST = False\nSCALE = {k}\nif FAST:\n    SCALE = 5\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a walrus inside a comprehension": (
+        "VALS = [(LAST := v) for v in range({k})]\n\n\ndef task(a):\n    return a * LAST\n"
+    ),
+    "a constant computed from another": (
+        "BASE = {k}\nSCALE = BASE * 10\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "an augmented assignment": (
+        "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value read when it was computed": (
+        "SCALE = {k}\nFACTOR = SCALE * 2\nSCALE = 100\n\n\n"
+        "def task(a):\n    return a * FACTOR\n"
+    ),
+}
+
+SCRIPT_NOT_EDITS = {
+    "a comprehension variable named like a global": (
+        "SCALE = 2\nGRID = [SCALE for SCALE in range({k})]\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a helper's local inside a block": (
+        "SCALE = 2\nif True:\n\n    def make():\n        SCALE = 3\n        return SCALE\n\n"
+        "    GRID = list(range({k}))\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value rebound before the task reads it": (
+        "SCALE = {k}\nSCALE = 5\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a declaration without a value after the binding": (
+        "SCALE = 2\nSCALE: 'v{k}'\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SCRIPT_EDITS))
+def test_a_script_edit_is_seen(tmp_path, case):
+    text = SCRIPT_EDITS[case]
+    one = _digest_of_script(tmp_path, "se1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "se2", text.format(k=2), {"task"})
+    assert one != two
+
+
+@pytest.mark.parametrize("case", sorted(SCRIPT_NOT_EDITS))
+def test_a_script_change_the_task_cannot_see_is_not_an_edit(tmp_path, case):
+    text = SCRIPT_NOT_EDITS[case]
+    one = _digest_of_script(tmp_path, "sn1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "sn2", text.format(k=2), {"task"})
+    assert one == two
+
+
+def test_a_future_import_in_a_script_counts(tmp_path):
+    """`from __future__ import annotations` changes how every definition in
+    the script runs, whatever names the task reads."""
+    body = (
+        "SCALE = 2\n\n\ndef helper(x: SCALE):\n    return x\n\n\n"
+        "def task(a):\n    return helper.__annotations__['x']\n"
+    )
+    plain = _digest_of_script(tmp_path, "fut1", body, {"task"})
+    future = _digest_of_script(
+        tmp_path, "fut2", "from __future__ import annotations\n\n" + body, {"task"}
+    )
+    assert plain != future
+
+
+def test_a_main_guard_else_branch_does_not_run_in_the_script(tmp_path):
+    """The driver script runs as `__main__`: its main block's body runs and
+    its `else` does not, so moving an assignment between them is an edit."""
+    text = (
+        "def task(a):\n    return a * SCALE\n\n\n"
+        "if __name__ == '__main__':\n    SCALE = 2\n{moved}else:\n{other}"
+    )
+    body = _digest_of_script(
+        tmp_path, "mge1", text.format(moved="    SCALE = 20\n", other="    pass\n"), {"task"}
+    )
+    other = _digest_of_script(
+        tmp_path, "mge2", text.format(moved="", other="    SCALE = 20\n"), {"task"}
+    )
+    assert body != other
+
+
+def test_reordering_independent_definitions_is_not_an_edit(tmp_path):
+    first = "SCALE = 2\n\n\ndef helper(x):\n    return x * SCALE\n\n\n"
+    second = "def task(a):\n    return helper(a)\n"
+    one = _digest_of_script(tmp_path, "ord1", first + "\n\n" + second, {"task"})
+    two = _digest_of_script(tmp_path, "ord2", second + "\n\n" + first, {"task"})
+    assert one == two
+
+
+#: One script holding most constructs the rule reads. Its digest must be the
+#: same on every supported Python (records are compared across versions, and
+#: a digest that moved with the interpreter would re-run every cell).
+CROSS_VERSION_SCRIPT = '''
+"""A driver script."""
+import functools
+import math as m
+from collections import OrderedDict
+
+SCALE = 2
+NAMES = [n for n in ("a", "b")]
+TABLE = {k: v for k, v in zip(NAMES, range(2))}
+GEN = sum(x * SCALE for x in range(3))
+BASE = 2
+SCALED = [BASE * v for v in range(2)]
+BASE = 5
+FN = lambda s: s * SCALE
+
+
+class Config:
+    LR: float = 0.1
+    SCALE = SCALE
+
+    def scaled(self, x: int = 1) -> float:
+        return x * self.LR * m.pi
+
+
+@functools.lru_cache
+def helper(x, *, factor: int = SCALE):
+    try:
+        import json as _json
+    except ImportError as err:
+        _json = err
+    with open(__file__) as f:
+        _ = f.read(1)
+    return [Config().scaled(x) for _ in range(factor)], OrderedDict(), _json
+
+
+def task(a):
+    global LAST
+    LAST = a
+    return helper(a), FN(a), TABLE, GEN, SCALED
+
+
+if __name__ == "__main__":
+    GRID = list(range(3))
+'''
+
+CROSS_VERSION_DIGEST = "e0128ffdf7cad4fe"
+
+
+def test_a_script_digest_is_the_same_on_every_python(tmp_path):
+    digest = _digest_of_script(tmp_path, "xver", CROSS_VERSION_SCRIPT, {"task"})
+    assert digest == CROSS_VERSION_DIGEST
