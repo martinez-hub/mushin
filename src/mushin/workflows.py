@@ -2497,7 +2497,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             registers, in the main block too), not by the run call, other
             top-level calls or prints, or what only they read (``GRID =
             dict(...)``), so extending the grid or adding a print is not an
-            edit; the script is read when the run starts (a ``_target_``
+            edit. The script is read when the run starts (a ``_target_``
             defined in it, when the first cell naming it runs), so editing it
             while the sweep runs does not change what its cells record. A re-run
             warns, naming the file (``helpers (file)``). Files are compared as
@@ -2514,13 +2514,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script
             definition reached only through an ``__init_subclass__`` or
-            metaclass registry, a package ``__init__.py`` above a config
-            ``_target_`` that no project code imports, and code reached only
-            through some other string. The script rule follows names, so an
-            unusual pattern (a decorator alias, a ``match`` capture, an
-            assignment moved between a main guard's branches) can hide an
-            edit: keep helpers in an imported module, which is compared as a
-            whole file, when that matters. A very large project
+            metaclass registry, a definition registered inside a block (``if
+            ENABLED: @register class ...``), a class body reading the module's
+            name it shadows (``SCALE = SCALE``), and code reached only through
+            some other string. The script rule follows names, so state
+            reached another way (``globals()``, ``exec``) can hide an edit:
+            keep helpers in an imported module, which is compared as a whole
+            file, when that matters. A very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.

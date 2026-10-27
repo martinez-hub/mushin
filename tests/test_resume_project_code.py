@@ -2083,6 +2083,391 @@ def test_an_edit_that_keeps_size_and_mtime_is_seen(project):
     assert _script_digest(path, frozenset({"K"}))[0] != script_first
 
 
+# --- the script rule follows what runs (review cases from #270) ----------------
+#
+# Each text is a driver script whose task is `task`; `{k}` is the edit. An
+# EDIT changes what the task computes, so the script's digest must change; a
+# NOT_EDIT does not, so it must not (extending a grid, renaming nothing).
+
+SCRIPT_EDITS = {
+    "a decorator alias": (
+        "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n"
+        "    return cls\n\n\nregister_model = register\n\n\n@register_model\n"
+        "class Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a match capture": (
+        "CFG = {{'scale': {k}}}\nmatch CFG:\n    case {{'scale': SCALE}}:\n"
+        "        pass\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value a conditional rebinding may keep": (
+        "FAST = False\nSCALE = {k}\nif FAST:\n    SCALE = 5\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a walrus inside a comprehension": (
+        "VALS = [(LAST := v) for v in range({k})]\n\n\ndef task(a):\n    return a * LAST\n"
+    ),
+    "a constant computed from another": (
+        "BASE = {k}\nSCALE = BASE * 10\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value rebound before the task reads it (a function may run between)": (
+        "SCALE = {k}\nSCALE = 5\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value a function computes while the script runs": (
+        "BASE = {k}\n\n\ndef scale():\n    return BASE * 10\n\n\nSCALE = scale()\n"
+        "BASE = 100\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value rebound after the run call": (
+        "MODE = 'm{k}'\n\n\ndef task(a):\n    return len(MODE) * a\n\n\n"
+        "if __name__ == '__main__':\n    first = run(task)\n    MODE = 'slow'\n"
+    ),
+    "a lambda after a semicolon": (
+        "SCALE = {k}\nA = 1; F = lambda a: a * SCALE\n\n\ndef task(a):\n    return F(a)\n"
+    ),
+    "a helper named like a comprehension": (
+        "SCALE = {k}\n\n\ndef genexpr(x):\n    return x * SCALE\n\n\n"
+        "def task(a):\n    return genexpr(a)\n"
+    ),
+    "a star import inside a block, beside a definition it may decorate": (
+        "SCALE = {k}\ntry:\n    from mushin_t_no_settings import *\nexcept ImportError:\n"
+        "    pass\n\n\n@cached\ndef report():\n    return 1\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a function registered on the function the task calls": (
+        "import functools\n\n\n@functools.singledispatch\ndef scale(x):\n    return x\n\n\n"
+        "@scale.register(int)\ndef _(x):\n    return x * {k}\n\n\n"
+        "def task(a):\n    return scale(a)\n"
+    ),
+    "a function registered on a class the task reads": (
+        "class Registry:\n    items = {{}}\n\n    @classmethod\n    def register(cls, fn):\n"
+        "        cls.items[fn.__name__] = fn\n        return fn\n\n\n@Registry.register\n"
+        "def lin(x):\n    return x * {k}\n\n\ndef task(a):\n    return Registry.items['lin'](a)\n"
+    ),
+    "a function registered on an object the task reads": (
+        "class Reg:\n    def __init__(self):\n        self.d = {{}}\n\n    def add(self, fn):\n"
+        "        self.d[fn.__name__] = fn\n        return fn\n\n\nMODELS = Reg()\n\n\n"
+        "@MODELS.add\ndef lin(x):\n    return x * {k}\n\n\n"
+        "def task(a):\n    return MODELS.d['lin'](a)\n"
+    ),
+    "a method named like a comprehension": (
+        "SCALE = {k}\n\n\nclass C:\n    def genexpr(self):\n        return SCALE\n\n\n"
+        "def task(a):\n    return C().genexpr() * a\n"
+    ),
+    "a value a walrus in a branch that did not run left as it was": (
+        "FLAG = False\nX = {k}\nY = (X := 1) if FLAG else 0\nZ = X * 2\n\n\n"
+        "def task(a):\n    return a * Z\n"
+    ),
+    "an annotation read after the definition": (
+        "import typing\n\n\ndef task(a: Hint):\n    return typing.get_type_hints(task)\n\n\n"
+        "Hint = {k}\n"
+    ),
+    "a class body's generator reading the global it shadows": (
+        "n = {k}\n\n\nclass W:\n    n = 1\n    t = sum(n for _ in range(2))\n\n\n"
+        "def task(a):\n    return a * W.t\n"
+    ),
+    "a registry a closure keeps": (
+        "def make_registry():\n    items = {{}}\n\n    def add(fn):\n"
+        "        items[fn.__name__] = fn\n        return fn\n\n    def get(k):\n"
+        "        return items[k]\n\n    return add, get\n\n\nadd, get = make_registry()\n\n\n"
+        "@add\ndef lin(x):\n    return x * {k}\n\n\ndef task(a):\n    return get('lin')(a)\n"
+    ),
+    "an annotation a dataclass in the task reads": (
+        "import dataclasses\n\nHint = {k}\n\n\ndef task(a):\n    @dataclasses.dataclass\n"
+        "    class Row:\n        x: Hint = 0\n\n    return Row\n"
+    ),
+    "a registry imported from elsewhere that a script decorator fills": (
+        "from sys import modules as REG\n\n\ndef register(cls):\n"
+        "    REG[cls.__name__] = cls\n    return cls\n\n\n@register\nclass Lin:\n"
+        "    K = {k}\n\n\ndef task(a):\n    return a * REG['Lin'].K\n"
+    ),
+    "a global a lambda default reads beside a local annotation": (
+        "Hint = {k}\n\n\ndef task(a):\n    x: Hint = a\n    f = lambda y=Hint: y\n"
+        "    return f()\n"
+    ),
+    "a walrus in a nested definition's default": (
+        "if True:\n\n    def helper(x=(SCALE := {k})):\n        return x\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a star capture": (
+        "CFG = [1, {k}]\nmatch CFG:\n    case [_, *REST]:\n        pass\n\n\n"
+        "def task(a):\n    return a * REST[0]\n"
+    ),
+    "a mapping rest capture": (
+        "CFG = {{'a': 1, 'b': {k}}}\nmatch CFG:\n    case {{'a': _, **REST}}:\n        pass\n\n\n"
+        "def task(a):\n    return a * REST['b']\n"
+    ),
+    "a value set in the main block's else, which a spawned child runs": (
+        "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
+        "if __name__ == '__main__':\n    run(task)\nelse:\n    SCALE = {k}\n"
+    ),
+    "a decorator aliased from a class attribute": (
+        "MODELS = {{}}\n\n\nclass Reg:\n    @staticmethod\n    def add(cls):\n"
+        "        MODELS[cls.__name__] = cls\n        return cls\n\n\nregister = Reg.add\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a walrus in a lambda default": (
+        "F = lambda x=(SCALE := {k}): x\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a global a function in a block declares": (
+        "DEVICE = 'cpu'\nif True:\n\n    def setup():\n        global DEVICE\n"
+        "        DEVICE = 'cuda:{k}'\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
+    ),
+    "a global a method of a class in a block declares": (
+        "DEVICE = 'cpu'\ntry:\n\n    class Setup:\n        def go(self):\n"
+        "            global DEVICE\n            DEVICE = 'cuda:{k}'\n\n    Setup().go()\n"
+        "except Exception:\n    pass\n\n\ndef task(a):\n    return len(DEVICE) * a\n"
+    ),
+    "a global an inner function in a block declares": (
+        "X = 0\nif True:\n\n    def outer():\n        def inner():\n            global X\n"
+        "            X = {k}\n\n        inner()\n\n    outer()\n\n\ndef task(a):\n    return a * X\n"
+    ),
+    "a walrus in a lambda default under a block function's global": (
+        "X = 0\nif True:\n\n    def setup():\n        global X\n"
+        "        f = lambda q=(X := {k}): q\n        return f\n\n    setup()\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a walrus in a nested definition's default under a global": (
+        "X = 0\nif True:\n\n    def setup():\n        global X\n\n"
+        "        def g(a=(X := {k})):\n            return a\n\n    setup()\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a walrus in a nested class keyword under a global": (
+        "X = 0\nif True:\n\n    def setup():\n        global X\n\n"
+        "        class C(dict, x=(X := {k})):\n            pass\n\n    setup()\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a capture under a block function's global": (
+        "X = 0\nif True:\n\n    def setup(v):\n        global X\n        match v:\n"
+        "            case [X]:\n                pass\n\n    setup([{k}])\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "an augmented assignment": (
+        "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a value read when it was computed": (
+        "SCALE = {k}\nFACTOR = SCALE * 2\nSCALE = 100\n\n\n"
+        "def task(a):\n    return a * FACTOR\n"
+    ),
+    "a walrus in an annotation-only subscript target": (
+        "SCALE = 1\nA = [0] * 5\nA[(SCALE := {k})]: int\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+}
+
+SCRIPT_NOT_EDITS = {
+    "a grid in a main-block try whose handler names what the task's import uses": (
+        "try:\n    import mushin_t_no_wandb as wandb\nexcept ImportError as e:\n"
+        "    wandb = None\n    print('no wandb:', e)\n\n\ndef task(a):\n    return a if wandb is None else 0\n\n\n"
+        "if __name__ == '__main__':\n    try:\n        run(task, a=list(range({k})))\n"
+        "    except KeyboardInterrupt as e:\n        print(e)\n"
+    ),
+    "a block's function that only reads a global it declares": (
+        "SCALE = 2\nif True:\n\n    def report():\n        global SCALE\n"
+        "        print('scale', SCALE, {k})\n\n    GRID = list(range({k}))\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a decorator alias that rebinds the name it aliases": (
+        "def register(fn):\n    return fn\n\n\na = register\nregister = a\n\n\n"
+        "@a\ndef other():\n    return {k}\n\n\ndef task(x):\n    return x\n"
+    ),
+    "a walrus in a lambda body": (
+        "F = lambda: (SCALE := {k})\nSCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a loop over the grid beside a registration in its block": (
+        "MODELS = {{}}\nGRID = list(range({k}))\n\n\ndef register(cls):\n"
+        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif True:\n\n    @register\n"
+        "    class Lin:\n        K = 1\n\n    for g in GRID:\n        print(g)\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a name a class body's block binds and reads": (
+        "lr = [0.1, {k}]\n\n\nclass Cfg:\n    if True:\n        lr = 0.1\n        warm = lr * 10\n\n\n"
+        "def task(a):\n    return Cfg.warm * a\n"
+    ),
+    "a class body's except name named like a global": (
+        "err = {k}\n\n\nclass Cfg:\n    try:\n        X = 1 / 0\n"
+        "    except ZeroDivisionError as err:\n        X = str(err)\n\n\n"
+        "def task(a):\n    return len(Cfg.X) * a\n"
+    ),
+    "a grid in the block that registers a definition": (
+        "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n\n\n"
+        "if True:\n\n    @register\n    class Lin:\n        K = 1\n\n    GRID = list(range({k}))\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a CLI group whose callback seeds what the task uses": (
+        "import click\nimport torch\n\n\ndef set_seed(seed):\n    torch.manual_seed(seed)\n\n\n"
+        "def task(lr):\n    return float(torch.tensor(lr))\n\n\n@click.group()\n"
+        "def cli():\n    set_seed(0)\n\n\n@cli.command()\ndef sweep():\n"
+        "    run(task, lr=list(range({k})))\n"
+    ),
+    "a class body's loop variable named like a global": (
+        "i = {k}\n\n\nclass Table:\n    rows = []\n    for i in range(2):\n"
+        "        rows.append(i)\n\n\ndef task(a):\n    return a * len(Table.rows)\n"
+    ),
+    "a decorator whose wrapper only shares a module with the task": (
+        "import math\n\n\ndef _sync():\n    return math.floor(1.0)\n\n\n"
+        "def timed(fn):\n    def wrapper(*a):\n        _sync()\n        return fn(*a)\n\n"
+        "    return wrapper\n\n\ndef task(a):\n    return math.sqrt(a)\n\n\n"
+        "@timed\ndef evaluate():\n    return {k}\n"
+    ),
+    "a definition decorated in the block that defines its decorator": (
+        "SCALE = 2\nif True:\n\n    def timer(fn):\n        return fn\n\n    @timer\n"
+        "    def plot():\n        return SCALE + {k}\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a class annotation left as a string": (
+        "from __future__ import annotations\n\nTensor = {k}\n\n\nclass Model:\n"
+        "    x: Tensor = 1\n\n\ndef task(a):\n    return a * Model.x\n"
+    ),
+    "a definition decorated by a function the task calls": (
+        "def ident(fn):\n    return fn\n\n\ndef task(a):\n    return ident(a)\n\n\n"
+        "@ident\ndef other():\n    return {k}\n"
+    ),
+    "another definition that only shares the task's decorator": (
+        "def timer(fn):\n    return fn\n\n\n@timer\ndef task(a):\n    return a\n\n\n"
+        "@timer\ndef other(a):\n    return a * {k}\n"
+    ),
+    "a run function that sets a global": (
+        "DEVICE = 'cpu'\n\n\ndef task(a):\n    return len(DEVICE) * a\n\n\n"
+        "def main():\n    global DEVICE\n    DEVICE = 'cpu'\n"
+        "    run(task, a=list(range({k})))\n"
+    ),
+    "a comprehension variable named like a global": (
+        "SCALE = 2\nGRID = [SCALE for SCALE in range({k})]\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
+    "a helper's local inside a block": (
+        "SCALE = 2\nif True:\n\n    def make():\n        SCALE = 3\n        return SCALE\n\n"
+        "    GRID = list(range({k}))\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a declaration without a value after the binding": (
+        "SCALE = 2\nSCALE: 'v{k}'\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a grid in a run function whose header walrus binds what the task reads": (
+        "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
+        "def main(n=(SCALE := 2)):\n    run(task, a=list(range({k})))\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SCRIPT_EDITS))
+def test_a_script_edit_is_seen(tmp_path, case):
+    text = SCRIPT_EDITS[case]
+    one = _digest_of_script(tmp_path, "se1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "se2", text.format(k=2), {"task"})
+    assert one != two
+
+
+@pytest.mark.parametrize("case", sorted(SCRIPT_NOT_EDITS))
+def test_a_script_change_the_task_cannot_see_is_not_an_edit(tmp_path, case):
+    text = SCRIPT_NOT_EDITS[case]
+    one = _digest_of_script(tmp_path, "sn1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "sn2", text.format(k=2), {"task"})
+    assert one == two
+
+
+def test_each_run_of_an_augmented_assignment_counts(tmp_path):
+    """`SCALE += 1` twice and three times are different values: a chain of
+    identical statements is not one statement."""
+    base = "SCALE = 1\n{incs}\n\ndef task(a):\n    return a * SCALE\n"
+    two = _digest_of_script(
+        tmp_path, "inc2", base.format(incs="SCALE += 1\n" * 2), {"task"}
+    )
+    three = _digest_of_script(
+        tmp_path, "inc3", base.format(incs="SCALE += 1\n" * 3), {"task"}
+    )
+    assert two != three
+
+
+def test_a_future_import_in_a_script_counts(tmp_path):
+    """`from __future__ import annotations` changes how every definition in
+    the script runs, whatever names the task reads."""
+    body = (
+        "SCALE = 2\n\n\ndef helper(x: SCALE):\n    return x\n\n\n"
+        "def task(a):\n    return helper.__annotations__['x']\n"
+    )
+    plain = _digest_of_script(tmp_path, "fut1", body, {"task"})
+    future = _digest_of_script(
+        tmp_path, "fut2", "from __future__ import annotations\n\n" + body, {"task"}
+    )
+    assert plain != future
+
+
+def test_moving_a_statement_between_the_main_blocks_branches_is_an_edit(tmp_path):
+    """The main block's body runs as `__main__`, its `else` where the script
+    is imported (a spawn child): moving an assignment between them is an
+    edit, though both count."""
+    text = (
+        "def task(a):\n    return a * SCALE\n\n\n"
+        "if __name__ == '__main__':\n    SCALE = 2\n{moved}else:\n{other}"
+    )
+    body = _digest_of_script(
+        tmp_path,
+        "mge1",
+        text.format(moved="    SCALE = 20\n", other="    pass\n"),
+        {"task"},
+    )
+    other = _digest_of_script(
+        tmp_path, "mge2", text.format(moved="", other="    SCALE = 20\n"), {"task"}
+    )
+    assert body != other
+
+
+#: One script holding most constructs the rule reads. Its digest must be the
+#: same on every supported Python (records are compared across versions, and
+#: a digest that moved with the interpreter would re-run every cell).
+CROSS_VERSION_SCRIPT = '''
+"""A driver script."""
+import functools
+import math as m
+from collections import OrderedDict
+
+SCALE = 2
+NAMES = [n for n in ("a", "b")]
+TABLE = {k: v for k, v in zip(NAMES, range(2))}
+GEN = sum(x * SCALE for x in range(3))
+BASE = 2
+SCALED = [BASE * v for v in range(2)]
+BASE = 5
+FN = lambda s: s * SCALE
+Hint = int
+
+
+class Config:
+    LR: float = 0.1
+    SCALE = SCALE
+
+    def scaled(self, x: int = 1) -> float:
+        return x * self.LR * m.pi
+
+
+@functools.lru_cache
+def helper(x, *, factor: int = SCALE):
+    try:
+        import json as _json
+    except ImportError as err:
+        _json = err
+    with open(__file__) as f:
+        _ = f.read(1)
+    return [Config().scaled(x) for _ in range(factor)], OrderedDict(), _json
+
+
+def task(a):
+    global LAST
+    LAST = a
+    local = Hint(1)
+    return helper(a), FN(a), TABLE, GEN, SCALED, local
+
+
+if __name__ == "__main__":
+    GRID = list(range(3))
+'''
+
+CROSS_VERSION_DIGEST = "345681fe1888e36b"
+
+
+def test_a_script_digest_is_the_same_on_every_python(tmp_path):
+    digest = _digest_of_script(tmp_path, "xver", CROSS_VERSION_SCRIPT, {"task"})
+    assert digest == CROSS_VERSION_DIGEST
+
+
 # --- follow-ups: parent packages, one record per completed cell, one resolve ---
 
 
@@ -2465,3 +2850,121 @@ def test_a_target_class_in_the_script_that_defines_the_task_is_covered(tmp_path)
     err = run("resume")
     assert "code the task reaches (both_script:Net (script))" in err, err
     assert calls.read_text() == "xxxx"
+
+
+def test_a_class_bodys_own_names_are_not_the_modules(tmp_path):
+    """`n = 1` then `m = n + 1` in a class body reads the class's `n`, and a
+    method default `b=n` too: the module's `n` is not code the task reads."""
+    text = (
+        "n = {k}\n\n\nclass W:\n    n = 1\n    m = n + 1\n\n    @staticmethod\n"
+        "    def task(a, b=n):\n        return a * b\n"
+    )
+    one = _digest_of_script(tmp_path, "cl1", text.format(k=3), {"W"})
+    two = _digest_of_script(tmp_path, "cl2", text.format(k=4), {"W"})
+    assert one == two
+
+
+def test_removing_a_main_block_override_is_an_edit(tmp_path):
+    """`LR = 0.1` set again in the main block is the value the task runs
+    with: removing it is an edit, though the same statements remain above."""
+    head = "LR = 0.1\nLR = 0.01\n\n\ndef task(a):\n    return a * LR\n\n\n"
+    with_override = head + "if __name__ == '__main__':\n    LR = 0.1\n    run(task)\n"
+    without = head + "if __name__ == '__main__':\n    run(task)\n"
+    one = _digest_of_script(tmp_path, "ov1", with_override, {"task"})
+    two = _digest_of_script(tmp_path, "ov2", without, {"task"})
+    assert one != two
+
+
+def test_a_long_unreached_expression_is_read(tmp_path):
+    """A generated statement the task never reaches (a long sum) does not
+    stop the script from being read."""
+    text = (
+        "SCALE = 2\nTOTAL = "
+        + " + ".join(["1"] * 1500)
+        + "\n\n\ndef task(a):\n    return a * SCALE\n"
+    )
+    assert _digest_of_script(tmp_path, "long", text, {"task"})
+
+
+def test_a_decorator_that_only_logs_through_a_project_helper_registers_nothing(
+    project, tmp_path
+):
+    """`@timer` calling a project logger does not make what it decorates
+    code the task runs."""
+    text = (
+        f"from {HELPERS} import scale as log\n\n\ndef timer(fn):\n"
+        "    def wrapper(*a):\n        log(1)\n        return fn(*a)\n\n    return wrapper\n\n\n"
+        "def task(a):\n    return a\n\n\n@timer\ndef other():\n    return {k}\n"
+    )
+    one = _digest_of_script(tmp_path, "lg1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "lg2", text.format(k=2), {"task"})
+    assert one == two
+
+
+def test_a_walrus_in_a_nested_definitions_annotation_binds(tmp_path):
+    """Before 3.14 an annotation runs where its definition is, and a walrus
+    in it binds the module's name (3.14 refuses one there)."""
+    if sys.version_info >= (3, 14):
+        pytest.skip("a named expression is not allowed in an annotation on 3.14")
+    text = (
+        "if True:\n\n    def helper(x: (SCALE := {k})):\n        return x\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    )
+    one = _digest_of_script(tmp_path, "wa1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "wa2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_walrus_in_a_bare_annotation_binds(tmp_path):
+    """Before 3.14 a module annotation runs, and a walrus in it binds the
+    module's name, though the annotated name itself is not bound."""
+    if sys.version_info >= (3, 14):
+        pytest.skip("a named expression is not allowed in an annotation on 3.14")
+    text = "x: (SCALE := {k})\n\n\ndef task(a):\n    return a * SCALE\n"
+    one = _digest_of_script(tmp_path, "ba1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "ba2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_decorator_from_a_star_import_inside_a_block_registers(project, tmp_path):
+    """`try: from helpers import *`: the `@register` it provides fills the
+    `MODELS` the task reads, as with a top-level star import."""
+    root, _ = project
+    (root / "mushin_t_starreg_blk.py").write_text(
+        "MODELS = {}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n"
+    )
+    text = (
+        "try:\n    from mushin_t_starreg_blk import *\nexcept ImportError:\n    pass\n\n\n"
+        "@register\nclass Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
+    )
+    one = _digest_of_script(tmp_path, "sb1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "sb2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_walrus_in_a_nested_definitions_return_annotation_binds(tmp_path):
+    if sys.version_info >= (3, 14):
+        pytest.skip("a named expression is not allowed in an annotation on 3.14")
+    text = (
+        "if True:\n\n    def helper(x) -> (SCALE := {k}):\n        return x\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    )
+    one = _digest_of_script(tmp_path, "wr1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "wr2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_the_main_guards_spelling_is_not_an_edit(tmp_path):
+    """`__name__ == "__main__"` and `"__main__" == __name__` are one guard:
+    flipping it is not an edit, though its else holds counted code."""
+    text = (
+        "def task(a):\n    return a * SCALE\n\n\n"
+        "if {guard}:\n    pass\nelse:\n    SCALE = 3\n"
+    )
+    one = _digest_of_script(
+        tmp_path, "gs1", text.format(guard="__name__ == '__main__'"), {"task"}
+    )
+    two = _digest_of_script(
+        tmp_path, "gs2", text.format(guard="'__main__' == __name__"), {"task"}
+    )
+    assert one == two
