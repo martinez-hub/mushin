@@ -2193,7 +2193,10 @@ def test_a_main_guard_else_branch_does_not_run_in_the_script(tmp_path):
         "if __name__ == '__main__':\n    SCALE = 2\n{moved}else:\n{other}"
     )
     body = _digest_of_script(
-        tmp_path, "mge1", text.format(moved="    SCALE = 20\n", other="    pass\n"), {"task"}
+        tmp_path,
+        "mge1",
+        text.format(moved="    SCALE = 20\n", other="    pass\n"),
+        {"task"},
     )
     other = _digest_of_script(
         tmp_path, "mge2", text.format(moved="", other="    SCALE = 20\n"), {"task"}

@@ -1717,11 +1717,15 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     arguments are not compared (as on main); the modules of the functions and
     classes it binds are followed.
 
+    A task defined in a notebook gives ``"__main__ (notebook)"``, the same
+    reach through the cells IPython ran (``_notebook_entry``).
+
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
-    environment, code defined in a notebook (the project modules of the
-    objects its namespace holds are covered), and code reached only through a
-    string that is not a ``_target_`` of the config. None when the record cannot be taken (with a
+    environment, code defined where there is no file and no IPython (a plain
+    REPL: the project modules of the objects its namespace holds are
+    covered), and code reached only through a string that is not a
+    ``_target_`` of the config. None when the record cannot be taken (with a
     warning, once); a resume then does not compare, and ``cache_dir`` is not
     used."""
     try:

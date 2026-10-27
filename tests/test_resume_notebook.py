@@ -137,9 +137,7 @@ def test_a_notebook_record_names_the_project_modules_the_task_reaches(
         sys.modules.pop("mushin_t_nbother", None)
 
 
-def test_a_value_made_outside_the_cells_brings_its_module(
-    shell, tmp_path, monkeypatch
-):
+def test_a_value_made_outside_the_cells_brings_its_module(shell, tmp_path, monkeypatch):
     """A name no cell binds (`%run`, an extension) is followed by the module
     of its value, inspected by type only."""
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -244,7 +242,9 @@ def test_a_notebook_resume_reruns_after_a_helper_cell_edit(shell, tmp_path):
     run(shell, sweep)
     assert calls.read_text() == "xx"  # unchanged: reused
     run(shell, "def helper(x):\n    return x * SCALE * 10\n")
-    with pytest.warns(UserWarning, match=r"code the task reaches \(__main__ \(notebook\)\)"):
+    with pytest.warns(
+        UserWarning, match=r"code the task reaches \(__main__ \(notebook\)\)"
+    ):
         run(shell, sweep)
     assert calls.read_text() == "xxxx"
     statuses = list(pathlib.Path(wd).rglob(STATUS_FILE))
