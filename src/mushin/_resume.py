@@ -712,7 +712,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
     table says which names are global), a star import (it may bind any name),
     and a decorated definition, in a block too, whose decorator registers it
     somewhere counted code reads (``@register`` defined in the script, or an
-    alias of it, or a helper it calls, writing the ``MODELS`` the task reads)
+    alias of it, writing the ``MODELS`` the task reads)
     or comes from a project module; not one whose decorators are foreign
     (``@click.command()``, ``@hydra.main``, ``@dataclass``). A ``__future__``
     import always counts. The script runs as ``__main__``, so a main block's
@@ -777,79 +777,61 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 outer += [arg.annotation for arg in params if arg and arg.annotation]
                 if node.returns is not None:
                     outer.append(node.returns)
-            # A local variable's annotation is never evaluated; symbol tables
-            # before 3.14 list what it names as read, 3.14's do not.
-            body = scope_reads.get(node.name, set()) - local_annotation_only(node)
-            out = body | loads(outer)
+            out = scope_reads.get(node.name, set()) | loads(outer)
             if isinstance(node, ast.ClassDef):
                 out |= class_fallback(node)
             return out
         return loads([node])
 
-    def local_annotation_only(node) -> set[str]:
-        """Names a definition's function bodies use only in local variable
-        annotations (``x: Hint = 1``), which never run. A class body's
-        annotations do run (a dataclass's fields), so they are reads."""
-        ann: set[str] = set()
-        other: set[str] = set()
+    def run_here(node) -> list:
+        """What a definition evaluates where it is defined, but annotations:
+        decorators and defaults, or decorators, bases and keywords."""
+        if isinstance(node, ast.ClassDef):
+            return [
+                *node.decorator_list,
+                *node.bases,
+                *(k.value for k in node.keywords),
+            ]
+        args = node.args
+        return [
+            *getattr(node, "decorator_list", ()),
+            *args.defaults,
+            *(d for d in args.kw_defaults if d is not None),
+        ]
 
-        def visit(n, in_function: bool) -> None:
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                if not isinstance(n, ast.Lambda):
-                    for sub in reads_outer(n):
-                        visit(sub, in_function)
-                for sub in n.body if isinstance(n.body, list) else [n.body]:
-                    visit(sub, True)
-                return
-            if isinstance(n, ast.ClassDef):
-                for sub in reads_outer(n):
-                    visit(sub, in_function)
-                for sub in n.body:
-                    visit(sub, False)
-                return
-            if in_function and isinstance(n, ast.AnnAssign):
-                ann.update(loads([n.annotation]))
-                visit(n.target, True)
-                if n.value is not None:
-                    visit(n.value, True)
-                return
-            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
-                other.add(n.id)
-            for sub in ast.iter_child_nodes(n):
-                visit(sub, in_function)
-
-        visit(node, False)
-        return ann - other
+    nested_scopes = (
+        *defs,
+        ast.Lambda,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+    )
 
     def direct_loads(node) -> set[str]:
         """Loads a class-body statement makes in the class scope itself: not
-        inside a nested function, lambda, class or comprehension (whose own
-        reads the symbol table already gives), but in a nested definition's
-        decorators, defaults and annotations, which run there."""
+        inside a nested function, lambda, class or comprehension, nor in an
+        annotation (the symbol table gives those, and knows whether
+        annotations are evaluated), but in a nested definition's decorators,
+        defaults and bases, which run there."""
         found: set[str] = set()
-        nested = (
-            *defs,
-            ast.Lambda,
-            ast.ListComp,
-            ast.SetComp,
-            ast.DictComp,
-            ast.GeneratorExp,
-        )
-
-        def visit(n) -> None:
-            if isinstance(n, nested):
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    for sub in reads_outer(n):
-                        visit(sub)
-                return
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, nested_scopes):
+                if isinstance(n, defs):
+                    stack.extend(run_here(n))
+                continue
+            if isinstance(n, ast.AnnAssign):
+                stack.append(n.target)
+                if n.value is not None:
+                    stack.append(n.value)
+                continue
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
                 found.add(n.id)
             elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
                 found.add(n.target.id)
-            for sub in ast.iter_child_nodes(n):
-                visit(sub)
-
-        visit(node)
+            stack.extend(ast.iter_child_nodes(n))
         return found
 
     def class_fallback(node) -> set[str]:
@@ -863,20 +845,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
             bound |= binds(stmt)
         return out
 
-    def reads_outer(node) -> list:
-        outer = list(node.decorator_list)
-        if isinstance(node, ast.ClassDef):
-            return outer + node.bases + [k.value for k in node.keywords]
-        outer += node.args.defaults + [
-            d for d in node.args.kw_defaults if d is not None
-        ]
-        a = node.args
-        params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-        outer += [arg.annotation for arg in params if arg and arg.annotation]
-        if node.returns is not None:
-            outer.append(node.returns)
-        return outer
-
     def binds(node) -> set[str]:
         if isinstance(node, defs):
             return {node.name}
@@ -886,18 +854,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
             }
         names: set[str] = set()
         comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-
-        def visit(sub, in_comp: bool) -> None:
+        # Iterative: a long generated expression must not exhaust the stack.
+        stack = [(node, False)]
+        while stack:
+            sub, in_comp = stack.pop()
             if isinstance(sub, defs):
                 names.add(sub.name)  # a definition inside `try:` or `if:`
-                return  # its body binds its own names
+                # Its body binds its own names; what it evaluates here (a
+                # walrus in a default) binds the module's.
+                stack.extend((e, in_comp) for e in run_here(sub))
+                continue
             if isinstance(sub, ast.Lambda):
-                return
+                args = sub.args
+                stack.extend(
+                    (e, in_comp)
+                    for e in (*args.defaults, *(d for d in args.kw_defaults if d))
+                )
+                continue
             if isinstance(sub, ast.NamedExpr):
                 if isinstance(sub.target, ast.Name):
                     names.add(sub.target.id)  # the module's, from a comprehension too
-                visit(sub.value, in_comp)
-                return
+                stack.append((sub.value, in_comp))
+                continue
             if isinstance(sub, comps):
                 in_comp = True  # its variables are its own
             elif isinstance(sub, ast.Name) and isinstance(
@@ -906,18 +884,15 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if not in_comp:
                     names.add(sub.id)
             elif isinstance(sub, ast.AnnAssign) and sub.value is None:
-                return  # an annotation alone binds nothing
+                continue  # an annotation alone binds nothing
             elif isinstance(sub, (ast.Import, ast.ImportFrom)):
                 names.update(binds(sub))
-                return
+                continue
             elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
                 names.add(sub.name)
             elif isinstance(sub, ast.MatchMapping) and sub.rest:
                 names.add(sub.rest)
-            for child in ast.iter_child_nodes(sub):
-                visit(child, in_comp)
-
-        visit(node, False)
+            stack.extend((child, in_comp) for child in ast.iter_child_nodes(sub))
         return names
 
     statements = []
@@ -955,25 +930,31 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return _project_file_of(module) is not None
         return False
 
-    def writes_counted(name: str, node, read: set[str], seen: set) -> bool:
-        """Whether script code bound to ``name`` reads what counted code
-        reads, directly or through the script names it reads in turn (an
-        alias ``register_model = register``, a helper ``register`` calls):
-        bounded, and through script bindings only."""
-        if name in seen or len(seen) > 200:
+    def writes_counted(name: str, node, enclosing, read: set[str], seen: set) -> bool:
+        """Whether the script code bound to decorator ``name`` reads what
+        counted code reads (``@register`` writing the ``MODELS`` the task
+        reads), through an alias of it too (``register_model = register``).
+        Not the statement the decorated definition is in, whose reads include
+        that definition's own."""
+        if name in seen or len(seen) > 50:
             return False
         seen.add(name)
         for binder in binders.get(name, ()):
-            if binder is node or isinstance(binder, (ast.Import, ast.ImportFrom)):
+            if binder is node or binder is enclosing:
                 continue
-            binder_reads = reads(binder)
-            if binder_reads & read:
+            if isinstance(binder, (ast.Import, ast.ImportFrom)):
+                continue
+            if reads(binder) & read:
                 return True
-            if any(writes_counted(n, node, read, seen) for n in sorted(binder_reads)):
-                return True
+            if isinstance(binder, ast.Assign) and isinstance(
+                binder.value, (ast.Name, ast.Attribute)
+            ):
+                alias = base(binder.value)
+                if alias and writes_counted(alias, node, enclosing, read, seen):
+                    return True
         return False
 
-    def registers(node, read: set[str]) -> bool:
+    def registers(node, read: set[str], enclosing=None) -> bool:
         """A decorated definition whose decorator comes from a project module,
         or is defined in the script reading what counted code reads. Not one
         whose decorator is merely read too (``@mushin.sweep`` on the task and
@@ -988,7 +969,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if isinstance(binder, (ast.Import, ast.ImportFrom)):
                     if project_import(binder, name):
                         return True
-            if writes_counted(name, node, read, set()):
+            if writes_counted(name, node, enclosing, read, set()):
                 return True
         return False
 
@@ -1024,7 +1005,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         add = [
             (n, names)
             for n, names in pending
-            if names & read or any(registers(d, read) for d in decorated(n))
+            if names & read or any(registers(d, read, n) for d in decorated(n))
         ]
         if not add:
             break

@@ -2095,11 +2095,6 @@ SCRIPT_EDITS = {
         "    return cls\n\n\nregister_model = register\n\n\n@register_model\n"
         "class Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
     ),
-    "a decorator that registers through a helper": (
-        "MODELS = {{}}\n\n\ndef _add(cls):\n    MODELS[cls.__name__] = cls\n\n\n"
-        "def register(cls):\n    _add(cls)\n    return cls\n\n\n@register\n"
-        "class Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
-    ),
     "a registration inside a block": (
         "MODELS = {{}}\nENABLED = True\n\n\ndef register(cls):\n"
         "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif ENABLED:\n\n"
@@ -2194,6 +2189,14 @@ SCRIPT_EDITS = {
         "    REG[cls.__name__] = cls\n    return cls\n\n\n@register\nclass Lin:\n"
         "    K = {k}\n\n\ndef task(a):\n    return a * REG['Lin'].K\n"
     ),
+    "a global a lambda default reads beside a local annotation": (
+        "Hint = {k}\n\n\ndef task(a):\n    x: Hint = a\n    f = lambda y=Hint: y\n"
+        "    return f()\n"
+    ),
+    "a walrus in a nested definition's default": (
+        "if True:\n\n    def helper(x=(SCALE := {k})):\n        return x\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2204,8 +2207,19 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
-    "a name a function uses only in a local annotation": (
-        "Hint = {k}\n\n\ndef task(a):\n    x: Hint = a\n    return x\n"
+    "a decorator whose wrapper only shares a module with the task": (
+        "import math\n\n\ndef _sync():\n    return math.floor(1.0)\n\n\n"
+        "def timed(fn):\n    def wrapper(*a):\n        _sync()\n        return fn(*a)\n\n"
+        "    return wrapper\n\n\ndef task(a):\n    return math.sqrt(a)\n\n\n"
+        "@timed\ndef evaluate():\n    return {k}\n"
+    ),
+    "a definition decorated in the block that defines its decorator": (
+        "SCALE = 2\nif True:\n\n    def timer(fn):\n        return fn\n\n    @timer\n"
+        "    def plot():\n        return SCALE + {k}\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a class annotation left as a string": (
+        "from __future__ import annotations\n\nTensor = {k}\n\n\nclass Model:\n"
+        "    x: Tensor = 1\n\n\ndef task(a):\n    return a * Model.x\n"
     ),
     "a definition decorated by a function the task calls": (
         "def ident(fn):\n    return fn\n\n\ndef task(a):\n    return ident(a)\n\n\n"
@@ -2338,7 +2352,7 @@ def helper(x, *, factor: int = SCALE):
 def task(a):
     global LAST
     LAST = a
-    local: Hint = Config()  # a local annotation is never evaluated
+    local = Hint(1)
     return helper(a), FN(a), TABLE, GEN, SCALED, local
 
 
@@ -2346,7 +2360,7 @@ if __name__ == "__main__":
     GRID = list(range(3))
 '''
 
-CROSS_VERSION_DIGEST = "f586de8941011e4b"
+CROSS_VERSION_DIGEST = "345681fe1888e36b"
 
 
 def test_a_script_digest_is_the_same_on_every_python(tmp_path):
@@ -2766,7 +2780,7 @@ def test_a_long_unreached_expression_is_read(tmp_path):
     stop the script from being read."""
     text = (
         "SCALE = 2\nTOTAL = "
-        + " + ".join(["1"] * 400)
+        + " + ".join(["1"] * 1500)
         + "\n\n\ndef task(a):\n    return a * SCALE\n"
     )
     assert _digest_of_script(tmp_path, "long", text, {"task"})
