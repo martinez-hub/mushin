@@ -2247,6 +2247,10 @@ SCRIPT_EDITS = {
         "SCALE = {k}\nFACTOR = SCALE * 2\nSCALE = 100\n\n\n"
         "def task(a):\n    return a * FACTOR\n"
     ),
+    "a walrus in an annotation-only subscript target": (
+        "SCALE = 1\nA = [0] * 5\nA[(SCALE := {k})]: int\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    ),
 }
 
 SCRIPT_NOT_EDITS = {
@@ -2335,6 +2339,10 @@ SCRIPT_NOT_EDITS = {
     ),
     "a declaration without a value after the binding": (
         "SCALE = 2\nSCALE: 'v{k}'\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    "a grid in a run function whose header walrus binds what the task reads": (
+        "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
+        "def main(n=(SCALE := 2)):\n    run(task, a=list(range({k})))\n"
     ),
 }
 

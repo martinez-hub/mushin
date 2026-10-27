@@ -835,9 +835,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     def binds(node) -> set[str]:
         if isinstance(node, defs):
-            # Its name, as on main: what its body sets when called is a
-            # documented residual (a `def main()` that sets a global and
-            # holds the run call would otherwise count its grid).
+            # Its name, as on main. A global its body sets (a function's
+            # when called, a class's when defined) and a walrus in its
+            # header are not counted: a `def main()` that sets a global and
+            # holds the run call would otherwise count its grid.
             return {node.name}
         return scope_binds(node, nested_globals=True)
 
@@ -897,8 +898,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if not in_comp:
                     names.add(sub.id)
             elif isinstance(sub, ast.AnnAssign) and sub.value is None:
-                # An annotation alone binds nothing (a walrus in it does).
+                # An annotation alone binds nothing, but what it evaluates
+                # can: a walrus in the annotation, or in a subscript or
+                # attribute target, which runs though nothing is assigned.
                 stack.append((sub.annotation, in_comp))
+                if not isinstance(sub.target, ast.Name):
+                    stack.append((sub.target, in_comp))
                 continue
             elif isinstance(sub, (ast.Import, ast.ImportFrom)):
                 names.update(scope_binds(sub))
