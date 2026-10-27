@@ -129,8 +129,9 @@ resume, and the cells re-run with a warning naming it (`helper (notebook)`). A
 flag the task reads counts too, so to retry only the failed cells after an
 outage, keep the outage's state outside the code (a file, a service, a dict
 item), as notebooks 04 and 08 do. A
-mutable value (a dict config, a list), an object's state, a name the task
-rebinds and a value named like a secret are not compared, nor is code whose
+mutable value (a dict config, a list), an object's state, a name or closure
+variable the task rebinds and a value named like a secret are not compared,
+nor is code whose
 text the kernel does not keep (a `%%time` cell, `exec`, a `%run` file). A value
 that differs per session, such as a timestamp or a seed drawn in a cell,
 re-runs the cells after a restart; pass it to the task as a parameter instead.

@@ -2516,8 +2516,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
             the environment, in a notebook a mutable value (a dict config), an
-            object's state, a name the task rebinds, a value named like a
-            secret, code whose text the kernel does not keep (a ``%%time``
+            object's state, a name or closure variable the task rebinds, a
+            value named like a secret, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its
             functions import inside their bodies, a
             top-level statement of the driver script that changes an object in

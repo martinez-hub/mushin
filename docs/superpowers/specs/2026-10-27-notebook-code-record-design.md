@@ -103,14 +103,29 @@ From each root, a worklist over `(namespace, name)` pairs, bounded (at most
   `co_filename == "<string>"`) is not.
 - **Rebound names are left out.** A name any reached code stores or deletes
   as a global (`STORE_GLOBAL`, `DELETE_GLOBAL`: a task counting its calls in
-  `global CALLS`) is not recorded: its value moves during a run.
+  `global CALLS`) is not recorded: its value moves during a run. Likewise a
+  closure variable it rebinds (`STORE_DEREF`: a timing decorator's `nonlocal
+  total`) and an attribute name it stores are recorded by type only, and so
+  are all defaults when it stores `__defaults__` or `__kwdefaults__`.
 - **IPython's own names are left out:** `_`, `__`, `___`, `_i`, `_ii`,
   `_iii`, `_iN`, `_N`, `_oh`, `_ih`, `_dh`, `In`, `Out`, `get_ipython`,
   `exit`, `quit`, `_exit_code`, and dunder names.
 - **Objects are inspected by type only** (`type(value)`, never
-  `isinstance`, never an attribute read on an instance), as
-  `_namespace_modules` already is: a lazy proxy must not resolve
-  (`test_the_record_never_resolves_a_lazy_object`).
+  `isinstance`, never an attribute read on an instance; only a function's or
+  an `lru_cache` wrapper's own `__dict__` is read for `__wrapped__`, so a
+  library's wrapper is followed), as `_namespace_modules` already is: a lazy
+  proxy must not resolve (`test_the_record_never_resolves_a_lazy_object`).
+- **Bounds omit, never truncate.** A container walk visits each container
+  once, breadth first, within 10,000 items; past that, the entries it feeds
+  are left out. Past 2000 functions and classes the record has no notebook
+  entries, with a warning. A cut walk's findings depend on a set's
+  per-process order, so a part of them would re-run cells after a restart.
+- **Digests per component.** A digest covers what its object reaches
+  through captured values, methods and bases. The graph is condensed into
+  strongly connected components (iterative Tarjan): a component hashes its
+  members' own parts and the digests of the components it reaches. That is
+  order-free and linear; a method calling `super()` and closures sharing a
+  dispatch table are cycles.
 
 ### What each name records
 
@@ -150,6 +165,13 @@ Details:
   default holds what the definition captured when it ran, which is what
   runs: `def f(x=SCALE)` keeps the old default until its cell is re-run, so
   following `SCALE` by name would record a value the function does not use.
+- **Secrets.** A plain global, a class attribute and every captured value
+  is checked under its own name, its parameter or closure variable's name,
+  and the name its source reads (`pw=DB_PASSWORD`, `pw = DB_PASSWORD`):
+  `password`, `passwd`, `secret`, `api_key` and `credential` hide any value,
+  `token` and `auth` only a string (`MAX_TOKENS = 512` is a setting), and a
+  provider-token-shaped string is hidden under any name. A hidden value is
+  recorded by type only.
 - **Plain values** are exactly `int`, `float`, `complex`, `bool`, `str`,
   `bytes`, `None`, and `tuple`/`frozenset` of plain values (exact types, so a
   `NamedTuple` or an `IntEnum` is not one), at most 10,000 elements and
@@ -175,9 +197,16 @@ its own; in a worker that has no cell text, only plain values come out, and
 records compare on shared keys, so that is never an edit.
 
 A config `_target_` naming `__main__.X` in a notebook is followed the same
-way, in the cell's process (`cell_project_record` takes targets per cell).
-Only the serial launcher can instantiate one; a worker's `__main__` is not
-the kernel.
+way, in the cell's process (`cell_project_record` takes targets per cell):
+any function defined in a cell and any class there, a config dataclass with
+no methods included. Another module with no file (an extension's submodule)
+is followed only for an object defined in a cell; otherwise main's path
+records its package's files. Only the serial launcher can instantiate a
+notebook target; a worker's `__main__` is not the kernel.
+
+IPython 8.6 and later write a cell's `linecache` entry with no mtime;
+earlier versions (7.x to 8.5, the floor of the dev group's ipykernel) write
+one and keep their cells in `linecache._ipython_cache`, which is read too.
 
 ### No IPython import
 
@@ -194,7 +223,12 @@ with `pytest.importorskip`.
   `python` REPL, a function from a `%run` file.
 - A function wrapped without `__wrapped__` (numba's `@njit`, some
   decorators).
-- A function that rebinds a global, and names it rebinds.
+- A function that rebinds a global, and names or closure variables it
+  rebinds.
+- A container deeper than 4 levels, or past 10,000 items in one walk; a
+  notebook reaching more than 2000 functions and classes (warns).
+- A secret under an innocent name inside a tuple or a string, as
+  provenance's value-shape rule also accepts.
 - A value that differs per session, which re-runs cells after a restart
   (accepted above).
 
