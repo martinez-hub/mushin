@@ -116,9 +116,10 @@ function's own source is compared as text, so a comment inside its body is an
 edit. If you edit a module and resume in the same Python process without
 reloading it, the old code still runs: reload it (or restart) first. The
 script rule follows names, so a statement that changes an object in place
-(`CFG["lr"] = 0.1`), a function that rebinds a global when called, or a
-registry filled by `__init_subclass__` can hide an edit there; helpers kept in
-an imported module are compared as a whole file.
+(`CFG["lr"] = 0.1`), a function that rebinds a global when called, a
+definition registered inside a block, or a registry filled by
+`__init_subclass__` can hide an edit there; helpers kept in an imported module
+are compared as a whole file.
 
 ### The full loop
 

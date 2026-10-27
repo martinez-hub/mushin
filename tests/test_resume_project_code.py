@@ -2095,19 +2095,9 @@ SCRIPT_EDITS = {
         "    return cls\n\n\nregister_model = register\n\n\n@register_model\n"
         "class Lin:\n    K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
     ),
-    "a registration inside a block": (
-        "MODELS = {{}}\nENABLED = True\n\n\ndef register(cls):\n"
-        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif ENABLED:\n\n"
-        "    @register\n    class Lin:\n        K = {k}\n\n\n"
-        "def task(a):\n    return a * MODELS['Lin'].K\n"
-    ),
     "a match capture": (
         "CFG = {{'scale': {k}}}\nmatch CFG:\n    case {{'scale': SCALE}}:\n"
         "        pass\n\n\ndef task(a):\n    return a * SCALE\n"
-    ),
-    "a class body reading the global it shadows": (
-        "SCALE = {k}\n\n\nclass Config:\n    SCALE = SCALE\n\n\n"
-        "def task(a):\n    return a * Config.SCALE\n"
     ),
     "a value a conditional rebinding may keep": (
         "FAST = False\nSCALE = {k}\nif FAST:\n    SCALE = 5\n\n\n"
@@ -2204,29 +2194,6 @@ SCRIPT_EDITS = {
     "a mapping rest capture": (
         "CFG = {{'a': 1, 'b': {k}}}\nmatch CFG:\n    case {{'a': _, **REST}}:\n        pass\n\n\n"
         "def task(a):\n    return a * REST['b']\n"
-    ),
-    "a class body updating the module's name": (
-        "COUNT = {k}\n\n\nclass C:\n    COUNT += 1\n\n\ndef task(a):\n    return a * C.COUNT\n"
-    ),
-    "a class body's comprehension over the module's name": (
-        "VALS = [1, {k}]\n\n\nclass C:\n    VALS = [v * 2 for v in VALS]\n\n\n"
-        "def task(a):\n    return a * sum(C.VALS)\n"
-    ),
-    "a registration in an except handler": (
-        "MODELS = {{}}\n\n\ndef register(cls):\n    MODELS[cls.__name__] = cls\n    return cls\n\n\n"
-        "try:\n    import mushin_t_nothing_here\nexcept ImportError:\n\n    @register\n"
-        "    class Lin:\n        K = {k}\n\n\ndef task(a):\n    return a * MODELS['Lin'].K\n"
-    ),
-    "the condition of a block that registers": (
-        "MODELS = {{}}\nENABLED = {k} > 1\n\n\ndef register(cls):\n"
-        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif ENABLED:\n\n    @register\n"
-        "    class Lin:\n        K = 1\n\n\ndef task(a):\n    return a * MODELS.get('Lin', 0)\n"
-    ),
-    "a match case's guard over a registration": (
-        "MODELS = {{}}\nCFG = 'lin'\nON = {k} > 1\n\n\ndef register(cls):\n"
-        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nmatch CFG:\n    case 'lin' if ON:\n\n"
-        "        @register\n        class Lin:\n            K = 1\n\n\n"
-        "def task(a):\n    return a * MODELS.get('Lin', 0)\n"
     ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
@@ -2866,19 +2833,6 @@ def test_a_decorator_that_only_logs_through_a_project_helper_registers_nothing(
     assert one == two
 
 
-def test_the_condition_of_a_registering_block_is_hashed(tmp_path):
-    """`if ENABLED:` and `if not ENABLED:` register under opposite settings,
-    though both read the same name."""
-    text = (
-        "MODELS = {{}}\nENABLED = True\n\n\ndef register(cls):\n"
-        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif {cond}:\n\n    @register\n"
-        "    class Lin:\n        K = 1\n\n\ndef task(a):\n    return a * MODELS.get('Lin', 0)\n"
-    )
-    one = _digest_of_script(tmp_path, "cd1", text.format(cond="ENABLED"), {"task"})
-    two = _digest_of_script(tmp_path, "cd2", text.format(cond="not ENABLED"), {"task"})
-    assert one != two
-
-
 def test_a_walrus_in_a_nested_definitions_annotation_binds(tmp_path):
     """Before 3.14 an annotation runs where its definition is, and a walrus
     in it binds the module's name (3.14 refuses one there)."""
@@ -2890,4 +2844,15 @@ def test_a_walrus_in_a_nested_definitions_annotation_binds(tmp_path):
     )
     one = _digest_of_script(tmp_path, "wa1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "wa2", text.format(k=2), {"task"})
+    assert one != two
+
+
+def test_a_walrus_in_a_bare_annotation_binds(tmp_path):
+    """Before 3.14 a module annotation runs, and a walrus in it binds the
+    module's name, though the annotated name itself is not bound."""
+    if sys.version_info >= (3, 14):
+        pytest.skip("a named expression is not allowed in an annotation on 3.14")
+    text = "x: (SCALE := {k})\n\n\ndef task(a):\n    return a * SCALE\n"
+    one = _digest_of_script(tmp_path, "ba1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "ba2", text.format(k=2), {"task"})
     assert one != two

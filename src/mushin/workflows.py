@@ -2515,11 +2515,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script
             definition reached only through an ``__init_subclass__`` or
-            metaclass registry, and code reached only through some other
-            string. The script rule follows names, so state reached another
-            way (``globals()``, ``exec``) can hide an edit: keep helpers in an
-            imported module, which is compared as a whole file, when that
-            matters. A very large project
+            metaclass registry, a definition registered inside a block (``if
+            ENABLED: @register class ...``), a class body reading the module's
+            name it shadows (``SCALE = SCALE``), and code reached only through
+            some other string. The script rule follows names, so state
+            reached another way (``globals()``, ``exec``) can hide an edit:
+            keep helpers in an imported module, which is compared as a whole
+            file, when that matters. A very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.

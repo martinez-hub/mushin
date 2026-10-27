@@ -710,17 +710,16 @@ def _script_digest(path: Path, roots: frozenset[str]):
     statement, in the main block too, that binds a name counted code reads as
     a global (function parameters and locals do not count: the script's symbol
     table says which names are global), a star import (it may bind any name),
-    and a decorated definition, in a block too, whose decorator registers it
-    somewhere counted code reads (``@register`` defined in the script, or an
-    alias of it, writing the ``MODELS`` the task reads)
+    and a decorated definition whose decorator registers it somewhere counted
+    code reads (``@register`` defined in the script, or an alias of it,
+    writing the ``MODELS`` the task reads)
     or comes from a project module; not one whose decorators are foreign
     (``@click.command()``, ``@hydra.main``, ``@dataclass``). A ``__future__``
     import always counts. The script runs as ``__main__``, so a main block's
     body counts and its ``else`` does not. A name is bound by the statements
     that bind it in the module's scope (a ``match`` capture does; a
     comprehension's variable, a nested function's local and an annotation
-    without a value do not), and a class body reads the module's name it
-    reads before binding it (``SCALE = SCALE``). Not counted: statements that
+    without a value do not). Not counted: statements that
     only do something (a call, the run call, an attribute or item set) and
     what only they read (``GRID``, ``ds = exp.run(...)``). ``imports`` are
     those of what counts."""
@@ -785,10 +784,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 outer += [arg.annotation for arg in params if arg and arg.annotation]
                 if node.returns is not None:
                     outer.append(node.returns)
-            out = scope_reads.get(node.name, set()) | loads(outer)
-            if isinstance(node, ast.ClassDef):
-                out |= class_fallback(node)
-            return out
+            return scope_reads.get(node.name, set()) | loads(outer)
         return loads([node])
 
     def run_here(node) -> list:
@@ -806,118 +802,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
             *args.defaults,
             *(d for d in args.kw_defaults if d is not None),
         ]
-
-    nested_scopes = (
-        *defs,
-        ast.Lambda,
-        ast.ListComp,
-        ast.SetComp,
-        ast.DictComp,
-        ast.GeneratorExp,
-    )
-
-    def direct_loads(node) -> set[str]:
-        """Loads a class-body statement makes in the class scope itself: not
-        inside a nested function, lambda or class, nor in a comprehension past
-        its first iterable, nor in an annotation (the symbol table gives
-        those, and knows whether annotations are evaluated), but in a nested
-        definition's decorators, defaults and bases, which run there."""
-        found: set[str] = set()
-        stack = [node]
-        while stack:
-            n = stack.pop()
-            if isinstance(n, nested_scopes):
-                if isinstance(n, defs):
-                    stack.extend(run_here(n))
-                elif not isinstance(n, ast.Lambda):
-                    # A comprehension's first iterable runs here.
-                    stack.append(n.generators[0].iter)
-                continue
-            if isinstance(n, ast.AnnAssign):
-                stack.append(n.target)
-                if n.value is not None:
-                    stack.append(n.value)
-                continue
-            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
-                found.add(n.id)
-            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
-                found.add(n.target.id)
-            stack.extend(ast.iter_child_nodes(n))
-        return found
-
-    def target_names(expr) -> set[str]:
-        return {
-            sub.id
-            for sub in ast.walk(expr)
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)
-        }
-
-    def capture_names(pattern) -> set[str]:
-        found = set()
-        for sub in ast.walk(pattern):
-            if isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
-                found.add(sub.name)
-            elif isinstance(sub, ast.MatchMapping) and sub.rest:
-                found.add(sub.rest)
-        return found
-
-    def class_fallback(node) -> set[str]:
-        """The names a class body reads before binding them in the body: a
-        class body's name lookup falls back to the module's (``SCALE =
-        SCALE``), which its symbol table records as the class's. The body is
-        read in order, into its blocks: a block's header against what is
-        bound so far, its loop and ``with`` targets, handler names and
-        captures bound before its bodies, each branch from the same start."""
-        out: set[str] = set()
-
-        def walk(body, bound: set[str]) -> None:
-            bound = set(bound)
-            for stmt in body:
-                branches: list[tuple[list, set[str]]] = []
-                heads: list = []
-                if isinstance(stmt, (ast.If, ast.While)):
-                    heads = [stmt.test]
-                    branches = [(stmt.body, set()), (stmt.orelse, set())]
-                elif isinstance(stmt, (ast.For, ast.AsyncFor)):
-                    heads = [stmt.iter]
-                    targets = target_names(stmt.target)
-                    branches = [(stmt.body, targets), (stmt.orelse, targets)]
-                elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-                    heads = [item.context_expr for item in stmt.items]
-                    targets = set()
-                    for item in stmt.items:
-                        if item.optional_vars is not None:
-                            targets |= target_names(item.optional_vars)
-                    branches = [(stmt.body, targets)]
-                elif isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-                    branches = [(stmt.body, set())]
-                    for handler in stmt.handlers:
-                        if handler.type is not None:
-                            heads.append(handler.type)
-                        branches.append(
-                            (handler.body, {handler.name} if handler.name else set())
-                        )
-                    branches += [(stmt.orelse, set()), (stmt.finalbody, set())]
-                elif isinstance(stmt, ast.Match):
-                    heads = [stmt.subject]
-                    for case in stmt.cases:
-                        captures = capture_names(case.pattern)
-                        out.update(direct_loads(case.pattern) - bound)
-                        if case.guard is not None:
-                            out.update(direct_loads(case.guard) - bound - captures)
-                        branches.append((case.body, captures))
-                else:
-                    out.update(direct_loads(stmt) - bound)
-                    bound |= binds(stmt)
-                    continue
-                for head in heads:
-                    out.update(direct_loads(head) - bound)
-                for branch, targets in branches:
-                    walk(branch, bound | targets)
-                bound |= binds(stmt)
-
-        walk(node.body, set())
-        return out
 
     def binds(node) -> set[str]:
         if isinstance(node, defs):
@@ -966,7 +850,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if not in_comp:
                     names.add(sub.id)
             elif isinstance(sub, ast.AnnAssign) and sub.value is None:
-                continue  # an annotation alone binds nothing
+                # An annotation alone binds nothing (a walrus in it does).
+                stack.append((sub.annotation, in_comp))
+                continue
             elif isinstance(sub, (ast.Import, ast.ImportFrom)):
                 names.update(binds(sub))
                 continue
@@ -1012,17 +898,15 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return _project_file_of(module) is not None
         return False
 
-    def writes_counted(name: str, node, enclosing, read: set[str], seen: set) -> bool:
+    def writes_counted(name: str, node, read: set[str], seen: set) -> bool:
         """Whether the script code bound to decorator ``name`` reads what
         counted code reads (``@register`` writing the ``MODELS`` the task
-        reads), through an alias of it too (``register_model = register``).
-        Not the statement the decorated definition is in, whose reads include
-        that definition's own."""
+        reads), through an alias of it too (``register_model = register``)."""
         if name in seen or len(seen) > 50:
             return False
         seen.add(name)
         for binder in binders.get(name, ()):
-            if binder is node or binder is enclosing:
+            if binder is node:
                 continue
             if isinstance(binder, (ast.Import, ast.ImportFrom)):
                 continue
@@ -1032,11 +916,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 binder.value, (ast.Name, ast.Attribute)
             ):
                 alias = base(binder.value)
-                if alias and writes_counted(alias, node, enclosing, read, seen):
+                if alias and writes_counted(alias, node, read, seen):
                     return True
         return False
 
-    def registers(node, read: set[str], enclosing=None) -> bool:
+    def registers(node, read: set[str]) -> bool:
         """A decorated definition whose decorator comes from a project module,
         or is defined in the script reading what counted code reads. Not one
         whose decorator is merely read too (``@mushin.sweep`` on the task and
@@ -1051,45 +935,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if isinstance(binder, (ast.Import, ast.ImportFrom)):
                     if project_import(binder, name):
                         return True
-            if writes_counted(name, node, enclosing, read, set()):
+            if writes_counted(name, node, read, set()):
                 return True
         return False
-
-    def decorated(node) -> list:
-        """``(definition, headers)`` for each decorated definition a statement
-        makes in the module's scope: itself, or one inside its blocks (`if
-        ENABLED: @register class`), with what the blocks enclosing it
-        evaluate to decide whether it runs (an ``if``'s or ``while``'s test, a
-        ``for``'s iterable, a ``with``'s items, a ``match``'s subject and the
-        case's pattern and guard), not the rest of the block."""
-        if isinstance(node, defs):
-            return [(node, [])] if node.decorator_list else []
-        found = []
-        stack = [(node, [])]
-        while stack:
-            n, heads = stack.pop()
-            if isinstance(n, defs):
-                if n.decorator_list:
-                    found.append((n, heads))
-                continue
-            if isinstance(n, (ast.If, ast.While)):
-                inner = [*heads, n.test]
-            elif isinstance(n, (ast.For, ast.AsyncFor)):
-                inner = [*heads, n.iter]
-            elif isinstance(n, (ast.With, ast.AsyncWith)):
-                inner = [*heads, *(item.context_expr for item in n.items)]
-            elif isinstance(n, ast.Match):
-                inner = [*heads, n.subject]
-            elif isinstance(n, ast.match_case):
-                inner = [*heads, n.pattern, *([n.guard] if n.guard is not None else [])]
-            else:
-                inner = heads
-            stack.extend(
-                (c, inner)
-                for c in ast.iter_child_nodes(n)
-                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
-            )
-        return found
 
     kept = [
         n
@@ -1103,41 +951,19 @@ def _script_digest(path: Path, roots: frozenset[str]):
     read: set[str] = set()
     for n in kept:
         read |= reads(n)
-    defs_in = {id(n): decorated(n) for n, _ in pending}
     while True:
-        add = [(n, names) for n, names in pending if names & read]
-        added = {id(n) for n, _ in add}
-        # A definition a block registers counts by itself, with what the
-        # blocks enclosing it evaluate to decide whether it runs (`if
-        # ENABLED:`), not the rest of the block (a grid beside it).
-        registered = [
-            (n, d, heads)
-            for n, _ in pending
-            if id(n) not in added
-            for d, heads in defs_in[id(n)]
-            if id(d) not in kept_ids and registers(d, read, n)
+        add = [
+            (n, names)
+            for n, names in pending
+            if names & read
+            or (isinstance(n, defs) and n.decorator_list and registers(n, read))
         ]
-        if not add and not registered:
+        if not add:
             break
+        added = {id(n) for n, _ in add}
         for n, _ in add:
             kept.append(n)
-            kept_ids.add(id(n))
             read |= reads(n)
-        for n, d, heads in registered:
-            if id(d) in kept_ids:
-                continue
-            kept_ids.add(id(d))
-            read |= reads(d)
-            if d is n:
-                kept.append(d)
-                added.add(id(n))
-                continue
-            read |= loads(heads)
-            # Hashed with its enclosing headers, as `if (test, ...): <def>`.
-            wrapper = ast.If(
-                test=ast.Tuple(elts=heads, ctx=ast.Load()), body=[d], orelse=[]
-            )
-            kept.append(ast.copy_location(wrapper, d))
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
     module = _strip_tree(
