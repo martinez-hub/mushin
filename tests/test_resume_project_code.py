@@ -2220,6 +2220,29 @@ SCRIPT_EDITS = {
         "X = 0\nif True:\n\n    def outer():\n        def inner():\n            global X\n"
         "            X = {k}\n\n        inner()\n\n    outer()\n\n\ndef task(a):\n    return a * X\n"
     ),
+    "a walrus in a lambda default under a block function's global": (
+        "X = 0\nif True:\n\n    def setup():\n        global X\n"
+        "        f = lambda q=(X := {k}): q\n        return f\n\n    setup()\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a walrus in a nested definition's default under a global": (
+        "X = 0\nif True:\n\n    def setup():\n        global X\n\n"
+        "        def g(a=(X := {k})):\n            return a\n\n    setup()\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a walrus in a nested class keyword under a global": (
+        "X = 0\nif True:\n\n    def setup():\n        global X\n\n"
+        "        class C(dict, x=(X := {k})):\n            pass\n\n    setup()\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a capture under a block function's global": (
+        "X = 0\nif True:\n\n    def setup(v):\n        global X\n        match v:\n"
+        "            case [X]:\n                pass\n\n    setup([{k}])\n\n\n"
+        "def task(a):\n    return a * X\n"
+    ),
+    "a walrus in a top-level definition's default": (
+        "def helper(x=(SCALE := {k})):\n    return x\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
