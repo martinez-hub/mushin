@@ -377,3 +377,70 @@ def test_a_notebook_sweep_under_joblib_resumes_from_the_drivers_entry(shell, tmp
     run(shell, "def helper(x):\n    return x * SCALE\n")
     run(shell, sweep)
     assert len(list(calls.iterdir())) == 2  # unchanged: reused
+
+
+def test_a_capture_cell_is_read(shell):
+    run(shell, "SCALE = 2")
+    run(shell, "def task(a):\n    return a * SCALE\n")
+    before = code(shell, "task")[KEY]
+    run(shell, "%%capture out\nSCALE = 3\nprint(SCALE)\n")
+    assert code(shell, "task")[KEY] != before
+
+
+def test_a_decorated_task_is_placed_by_its_decorators_line(shell):
+    """A decorated function's code starts at its first decorator, after other
+    statements in its cell: a task kept from before its cell changed is still
+    placed at its own definition, not found by name."""
+    run(shell, "import functools")
+    run(shell, "SCALE = 2\n\n@functools.lru_cache\ndef task(a):\n    return a * 1\n")
+    run(shell, "KEPT = task")
+    before = code(shell, "KEPT")[KEY]
+    run(shell, "SCALE = 2\n\n@functools.lru_cache\ndef task(a):\n    return a * 2\n")
+    assert code(shell, "KEPT")[KEY] == before
+    assert code(shell, "task")[KEY] != before
+
+
+def test_a_cell_named_by_its_text_is_placed_at_its_latest_run(shell):
+    """A Jupyter kernel names a cell's code by its text alone, so identical
+    runs share it: the root is placed at the latest run of that text."""
+    import linecache
+
+    from mushin._resume import _cell_position, _cell_statements
+
+    text = "def task(a):\n    return a\n"
+    for _ in range(2):
+        run(shell, text)
+    run(shell, "pass")
+    name = "/tmp/ipykernel_0/123456.py"
+    linecache.cache[name] = (len(text), None, text.splitlines(True), name)
+    try:
+        ns = {}
+        exec(compile(text, name, "exec"), ns)
+        cells = list(shell.history_manager.input_hist_parsed)
+        starts, total = [], 0
+        for cell in cells:
+            part = _cell_statements(cell) or []
+            starts.append((total, part))
+            total += len(part)
+        assert _cell_position(ns["task"], cells, starts) == starts[2][0]
+    finally:
+        linecache.cache.pop(name, None)
+
+
+def test_a_file_less_main_without_ipython_records_its_namespaces_modules(
+    tmp_path, monkeypatch
+):
+    """A REPL's `__main__` (no file, no IPython shell for it): its code cannot
+    be read, so the project modules of the objects it holds are recorded, as
+    before."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "mushin_t_repl.py").write_text("def f(x):\n    return x\n")
+    importlib.invalidate_caches()
+    try:
+        ns = {"__name__": "__main__"}
+        exec("import mushin_t_repl as lib\n\ndef task(a):\n    return lib.f(a)\n", ns)
+        record = project_fingerprints(ns["task"])["code"]
+        assert "mushin_t_repl (file)" in record
+        assert KEY not in record
+    finally:
+        sys.modules.pop("mushin_t_repl", None)
