@@ -2415,3 +2415,53 @@ def test_a_config_that_cannot_be_resolved_has_no_hash_and_no_targets(monkeypatch
     assert resolved_config_hash(resolved) is None
     assert _config_targets(resolved) == []
     assert _config_targets(cfg) == []
+
+
+BOTH_SCRIPT = """
+import sys
+
+from hydra_zen import builds, make_config
+
+from mushin import multirun
+from mushin.workflows import MultiRunMetricsWorkflow
+
+
+class Net:
+    def f(self, x):
+        return x * {scale}
+
+
+class W(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(net, a):
+        with open({calls!r}, "a") as f:
+            f.write("x")
+        return dict(v=net.f(a))
+
+
+if __name__ == "__main__":
+    W(eval_task_cfg=make_config(net=builds(Net))).run(
+        a=multirun([1, 2]), working_dir={wd!r}, resume="resume" in sys.argv
+    )
+"""
+
+
+def test_a_target_class_in_the_script_that_defines_the_task_is_covered(tmp_path):
+    """The task and a `_target_` class in one driver script: the target's
+    entry is the script read for the class, under its own key, beside the
+    roots' entry for the same script."""
+    calls = tmp_path / "calls.txt"
+    script = tmp_path / "both_script.py"
+
+    def write(scale):
+        script.write_text(
+            BOTH_SCRIPT.format(scale=scale, calls=str(calls), wd=str(tmp_path / "wd"))
+        )
+
+    run = _script_runner(tmp_path, script)
+    write(1.0)
+    run()
+    write(5.0)
+    err = run("resume")
+    assert "code the task reaches (both_script:Net (script))" in err, err
+    assert calls.read_text() == "xxxx"

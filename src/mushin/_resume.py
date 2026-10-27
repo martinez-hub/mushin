@@ -1313,19 +1313,17 @@ def cell_project_record(token: str, roots, with_body, cfg, scripts=None):
             try:
                 record = _record((), [target])["code"]
                 parts = target.split(".")
-                # Only what the roots' record lacks: a file both reach keeps
-                # the digest the run took (a target first named after an
-                # edit would read the edited file while the old code runs),
-                # and the entry does not hold a second copy of the roots'.
-                entries = {
-                    (
-                        k.replace(" (script)", f":{parts[1]} (script)")
-                        if k.endswith(" (script)") and len(parts) > 1
-                        else k
-                    ): v
-                    for k, v in record.items()
-                    if k not in base["code"]
-                }
+                entries = {}
+                for k, v in record.items():
+                    if k.endswith(" (script)") and len(parts) > 1:
+                        k = k.replace(" (script)", f":{parts[1]} (script)")
+                    # Only what the roots' record lacks, by the key as it is
+                    # written: a file both reach keeps the digest the run
+                    # took (a target first named after an edit would read
+                    # the edited file while the old code runs), and the entry
+                    # holds no second copy of the roots'.
+                    if k not in base["code"]:
+                        entries[k] = v
             except Exception:  # noqa: BLE001 - best effort: the roots' record stands
                 entries = {}
             while len(_TARGET_RECORDS) >= _TARGET_RECORDS_MAX:
