@@ -126,6 +126,9 @@ the run starts: each helper and class defined in a cell (its definition, and
 the defaults and class attributes it captured) and each plain constant (a
 number, a string, a tuple of them) by its value. Re-run the edited cell, then
 resume, and the cells re-run with a warning naming it (`helper (notebook)`). A
+flag the task reads counts too, so to retry only the failed cells after an
+outage, keep the outage's state outside the code (a file, a service, a dict
+item), as notebooks 04 and 08 do. A
 mutable value (a dict config, a list), an object's state, a name the task
 rebinds and a value named like a secret are not compared, nor is code whose
 text the kernel does not keep (a `%%time` cell, `exec`, a `%run` file). A value
