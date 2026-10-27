@@ -2222,6 +2222,12 @@ SCRIPT_EDITS = {
         "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif ENABLED:\n\n    @register\n"
         "    class Lin:\n        K = 1\n\n\ndef task(a):\n    return a * MODELS.get('Lin', 0)\n"
     ),
+    "a match case's guard over a registration": (
+        "MODELS = {{}}\nCFG = 'lin'\nON = {k} > 1\n\n\ndef register(cls):\n"
+        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nmatch CFG:\n    case 'lin' if ON:\n\n"
+        "        @register\n        class Lin:\n            K = 1\n\n\n"
+        "def task(a):\n    return a * MODELS.get('Lin', 0)\n"
+    ),
     "an augmented assignment": (
         "SCALE = {k}\nSCALE += 1\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
@@ -2232,6 +2238,21 @@ SCRIPT_EDITS = {
 }
 
 SCRIPT_NOT_EDITS = {
+    "a loop over the grid beside a registration in its block": (
+        "MODELS = {{}}\nGRID = list(range({k}))\n\n\ndef register(cls):\n"
+        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif True:\n\n    @register\n"
+        "    class Lin:\n        K = 1\n\n    for g in GRID:\n        print(g)\n\n\n"
+        "def task(a):\n    return a * MODELS['Lin'].K\n"
+    ),
+    "a name a class body's block binds and reads": (
+        "lr = [0.1, {k}]\n\n\nclass Cfg:\n    if True:\n        lr = 0.1\n        warm = lr * 10\n\n\n"
+        "def task(a):\n    return Cfg.warm * a\n"
+    ),
+    "a class body's except name named like a global": (
+        "err = {k}\n\n\nclass Cfg:\n    try:\n        X = 1 / 0\n"
+        "    except ZeroDivisionError as err:\n        X = str(err)\n\n\n"
+        "def task(a):\n    return len(Cfg.X) * a\n"
+    ),
     "an edit in the main block's else": (
         "SCALE = 2\n\n\ndef task(a):\n    return a * SCALE\n\n\n"
         "if __name__ == '__main__':\n    run(task)\nelse:\n    SCALE = {k}\n"
@@ -2843,3 +2864,30 @@ def test_a_decorator_that_only_logs_through_a_project_helper_registers_nothing(
     one = _digest_of_script(tmp_path, "lg1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "lg2", text.format(k=2), {"task"})
     assert one == two
+
+
+def test_the_condition_of_a_registering_block_is_hashed(tmp_path):
+    """`if ENABLED:` and `if not ENABLED:` register under opposite settings,
+    though both read the same name."""
+    text = (
+        "MODELS = {{}}\nENABLED = True\n\n\ndef register(cls):\n"
+        "    MODELS[cls.__name__] = cls\n    return cls\n\n\nif {cond}:\n\n    @register\n"
+        "    class Lin:\n        K = 1\n\n\ndef task(a):\n    return a * MODELS.get('Lin', 0)\n"
+    )
+    one = _digest_of_script(tmp_path, "cd1", text.format(cond="ENABLED"), {"task"})
+    two = _digest_of_script(tmp_path, "cd2", text.format(cond="not ENABLED"), {"task"})
+    assert one != two
+
+
+def test_a_walrus_in_a_nested_definitions_annotation_binds(tmp_path):
+    """Before 3.14 an annotation runs where its definition is, and a walrus
+    in it binds the module's name (3.14 refuses one there)."""
+    if sys.version_info >= (3, 14):
+        pytest.skip("a named expression is not allowed in an annotation on 3.14")
+    text = (
+        "if True:\n\n    def helper(x: (SCALE := {k})):\n        return x\n\n\n"
+        "def task(a):\n    return a * SCALE\n"
+    )
+    one = _digest_of_script(tmp_path, "wa1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "wa2", text.format(k=2), {"task"})
+    assert one != two

@@ -845,19 +845,78 @@ def _script_digest(path: Path, roots: frozenset[str]):
             stack.extend(ast.iter_child_nodes(n))
         return found
 
+    def target_names(expr) -> set[str]:
+        return {
+            sub.id
+            for sub in ast.walk(expr)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)
+        }
+
+    def capture_names(pattern) -> set[str]:
+        found = set()
+        for sub in ast.walk(pattern):
+            if isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+                found.add(sub.name)
+            elif isinstance(sub, ast.MatchMapping) and sub.rest:
+                found.add(sub.rest)
+        return found
+
     def class_fallback(node) -> set[str]:
         """The names a class body reads before binding them in the body: a
         class body's name lookup falls back to the module's (``SCALE =
-        SCALE``), which its symbol table records as the class's."""
+        SCALE``), which its symbol table records as the class's. The body is
+        read in order, into its blocks: a block's header against what is
+        bound so far, its loop and ``with`` targets, handler names and
+        captures bound before its bodies, each branch from the same start."""
         out: set[str] = set()
-        bound: set[str] = set()
-        for stmt in node.body:
-            loaded = direct_loads(stmt)
-            if isinstance(stmt, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
-                # Its targets are bound before its body reads them.
-                loaded -= binds(stmt)
-            out |= loaded - bound
-            bound |= binds(stmt)
+
+        def walk(body, bound: set[str]) -> None:
+            bound = set(bound)
+            for stmt in body:
+                branches: list[tuple[list, set[str]]] = []
+                heads: list = []
+                if isinstance(stmt, (ast.If, ast.While)):
+                    heads = [stmt.test]
+                    branches = [(stmt.body, set()), (stmt.orelse, set())]
+                elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                    heads = [stmt.iter]
+                    targets = target_names(stmt.target)
+                    branches = [(stmt.body, targets), (stmt.orelse, targets)]
+                elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                    heads = [item.context_expr for item in stmt.items]
+                    targets = set()
+                    for item in stmt.items:
+                        if item.optional_vars is not None:
+                            targets |= target_names(item.optional_vars)
+                    branches = [(stmt.body, targets)]
+                elif isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+                    branches = [(stmt.body, set())]
+                    for handler in stmt.handlers:
+                        if handler.type is not None:
+                            heads.append(handler.type)
+                        branches.append(
+                            (handler.body, {handler.name} if handler.name else set())
+                        )
+                    branches += [(stmt.orelse, set()), (stmt.finalbody, set())]
+                elif isinstance(stmt, ast.Match):
+                    heads = [stmt.subject]
+                    for case in stmt.cases:
+                        captures = capture_names(case.pattern)
+                        out.update(direct_loads(case.pattern) - bound)
+                        if case.guard is not None:
+                            out.update(direct_loads(case.guard) - bound - captures)
+                        branches.append((case.body, captures))
+                else:
+                    out.update(direct_loads(stmt) - bound)
+                    bound |= binds(stmt)
+                    continue
+                for head in heads:
+                    out.update(direct_loads(head) - bound)
+                for branch, targets in branches:
+                    walk(branch, bound | targets)
+                bound |= binds(stmt)
+
+        walk(node.body, set())
         return out
 
     def binds(node) -> set[str]:
@@ -876,8 +935,16 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(sub, defs):
                 names.add(sub.name)  # a definition inside `try:` or `if:`
                 # Its body binds its own names; what it evaluates here (a
-                # walrus in a default) binds the module's.
+                # walrus in a default or an annotation) binds the module's.
                 stack.extend((e, in_comp) for e in run_here(sub))
+                if not isinstance(sub, ast.ClassDef):
+                    a = sub.args
+                    params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                    stack.extend(
+                        (p.annotation, in_comp) for p in params if p and p.annotation
+                    )
+                    if sub.returns is not None:
+                        stack.append((sub.returns, in_comp))
                 continue
             if isinstance(sub, ast.Lambda):
                 args = sub.args
@@ -988,44 +1055,40 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 return True
         return False
 
-    def header(node) -> list:
-        """What a block evaluates to decide what of it runs: an ``if``'s or
-        ``while``'s test, a ``for``'s iterable, a ``with``'s items, a
-        ``match``'s subject (not its body)."""
-        found = []
-        stack = [node]
-        while stack:
-            n = stack.pop()
-            if isinstance(n, (ast.If, ast.While)):
-                found.append(n.test)
-            elif isinstance(n, (ast.For, ast.AsyncFor)):
-                found.append(n.iter)
-            elif isinstance(n, (ast.With, ast.AsyncWith)):
-                found.extend(item.context_expr for item in n.items)
-            elif isinstance(n, ast.Match):
-                found.append(n.subject)
-            if not isinstance(n, defs):
-                stack.extend(
-                    c
-                    for c in ast.iter_child_nodes(n)
-                    if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
-                )
-        return found
-
     def decorated(node) -> list:
-        """The decorated definitions a statement makes in the module's scope:
-        itself, or those inside its blocks (`if ENABLED: @register class`)."""
+        """``(definition, headers)`` for each decorated definition a statement
+        makes in the module's scope: itself, or one inside its blocks (`if
+        ENABLED: @register class`), with what the blocks enclosing it
+        evaluate to decide whether it runs (an ``if``'s or ``while``'s test, a
+        ``for``'s iterable, a ``with``'s items, a ``match``'s subject and the
+        case's pattern and guard), not the rest of the block."""
         if isinstance(node, defs):
-            return [node] if node.decorator_list else []
+            return [(node, [])] if node.decorator_list else []
         found = []
-        stack = list(ast.iter_child_nodes(node))
+        stack = [(node, [])]
         while stack:
-            sub = stack.pop()
-            if isinstance(sub, defs):
-                if sub.decorator_list:
-                    found.append(sub)
-            elif isinstance(sub, (ast.stmt, ast.excepthandler, ast.match_case)):
-                stack.extend(ast.iter_child_nodes(sub))
+            n, heads = stack.pop()
+            if isinstance(n, defs):
+                if n.decorator_list:
+                    found.append((n, heads))
+                continue
+            if isinstance(n, (ast.If, ast.While)):
+                inner = [*heads, n.test]
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                inner = [*heads, n.iter]
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                inner = [*heads, *(item.context_expr for item in n.items)]
+            elif isinstance(n, ast.Match):
+                inner = [*heads, n.subject]
+            elif isinstance(n, ast.match_case):
+                inner = [*heads, n.pattern, *([n.guard] if n.guard is not None else [])]
+            else:
+                inner = heads
+            stack.extend(
+                (c, inner)
+                for c in ast.iter_child_nodes(n)
+                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
         return found
 
     kept = [
@@ -1040,33 +1103,41 @@ def _script_digest(path: Path, roots: frozenset[str]):
     read: set[str] = set()
     for n in kept:
         read |= reads(n)
+    defs_in = {id(n): decorated(n) for n, _ in pending}
     while True:
         add = [(n, names) for n, names in pending if names & read]
-        # A definition a block registers counts by itself, with the names the
-        # block's own condition reads (`if ENABLED:`), not the whole block (a
-        # grid in it).
+        added = {id(n) for n, _ in add}
+        # A definition a block registers counts by itself, with what the
+        # blocks enclosing it evaluate to decide whether it runs (`if
+        # ENABLED:`), not the rest of the block (a grid beside it).
         registered = [
-            (n, d)
+            (n, d, heads)
             for n, _ in pending
-            if not any(n is m for m, _ in add)
-            for d in decorated(n)
+            if id(n) not in added
+            for d, heads in defs_in[id(n)]
             if id(d) not in kept_ids and registers(d, read, n)
         ]
         if not add and not registered:
             break
-        added = {id(n) for n, _ in add}
         for n, _ in add:
             kept.append(n)
             kept_ids.add(id(n))
             read |= reads(n)
-        for n, d in registered:
+        for n, d, heads in registered:
             if id(d) in kept_ids:
                 continue
-            kept.append(d)
             kept_ids.add(id(d))
             read |= reads(d)
-            if d is not n:
-                read |= loads(header(n))
+            if d is n:
+                kept.append(d)
+                added.add(id(n))
+                continue
+            read |= loads(heads)
+            # Hashed with its enclosing headers, as `if (test, ...): <def>`.
+            wrapper = ast.If(
+                test=ast.Tuple(elts=heads, ctx=ast.Load()), body=[d], orelse=[]
+            )
+            kept.append(ast.copy_location(wrapper, d))
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
     module = _strip_tree(
