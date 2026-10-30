@@ -1,0 +1,1 @@
+The docs site serves [`llms-full.txt`](https://martinez-hub.github.io/mushin/llms-full.txt), every page as one Markdown file with the guides' example code, the API reference and the notebooks' code inlined, so an agent can load the whole site in one fetch; `llms.txt` and the For AI agents page link to it.

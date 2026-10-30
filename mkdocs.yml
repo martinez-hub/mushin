@@ -32,6 +32,10 @@ theme:
     - content.code.copy
     - search.suggest
 
+# Writes llms-full.txt (the whole site as one Markdown file) next to llms.txt.
+hooks:
+  - scripts/llms_full.py
+
 plugins:
   - search
   - mkdocs-jupyter:
