@@ -32,6 +32,7 @@ experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 
 ## Docs
 
+- [The whole site in one file](https://martinez-hub.github.io/mushin/llms-full.txt): every page below except Optional, in this order, with the guides' example code, the API reference's signatures and docstrings, and the notebooks' code inlined; for loading all of the docs into context in one fetch
 - [Home](https://martinez-hub.github.io/mushin/): what mushin is and a tour of its features
 - [Install](https://martinez-hub.github.io/mushin/install/): extras table and the platform, torch and NumPy support matrix
 - [Quickstart](https://martinez-hub.github.io/mushin/quickstart/): run a sweep and get a labeled `xarray.Dataset` back

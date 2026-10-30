@@ -39,6 +39,12 @@ https://raw.githubusercontent.com/martinez-hub/mushin/main/src/mushin/agent_guid
 instead; before 0.10, upgrade first.
 ```
 
+To give an agent the whole site at once, point it at
+[llms-full.txt](https://martinez-hub.github.io/mushin/llms-full.txt): every
+page as one Markdown file, with the example code and the API reference
+inlined. [llms.txt](https://martinez-hub.github.io/mushin/llms.txt) is the
+short index of the same pages.
+
 To let an agent inspect finished runs, see
 [Analyzing from Claude Code](guides/mcp.md): `mushin-mcp` is a read-only MCP
 server over a directory of runs.

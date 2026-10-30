@@ -40,6 +40,10 @@ LLMS_TXT = ROOT / "docs" / "llms.txt"
 # host, or to the site's host outside the site, is a typo or a stale address.
 EXTERNAL_HOSTS = {"github.com", "raw.githubusercontent.com"}
 
+# Files the docs build writes into the site that are not nav pages:
+# scripts/llms_full.py (a hook in mkdocs.yml) writes llms-full.txt.
+BUILT_FILES = {"llms-full.txt"}
+
 
 @cache
 def _pyproject() -> dict:
@@ -132,10 +136,18 @@ def test_every_nav_page_is_listed_in_llms_txt():
 
 
 def test_every_llms_txt_site_link_is_a_nav_page():
-    stale = set(_llms_txt_urls()) - _nav_urls()
+    built = {_site() + name for name in BUILT_FILES}
+    stale = set(_llms_txt_urls()) - _nav_urls() - built
     assert not stale, (
         f"docs/llms.txt links to pages that are not in the nav: {sorted(stale)}"
     )
+
+
+def test_llms_txt_links_llms_full_txt():
+    """The one-file copy is only useful if an agent reading the index finds it."""
+    assert _site() + "llms-full.txt" in _llms_txt_links()
+    hooks = yaml.load((ROOT / "mkdocs.yml").read_text("utf-8"), _MkdocsLoader)
+    assert "scripts/llms_full.py" in hooks.get("hooks", [])
 
 
 def test_llms_txt_lists_each_page_once():
