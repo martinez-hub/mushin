@@ -2538,9 +2538,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             still compared, so once a run rebinds it in the kernel, a resume
             re-runs the cells; the resilience guide lists where mushin looks.
             A very large project is covered up to a fixed number of files
-            (with a warning). After
-            upgrading a dependency, changing the data or editing such code,
-            re-run from a fresh ``working_dir`` rather than resuming.
+            (with a warning). After upgrading a dependency, changing the data
+            or editing such code, re-run from a fresh ``working_dir`` rather
+            than resuming.
         capture_env : bool (default: False)
             After the sweep, snapshot the environment (``uv export``, falling
             back to ``uv pip freeze`` then an ``importlib.metadata`` dump) to

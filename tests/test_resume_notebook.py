@@ -861,10 +861,10 @@ def test_a_notebook_change_the_task_cannot_see_is_not_an_edit(kernel, case):
     assert _record(kernel, "task") == first
 
 
-def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
+def test_a_notebook_whose_record_fails_warns(kernel, monkeypatch):
     """A notebook whose entries cannot be taken has none, as on main, but
-    says so, on each run: a kernel is one process, and the resume is where
-    the edit goes unnoticed."""
+    says so, once, with the exception's type and not its message (the
+    notebook's own text)."""
     import mushin._resume as resume
 
     def fail(namespace, roots):
@@ -873,13 +873,50 @@ def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
     monkeypatch.setattr(resume, "_notebook_entries", fail)
     monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
     _run_cells(kernel, ["def helper(x):\n    return x\n", TASK])
-    for _ in range(2):  # a run, then a resume
-        with pytest.warns(
-            UserWarning, match=r"could not be recorded \(RuntimeError\)"
-        ) as got:
-            entries = resume.driver_script_entries((kernel.ns["task"],))
-        assert entries[resume.NOTEBOOK_ENTRIES] == {}
-        assert "own text" not in str(got[0].message)
+    with pytest.warns(
+        UserWarning, match=r"could not be recorded \(RuntimeError\)"
+    ) as got:
+        entries = resume.driver_script_entries((kernel.ns["task"],))
+    assert entries[resume.NOTEBOOK_ENTRIES] == {}
+    assert len(got) == 1 and "own text" not in str(got[0].message)
+
+
+def test_a_notebook_metaclass_hook_that_raises_warns(kernel, monkeypatch):
+    """The real case: a class's __dict__ is read through its metaclass, whose
+    hook can raise. The notebook then has no entries, with the warning."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    _run_cells(
+        kernel,
+        [
+            "class Meta(type):\n    def __getattribute__(cls, name):\n"
+            "        if name == '__dict__':\n            raise RuntimeError('no')\n"
+            "        return super().__getattribute__(name)\n\n\n"
+            "class Thing(metaclass=Meta):\n    pass\n\n\nobj = Thing()\n",
+            "def helper(x):\n    return x\n",
+            TASK,
+        ],
+    )
+    with pytest.warns(UserWarning, match=r"could not be recorded \(RuntimeError\)"):
+        assert _record(kernel, "task") == {}
+
+
+def test_a_metaclass_eq_that_raises_does_not_drop_the_record(kernel):
+    """Types are matched by identity, so a metaclass's __eq__ never runs: one
+    that raised used to drop every notebook entry."""
+    _run_cells(
+        kernel,
+        [
+            "class Meta(type):\n    def __eq__(cls, other):\n        raise RuntimeError('no')\n\n"
+            "    __hash__ = type.__hash__\n\n\n"
+            "class Thing(metaclass=Meta):\n    def f(self, x):\n        return x\n\n\n"
+            "obj = Thing()\n",
+            "def helper(x):\n    return x\n",
+            "def task(a):\n    return Thing().f(helper(a))\n",
+        ],
+    )
+    assert {"Thing (notebook)", "helper (notebook)"} <= set(_record(kernel, "task"))
 
 
 def test_a_metaclass_eq_does_not_steer_the_write_scan(kernel):

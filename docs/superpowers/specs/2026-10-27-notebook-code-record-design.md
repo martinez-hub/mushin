@@ -237,13 +237,19 @@ are unaffected. Tests import it with `pytest.importorskip`.
   dict keys joined the residuals; the tuple, set, frozenset and `partial`
   keyword branches got their cases; the multiprocess qualifier and the
   docstring wording were fixed.
-- Round 8 (final head, 0 + 9, nothing on the bar): types are matched by
-  identity (a metaclass `__eq__` that answered yes had the scan iterate a
-  notebook object); the failure and truncation warnings fire on every run,
-  not once per kernel, since a resume is where a missed edit costs; the
-  warning reads the exception's name from its slot; the warning test forces
-  the failure instead of relying on a defect; the guide lists where the
-  write scan looks.
+- Round 8 (0 + 9, nothing on the bar): types are matched by identity (a
+  metaclass `__eq__` that answered yes had the scan iterate a notebook
+  object); the warning reads the exception's name from its slot; the guide
+  lists where the write scan looks.
+- Final head (0 + 9 and 0 + 1, nothing on the bar). A per-run reset of the
+  warnings was reverted: Python shows a repeated warning from one place once
+  per process anyway, so it did nothing. Tests now pin the identity check
+  with a raising `__eq__` and the warning with a real metaclass hook. Two
+  residuals were left as such, since no change was allowed past the final
+  review except for a blocking finding: a class body whose `__module__` is
+  an object with its own `__eq__` (the comparison runs it), and a
+  `BaseException` raised by notebook code during the record, which is not
+  caught.
 
 ## Tests
 

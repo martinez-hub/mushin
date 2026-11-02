@@ -1412,10 +1412,10 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     bytecode, so a function whose text the kernel did not keep counts too.
     Taken from the whole namespace before the walk, not from what the walk
     reaches, since a name the run can rebind must not shape the record (see
-    ``_notebook_entries``). Breadth first, each object
-    at its least depth, and a container walked by its size alone, so the
-    result does not depend on iteration order; it depends only on the
-    notebook's definitions and the shape of what it holds."""
+    ``_notebook_entries``). Breadth first, each object at its least depth,
+    and a container walked by its size alone, so the result does not depend
+    on iteration order; it depends only on the notebook's definitions and
+    the shape of what it holds."""
     import collections
     import types
 
@@ -1725,8 +1725,8 @@ def _notebook_record(notebooks: dict) -> dict[str, str]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
     root)])}``), best effort: a notebook whose entries cannot be taken gives
     none (as on main), with a warning, since an edit then goes unnoticed (a
-    notebook metaclass's attribute hook that raises, say). Once per run:
-    ``driver_script_entries`` clears the flag, so a resume warns again."""
+    notebook metaclass's attribute hook that raises, say). Once per process:
+    Python shows a repeated warning from one place only once anyway."""
     out: dict[str, str] = {}
     for namespace, roots in notebooks.values():
         try:
@@ -1891,10 +1891,6 @@ def driver_script_entries(roots) -> dict:
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not
     mistaken for the code its cells ran. Empty when they cannot be taken."""
-    # A kernel is one long process: warn about the notebook record on every
-    # run, not only the first, since a resume is where a missed edit costs.
-    _NOTEBOOK_TRUNCATION_WARNED.clear()
-    _NOTEBOOK_FAILURE_WARNED.clear()
     try:
         code: dict[str, str] = {}
         seeds: list[str] = []
