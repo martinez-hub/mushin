@@ -197,6 +197,9 @@ are unaffected. Tests import it with `pytest.importorskip`.
   dataclass, or a class whose every method is wrapped by a decorator defined
   in the notebook (the wrapper's code is the decorator's; its methods'
   bodies are still compared, through `__wrapped__`).
+- A helper read only by a nested class's methods (`Outer.Inner().f`): the
+  walk follows a class's direct methods, so the helper is not followed
+  (the nested class's own text is, inside the outer class statement).
 - A root that calls another function bound to its own name (a task kept as
   `saved_task` after `task` was redefined, calling the new `task`): the
   other function's entry shares the root's key and is left out, so an edit
