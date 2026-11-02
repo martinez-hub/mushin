@@ -229,7 +229,8 @@ def test_each_page_is_one_section_with_a_title():
 
 def test_no_include_or_api_directive_is_left_unresolved():
     assert not _MARKER_LIKE.findall(_full())
-    assert not re.findall(r"^::: ", _full(), re.MULTILINE)
+    # Outside code: a page may show a directive as an example.
+    assert not re.search(r"(?:^|\n)::: \S", "".join(_rendered_full().text))
 
 
 def test_the_guides_example_code_is_inlined():
@@ -346,6 +347,16 @@ def test_a_module_or_external_directive_does_not_break_the_build():
     assert "## `mushin.export`" in text and "table(" in text
     assert "## `hydra_zen.zen`" in text
     assert "## `mushin.does_not_exist`" in text
+
+
+def test_a_directive_shown_in_a_fence_is_left_as_written():
+    hook = _hook()
+    example = (
+        "```markdown\n::: mushin.export\n    options:\n      heading_level: 3\n```\n"
+    )
+    entries: list[str] = []
+    assert hook._render_directives(example, _package(), entries) == example
+    assert entries == []
 
 
 def test_an_indented_block_after_a_directive_is_the_pages_own():
@@ -513,6 +524,10 @@ def test_only_a_reference_to_a_documented_object_is_rewritten():
         "[x](https://e.org/r/#mushin.A.m), [`mushin.A`](https://e.org/r/#mushin.A), "
         "[y][mushin.gone], ds[0][a.b], [z][l]\n"
     )
+    # An undotted label is an ordinary reference link with its own definition.
+    own = "[mushin][]\n\n[mushin]: https://pypi.org/project/mushin-py/\n"
+    pkg = {"mushin": "https://e.org/r/#mushin"}
+    assert _hook()._absolute_links(own, "x.md", "https://e.org/", None, pkg) == own
 
 
 def test_a_wrapped_cross_reference_is_linked():

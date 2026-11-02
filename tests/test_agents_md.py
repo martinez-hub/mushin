@@ -154,6 +154,8 @@ def test_a_slash_or_a_file_name_in_prose_is_read_rightly():
     # A path whose directory was renamed is still a path, and so is checked.
     assert _is_path("renamed_dir/") and _is_path("renamed_dir/helpers.py")
     assert not _exists("renamed_dir/helpers.py")
+    text = "Use `actions/checkout`.\n\n```bash\npytest tests/test_show.py -q\n```\n"
+    assert _named_paths(text) == ["tests/test_show.py"]
 
 
 def test_a_bare_name_resolves_only_where_agents_md_means_it():
@@ -162,8 +164,6 @@ def test_a_bare_name_resolves_only_where_agents_md_means_it():
     assert _exists("study/_study.py") and not _exists("_study.py")
     assert _exists("__main__.py")  # the package's own
     assert not _exists("hydra_plugins")  # only under tests/plugins/
-    text = "Use `actions/checkout`.\n\n```bash\npytest tests/test_show.py -q\n```\n"
-    assert _named_paths(text) == ["tests/test_show.py"]
 
 
 def test_every_path_agents_md_names_exists():

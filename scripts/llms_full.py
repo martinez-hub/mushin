@@ -33,7 +33,10 @@ build. Relative links (to pages, images, in reference definitions) become
 site URLs, since a relative `guides/mcp.md` means nothing in a single file,
 and an mkdocs-autorefs cross-reference (`[text][mushin.name]`) to an object
 the reference documents becomes a link to its anchor. Code (fences of any
-length, inline code spans) is left as written. Notebooks contribute their
+length, inline code spans) is left as written; a page using a form this does
+not read (an indented code block outside an admonition, an escaped backtick,
+an unbalanced bracket) fails the tests rather than shipping a relative link.
+Notebooks contribute their
 Markdown cells and their code cells as ```python fences; their committed
 outputs (plots, tables, base64 images) stay out. `tests/test_llms_full.py`
 checks all of this against the site mkdocs builds.
@@ -228,7 +231,8 @@ def _render_directives(text: str, package, rendered: list[str]) -> str:
             return f"{'#' * level} `{path}`\n"
         return _api_entry(obj, path, level, show_bases, rendered) + "\n"
 
-    return _DIRECTIVE.sub(entry, text)
+    # mkdocstrings never sees a fence's text, so an example stays one.
+    return _outside_fences(text, lambda run: _DIRECTIVE.sub(entry, run))
 
 
 def _notebook_markdown(path: Path) -> str:
@@ -297,7 +301,9 @@ def _absolute_links(
 
         def autoref(match: re.Match) -> str:
             target = match[2] or show(match[1]).strip("`")
-            url = anchors.get(target)
+            # An object path has a dot; an undotted label (`[mushin][]`) is an
+            # ordinary reference link, which may have its own definition.
+            url = anchors.get(target) if "." in target else None
             return f"[{match[1]}]({url})" if url else match[0]
 
         prose = _CODE_SPAN.sub(hide, prose)
@@ -306,6 +312,13 @@ def _absolute_links(
         prose = _AUTOREF.sub(autoref, prose)
         return show(prose)
 
+    return _outside_fences(text, rewrite)
+
+
+def _outside_fences(text: str, rewrite) -> str:
+    """``text`` with ``rewrite`` applied to each run of lines outside a code
+    fence, the fences as written: a page that shows a link or a `:::`
+    directive as an example keeps it."""
     out: list[str] = []
     prose: list[str] = []
     fence = None
