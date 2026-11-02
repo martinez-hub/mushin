@@ -1,8 +1,8 @@
 # Notebook code in the resume and cache_dir record: design
 
-Date: 2026-10-27. Status: implemented in #278, after four review rounds that
-each removed part of the first version (see "Review history"). Follows #270
-(the record), #276 and #277 (its follow-ups).
+Date: 2026-10-27. Status: implemented in #278, after six review rounds; the
+first four each removed part of the first version (see "Review history").
+Follows #270 (the record), #276 and #277 (its follow-ups).
 
 ## Problem
 
@@ -104,8 +104,12 @@ up, bounded at 2000 functions and classes:
   sit in a base no name holds: `class Model(Model)`, a decorator's
   subclass), and lists, tuples, sets, deques and dicts (`defaultdict` and
   `OrderedDict` too) of at most 256 items (`@HOOKS.append` keeps a writer
-  nowhere else). Only those objects count toward the bound, not the data
-  beside them, so a results dict of floats does not turn the record off.
+  nowhere else). Containers are matched by exact type and a mapping is read
+  through `dict`'s own iterator, so walking one runs no notebook code (an
+  `OrderedDict`'s iterator hashes each key again). Only those objects count
+  toward the bound, not the data beside them, so a results dict of floats
+  does not turn the record off; whether a type can lead to a function is
+  asked once per type.
   Round 5 found writers the reached code alone missed, in a list of hooks
   and a callback instance. The scan is breadth first, each object at its
   least depth, and a container is walked by its size alone, so it does not
@@ -163,9 +167,15 @@ are unaffected. Tests import it with `pytest.importorskip`.
 ## Residuals (documented)
 
 - A name any of the notebook's functions rebinds, even one the task never
-  calls; a writer the scan cannot reach (in a container larger than 256
-  items, deeper than three steps, or in an instance's attributes); a name
+  calls (not compared). A writer the scan cannot reach, so the name it
+  rebinds is still followed and a resume after the run re-runs the cells: in
+  a container larger than 256 items, deeper than three steps, in an
+  instance's attributes, a metaclass, a `defaultdict`'s `default_factory`, a
+  container subclass, or a class defined outside the notebook; a name
   rebound through `globals()` or `exec`, which no bytecode names.
+- A notebook metaclass's own methods (`__eq__`, attribute hooks) can run
+  while the record is taken; if one raises, the notebook has no entries (as
+  on main).
 - A task that assigns to a class at run time (`Model.f = other`, `setattr`):
   the class's digest is taken from its live members. Wrapping a method in a
   cache (`functools.lru_cache`) and storing a function a method defines are
@@ -212,6 +222,12 @@ are unaffected. Tests import it with `pytest.importorskip`.
   only were fixed alongside. Its delta review found the scan skipping a
   class's bases and the stdlib registry types, and counting data toward its
   bound; all three were fixed.
+- Round 6 (2 + 10): walking an `OrderedDict` through its own iterator ran
+  its keys' `__hash__`, so one whose key changed raised and the notebook lost
+  every entry, silently; mappings are now read through `dict`'s iterator. The
+  rest were writers in places the scan does not look (residuals above), a
+  per-item filter cost, and tests: every scan branch is now pinned by a case
+  that fails without it, and a not-edit case must have entries.
 
 ## Tests
 

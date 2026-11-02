@@ -2517,8 +2517,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             covered: installed packages other than editable ones, data files,
             the environment, in a notebook its values, a function reached
             only through a container (a registry), a closure or a default, a
-            name one of its functions rebinds (``global helper``; one rebound
-            through ``globals()`` or ``exec`` is not seen), a class's
+            name one of its functions rebinds (``global helper``), a class's
             attribute values beyond its text, a ``_target_`` defined
             there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its
@@ -2533,7 +2532,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             some other string. The script rule follows names, so state
             reached another way (``globals()``, ``exec``) can hide an edit:
             keep helpers in an imported module, which is compared as a whole
-            file, when that matters. A very large project
+            file, when that matters. In a notebook, a name rebound some other
+            way (``globals()``, ``exec``, a function kept only in an object's
+            attributes) is still compared, so a resume after a run that
+            rebinds it re-runs the cells. A very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.

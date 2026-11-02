@@ -258,6 +258,19 @@ NOTEBOOK_EDITS = {
         ],
         ["@functools.lru_cache\ndef helper(x):\n    return x * 3\n"],
     ),
+    # Round 6: an OrderedDict's own iterator looks each key up again, so one
+    # whose key's hash changed raised in the write scan and the notebook had
+    # no entries at all.
+    "a helper beside an OrderedDict whose key changed": (
+        [
+            "import collections\nimport dataclasses\n\n\n"
+            "@dataclasses.dataclass(unsafe_hash=True)\nclass Cfg:\n    lr: float\n\n\n"
+            "cfg = Cfg(0.1)\nBEST = collections.OrderedDict({cfg: 0.9})\ncfg.lr = 0.2\n",
+            "def helper(x):\n    return x\n",
+            TASK,
+        ],
+        ["def helper(x):\n    return x * 2\n"],
+    ),
 }
 
 NOTEBOOK_NOT_EDITS = {
@@ -720,6 +733,73 @@ NOTEBOOK_NOT_EDITS = {
         ["import math\n\n\ndef task(a):\n    return math.sqrt(a)\n"],
         ["import math\n"],
     ),
+    # Round 6: each place the write scan looks, with the writer held there
+    # and nowhere else.
+    "a writer in a deque of hooks": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import collections\n\n\ndef switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = collections.deque([switch])\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in an OrderedDict of hooks": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import collections\n\n\ndef switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = collections.OrderedDict(pre=switch)\ndel switch\n",
+            "def task(a):\n    HOOKS['pre']()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer passed to a partial as an argument": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import functools\n\n\ndef switch():\n    global helper\n    helper = fast\n\n\n"
+            "def call(f):\n    f()\n\n\nHOOKS = [functools.partial(call, switch)]\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer held only as a keyword-only default": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "def run(a, *, hook=switch):\n    hook()\n    return helper(a)\n\n\ndel switch\n",
+            "def task(a):\n    return run(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer only a wrapper's __wrapped__ holds": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "def mark(f):\n    def w():\n        return w.__wrapped__()\n\n"
+            "    w.__wrapped__ = f\n    return w\n\n\nHOOKS = [mark(switch)]\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer reached through a bound method's instance": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "class Holder:\n    def switch(self):\n        global helper\n        helper = fast\n\n"
+            "    def run(self):\n        self.switch()\n\n\nHOOK = Holder().run\ndel Holder\n",
+            "def task(a):\n    HOOK()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a grandparent of a class a registry holds": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "class Base:\n    def switch(self):\n        global helper\n        helper = fast\n\n\n"
+            "class Mid(Base):\n    pass\n\n\nclass Leaf(Mid):\n    pass\n\n\n"
+            "REG = [Leaf]\ndel Base, Mid, Leaf\n",
+            "def task(a):\n    REG[0]().switch()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
 }
 
 
@@ -738,8 +818,32 @@ def test_a_notebook_change_the_task_cannot_see_is_not_an_edit(kernel, case):
     before, after = NOTEBOOK_NOT_EDITS[case]
     _run_cells(kernel, before)
     first = _record(kernel, "task")
+    # An empty record would pass vacuously: a scan that raised gives none.
+    assert first, "the notebook entries are empty"
     _run_cells(kernel, after)
     assert _record(kernel, "task") == first
+
+
+def test_the_write_scan_runs_no_keys_hash():
+    """Round 6: walking a container must run no notebook code. An
+    OrderedDict's own iterator hashes each key again, so a key whose hash
+    changed raised and the notebook had no entries; dict's iterator does not."""
+    kernel = Kernel()
+    try:
+        kernel.run(
+            "import collections\n\n\nclass Key:\n    calls = 0\n\n"
+            "    def __hash__(self):\n        type(self).calls += 1\n        return 1\n\n\n"
+            "k = Key()\nREG = [collections.OrderedDict({k: 1}), "
+            "collections.defaultdict(int, {k: 1}), {k: 1}, {k}, frozenset({k}), "
+            "collections.deque([k])]\n"
+        )
+        kernel.run(TASK)
+        kernel.run("def helper(x):\n    return x\n")
+        calls = kernel.ns["Key"].calls
+        assert "helper (notebook)" in _record(kernel, "task")
+        assert kernel.ns["Key"].calls == calls
+    finally:
+        kernel.close()
 
 
 def test_a_restart_replaying_the_cells_gives_the_same_record():
