@@ -197,6 +197,10 @@ are unaffected. Tests import it with `pytest.importorskip`.
   dataclass, or a class whose every method is wrapped by a decorator defined
   in the notebook (the wrapper's code is the decorator's; its methods'
   bodies are still compared, through `__wrapped__`).
+- A root that calls another function bound to its own name (a task kept as
+  `saved_task` after `task` was redefined, calling the new `task`): the
+  other function's entry shares the root's key and is left out, so an edit
+  to it is not seen (Codex, after the final review).
 - A `_target_` defined in the notebook (as on main): its per-cell walk could
   not see the task's writes; hydra-zen's `builds` puts a class's defaults in
   the config, which is compared.
