@@ -33,14 +33,15 @@ build. Relative links (to pages, images, in reference definitions) become
 site URLs, since a relative `guides/mcp.md` means nothing in a single file,
 and an mkdocs-autorefs cross-reference (`[text][mushin.name]`) by the path a
 reference page documents the object under becomes a link to its anchor (not
-by another of its paths, an alias, which the tests reject). Code (fences of any
-length, inline code spans) is left as written; a page using a form this does
-not read (an indented code block outside an admonition, an escaped backtick,
-an unbalanced bracket) fails the tests rather than shipping a relative link.
-Notebooks contribute their
-Markdown cells and their code cells as ```python fences; their committed
-outputs (plots, tables, base64 images) stay out. `tests/test_llms_full.py`
-checks all of this against the site mkdocs builds.
+by another of its paths, an alias, which the tests reject). Code (fences of
+any length, inline code spans) is left as written. A page using a form this
+does not read as the site does (an indented code block outside an admonition,
+an escaped backtick, an unbalanced bracket, a fence superfences closes
+differently: it needs exactly the opener's length and drops an unclosed one)
+fails the tests rather than shipping a relative link. Notebooks contribute
+their Markdown cells and their code cells as ```python fences; their
+committed outputs (plots, tables, base64 images) stay out.
+`tests/test_llms_full.py` checks all of this against the site mkdocs builds.
 """
 
 from __future__ import annotations

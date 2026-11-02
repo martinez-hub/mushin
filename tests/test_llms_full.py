@@ -154,11 +154,19 @@ def built_site(tmp_path_factory):
     return site_dir
 
 
+def _prose(text: str) -> str:
+    """``text`` outside its code fences, as the hook reads it: a page may show
+    a directive or its options as an example."""
+    runs: list[str] = []
+    _hook()._outside_fences(text, lambda run: runs.append(run) or run)
+    return "\n".join(runs)
+
+
 def _directives() -> list[tuple[str, int]]:
     """``(name, heading level)`` for every directive on the reference pages."""
     found = []
     for page in sorted((ROOT / "docs" / "reference").glob("*.md")):
-        text = page.read_text("utf-8")
+        text = _prose(page.read_text("utf-8"))
         for match in re.finditer(r"^::: (\S+)\n((?:[ \t]+\S.*\n)*)", text, re.M):
             level = re.search(r"heading_level:\s*(\d+)", match[2])
             found.append((match[1], int(level[1]) if level else 2))
@@ -237,7 +245,8 @@ def test_each_page_is_one_section_with_a_title():
 def test_no_include_or_api_directive_is_left_unresolved():
     assert not _MARKER_LIKE.findall(_full())
     # Outside code: a page may show a directive as an example.
-    assert not re.search(r"(?:^|\n)::: \S", "".join(_rendered_full().text))
+    # With or without the space, as mkdocstrings reads it.
+    assert not re.search(r"(?:^|\n)::: ?[\w.]", "".join(_rendered_full().text))
 
 
 def test_the_guides_example_code_is_inlined():
@@ -266,7 +275,7 @@ def test_the_guides_example_code_is_inlined():
 def test_the_api_reference_is_rendered():
     names = []
     for page in sorted((ROOT / "docs" / "reference").glob("*.md")):
-        names += re.findall(r"^::: (\S+)", page.read_text("utf-8"), re.MULTILINE)
+        names += re.findall(r"^::: (\S+)", _prose(page.read_text("utf-8")), re.M)
     assert names
     missing = [
         name
@@ -341,7 +350,8 @@ def test_directive_heading_levels_are_kept():
 
 
 def test_no_directive_option_reaches_the_file():
-    assert not re.search(r"^[ \t]+(options|heading_level|show_bases):", _full(), re.M)
+    options = r"^[ \t]+(options|heading_level|show_bases):"
+    assert not re.search(options, _prose(_full()), re.M)
 
 
 def test_a_module_or_external_directive_does_not_break_the_build():
@@ -387,7 +397,7 @@ def test_the_hook_renders_every_mkdocstrings_option_the_docs_use():
     for page in sorted((ROOT / "docs").rglob("*.md")):
         if "superpowers" in page.parts:
             continue
-        for match in hook._DIRECTIVE.finditer(page.read_text(encoding="utf-8")):
+        for match in hook._DIRECTIVE.finditer(_prose(page.read_text(encoding="utf-8"))):
             block = match[0].split("\n", 1)[1] if "\n" in match[0] else ""
             used |= set(hook._directive_options(block))
     assert used, "found no directive options: the parsing changed"
@@ -417,7 +427,9 @@ def test_the_api_entries_match_the_built_site(built_site):
     checked = 0
     # Every page, so an object the site renders where the hook rendered none
     # (a directive form it does not read) fails too.
-    for _, _, url, _, entries in pages:
+    for _, page, url, _, entries in pages:
+        if page.endswith(".ipynb"):
+            continue  # nbconvert keeps a heading's dots: `## mushin.show` is an id
         html = (built_site / url.removeprefix(_site()) / "index.html").read_text(
             encoding="utf-8"
         )
