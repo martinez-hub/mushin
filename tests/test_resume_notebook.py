@@ -561,7 +561,7 @@ NOTEBOOK_NOT_EDITS = {
             "class Baseline:\n    def f(self, x):\n        return x\n\n\n"
             "class Tuned:\n    def f(self, x):\n        return x + 0\n\n\nmodel = Baseline()\n",
             "class Promote:\n    def __call__(self):\n        global model\n"
-            "        model = Tuned()\n\n\nCALLBACKS = [Promote()]\n",
+            "        model = Tuned()\n\n\nCALLBACKS = [Promote()]\ndel Promote\n",
             "def task(a):\n    for c in CALLBACKS:\n        c()\n    return model.f(a)\n",
         ],
         ["task(1)\n"],
@@ -601,6 +601,92 @@ NOTEBOOK_NOT_EDITS = {
             "def make():\n    def switch():\n        global helper\n        helper = fast\n\n"
             "    def run(a):\n        switch()\n        return helper(a)\n\n    return run\n\n\n"
             "task = make()\ndel make\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a base class a class decorator hides": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def registered(cls):\n    return type(cls.__name__, (cls,), {})\n",
+            "@registered\nclass Model:\n    def warm(self):\n        global helper\n"
+            "        helper = fast\n\n    def f(self, x):\n        self.warm()\n"
+            "        return helper(x)\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a base class no longer bound": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "class Base:\n    def warm(self):\n        global helper\n        helper = fast\n",
+            "class Model(Base):\n    def f(self, x):\n        self.warm()\n"
+            "        return helper(x)\n\n\ndel Base\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a class a subclass of the same name shadows": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "class Model:\n    def warm(self):\n        global helper\n        helper = fast\n",
+            "class Model(Model):\n    def f(self, x):\n        self.warm()\n"
+            "        return helper(x)\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a defaultdict of hooks": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import collections\n\nHOOKS = collections.defaultdict(list)\n\n\n"
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS['pre'].append(switch)\ndel switch\n",
+            "def task(a):\n    for h in HOOKS['pre']:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer kept only in a partial": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import functools\n\n\ndef switch(to):\n    global helper\n    helper = to\n\n\n"
+            "HOOKS = [functools.partial(switch, fast)]\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer behind an lru_cache wrapper": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import functools\n\n\n@functools.lru_cache\ndef switch():\n    global helper\n"
+            "    helper = fast\n\n\nHOOKS = [switch]\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer held only as a default": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "def run(a, hook=switch):\n    hook()\n    return helper(a)\n\n\ndel switch\n",
+            "def task(a):\n    return run(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer held in a dict": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = {'pre': switch}\ndel switch\n",
+            "def task(a):\n    HOOKS['pre']()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer that is a static method": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "class Setup:\n    @staticmethod\n    def switch():\n        global helper\n"
+            "        helper = fast\n\n\nHOOKS = [Setup]\ndel Setup\n",
+            "def task(a):\n    for h in HOOKS:\n        h.switch()\n    return helper(a)\n",
         ],
         ["task(1)\n"],
     ),
@@ -729,6 +815,39 @@ def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
     )
     with pytest.warns(UserWarning, match="larger than the record covers"):
         assert _record(kernel, "task") == {}
+
+
+def test_data_does_not_count_toward_the_write_scan_bound(kernel):
+    """A notebook's data (a results dict of number lists) holds no function:
+    it must not use up the bound and turn the record off."""
+    kernel.run(
+        # 40,000 distinct floats, in lists the scan walks (200 items each).
+        "RESULTS = {i: [float(j) for j in range(200)] for i in range(200)}\n\n\n"
+        "def helper(x):\n    return x\n\n\ndef task(a):\n    return helper(a)\n"
+    )
+    assert "helper (notebook)" in _record(kernel, "task")
+
+
+def test_a_sweep_tasks_own_global_write_is_seen(kernel):
+    """`@mushin.sweep` binds a handle, not the task: the scan must take the
+    task's own `global` writes from the roots. Whole records compared, since
+    a key that appears later is not a resume mismatch but changes a
+    cache_dir key."""
+    _run_cells(
+        kernel,
+        [
+            "import mushin\n\n\ndef mlp_block(x):\n    return x + 1\n\n\n"
+            "class MLP:\n    def f(self, x):\n        return mlp_block(x)\n\n\n"
+            "MODELS = {'mlp': MLP}\nmodel = None\n",
+            "@mushin.sweep\ndef task(a):\n    global model\n"
+            "    if model is None:\n        model = MODELS['mlp']()\n"
+            "    return {'v': model.f(a)}\n",
+        ],
+    )
+    root = kernel.ns["task"].__mushin_task__
+    one = _notebook(project_fingerprints(root))
+    root(1)
+    assert _notebook(project_fingerprints(root)) == one
 
 
 def test_a_write_scan_past_its_bound_gives_no_notebook_entries(kernel, monkeypatch):

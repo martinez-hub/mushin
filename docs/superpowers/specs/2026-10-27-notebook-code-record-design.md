@@ -100,8 +100,12 @@ up, bounded at 2000 functions and classes:
   from every function the namespace holds or can reach without running
   anything (`_notebook_writes`): through decorators, a `partial` and its
   arguments, a bound method, a class's members and nested classes, an
-  instance's class, closure cells, defaults, and lists, tuples, sets and
-  dicts of at most 256 items (`@HOOKS.append` keeps a writer nowhere else).
+  instance's class, closure cells, defaults, a class's bases (a writer can
+  sit in a base no name holds: `class Model(Model)`, a decorator's
+  subclass), and lists, tuples, sets, deques and dicts (`defaultdict` and
+  `OrderedDict` too) of at most 256 items (`@HOOKS.append` keeps a writer
+  nowhere else). Only those objects count toward the bound, not the data
+  beside them, so a results dict of floats does not turn the record off.
   Round 5 found writers the reached code alone missed, in a list of hooks
   and a callback instance. The scan is breadth first, each object at its
   least depth, and a container is walked by its size alone, so it does not
@@ -160,7 +164,8 @@ are unaffected. Tests import it with `pytest.importorskip`.
 
 - A name any of the notebook's functions rebinds, even one the task never
   calls; a writer the scan cannot reach (in a container larger than 256
-  items, deeper than three steps, or in an instance's attributes).
+  items, deeper than three steps, or in an instance's attributes); a name
+  rebound through `globals()` or `exec`, which no bytecode names.
 - A task that assigns to a class at run time (`Model.f = other`, `setattr`):
   the class's digest is taken from its live members. Wrapping a method in a
   cache (`functools.lru_cache`) and storing a function a method defines are
@@ -204,7 +209,9 @@ are unaffected. Tests import it with `pytest.importorskip`.
   name's value still shaped the `cache_dir` key. Names the notebook rebinds
   are now taken from the whole namespace before the walk and not followed.
   Cached methods and properties, class methods as roots, and direct members
-  only were fixed alongside.
+  only were fixed alongside. Its delta review found the scan skipping a
+  class's bases and the stdlib registry types, and counting data toward its
+  bound; all three were fixed.
 
 ## Tests
 

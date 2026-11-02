@@ -2517,7 +2517,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             covered: installed packages other than editable ones, data files,
             the environment, in a notebook its values, a function reached
             only through a container (a registry), a closure or a default, a
-            name one of its functions rebinds (``global helper``), a class's
+            name one of its functions rebinds (``global helper``; one rebound
+            through ``globals()`` or ``exec`` is not seen), a class's
             attribute values beyond its text, a ``_target_`` defined
             there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its

@@ -131,7 +131,8 @@ when every writer of it is known, and in a notebook a writer can sit anywhere
 a value can. So pass a value the results depend on (a model name, a scale) to
 the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
-default, a name one of the notebook's functions rebinds (`global helper`), a
+default, a name one of the notebook's functions rebinds (`global helper`;
+one rebound through `globals()` or `exec` is not seen), a
 `_target_` defined in the notebook, and code whose text the kernel does not
 keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
 

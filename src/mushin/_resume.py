@@ -1403,19 +1403,25 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     anything: through decorators, an ``lru_cache`` wrapper, a ``partial``
     (its arguments too), a bound method, a class's members (its methods,
     nested classes and class attributes), an instance's class, a closure's
-    cells and a function's defaults, and lists, tuples, sets and dicts of at
-    most ``_WRITE_SCAN_CONTAINER`` items (``@HOOKS.append`` keeps a writer
-    nowhere else). From bytecode, so a function whose text the kernel did not
+    cells and a function's defaults, a class's bases, and lists, tuples,
+    sets, deques and dicts (``defaultdict`` and ``OrderedDict`` too) of at most
+    ``_WRITE_SCAN_CONTAINER`` items (``@HOOKS.append`` keeps a writer nowhere
+    else). Only those objects count toward the bound, not the data beside
+    them. A name rebound through ``globals()`` or ``exec`` is not seen. From bytecode, so a function whose text the kernel did not
     keep counts too. Taken from the whole namespace before the walk, not
     from what the walk reaches, since a name the run can rebind must not
     shape the record (see ``_notebook_entries``). Breadth first, each object
     at its least depth, and a container walked by its size alone, so the
     result does not depend on iteration order; it depends only on the
     notebook's definitions and the shape of what it holds."""
+    import collections
     import types
 
     lru = getattr(functools, "_lru_cache_wrapper", None)
-    containers = (list, tuple, set, frozenset, dict)
+    # Exact types only, so no subclass's __iter__ or __len__ runs.
+    mappings = (dict, collections.defaultdict, collections.OrderedDict)
+    containers = (list, tuple, set, frozenset, collections.deque, *mappings)
+    callable_kinds = (types.FunctionType, lru, functools.partial, types.MethodType)
     functions: list = []
     seen: set[int] = set()
     level = [
@@ -1431,12 +1437,21 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     while level and depth <= _WRITE_SCAN_DEPTH:
         nxt: list = []
         for value in level:
+            kind = type(value)
+            # Only what can lead to a function counts toward the bound: a
+            # notebook's data (lists of numbers) must not turn the record off.
+            if not (
+                kind in callable_kinds
+                or kind in containers
+                or issubclass(kind, type)
+                or _notebook_class(kind, namespace) is not None
+            ):
+                continue
             if id(value) in seen:
                 continue
             seen.add(id(value))
             if len(seen) > _WRITE_SCAN_MAX:
                 return None
-            kind = type(value)
             if kind is types.FunctionType:
                 if value.__globals__ is namespace:
                     functions.append(value)
@@ -1456,7 +1471,7 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
                 nxt.extend([value.__func__, value.__self__])
             elif kind in containers:
                 if len(value) <= _WRITE_SCAN_CONTAINER:
-                    nxt.extend(value.values() if kind is dict else value)
+                    nxt.extend(value.values() if kind in mappings else value)
             elif _notebook_class(value, namespace) is not None:
                 try:
                     members = list(vars(value).values())
@@ -1465,6 +1480,9 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
                 for member in members:
                     nxt.extend(_method_functions(member))
                     nxt.append(member)
+                # Its bases too, as the walk follows them: a writer can sit in a
+                # base no name holds (`class Model(Model)`, a decorator's subclass).
+                nxt.extend(value.__mro__[1:])
             elif _notebook_class(kind, namespace) is not None:
                 nxt.append(kind)  # an instance: its class
         level, depth = nxt, depth + 1
