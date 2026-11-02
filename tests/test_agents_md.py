@@ -60,25 +60,54 @@ def _section(title: str) -> str:
     return rest.split("\n## ", 1)[0]
 
 
+@cache
+def _tracked() -> frozenset[str]:
+    """The repository's files, as git tracks them."""
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+    return frozenset(out.splitlines())
+
+
 def _is_path(token: str) -> bool:
-    if re.search(r"[\s<>]|://", token):
+    """A token that names a repository path: its first segment is an entry of
+    the repository or of the package (the Layout names modules by their short
+    names, `study/_study.py`), or it is a bare file name. Not any token with a
+    `/` (`actions/checkout`, `and/or`), and not a bare suffix (`.md`)."""
+    token = token.rstrip(".,;:)")
+    if not token or re.search(r"[\s<>\"'`]|://", token):
         return False
-    if token.startswith("."):
-        # `.claude-plugin/` is a path; a bare `.md` in prose is a suffix.
-        return "/" in token
-    return "/" in token or any(token.endswith(s) for s in PATH_SUFFIXES)
+    if "/" not in token:
+        return not token.startswith(".") and token.endswith(tuple(PATH_SUFFIXES))
+    first = token.split("/", 1)[0]
+    return bool(first) and any((base / first).exists() for base in (ROOT, PACKAGE))
 
 
-def _named_paths() -> list[str]:
-    """Backticked tokens that look like repository paths: they contain a `/`
-    or end in a file suffix, and hold no spaces, placeholders or URLs."""
-    tokens = set(re.findall(r"`([^`\n]+)`", _text()))
-    return sorted({token for token in tokens if _is_path(token)} - RUNTIME_PATHS)
+def _code_blocks(text: str) -> list[str]:
+    """The bodies of the fenced code blocks."""
+    return re.findall(r"^```[^\n]*\n(.*?)^```$", text, re.M | re.S)
+
+
+def _named_paths(text: str | None = None) -> list[str]:
+    """The repository paths AGENTS.md names: backticked tokens, and the words
+    of its command blocks (`pytest tests/test_show.py`), that look like
+    paths and are not ones a run creates."""
+    text = _text() if text is None else text
+    tokens = set(re.findall(r"`([^`\n]+)`", text))
+    for block in _code_blocks(text):
+        tokens |= {word for word in block.split() if "/" in word}
+    paths = {token.rstrip(".,;:)") for token in tokens if _is_path(token)}
+    return sorted(paths - RUNTIME_PATHS)
 
 
 def _exists(path: str) -> bool:
     # The Layout table names modules inside the package by their short names
-    # (`_show.py`, `study/_study.py`), so a path may be relative to it.
+    # (`_show.py`, `study/_study.py`), so a path may be relative to it; a bare
+    # file name (`conftest.py`) may live anywhere in the repository.
+    if "/" not in path and "*" not in path:
+        return any(f.rsplit("/", 1)[-1] == path for f in _tracked())
     for base in (ROOT, PACKAGE):
         if "*" in path:
             if any(base.glob(path)):
@@ -88,12 +117,44 @@ def _exists(path: str) -> bool:
     return False
 
 
+def _make_targets(text: str) -> set[str]:
+    """The make targets a text names in code: `` `make check` `` inline, or a
+    command block's `make lint` line. Prose ("make sure") is not one."""
+    named = set(re.findall(r"`make ([a-z][\w-]*)", text))
+    for block in _code_blocks(text):
+        named |= set(re.findall(r"^\s*make ([a-z][\w-]*)", block, re.M))
+    return named
+
+
+def _gate_tests(section: str) -> set[str]:
+    """The test files of the pytest commands in a section, with a command
+    wrapped over lines (`\\` continuations) read whole."""
+    joined = re.sub(r"\\\n\s*", " ", section)
+    return {
+        test
+        for line in joined.splitlines()
+        if "pytest" in line
+        for test in re.findall(r"tests/\S+\.py", line)
+    }
+
+
 def test_agents_md_names_paths():
     """Guards the path extraction itself: an empty list passes vacuously."""
     paths = _named_paths()
     assert "src/mushin/__init__.py" in paths
     assert "tests/test_lazy_imports.py" in paths
+    assert "tests/test_show.py" in paths  # from a command block
     assert ".md" not in paths  # a bare suffix in prose is not a path
+
+
+def test_a_slash_or_a_file_name_in_prose_is_read_rightly():
+    assert not _is_path("actions/checkout")
+    assert not _is_path("martinez-hub/mushin")
+    assert not _is_path("and/or")
+    assert _is_path("src/mushin/_show.py") and _is_path("study/_study.py")
+    assert _is_path("conftest.py") and _exists("conftest.py")
+    text = "Use `actions/checkout`.\n\n```bash\npytest tests/test_show.py -q\n```\n"
+    assert _named_paths(text) == ["tests/test_show.py"]
 
 
 def test_every_path_agents_md_names_exists():
@@ -115,9 +176,14 @@ def test_every_relative_link_in_agents_md_resolves():
 def test_every_make_target_agents_md_names_exists():
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     targets = set(re.findall(r"^([A-Za-z][\w-]*):", makefile, re.MULTILINE))
-    named = set(re.findall(r"\bmake ([a-z][\w-]*)", _text()))
+    named = _make_targets(_text())
     assert named, "found no `make <target>` in AGENTS.md"
     assert named <= targets, f"not Makefile targets: {sorted(named - targets)}"
+
+
+def test_make_targets_are_read_from_code_only():
+    text = "Run `make check`; make sure it passes.\n\n```bash\nmake lint\n```\n"
+    assert _make_targets(text) == {"check", "lint"}
 
 
 def test_every_extra_and_group_agents_md_names_exists():
@@ -149,23 +215,25 @@ def test_the_docs_gate_matches_the_ci_docs_job():
     """'Before you push' gives the docs-pinning tests to run locally; it must be
     the list CI's docs job runs, or a local pass proves less than it claims."""
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text("utf-8"))
-    runs = [
-        step["run"]
-        for job in ci["jobs"].values()
-        for step in job.get("steps", [])
-        if step.get("name") == "Docs-pinning tests"
-    ]
-    assert len(runs) == 1, "expected one 'Docs-pinning tests' step in ci.yml"
-    in_ci = set(re.findall(r"tests/\S+\.py", runs[0]))
-
-    command = next(
-        line for line in _section("Before you push").splitlines() if "pytest" in line
-    )
-    in_agents_md = set(re.findall(r"tests/\S+\.py", command))
+    # Every pytest step of the docs job: the snippet-include check runs in a
+    # step of its own beside 'Docs-pinning tests'.
+    in_ci = {
+        test
+        for step in ci["jobs"]["docs"]["steps"]
+        if "pytest" in step.get("run", "")
+        for test in re.findall(r"tests/\S+\.py", step["run"])
+    }
+    assert "tests/test_docs_snippets.py" in in_ci, "the docs job's steps changed"
+    in_agents_md = _gate_tests(_section("Before you push"))
     assert in_agents_md == in_ci, (
         f"only in AGENTS.md: {sorted(in_agents_md - in_ci)}; "
         f"only in ci.yml: {sorted(in_ci - in_agents_md)}"
     )
+
+
+def test_a_wrapped_gate_command_is_read_whole():
+    section = "2. Run:\n   `uv run pytest tests/test_a.py \\\n   tests/test_b.py`\n"
+    assert _gate_tests(section) == {"tests/test_a.py", "tests/test_b.py"}
 
 
 def test_fragment_types_match_towncrier():

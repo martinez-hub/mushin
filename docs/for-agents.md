@@ -41,8 +41,8 @@ instead; before 0.10, upgrade first.
 
 To give an agent the whole site at once, point it at
 [llms-full.txt](https://martinez-hub.github.io/mushin/llms-full.txt): every
-page as one Markdown file, with the example code and the API reference
-inlined. [llms.txt](https://martinez-hub.github.io/mushin/llms.txt) is the
+page but the contributing guide and the changelog, as one Markdown file, with
+the example code and the API reference inlined. [llms.txt](https://martinez-hub.github.io/mushin/llms.txt) is the
 short index of the same pages.
 
 To let an agent inspect finished runs, see

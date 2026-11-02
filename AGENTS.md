@@ -71,7 +71,7 @@ local pass therefore does not cover them, and you should not claim it does.
 | `docs/notebooks/` | Example notebooks with committed outputs; CI re-executes them. |
 | `docs/superpowers/` | Internal design specs and plans. Excluded from the site; never link to it from published docs. |
 | `docs/llms.txt` | The LLM-facing index of the docs site, served at <https://martinez-hub.github.io/mushin/llms.txt>. |
-| `scripts/llms_full.py` | An mkdocs hook (`hooks:` in `mkdocs.yml`) that writes `llms-full.txt`, the whole site as one Markdown file, into the built site next to `docs/llms.txt` on every build. |
+| `scripts/llms_full.py` | An mkdocs hook (`hooks:` in `mkdocs.yml`) that writes `llms-full.txt`, every page but the contributing guide and the changelog as one Markdown file, into the built site next to `docs/llms.txt` on every build. |
 | `changes/` | Towncrier news fragments (see below). |
 | `paper/` | The paper source (LaTeX); built by `.github/workflows/paper-pdf.yml`. |
 
@@ -125,7 +125,7 @@ local pass therefore does not cover them, and you should not claim it does.
   pages. `tests/test_llms_full.py` checks what it holds.
 - **`AGENTS.md` is tested.** The paths, Makefile targets, extras and groups it
   names must exist, its Layout must list every subpackage, its "Before you
-  push" docs tests must be the CI docs job's, and its Python range and fragment
+  push" docs tests must be every test the CI docs job runs, and its Python range and fragment
   types must match `pyproject.toml` (`tests/test_agents_md.py`). Update this
   file in the same PR as the change it describes.
 - **The agent guide is tested.** `src/mushin/agent_guide.md` is ASCII, its
@@ -193,7 +193,7 @@ local pass therefore does not cover them, and you should not claim it does.
 1. `make check` passes.
 2. Docs or `src/mushin/agent_guide.md` touched (including `mkdocs.yml` or
    `docs/llms.txt`): `make docs-build` passes, and so does
-   `uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_llms_full.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py tests/test_reference_pages.py tests/test_agents_md.py`
+   `uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_llms_full.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py tests/test_reference_pages.py tests/test_agents_md.py tests/test_docs_snippets.py`
    (the docs group gives the guide's render test its Markdown extensions).
 3. Notebooks or code they exercise touched: the nbmake command above passes.
 4. A fragment exists in `changes/`.
