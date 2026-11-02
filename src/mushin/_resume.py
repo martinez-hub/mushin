@@ -1282,24 +1282,30 @@ def _definition_nodes(code) -> list | None:
 
 def _method_functions(value) -> list:
     """The functions a class attribute holds: a function, a static or class
-    method's, a property's accessors. Not 3.14's ``__annotate__``, which
-    holds a class body's annotations: the compiler's, not a method, and
-    absent before 3.14."""
+    method's, a property's accessors, a ``functools.cached_property``'s, and
+    through an ``lru_cache`` (``functools.cache``) wrapper. Not 3.14's
+    ``__annotate__``, which holds a class body's annotations: the
+    compiler's, not a method, and absent before 3.14."""
     import types
 
+    lru = getattr(functools, "_lru_cache_wrapper", None)
     kind = type(value)
     found: list = []
-    if kind is types.FunctionType:
+    if kind is types.FunctionType or kind is lru:
         found = [value]
     elif kind in (staticmethod, classmethod):
         found = [value.__func__]
     elif kind is property:
         found = [value.fget, value.fset, value.fdel]
-    return [
-        f
-        for f in found
-        if type(f) is types.FunctionType and f.__code__.co_name != "__annotate__"
-    ]
+    elif kind is functools.cached_property:
+        found = [value.func]
+    out = []
+    for f in found:
+        if type(f) is lru:
+            f = vars(f).get("__wrapped__")
+        if type(f) is types.FunctionType and f.__code__.co_name != "__annotate__":
+            out.append(f)
+    return out
 
 
 def _class_node(cls, methods):
@@ -1369,14 +1375,103 @@ def _notebook_class(value, namespace):
 
 def _class_methods(cls, namespace) -> list:
     """The functions defined in a notebook class's body, through their
-    decorators."""
+    decorators: direct members only, so a function a method defines and
+    stores on the class as it runs (``Model.f.<locals>.g``) is not one."""
     out = []
     for value in vars(cls).values():
         for fn in _method_functions(value):
             fn = _cell_function(fn, namespace)
-            if fn is not None and fn.__qualname__.startswith(cls.__qualname__ + "."):
+            if (
+                fn is not None
+                and fn.__qualname__.rpartition(".")[0] == cls.__qualname__
+            ):
                 out.append(fn)
     return out
+
+
+#: How far the write scan looks through containers, closures and defaults,
+#: how large a container it walks, and how many objects it takes in all.
+_WRITE_SCAN_DEPTH = 3
+_WRITE_SCAN_CONTAINER = 256
+_WRITE_SCAN_MAX = 20_000
+
+
+def _notebook_writes(namespace: dict, roots) -> frozenset | None:
+    """The global names any of a notebook's functions rebinds (``global
+    helper; helper = fast``), or None past the scan's bound. Every function
+    the namespace holds counts, and every one it can reach without running
+    anything: through decorators, an ``lru_cache`` wrapper, a ``partial``
+    (its arguments too), a bound method, a class's members (its methods,
+    nested classes and class attributes), an instance's class, a closure's
+    cells and a function's defaults, and lists, tuples, sets and dicts of at
+    most ``_WRITE_SCAN_CONTAINER`` items (``@HOOKS.append`` keeps a writer
+    nowhere else). From bytecode, so a function whose text the kernel did not
+    keep counts too. Taken from the whole namespace before the walk, not
+    from what the walk reaches, since a name the run can rebind must not
+    shape the record (see ``_notebook_entries``). Breadth first, each object
+    at its least depth, and a container walked by its size alone, so the
+    result does not depend on iteration order; it depends only on the
+    notebook's definitions and the shape of what it holds."""
+    import types
+
+    lru = getattr(functools, "_lru_cache_wrapper", None)
+    containers = (list, tuple, set, frozenset, dict)
+    functions: list = []
+    seen: set[int] = set()
+    level = [
+        value
+        for name, value in list(namespace.items())
+        if type(name) is str
+        and not (
+            (name.startswith("__") and name.endswith("__"))
+            or _IPYTHON_NAME.fullmatch(name)
+        )
+    ] + [root for _, root in roots]
+    depth = 0
+    while level and depth <= _WRITE_SCAN_DEPTH:
+        nxt: list = []
+        for value in level:
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            if len(seen) > _WRITE_SCAN_MAX:
+                return None
+            kind = type(value)
+            if kind is types.FunctionType:
+                if value.__globals__ is namespace:
+                    functions.append(value)
+                nxt.append(value.__dict__.get("__wrapped__"))
+                nxt.extend(value.__defaults__ or ())
+                nxt.extend((value.__kwdefaults__ or {}).values())
+                for cell in value.__closure__ or ():
+                    try:
+                        nxt.append(cell.cell_contents)
+                    except ValueError:  # an empty cell
+                        pass
+            elif kind is lru:
+                nxt.append(vars(value).get("__wrapped__"))
+            elif kind is functools.partial:
+                nxt.extend([value.func, *value.args, *(value.keywords or {}).values()])
+            elif kind is types.MethodType:
+                nxt.extend([value.__func__, value.__self__])
+            elif kind in containers:
+                if len(value) <= _WRITE_SCAN_CONTAINER:
+                    nxt.extend(value.values() if kind is dict else value)
+            elif _notebook_class(value, namespace) is not None:
+                try:
+                    members = list(vars(value).values())
+                except TypeError:
+                    continue
+                for member in members:
+                    nxt.extend(_method_functions(member))
+                    nxt.append(member)
+            elif _notebook_class(kind, namespace) is not None:
+                nxt.append(kind)  # an instance: its class
+        level, depth = nxt, depth + 1
+    writes: set[str] = set()
+    for fn in functions:
+        writes |= _code_names(fn.__code__)[1]
+    return frozenset(writes)
 
 
 def _notebook_object(value, namespace):
@@ -1457,8 +1552,10 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
 
     No value is compared, a closure's or a default's contents neither: a
     value is only safe to compare when every writer of it is found, and in a
-    notebook a writer can sit wherever a value can. A name the reached code
-    rebinds (``global helper; helper = fast``) is left out. A record past its
+    notebook a writer can sit wherever a value can. A name any of the
+    notebook's functions rebinds (``global helper; helper = fast``, see
+    ``_notebook_writes``) is not followed: what it holds when the run starts
+    can be gone by the next. A record past its
     object bound has no notebook entries (with a warning): which objects a
     cut walk took depends on its order. Objects are inspected by type, and
     only a function's own ``__dict__`` is read, so a lazy proxy is never
@@ -1468,10 +1565,15 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
     def resolve(value):
         return _notebook_object(value, namespace)
 
+    over = [False]
+    rebound = _notebook_writes(namespace, roots)
+    if rebound is None:  # past the scan's bound: which writes it saw is unknown
+        over[0] = True
+        rebound = frozenset()
+
     # uid -> [kind, object, children, methods]
     units: dict[int, list] = {}
     codes: list = []
-    over = [False]
 
     def visit(obj) -> int | None:
         """Take a function or class into ``units``; None past the bound."""
@@ -1518,8 +1620,10 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
                 continue
             followed.add(name)
             if (
-                name.startswith("__") and name.endswith("__")
-            ) or _IPYTHON_NAME.fullmatch(name):
+                (name.startswith("__") and name.endswith("__"))
+                or _IPYTHON_NAME.fullmatch(name)
+                or name in rebound
+            ):
                 continue
             found = resolve(namespace[name])
             if found is not None:
@@ -1534,9 +1638,6 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
                 "working_dir after editing it."
             )
         return {}
-    rebound: set[str] = set()
-    for code in codes:
-        rebound |= _code_names(code)[1]
 
     def own(uid: int) -> str:
         """A unit's own definition, without what it reaches."""
@@ -1579,7 +1680,7 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         )
     for name, obj in named.items():
         key = f"{name} (notebook)"
-        if key not in entries and name not in rebound:
+        if key not in entries:
             entries[key] = digest(id(obj))
     return entries
 
@@ -1684,7 +1785,9 @@ def _root_entries(
                 _root_entries(
                     layer.__func__, code, seeds, scripts, depth + 1, notebooks
                 )
-            layer = type(layer.__self__)
+            # A class method is bound to its class (whose type is a metaclass).
+            owner = layer.__self__
+            layer = owner if issubclass(type(owner), type) else type(owner)
         if type(layer) is types.FunctionType:
             namespace = layer.__globals__
             top = layer.__qualname__.partition(".")[0]
@@ -1730,7 +1833,9 @@ def _script_entry(file: str, namespace: dict, names, objects) -> tuple[str, list
 
 def driver_script_entries(roots) -> dict:
     """The entries of the driver scripts the roots are defined in, taken in
-    the driver when a run starts: ``{file: (digest, imports, package)}``. A
+    the driver when a run starts: ``{file: (digest, imports, package)}``, and
+    for roots defined in a notebook ``{NOTEBOOK_ENTRIES: {key: digest}}``
+    (no script path can be that key). A
     parallel worker runs the driver's pickled script functions, so the
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not

@@ -3,9 +3,9 @@
 """resume=True and cache_dir= notice edits to code defined in a notebook.
 
 A notebook has no file to compare. The record follows the names the task's
-code looks up, through the objects the kernel holds now: a function's code
-names the cell text of the version in force, a class is found through its
-methods, and a plain constant is compared by its value (see
+code looks up, through the objects the kernel holds now, and compares their
+definitions: a function's code names the cell text of the version in force,
+and a class is found through its methods. No value is compared (see
 docs/superpowers/specs/2026-10-27-notebook-code-record-design.md).
 """
 
@@ -217,6 +217,37 @@ NOTEBOOK_EDITS = {
             # (until then the old Base is what runs, and the record says so).
             "class Base:\n    def g(self, x):\n        return x * 3\n",
             "class Model(Base):\n    def f(self, x):\n        return self.g(x)\n",
+        ],
+    ),
+    "a cached method's body": (
+        [
+            "import functools\n\n\nclass Model:\n    @functools.cache\n    def f(self, x):\n"
+            "        return x * 2\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        [
+            "class Model:\n    @functools.cache\n    def f(self, x):\n        return x * 3\n"
+        ],
+    ),
+    "a cached property's body": (
+        [
+            "import functools\n\n\nclass Model:\n    @functools.cached_property\n"
+            "    def k(self):\n        return 2\n",
+            "def task(a):\n    return a * Model().k\n",
+        ],
+        [
+            "class Model:\n    @functools.cached_property\n    def k(self):\n"
+            "        return 3\n",
+        ],
+    ),
+    "a class reached through its class method as the task": (
+        [
+            "class Model:\n    FACTOR = 2\n\n    @classmethod\n    def run(cls, x):\n"
+            "        return x * cls.FACTOR\n\n\ntask = Model.run\n",
+        ],
+        [
+            "class Model:\n    FACTOR = 3\n\n    @classmethod\n    def run(cls, x):\n"
+            "        return x * cls.FACTOR\n\n\ntask = Model.run\n",
         ],
     ),
     "a decorated helper": (
@@ -517,6 +548,88 @@ NOTEBOOK_NOT_EDITS = {
         ],
         ["def scale(x):\n    return x * 3\n"],
     ),
+    "a hook in a list rebinding a helper": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\nHOOKS = [switch]\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a callback instance rebinding a model": (
+        [
+            "class Baseline:\n    def f(self, x):\n        return x\n\n\n"
+            "class Tuned:\n    def f(self, x):\n        return x + 0\n\n\nmodel = Baseline()\n",
+            "class Promote:\n    def __call__(self):\n        global model\n"
+            "        model = Tuned()\n\n\nCALLBACKS = [Promote()]\n",
+            "def task(a):\n    for c in CALLBACKS:\n        c()\n    return model.f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a nested class rebinding a helper": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "class Outer:\n    class Inner:\n        def go(self):\n            global helper\n"
+            "            helper = fast\n",
+            "def task(a):\n    Outer.Inner().go()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer bound as a method of another object": (
+        [
+            "import types\n\n\ndef slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\n"
+            "helper = slow\n",
+            "def switch(self):\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = [types.MethodType(switch, types.SimpleNamespace())]\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer registered with a decorator that returns None": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\n"
+            "helper = slow\nHOOKS = []\n",
+            "@HOOKS.append\ndef switch():\n    global helper\n    helper = fast\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer only a closure holds": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\n"
+            "helper = slow\n",
+            "def make():\n    def switch():\n        global helper\n        helper = fast\n\n"
+            "    def run(a):\n        switch()\n        return helper(a)\n\n    return run\n\n\n"
+            "task = make()\ndel make\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a task setting a global it reads to an instance": (
+        [
+            "def mlp_block(x):\n    return x + 1\n\n\nclass MLP:\n    def f(self, x):\n"
+            "        return mlp_block(x)\n\n\nMODELS = {'mlp': MLP}\nmodel = None\n",
+            "def task(a):\n    global model\n    if model is None:\n"
+            "        model = MODELS['mlp']()\n    return model.f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a task caching a method at run time": (
+        [
+            "import functools\n\n\nclass Model:\n    def f(self, x):\n        return x * 2\n",
+            "def task(a):\n    if not hasattr(Model, '_memo'):\n"
+            "        Model.f = functools.lru_cache(Model.f)\n        Model._memo = True\n"
+            "    return Model().f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a method adding a nested function to its class": (
+        [
+            "class Model:\n    def f(self, x):\n        def g(y):\n            return y\n\n"
+            "        type(self).g = g\n        return x\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
     "a module the task reads": (
         ["import math\n\n\ndef task(a):\n    return math.sqrt(a)\n"],
         ["import math\n"],
@@ -612,6 +725,24 @@ def test_too_many_objects_give_no_notebook_entries(kernel, monkeypatch):
             "def task(a):\n    return "
             + " + ".join(f"h{i}(a)" for i in range(10))
             + "\n",
+        ],
+    )
+    with pytest.warns(UserWarning, match="larger than the record covers"):
+        assert _record(kernel, "task") == {}
+
+
+def test_a_write_scan_past_its_bound_gives_no_notebook_entries(kernel, monkeypatch):
+    """Which writes a cut scan saw depends on its order: no notebook entry is
+    recorded rather than a part of them."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_WRITE_SCAN_MAX", 3)
+    monkeypatch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
+    _run_cells(
+        kernel,
+        [
+            "".join(f"def h{i}(x):\n    return x + {i}\n\n\n" for i in range(10)),
+            "def task(a):\n    return h0(a)\n",
         ],
     )
     with pytest.warns(UserWarning, match="larger than the record covers"):

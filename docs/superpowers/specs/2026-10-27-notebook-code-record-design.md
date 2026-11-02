@@ -93,16 +93,26 @@ up, bounded at 2000 functions and classes:
   bases, a wrapper defined in a cell to its `__wrapped__`. Not a closure's or
   a default's contents: following a callable a capture holds needs to know
   that nothing rebinds it, which is the writer discovery above.
-- **A name the reached code rebinds is left out** (`global helper; helper =
-  fast`). Dropping a key never re-runs a cell (records compare on the keys
-  both have), and it is taken from the reached code only, so the key set
-  does not depend on code the task cannot reach.
+- **A name the notebook's code rebinds is not followed** (`global helper;
+  helper = fast`): what it holds when the run starts can be gone by the
+  next, and following it would let that value shape the record (a
+  `cache_dir` key hashes every entry). The writes are taken before the walk
+  from every function the namespace holds or can reach without running
+  anything (`_notebook_writes`): through decorators, a `partial` and its
+  arguments, a bound method, a class's members and nested classes, an
+  instance's class, closure cells, defaults, and lists, tuples, sets and
+  dicts of at most 256 items (`@HOOKS.append` keeps a writer nowhere else).
+  Round 5 found writers the reached code alone missed, in a list of hooks
+  and a callback instance. The scan is breadth first, each object at its
+  least depth, and a container is walked by its size alone, so it does not
+  depend on iteration order; past 20,000 objects there are no notebook
+  entries, with a warning.
 - **IPython's own names are not followed:** `_`, `__`, `___`, `_i`, `_ii`,
   `_iii`, `_iN`, `_N`, `_oh`, `_ih`, `_dh`, `In`, `Out`, `get_ipython`,
   `exit`, `quit`, `_exit_code`, and dunder names.
 - **Objects are inspected by type only**; only a function's or an
   `lru_cache` wrapper's own `__dict__` is read, so a lazy proxy is never
-  resolved (`test_the_record_never_resolves_a_lazy_object`).
+  resolved (`test_the_record_does_not_resolve_a_lazy_object`).
 
 ### What each name records
 
@@ -148,6 +158,14 @@ are unaffected. Tests import it with `pytest.importorskip`.
 
 ## Residuals (documented)
 
+- A name any of the notebook's functions rebinds, even one the task never
+  calls; a writer the scan cannot reach (in a container larger than 256
+  items, deeper than three steps, or in an instance's attributes).
+- A task that assigns to a class at run time (`Model.f = other`, `setattr`):
+  the class's digest is taken from its live members. Wrapping a method in a
+  cache (`functools.lru_cache`) and storing a function a method defines are
+  not this: they resolve to the same definition.
+
 - **Values:** a number, a string, a container's contents, an object's state,
   data, and what a default or a closure holds. Pass a value as a swept
   parameter, or use a new `working_dir` after editing one. A flag or a
@@ -181,6 +199,12 @@ are unaffected. Tests import it with `pytest.importorskip`.
 - Round 4 (7 + 4): the namespace-wide writes let unrelated cells change a
   digest, and a writer behind a notebook decorator was still missed. The
   kill criterion fired: values are not compared.
+- Round 5 (final head, 8 + 3, and Codex 3): a writer the walk never reached
+  rebound a name bound to a function (a hook in a list), and a rebound
+  name's value still shaped the `cache_dir` key. Names the notebook rebinds
+  are now taken from the whole namespace before the walk and not followed.
+  Cached methods and properties, class methods as roots, and direct members
+  only were fixed alongside.
 
 ## Tests
 
