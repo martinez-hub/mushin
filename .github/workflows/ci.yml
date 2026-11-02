@@ -293,14 +293,17 @@ jobs:
       # manifests, skill and documented install commands must agree (nothing
       # in CI runs Claude Code, and plugins/ is not in the `code` filter, so
       # this is the one place tests/test_plugin.py runs on a plugin-only PR),
-      # and every public name must have a reference-page directive.
+      # every public name must have a reference-page directive, llms-full.txt
+      # must hold every page with its includes resolved, and AGENTS.md must
+      # name only real paths, targets and docs tests (this list among them).
       # The `test` job skips docs-only PRs, which are the ones most likely to
       # break these, so they run here on every PR as well, after the strict
       # build so a failure here does not hide a build error. --extra eval:
       # test_docs_claims imports the stats code. --group docs: the agent
-      # guide's render test needs the Markdown extensions.
+      # guide's render test needs the Markdown extensions, and
+      # test_llms_full needs mkdocs, pymdownx and griffe.
       - name: Docs-pinning tests
-        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py tests/test_reference_pages.py -p no:cacheprovider
+        run: uv run --extra eval --group docs pytest tests/test_llms_txt.py tests/test_docs_claims.py tests/test_agent_guide.py tests/test_plugin.py tests/test_reference_pages.py tests/test_llms_full.py tests/test_agents_md.py -p no:cacheprovider
 
   core-only:
     # Guards the eval-extra split: a core install (NO extras) must import, run a
