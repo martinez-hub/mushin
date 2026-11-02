@@ -170,12 +170,15 @@ are unaffected. Tests import it with `pytest.importorskip`.
   calls (not compared). A writer the scan cannot reach, so the name it
   rebinds is still followed and a resume after the run re-runs the cells: in
   a container larger than 256 items, deeper than three steps, in an
-  instance's attributes, a metaclass, a `defaultdict`'s `default_factory`, a
-  container subclass, or a class defined outside the notebook; a name
-  rebound through `globals()` or `exec`, which no bytecode names.
+  instance's attributes, a dict's keys, a metaclass, a `defaultdict`'s
+  `default_factory`, a container subclass, or a class defined outside the
+  notebook; a name rebound through `globals()` or `exec`, which no bytecode
+  names. Under a multiprocess launcher the rebinding happens in a worker,
+  so the kernel's name, and the record, do not change.
 - A notebook metaclass's own methods (`__eq__`, attribute hooks) can run
   while the record is taken; if one raises, the notebook has no entries (as
-  on main).
+  on main), with a warning, so the edit that then goes unnoticed is not
+  silent.
 - A task that assigns to a class at run time (`Model.f = other`, `setattr`):
   the class's digest is taken from its live members. Wrapping a method in a
   cache (`functools.lru_cache`) and storing a function a method defines are
@@ -228,6 +231,11 @@ are unaffected. Tests import it with `pytest.importorskip`.
   rest were writers in places the scan does not look (residuals above), a
   per-item filter cost, and tests: every scan branch is now pinned by a case
   that fails without it, and a not-edit case must have entries.
+- Round 7 (0 + 8, nothing on the bar): a notebook whose record raises now
+  warns instead of dropping its entries silently (a metaclass `__eq__`);
+  dict keys joined the residuals; the tuple, set, frozenset and `partial`
+  keyword branches got their cases; the multiprocess qualifier and the
+  docstring wording were fixed.
 
 ## Tests
 

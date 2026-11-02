@@ -2532,10 +2532,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             some other string. The script rule follows names, so state
             reached another way (``globals()``, ``exec``) can hide an edit:
             keep helpers in an imported module, which is compared as a whole
-            file, when that matters. In a notebook, a name rebound some other
-            way (``globals()``, ``exec``, a function kept only in an object's
-            attributes) is still compared, so a resume after a run that
-            rebinds it re-runs the cells. A very large project
+            file, when that matters. In a notebook, a name rebound without a
+            ``global`` statement the notebook's functions show (through
+            ``globals()`` or ``exec``, or by a function kept only in an
+            object's attributes or a dict's keys) is still compared, so once
+            a run rebinds it in the kernel, a resume re-runs the cells. A
+            very large project
             is covered up to a fixed number of files (with a warning). After
             upgrading a dependency, changing the data or editing such code,
             re-run from a fresh ``working_dir`` rather than resuming.

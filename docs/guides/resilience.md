@@ -134,9 +134,10 @@ function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
 keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A name
-rebound some other way (through `globals()` or `exec`, or by a function kept
-only in an object's attributes) is still compared, so a resume after a run
-that rebinds it re-runs the cells.
+rebound without a `global` statement the notebook's functions show (through
+`globals()` or `exec`, or by a function kept only in an object's attributes or
+a dict's keys) is still compared, so once a run rebinds it in the kernel, a
+resume re-runs the cells.
 
 ### The full loop
 

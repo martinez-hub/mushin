@@ -1174,6 +1174,7 @@ _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
 _NOTEBOOK_TRUNCATION_WARNED: list = []
+_NOTEBOOK_FAILURE_WARNED: list = []
 
 
 def _cell_entry(entry) -> bool:
@@ -1408,8 +1409,9 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     ``_WRITE_SCAN_CONTAINER`` items (``@HOOKS.append`` keeps a writer nowhere
     else). Only those objects count toward the bound, not the data beside
     them. A name rebound through ``globals()`` or ``exec`` is not seen. From
-    bytecode, so a function whose text the kernel did not keep counts too. Taken from the whole namespace before the walk, not
-    from what the walk reaches, since a name the run can rebind must not
+    bytecode, so a function whose text the kernel did not keep counts too.
+    Taken from the whole namespace before the walk, not from what the walk
+    reaches, since a name the run can rebind must not
     shape the record (see ``_notebook_entries``). Breadth first, each object
     at its least depth, and a container walked by its size alone, so the
     result does not depend on iteration order; it depends only on the
@@ -1716,13 +1718,21 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
 def _notebook_record(notebooks: dict) -> dict[str, str]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
     root)])}``), best effort: a notebook whose entries cannot be taken gives
-    none (as on main)."""
+    none (as on main), with a warning, since an edit then goes unnoticed (a
+    notebook metaclass's ``__eq__`` that raises, say)."""
     out: dict[str, str] = {}
     for namespace, roots in notebooks.values():
         try:
             out.update(_notebook_entries(namespace, roots))
-        except Exception:  # noqa: BLE001 - never fail the record for this
-            continue
+        except Exception as error:  # noqa: BLE001 - never fail the record
+            if not _NOTEBOOK_FAILURE_WARNED:
+                _NOTEBOOK_FAILURE_WARNED.append(True)
+                # The type only: the message is the notebook's own text.
+                _best_effort_warning(
+                    "resume/cache_dir: the notebook code this task reaches could "
+                    f"not be recorded ({type(error).__name__}), so it is not "
+                    "compared; use a fresh working_dir after editing it."
+                )
     return out
 
 

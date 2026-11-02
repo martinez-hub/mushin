@@ -790,6 +790,43 @@ NOTEBOOK_NOT_EDITS = {
         ],
         ["task(1)\n"],
     ),
+    "a writer in a tuple of hooks": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = (switch,)\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a set of hooks": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = {switch}\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer in a frozenset of hooks": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "def switch():\n    global helper\n    helper = fast\n\n\n"
+            "HOOKS = frozenset({switch})\ndel switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
+    "a writer passed to a partial as a keyword": (
+        [
+            "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
+            "import functools\n\n\ndef switch():\n    global helper\n    helper = fast\n\n\n"
+            "def call(*, f):\n    f()\n\n\nHOOKS = [functools.partial(call, f=switch)]\n"
+            "del switch\n",
+            "def task(a):\n    for h in HOOKS:\n        h()\n    return helper(a)\n",
+        ],
+        ["task(1)\n"],
+    ),
     "a writer in a grandparent of a class a registry holds": (
         [
             "def slow(x):\n    return x\n\n\ndef fast(x):\n    return x + 0\n\n\nhelper = slow\n",
@@ -822,6 +859,27 @@ def test_a_notebook_change_the_task_cannot_see_is_not_an_edit(kernel, case):
     assert first, "the notebook entries are empty"
     _run_cells(kernel, after)
     assert _record(kernel, "task") == first
+
+
+def test_a_notebook_whose_record_fails_warns(kernel, monkeypatch):
+    """A notebook whose entries cannot be taken has none, as on main, but
+    says so: an edit to it then goes unnoticed (round 7 found a notebook
+    metaclass's `__eq__` reached by the write scan)."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    _run_cells(
+        kernel,
+        [
+            "class Meta(type):\n    def __eq__(cls, other):\n"
+            "        raise RuntimeError('no')\n\n    __hash__ = type.__hash__\n\n\n"
+            "class Thing(metaclass=Meta):\n    pass\n\n\nobj = Thing()\n",
+            "def helper(x):\n    return x\n",
+            TASK,
+        ],
+    )
+    with pytest.warns(UserWarning, match=r"could not be recorded \(RuntimeError\)"):
+        assert _record(kernel, "task") == {}
 
 
 def test_the_write_scan_runs_no_keys_hash():
