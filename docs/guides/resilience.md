@@ -121,6 +121,32 @@ definition registered inside a block, or a registry filled by
 `__init_subclass__` can hide an edit there; helpers kept in an imported module
 are compared as a whole file.
 
+In a notebook, what counts is the definitions the task's code reaches by name
+in the kernel when the run starts: each function and class defined in a cell,
+through decorators, a `partial`, a bound method or an instance. Re-run the
+edited cell, then resume, and the cells re-run with a warning naming it
+(`helper (notebook)`). No value is compared: not a number, a string, a dict
+config, nor what a default or a closure holds. A value is only safe to compare
+when every writer of it is known, and in a notebook a writer can sit anywhere
+a value can. So pass a value the results depend on (a model name, a scale) to
+the task as a swept parameter, or use a new `working_dir` after editing one. A
+function reached only through a container (a registry), a closure or a
+default, a name one of the notebook's functions rebinds (`global helper`), a
+`_target_` defined in the notebook, and code whose text the kernel does not
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
+
+mushin finds those functions by looking through the notebook's names: the
+functions they hold, and what those reach through decorators, `partial`s,
+bound methods, classes, closures, defaults and small lists, tuples, sets and
+dicts. A name rebound some other way is still compared, so once a run
+rebinds it in the kernel, the next resume re-runs the cells. That covers
+`globals()` and `exec`, and a `global` statement in a function kept only
+somewhere that look-through does not go: an object's attributes, a dict's
+keys, a container of more than 256 items, more than three steps from a name
+(each container, class, base class, instance, closure, default, decorator,
+`partial` and bound method is a step), a subclass of a container, a
+metaclass, or a class from outside the notebook.
+
 ### The full loop
 
 ```

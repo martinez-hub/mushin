@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "params": [
+    "a"
+  ],
+  "cells": {
+    "a=1": {
+      "dir": "0",
+      "status": "completed"
+    },
+    "a=2": {
+      "dir": "1",
+      "status": "completed"
+    }
+  }
+}
