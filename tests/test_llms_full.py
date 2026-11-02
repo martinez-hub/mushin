@@ -18,6 +18,7 @@ import json
 import re
 import textwrap
 from functools import cache
+from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 import pytest
@@ -68,6 +69,82 @@ def _package():
         resolve_aliases=True,
         resolve_external=False,
     )
+
+
+@cache
+def _pages():
+    """The hook's pages before their links are rewritten, and its anchors."""
+    config = _config()
+    return _hook().read_pages(
+        docs_dir=ROOT / "docs",
+        nav=config["nav"],
+        site=_site(),
+        snippet_config=config["mdx_configs"]["pymdownx.snippets"],
+        root=ROOT,
+    )
+
+
+class _Html(HTMLParser):
+    """The link targets of rendered HTML, its code text, and its other text."""
+
+    def __init__(self):
+        super().__init__()
+        self.urls: list[str] = []
+        self.code: list[str] = []
+        self.text: list[str] = []
+        self._in_code = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "a" and attrs.get("href"):
+            self.urls.append(attrs["href"])
+        if tag == "img" and attrs.get("src"):
+            self.urls.append(attrs["src"])
+        if tag in ("code", "pre"):
+            self._in_code += 1
+
+    def handle_endtag(self, tag):
+        if tag in ("code", "pre"):
+            self._in_code -= 1
+
+    def handle_data(self, data):
+        (self.code if self._in_code else self.text).append(data)
+
+
+def _render(text: str) -> _Html:
+    """``text`` as the site's Markdown renders it: the oracle for what is a
+    link and what is code, rather than a regex of the tests' own."""
+    import markdown
+
+    config = _config()
+    # The snippet includes are resolved already; a literal marker in a code
+    # block must stay one.
+    extensions = [e for e in config["markdown_extensions"] if e != "pymdownx.snippets"]
+    html = markdown.markdown(
+        text,
+        extensions=extensions,
+        extension_configs={
+            k: v for k, v in config["mdx_configs"].items() if k in extensions
+        },
+    )
+    parser = _Html()
+    parser.feed(html)
+    return parser
+
+
+@cache
+def _rendered_full() -> _Html:
+    return _render(_full())
+
+
+@pytest.fixture(scope="module")
+def built_site(tmp_path_factory):
+    """The site as `mkdocs build` writes it, hook included."""
+    from mkdocs.commands.build import build
+
+    site_dir = tmp_path_factory.mktemp("site")
+    build(mkdocs_config.load_config(str(ROOT / "mkdocs.yml"), site_dir=str(site_dir)))
+    return site_dir
 
 
 def _directives() -> list[tuple[str, int]]:
@@ -218,12 +295,34 @@ def test_a_class_brings_its_documented_members_and_dunders():
     assert not re.search(r"^#+ `mushin\.[\w.]*\._[^_][\w]*`$", full, re.M)
 
 
+def _signature_of(name: str) -> str:
+    return re.match(r"\s*```python\n(.*?)\n```", _api_section(name), re.S)[1]
+
+
 def test_show_bases_false_is_kept():
-    """lightning.md hides HydraDDP's bases (a private mixin and Lightning's)."""
-    fence = re.match(
-        r"\s*```python\n(.*?)\n```", _api_section("mushin.lightning.HydraDDP"), re.S
+    """lightning.md hides HydraDDP's bases (a private mixin and Lightning's);
+    a class without the option shows its bases, as on the site."""
+    assert _signature_of("mushin.lightning.HydraDDP") == "class HydraDDP"
+    assert (
+        _signature_of("mushin.benchmark.IncompleteSweepError")
+        == "class IncompleteSweepError(RuntimeError)"
     )
-    assert fence[1] == "class HydraDDP"
+
+
+def test_show_bases_applies_to_the_whole_entry():
+    """mkdocstrings applies an option to the object and its members, so a
+    nested class hides its bases too."""
+    import griffe
+
+    module = griffe.visit(
+        "m",
+        filepath=ROOT / "m.py",
+        code='class A(Exception):\n    """A."""\n\n    class C(KeyError):\n        """C."""\n',
+    )
+    hidden = _hook()._api_entry(module["A"], "m.A", 2, False, [])
+    assert "```python\nclass A\n```" in hidden and "```python\nclass C\n```" in hidden
+    shown = _hook()._api_entry(module["A"], "m.A", 2, True, [])
+    assert "class A(Exception)" in shown and "class C(KeyError)" in shown
 
 
 def test_directive_heading_levels_are_kept():
@@ -240,10 +339,73 @@ def test_no_directive_option_reaches_the_file():
 def test_a_module_or_external_directive_does_not_break_the_build():
     hook = _hook()
     text = hook._render_directives(
-        "::: mushin.export\n\n::: hydra_zen.zen\n", _package()
+        "::: mushin.export\n\n::: hydra_zen.zen\n\n::: mushin.does_not_exist\n",
+        _package(),
+        [],
     )
     assert "## `mushin.export`" in text and "table(" in text
     assert "## `hydra_zen.zen`" in text
+    assert "## `mushin.does_not_exist`" in text
+
+
+def test_an_indented_block_after_a_directive_is_the_pages_own():
+    """mkdocstrings reads options from the lines right under the directive, or
+    from a next block that starts with `options:`; any other indented block
+    is the page's code, which YAML could not even parse."""
+    hook = _hook()
+    code = "    @functools.cache\n    def f(): ...\n"
+    text = hook._render_directives(f"::: mushin.export\n\n{code}", _package(), [])
+    assert code in text and "## `mushin.export`" in text
+    separated = "::: mushin.export\n\n    options:\n      heading_level: 3\n"
+    assert "### `mushin.export`" in hook._render_directives(separated, _package(), [])
+
+
+def test_the_hook_renders_every_mkdocstrings_option_the_docs_use():
+    """The hook follows only the options the site uses. Another one (members,
+    filters, inherited members) would make the file differ from the site in
+    silence, so it fails here until the hook renders it."""
+    hook = _hook()
+    used = set()
+    for page in sorted((ROOT / "docs").rglob("*.md")):
+        if "superpowers" in page.parts:
+            continue
+        for match in hook._DIRECTIVE.finditer(page.read_text(encoding="utf-8")):
+            block = match[0].split("\n", 1)[1] if "\n" in match[0] else ""
+            used |= set(hook._directive_options(block))
+    assert used, "found no directive options: the parsing changed"
+    assert used <= {"heading_level", "show_bases"}, used
+    plugin = _config()["plugins"]["mkdocstrings"].config
+    options = plugin["handlers"]["python"]["options"]
+    # These change nothing in the file, or are what the hook assumes.
+    known = {
+        "docstring_style",
+        "show_source",
+        "show_root_heading",
+        "show_root_full_path",
+        "members_order",
+        "separate_signature",
+        "heading_level",
+    }
+    assert set(options) <= known, set(options) - known
+    assert options.get("members_order") == "source"  # griffe's order
+    assert options.get("heading_level", 2) == 2
+    assert options.get("show_root_heading") is True
+
+
+def test_the_api_entries_match_the_built_site(built_site):
+    """Each reference page's objects, in order, are the ones mkdocstrings
+    renders: members, filters, order and re-exports checked by outcome."""
+    pages, _ = _pages()
+    checked = 0
+    for _, _, url, _, entries in pages:
+        if not entries:
+            continue
+        html = (built_site / url.removeprefix(_site()) / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert re.findall(r'<h[1-6] id="(mushin\.[^"]+)"', html) == entries, url
+        checked += 1
+    assert checked >= 8
 
 
 def test_notebooks_bring_their_code_and_not_their_outputs():
@@ -266,66 +428,108 @@ def test_notebooks_bring_their_code_and_not_their_outputs():
         assert prose in full, f"{path.name}'s Markdown cells are missing"
 
 
-def test_links_between_pages_are_site_urls():
-    relative = re.findall(
-        r"\]\((?![a-z][a-z0-9+.-]*:|#)<?([^)\s>]+\.(?:md|ipynb))", _full()
-    )
+def test_every_link_in_the_file_is_absolute():
+    """Every link and image the file renders, in any Markdown form, is a URL
+    or an anchor: a relative one means nothing outside the site."""
+    urls = _rendered_full().urls
+    relative = sorted({u for u in urls if not re.match(r"[a-z][a-z0-9+.-]*:|#", u)})
     assert not relative, relative
-    definitions = re.findall(
-        r"^\[[^\]]+\]:\s*<?(?![a-z][a-z0-9+.-]*:|#)(\S+\.(?:md|ipynb))", _full(), re.M
-    )
-    assert not definitions, definitions
-    # A rewritten link lands on a real page.
-    assert "](https://martinez-hub.github.io/mushin/guides/exploration-to-paper/)" in (
-        _full()
-    )
+    assert _site() + "guides/exploration-to-paper/" in urls
 
 
 def test_every_site_url_in_the_file_is_a_page():
-    """Every link into the site resolves: a page, its anchors, or the files
-    the build writes beside them (llms.txt, a notebook's download)."""
+    """Every link into the site resolves: a page, or a file the build writes
+    beside them (llms.txt, a notebook's download, an image under docs/)."""
     site = _site()
     pages = {_site_url(page) for page in _nav_pages(_config()["nav"])}
     allowed = pages | {site + "llms.txt", site + "llms-full.txt"}
-    found = re.findall(rf"{re.escape(site)}[^)\s>\]]*", _full())
     bad = sorted(
         {
             url
-            for url in (u.split("#", 1)[0] for u in found)
-            if url not in allowed and not re.search(r"/([\w-]+)/\1\.ipynb$", url)
+            for url in (u.split("#", 1)[0] for u in _rendered_full().urls)
+            if url.startswith(site)
+            and url not in allowed
+            and not re.search(r"/([\w-]+)/\1\.ipynb$", url)
+            and not (ROOT / "docs" / url.removeprefix(site)).is_file()
         }
     )
     assert not bad, bad
 
 
+def test_code_on_every_page_is_left_as_written():
+    """The rewrite changes links only: every page's code, as the site's
+    Markdown renders it, is the same before and after."""
+    pages, anchors = _pages()
+    hook = _hook()
+    for _, page, _, text, _ in pages:
+        after = hook._absolute_links(text, page, _site(), ROOT / "docs", anchors)
+        assert _render(after).code == _render(text).code, page
+
+
 def test_links_in_code_are_left_as_written():
-    text = "See [a](mcp.md).\n\n```markdown\n[b](mcp.md)\n```\n"
-    out = _hook()._absolute_links(text, "guides/x.md", "https://e.org/")
+    text = (
+        "See [a](mcp.md), `[b](mcp.md)` and `x[0][mushin.run]`.\n\n"
+        "```markdown\n[c](mcp.md)\n```\n\n"
+        "````markdown\n```python\n[d](mcp.md)\n```\n[e](mcp.md)\n````\n\n"
+        "[f](mcp.md) after.\n"
+    )
+    anchors = {"mushin.run": "https://e.org/api/#mushin.run"}
+    out = _hook()._absolute_links(text, "guides/x.md", "https://e.org/", None, anchors)
     assert "[a](https://e.org/guides/mcp/)" in out
-    assert "[b](mcp.md)" in out
+    for kept in ("`[b](mcp.md)`", "`x[0][mushin.run]`", "[c](mcp.md)"):
+        assert kept in out
+    # A four-backtick fence holds a three-backtick one.
+    assert "[d](mcp.md)" in out and "[e](mcp.md)" in out
+    assert "[f](https://e.org/guides/mcp/) after." in out
 
 
 def test_every_link_form_becomes_a_site_url():
     text = (
-        '[a](mcp.md "Title") [b](<mcp.md>) ![logo](../assets/logo.png)\n\n'
-        "[c]: mcp.md#top\n"
+        '[a](mcp.md "Title") [b](<mcp.md>) ![logo](../assets/logo.png)\n'
+        "[g](mcp.md 'Single') [h](mcp.md (Paren))\n\n"
+        "[c]: mcp.md#top\n\n"
+        "!!! note\n    [i]: mcp.md\n"
     )
     out = _hook()._absolute_links(text, "guides/x.md", "https://e.org/")
     assert '[a](https://e.org/guides/mcp/ "Title")' in out
     assert "[b](https://e.org/guides/mcp/)" in out
     assert "![logo](https://e.org/assets/logo.png)" in out
+    assert "[g](https://e.org/guides/mcp/ 'Single')" in out
+    assert "[h](https://e.org/guides/mcp/ (Paren))" in out
     assert "[c]: https://e.org/guides/mcp/#top" in out
+    assert "    [i]: https://e.org/guides/mcp/" in out
+
+
+def test_only_a_reference_to_a_documented_object_is_rewritten():
+    """An autorefs cross-reference to an entry becomes a link to its anchor,
+    a member's too; any other bracket pair is left exactly as written."""
+    anchors = {
+        "mushin.A": "https://e.org/r/#mushin.A",
+        "mushin.A.m": "https://e.org/r/#mushin.A.m",
+    }
+    text = "[x][mushin.A.m], [`mushin.A`][], [y][mushin.gone], ds[0][a.b], [z][l]\n"
+    out = _hook()._absolute_links(text, "x.md", "https://e.org/", None, anchors)
+    assert out == (
+        "[x](https://e.org/r/#mushin.A.m), [`mushin.A`](https://e.org/r/#mushin.A), "
+        "[y][mushin.gone], ds[0][a.b], [z][l]\n"
+    )
+
+
+def test_a_wrapped_cross_reference_is_linked():
+    anchors = {"mushin.A": "https://e.org/r/#mushin.A"}
+    text = "Use [the helper\n`mushin.A`][mushin.A] here.\n\n[not\n\nthis][mushin.A]\n"
+    out = _hook()._absolute_links(text, "x.md", "https://e.org/", None, anchors)
+    assert "Use [the helper\n`mushin.A`](https://e.org/r/#mushin.A) here." in out
+    assert "[not\n\nthis][mushin.A]" in out  # a blank line ends a paragraph
 
 
 def test_api_cross_references_become_links():
     """mkdocs-autorefs writes ``[text][mushin.name]``; in one file it needs
     the URL of the page that documents the name."""
-    assert not re.search(r"\]\[mushin\.[\w.]+\]", _full())
+    link = f"[`mushin.original_cwd()`]({_site()}reference/utils/#mushin.original_cwd)"
+    assert link in _full()
+    assert not re.search(r"\]\[mushin\.[\w.]+\]", "".join(_rendered_full().text))
 
 
-def test_the_hook_writes_the_file(tmp_path):
-    site_dir = tmp_path / "site"
-    site_dir.mkdir()
-    config = mkdocs_config.load_config(str(ROOT / "mkdocs.yml"), site_dir=str(site_dir))
-    _hook().on_post_build(config)
-    assert (site_dir / "llms-full.txt").read_text(encoding="utf-8") == _full()
+def test_the_hook_writes_the_file(built_site):
+    assert (built_site / "llms-full.txt").read_text(encoding="utf-8") == _full()

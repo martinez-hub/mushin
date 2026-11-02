@@ -60,29 +60,26 @@ def _section(title: str) -> str:
     return rest.split("\n## ", 1)[0]
 
 
-@cache
-def _tracked() -> frozenset[str]:
-    """The repository's files, as git tracks them."""
-    import subprocess
-
-    out = subprocess.run(
-        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout
-    return frozenset(out.splitlines())
-
-
 def _is_path(token: str) -> bool:
-    """A token that names a repository path: its first segment is an entry of
-    the repository or of the package (the Layout names modules by their short
-    names, `study/_study.py`), or it is a bare file name. Not any token with a
-    `/` (`actions/checkout`, `and/or`), and not a bare suffix (`.md`)."""
+    """A token that names a repository path: a bare file name, or a token with
+    a `/` that ends in `/` or a file suffix, or whose first segment is an
+    entry of the repository or of the package (the Layout names modules by
+    their short names, `study/_study.py`). The shape decides, not existence,
+    so a renamed directory is still checked. Not any token with a `/`
+    (`actions/checkout`, `and/or`), and not a bare suffix (`.md`)."""
     token = token.rstrip(".,;:)")
     if not token or re.search(r"[\s<>\"'`]|://", token):
         return False
     if "/" not in token:
         return not token.startswith(".") and token.endswith(tuple(PATH_SUFFIXES))
-    first = token.split("/", 1)[0]
-    return bool(first) and any((base / first).exists() for base in (ROOT, PACKAGE))
+    first, last = token.split("/", 1)[0], token.rsplit("/", 1)[1]
+    if not first:
+        return False
+    return (
+        token.endswith("/")
+        or last.endswith(tuple(PATH_SUFFIXES))
+        or any((base / first).exists() for base in (ROOT, PACKAGE))
+    )
 
 
 def _code_blocks(text: str) -> list[str]:
@@ -104,11 +101,12 @@ def _named_paths(text: str | None = None) -> list[str]:
 
 def _exists(path: str) -> bool:
     # The Layout table names modules inside the package by their short names
-    # (`_show.py`, `study/_study.py`), so a path may be relative to it; a bare
-    # file name (`conftest.py`) may live anywhere in the repository.
-    if "/" not in path and "*" not in path:
-        return any(f.rsplit("/", 1)[-1] == path for f in _tracked())
-    for base in (ROOT, PACKAGE):
+    # (`_show.py`, `study/_study.py`), so a path may be relative to it, and
+    # the conventions name a test helper bare (`conftest.py`). Those places
+    # only: a bare name matched anywhere would let a deleted
+    # `src/mushin/__main__.py` pass on another package's `__main__.py`.
+    bases = (ROOT, PACKAGE) if "/" in path else (ROOT, PACKAGE, ROOT / "tests")
+    for base in bases:
         if "*" in path:
             if any(base.glob(path)):
                 return True
@@ -153,6 +151,17 @@ def test_a_slash_or_a_file_name_in_prose_is_read_rightly():
     assert not _is_path("and/or")
     assert _is_path("src/mushin/_show.py") and _is_path("study/_study.py")
     assert _is_path("conftest.py") and _exists("conftest.py")
+    # A path whose directory was renamed is still a path, and so is checked.
+    assert _is_path("renamed_dir/") and _is_path("renamed_dir/helpers.py")
+    assert not _exists("renamed_dir/helpers.py")
+
+
+def test_a_bare_name_resolves_only_where_agents_md_means_it():
+    """A module the Layout names by its package path (`study/_study.py`) is
+    not found by its bare name, which would match any file of that name."""
+    assert _exists("study/_study.py") and not _exists("_study.py")
+    assert _exists("__main__.py")  # the package's own
+    assert not _exists("hydra_plugins")  # only under tests/plugins/
     text = "Use `actions/checkout`.\n\n```bash\npytest tests/test_show.py -q\n```\n"
     assert _named_paths(text) == ["tests/test_show.py"]
 

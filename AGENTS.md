@@ -122,7 +122,9 @@ local pass therefore does not cover them, and you should not claim it does.
   `scripts/llms_full.py` assembles it from the nav pages at build time
   (snippet includes resolved, API directives rendered from the docstrings,
   notebook outputs dropped), so there is no file to keep in step: change the
-  pages. `tests/test_llms_full.py` checks what it holds.
+  pages. `tests/test_llms_full.py` checks what it holds against a real
+  `mkdocs build`. A `:::` directive may set only `heading_level` and
+  `show_bases`; the test fails on any other option until the hook renders it.
 - **`AGENTS.md` is tested.** The paths, Makefile targets, extras and groups it
   names must exist, its Layout must list every subpackage, its "Before you
   push" docs tests must be every test the CI docs job runs, and its Python range and fragment

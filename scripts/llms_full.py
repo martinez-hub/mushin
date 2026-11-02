@@ -25,20 +25,24 @@ options in `mkdocs.yml`, so they resolve exactly as on the site. An API page's
 with griffe (mkdocstrings' own loader, so nothing is imported) and, for a
 class or a module, its members that have a docstring and are not private
 (mkdocstrings' default filter, so a documented `__init__` counts), at the
-directive's `heading_level`, with its `members` and `show_bases` options; a
-name griffe cannot find becomes a heading, so a reference page never breaks
-the build. Relative links (to pages, images, in reference definitions)
-become site URLs, since a relative `guides/mcp.md` means nothing in a single
-file, and an mkdocs-autorefs cross-reference (`[text][mushin.name]`) a link
-to the object's anchor; code fences are left as written. Notebooks contribute
-their Markdown cells and their code cells as ```python fences; their
-committed outputs (plots, tables, base64 images) stay out.
-`tests/test_llms_full.py` checks all of this.
+directive's `heading_level` and with its `show_bases`. Those are the only
+options the reference pages use; the tests fail on any other, so a new one
+gets rendered here before it can silently differ from the site. A name
+griffe cannot find becomes a heading, so a reference page never breaks the
+build. Relative links (to pages, images, in reference definitions) become
+site URLs, since a relative `guides/mcp.md` means nothing in a single file,
+and an mkdocs-autorefs cross-reference (`[text][mushin.name]`) to an object
+the reference documents becomes a link to its anchor. Code (fences of any
+length, inline code spans) is left as written. Notebooks contribute their
+Markdown cells and their code cells as ```python fences; their committed
+outputs (plots, tables, base64 images) stay out. `tests/test_llms_full.py`
+checks all of this against the site mkdocs builds.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import posixpath
 import re
 import textwrap
@@ -50,17 +54,27 @@ OUTPUT = "llms-full.txt"
 
 # A relative link target: no scheme, no leading slash or #, in an inline
 # link or image `](target "title")` / `](<target>)`, or a reference definition
-# `[label]: target`.
+# `[label]: target`, which may be indented (inside an admonition).
 _RELATIVE = r"(?![a-z][a-z0-9+.-]*:|[/#])"
+_TITLE = r"""(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?"""
 _INLINE_LINK = re.compile(
-    rf"\]\((<?){_RELATIVE}([^)\s>#]+)(#[^)\s>]*)?(>?)((?:\s+\"[^\"]*\")?)\)"
+    rf"\]\((<?){_RELATIVE}([^)\s>#]+)(#[^)\s>]*)?(>?)({_TITLE})\)"
 )
 _DEFINITION = re.compile(
-    rf"^(\[[^\]]+\]:[ \t]*)(<?){_RELATIVE}([^\s>#]+)(#\S*?)?(>?)(?=\s|$)", re.M
+    rf"^([ \t]*\[[^\]]+\]:[ \t]*)(<?){_RELATIVE}([^\s>#]+)(#\S*?)?(>?)(?=\s|$)",
+    re.M,
 )
-# An mkdocs-autorefs cross-reference: `[text][identifier]` or `[identifier][]`.
-_AUTOREF = re.compile(r"\[([^\]\n]+)\]\[([\w.]*)\]")
-_FENCE = re.compile(r"^[ \t]*(```|~~~)")
+# An mkdocs-autorefs cross-reference, `[text][identifier]` or
+# `[identifier][]`; its text may wrap onto the next line of the paragraph.
+_AUTOREF = re.compile(r"\[((?:[^\[\]\n]|\n(?![ \t]*\n))+)\]\[([\w.]*)\]")
+# A fence opens on three or more backticks or tildes and closes on a line of
+# the same character, at least as many, and nothing else (CommonMark), so a
+# four-backtick fence can show a three-backtick one.
+_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
+# An inline code span: a run of backticks to the next run of the same length,
+# within one paragraph.
+_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n).)+?(?<!`)\1(?!`)", re.S)
 
 
 def _nav_entries(node, title: str | None = None) -> list[tuple[str, str]]:
@@ -88,7 +102,8 @@ def _site_url(site: str, page: str) -> str:
 def _optional_paths(llms_txt: str) -> set[str]:
     """The site paths of the links in llms.txt's `## Optional` section, without
     their anchors. Paths, not URLs: `mkdocs serve` rewrites `site_url` to a
-    local address, and the pages to leave out are the same."""
+    local address, and the pages to leave out are the same. (An external link
+    there whose path is a page's path would leave that page out too.)"""
     found = re.search(r"^## Optional\n", llms_txt, re.M)
     if not found:
         return set()
@@ -96,9 +111,16 @@ def _optional_paths(llms_txt: str) -> set[str]:
     return {urlsplit(u).path for u in re.findall(r"\]\(([^)\s]+)\)", section)}
 
 
-# A mkdocstrings directive, `::: dotted.path`, and the indented options under it.
+# A mkdocstrings directive, `::: dotted.path`, and its YAML, read as
+# mkdocstrings reads it (its extension's `run`): the indented lines right
+# under it, or, when there are none, the next block if that starts with
+# `    options:` or `    handler:`. Any other indented block after a blank
+# line is the page's own (a code block), not options.
 _DIRECTIVE = re.compile(
-    r"^::: (\S+)[ \t]*\n(?:[ \t]+\S.*\n|[ \t]*\n(?=[ \t]+\S))*", re.M
+    r"^::: ?(\S+) *(?:\n|\Z)"
+    r"(?:(?:(?: {4}|\t)[ \t]*\S.*(?:\n|\Z))+"
+    r"|[ \t]*\n(?=    (?:options|handler):)(?:[ \t]*\S.*(?:\n|\Z))+)?",
+    re.M,
 )
 
 
@@ -118,6 +140,10 @@ def _signature(obj, show_bases: bool = True) -> str:
     return ("class " if obj.is_class else "") + signature
 
 
+# The members an entry shows, in the order mkdocstrings groups them.
+_CATEGORIES = ("attribute", "class", "function")
+
+
 def _private(name: str) -> bool:
     """mkdocstrings' default member filter (`!^_[^_]`): a single leading
     underscore is private; a documented dunder (`__init__`) is shown."""
@@ -125,17 +151,23 @@ def _private(name: str) -> bool:
 
 
 def _api_entry(
-    obj, heading: str, level: int, members=None, show_bases: bool = True
+    obj, heading: str, level: int, show_bases: bool, rendered: list[str]
 ) -> str:
+    """``obj``'s entry and its members', each heading's path added to
+    ``rendered`` (the anchors mkdocstrings gives them)."""
     obj = obj.final_target if obj.is_alias else obj
+    rendered.append(heading)
     signature = _signature(obj, show_bases)
     parts = [f"{'#' * level} `{heading}`", f"```python\n{signature}\n```"]
     if obj.docstring:
         parts.append(obj.docstring.value.strip("\n"))
+    shown = []
     if obj.is_class or obj.is_module:
         for name, member in obj.members.items():
-            if (members is not None and name not in members) or _private(name):
+            if _private(name):
                 continue
+            # mkdocstrings' `source` order: an import by the line it is on.
+            line = member.alias_lineno if member.is_alias else member.lineno
             if member.is_alias:
                 # An import: on a class, an inherited name; in a module, a
                 # re-export, shown when it names the package's own object.
@@ -147,10 +179,16 @@ def _api_entry(
                     continue
                 if not member.path.startswith(f"{obj.package.name}."):
                     continue
-            if not member.docstring:
+            if not member.docstring or member.kind.value not in _CATEGORIES:
                 continue
-            if member.is_function or member.is_attribute or member.is_class:
-                parts.append(_api_entry(member, f"{heading}.{name}", level + 1))
+            category = _CATEGORIES.index(member.kind.value)
+            shown.append((category, math.inf if line is None else line, name, member))
+    # Grouped by category, each in source order, as mkdocstrings' default
+    # `group_by_category` renders them (the sort is stable for equal lines).
+    for _, _, name, member in sorted(shown, key=lambda m: m[:2]):
+        # An option applies to the whole entry, as in mkdocstrings.
+        entry = _api_entry(member, f"{heading}.{name}", level + 1, show_bases, rendered)
+        parts.append(entry)
     return "\n\n".join(parts)
 
 
@@ -163,19 +201,18 @@ def _directive_options(block: str) -> dict:
     return options if isinstance(options, dict) else {}
 
 
-def _render_directives(text: str, package) -> str:
+def _render_directives(text: str, package, rendered: list[str]) -> str:
     """Each `::: name` directive as the object's entry, at the heading level
-    its options give; a name outside the package, or one griffe cannot find,
-    as a heading only, so a reference page the site renders never breaks the
-    build."""
+    its options give, the paths of the entries added to ``rendered``; a name
+    outside the package, or one griffe cannot find, as a heading only, so a
+    reference page the site renders never breaks the build."""
 
     def entry(match: re.Match) -> str:
         path = match[1]
-        options = _directive_options(match[0].split("\n", 1)[1])
+        block = match[0].split("\n", 1)[1] if "\n" in match[0] else ""
+        options = _directive_options(block)
         level = options.get("heading_level", 2)
         level = level if isinstance(level, int) and 1 <= level <= 6 else 2
-        members = options.get("members")
-        members = set(members) if isinstance(members, list) else None
         show_bases = options.get("show_bases", True) is not False
         obj = None
         if path == package.name or path.startswith(f"{package.name}."):
@@ -189,35 +226,9 @@ def _render_directives(text: str, package) -> str:
                 obj = None
         if obj is None:
             return f"{'#' * level} `{path}`\n"
-        return _api_entry(obj, path, level, members, show_bases) + "\n"
+        return _api_entry(obj, path, level, show_bases, rendered) + "\n"
 
     return _DIRECTIVE.sub(entry, text)
-
-
-def _api_anchors(nav: list, docs_dir: Path, site: str, package) -> dict[str, str]:
-    """``{object path: URL#anchor}`` for every object a reference page
-    documents, as mkdocstrings anchors it (the path is the id), so an
-    autorefs cross-reference on any page can be linked."""
-    anchors: dict[str, str] = {}
-    for _, page in _nav_entries(nav):
-        if not page.endswith(".md"):
-            continue
-        text = (docs_dir / page).read_text(encoding="utf-8-sig")
-        for match in _DIRECTIVE.finditer(text):
-            path = match[1]
-            if not path.startswith(f"{package.name}."):
-                continue
-            try:
-                obj = package[path.removeprefix(f"{package.name}.")]
-            except Exception:  # noqa: BLE001 - not in the package
-                continue
-            url = _site_url(site, page)
-            anchors[path] = f"{url}#{path}"
-            obj = obj.final_target if obj.is_alias else obj
-            for name in getattr(obj, "members", {}):
-                if not _private(name):
-                    anchors.setdefault(f"{path}.{name}", f"{url}#{path}.{name}")
-    return anchors
 
 
 def _notebook_markdown(path: Path) -> str:
@@ -244,10 +255,10 @@ def _absolute_links(
     """Rewrite `page`'s relative links as the site URLs they serve at: a page
     as its URL, any other file (an image) at its path in the site, in inline
     links and images (with a title or in angle brackets) and in reference
-    definitions; and an autorefs cross-reference to a documented object as a
-    link to its anchor, or as its text when nothing documents it. Code fences
-    are left as written. With `docs_dir`, a target that is not a file of the
-    site (a path out of the docs) is left as written too."""
+    definitions; and an autorefs cross-reference to an object in `anchors`
+    as a link to its anchor. Anything else, and all code (fences, inline
+    spans), is left as written. With `docs_dir`, a target that is not a file
+    of the site (a path out of the docs) is left as written too."""
     page_dir = posixpath.dirname(page)
     anchors = anchors or {}
 
@@ -271,27 +282,50 @@ def _absolute_links(
         url = url_of(match[3])
         return match[0] if url is None else f"{match[1]}{url}{match[4] or ''}"
 
-    def autoref(match: re.Match) -> str:
-        text_, target = match[1], match[2] or match[1].strip("`")
-        if "." not in target:
-            return match[0]  # an ordinary reference link, not autorefs'
-        url = anchors.get(target)
-        return f"[{text_}]({url})" if url else text_
+    def rewrite(prose: str) -> str:
+        # Code spans are set aside first, so nothing in them is rewritten and
+        # a link's text may hold one (`[`run`][mushin.run]`); the whole run
+        # of lines is rewritten at once, so a link may wrap.
+        spans: list[str] = []
 
-    out, fenced = [], None
+        def hide(match: re.Match) -> str:
+            spans.append(match[0])
+            return f"\x00{len(spans) - 1}\x00"
+
+        def show(chunk: str) -> str:
+            return re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m[1])], chunk)
+
+        def autoref(match: re.Match) -> str:
+            target = match[2] or show(match[1]).strip("`")
+            url = anchors.get(target)
+            return f"[{match[1]}]({url})" if url else match[0]
+
+        prose = _CODE_SPAN.sub(hide, prose)
+        prose = _INLINE_LINK.sub(inline, prose)
+        prose = _DEFINITION.sub(definition, prose)
+        prose = _AUTOREF.sub(autoref, prose)
+        return show(prose)
+
+    out: list[str] = []
+    prose: list[str] = []
+    fence = None
     for line in text.split("\n"):
-        fence = _FENCE.match(line)
-        if fence and (fenced is None or fence[1] == fenced):
-            fenced = None if fenced else fence[1]
-            out.append(line)
-            continue
-        if fenced:
-            out.append(line)
-            continue
-        line = _INLINE_LINK.sub(inline, line)
-        line = _DEFINITION.sub(definition, line)
-        line = _AUTOREF.sub(autoref, line)
+        if fence is None:
+            opened = _FENCE.match(line)
+            if opened is None:
+                prose.append(line)
+                continue
+            if prose:
+                out.append(rewrite("\n".join(prose)))
+                prose = []
+            fence = opened[1]
+        else:
+            closed = _FENCE_CLOSE.match(line)
+            if closed and closed[1][0] == fence[0] and len(closed[1]) >= len(fence):
+                fence = None
         out.append(line)
+    if prose:
+        out.append(rewrite("\n".join(prose)))
     return "\n".join(out)
 
 
@@ -309,13 +343,16 @@ def _snippet_preprocessor(snippet_config: dict, root: Path):
     return md.preprocessors["snippet"]
 
 
-def build(
-    *, docs_dir: Path, nav: list, site_url: str, snippet_config: dict, root: Path
-) -> str:
-    """The text of llms-full.txt for the site described by these settings."""
-    site = site_url.rstrip("/") + "/"
-    llms_txt = (docs_dir / LLMS_TXT).read_text(encoding="utf-8")
-    skip = _optional_paths(llms_txt)
+def read_pages(
+    *, docs_dir: Path, nav: list, site: str, snippet_config: dict, root: Path
+) -> tuple[list[tuple[str, str, str, str, list[str]]], dict[str, str]]:
+    """Every nav page as ``(title, page, url, text, entries)``, its snippet
+    includes resolved and its directives rendered (``entries`` holds the
+    object paths they rendered), its links not yet rewritten; and
+    ``{object path: URL#anchor}`` for every entry. All pages first, so a
+    cross-reference to an object any reference page documents can be
+    linked, and only to an entry rendered, so no anchor points at a member
+    the site does not show."""
     snippets = _snippet_preprocessor(snippet_config, root)
     import griffe
 
@@ -325,15 +362,11 @@ def build(
         resolve_aliases=True,
         resolve_external=False,
     )
-    anchors = _api_anchors(nav, docs_dir, site, package)
-
-    header = llms_txt.split("\n## ", 1)[0].rstrip("\n")
-    parts = [header]
+    pages, anchors = [], {}
     for title, page in _nav_entries(nav):
         url = _site_url(site, page)
-        if urlsplit(url).path in skip:
-            continue
         path = docs_dir / page
+        entries: list[str] = []
         if page.endswith(".ipynb"):
             text = _notebook_markdown(path)
         else:
@@ -341,7 +374,32 @@ def build(
             lines = path.read_text(encoding="utf-8-sig").split("\n")
             text = "\n".join(snippets.run(lines))
             if _DIRECTIVE.search(text):
-                text = _render_directives(text, package)
+                text = _render_directives(text, package, entries)
+                for name in entries:
+                    anchors.setdefault(name, f"{url}#{name}")
+        pages.append((title, page, url, text, entries))
+    return pages, anchors
+
+
+def build(
+    *, docs_dir: Path, nav: list, site_url: str, snippet_config: dict, root: Path
+) -> str:
+    """The text of llms-full.txt for the site described by these settings."""
+    site = site_url.rstrip("/") + "/"
+    llms_txt = (docs_dir / LLMS_TXT).read_text(encoding="utf-8")
+    skip = _optional_paths(llms_txt)
+    pages, anchors = read_pages(
+        docs_dir=docs_dir,
+        nav=nav,
+        site=site,
+        snippet_config=snippet_config,
+        root=root,
+    )
+    header = llms_txt.split("\n## ", 1)[0].rstrip("\n")
+    parts = [header]
+    for title, page, url, text, _ in pages:
+        if urlsplit(url).path in skip:
+            continue
         text = _absolute_links(text, page, site, docs_dir, anchors).strip("\n")
         if not text.startswith("# "):
             text = f"# {title}\n\n{text}"
