@@ -212,6 +212,19 @@ EDITS = {
         2,
         3,
     ),
+    # Docstrings are stripped in these bodies too; the code in them is not.
+    "code in an except block": (
+        "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
+        "    def helper(x):\n        return x * {v}\n\n\ndef task(a):\n    return helper(a)\n",
+        2,
+        3,
+    ),
+    "code in a match case": (
+        "match 1:\n    case 1:\n\n        def helper(x):\n            return x * {v}\n\n\n"
+        "def task(a):\n    return helper(a)\n",
+        2,
+        3,
+    ),
 }
 
 #: Not edits: the record must stay as it was.

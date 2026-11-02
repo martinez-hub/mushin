@@ -261,6 +261,17 @@ NOTEBOOK_EDITS = {
     # Round 6: an OrderedDict's own iterator looks each key up again, so one
     # whose key's hash changed raised in the write scan and the notebook had
     # no entries at all.
+    "a helper defined in an except block": (
+        [
+            "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
+            '    def helper(x):\n        """Doc."""\n        return x * 2\n',
+            TASK,
+        ],
+        [
+            "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
+            '    def helper(x):\n        """Doc."""\n        return x * 3\n'
+        ],
+    ),
     "a helper beside an OrderedDict whose key changed": (
         [
             "import collections\nimport dataclasses\n\n\n"
