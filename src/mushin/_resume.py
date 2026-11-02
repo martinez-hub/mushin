@@ -526,10 +526,15 @@ def _strip_tree(tree, main_guards: bool = True):
                 continue
             if i == 0 and is_doc(node):
                 continue
-            for field in ("body", "orelse", "finalbody", "handlers"):
+            # Every statement list, an except handler's and a match case's
+            # too (each holds a body of its own), so a function defined in an
+            # optional dependency's fallback loses its docstring like any.
+            for field in ("body", "orelse", "finalbody"):
                 inner = getattr(node, field, None)
                 if isinstance(inner, list) and inner and isinstance(inner[0], ast.AST):
-                    setattr(node, field, clean(inner) if field != "handlers" else inner)
+                    setattr(node, field, clean(inner))
+            for part in (*getattr(node, "handlers", ()), *getattr(node, "cases", ())):
+                part.body = clean(part.body)
             out.append(node)
         return out
 

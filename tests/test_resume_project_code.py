@@ -226,6 +226,21 @@ NOT_EDITS = {
         '"""Old."""',
         '"""New."""',
     ),
+    # Docstrings at any depth: inside an except block (an optional
+    # dependency's fallback) and a match case too.
+    "a docstring in an except block": (
+        "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
+        "    def helper(x):\n        {v}\n        return x\n\n\n"
+        "def task(a):\n    return helper(a)\n",
+        '"""Old."""',
+        '"""New."""',
+    ),
+    "a docstring in a match case": (
+        "match 1:\n    case 1:\n\n        def helper(x):\n            {v}\n"
+        "            return x\n\n\ndef task(a):\n    return helper(a)\n",
+        '"""Old."""',
+        '"""New."""',
+    ),
     "formatting": (
         "def helper(x, y):\n    return {v}\n\n\ndef task(a):\n    return helper(a, a)\n",
         "max(x, y)",

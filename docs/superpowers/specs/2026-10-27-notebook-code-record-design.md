@@ -192,8 +192,11 @@ are unaffected. Tests import it with `pytest.importorskip`.
   either.
 - A function or class reached only through a container (a registry
   `MODELS["cnn"]`), a closure or a default.
-- A class's attribute values beyond its literal text (`K = SCALE`), and a
-  method-less dataclass (its class statement cannot be located).
+- A class's attribute values beyond its literal text (`K = SCALE`), and the
+  text of a class whose statement cannot be located: a method-less
+  dataclass, or a class whose every method is wrapped by a decorator defined
+  in the notebook (the wrapper's code is the decorator's; its methods'
+  bodies are still compared, through `__wrapped__`).
 - A `_target_` defined in the notebook (as on main): its per-cell walk could
   not see the task's writes; hydra-zen's `builds` puts a class's defaults in
   the config, which is compared.
@@ -249,7 +252,11 @@ are unaffected. Tests import it with `pytest.importorskip`.
   review except for a blocking finding: a class body whose `__module__` is
   an object with its own `__eq__` (the comparison runs it), and a
   `BaseException` raised by notebook code during the record, which is not
-  caught.
+  caught. Codex then found a blocking one, fixed with its tests:
+  `_strip_tree` kept the docstrings of functions defined in an `except`
+  handler or a `match` case, so a docstring edit there re-ran the cells (in
+  a project file too). The class whose methods are all wrapped by a
+  notebook decorator joined the residuals.
 
 ## Tests
 

@@ -282,6 +282,17 @@ NOTEBOOK_NOT_EDITS = {
         ["def helper(x):\n    return x * 2\n", TASK],
         ['def helper(x):\n    """Twice."""\n    # the scale\n    return x*2\n'],
     ),
+    "a docstring of a helper defined in an except block": (
+        [
+            "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
+            '    def helper(x):\n        """Old."""\n        return x * 2\n',
+            TASK,
+        ],
+        [
+            "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
+            '    def helper(x):\n        """New."""\n        return x * 2\n'
+        ],
+    ),
     "a helper the task does not reach": (
         ["def helper(x):\n    return x * 2\n\n\ndef other(x):\n    return x\n", TASK],
         ["def other(x):\n    return x + 1\n"],
