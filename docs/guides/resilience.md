@@ -143,8 +143,9 @@ rebinds it in the kernel, the next resume re-runs the cells. That covers
 `globals()` and `exec`, and a `global` statement in a function kept only
 somewhere that look-through does not go: an object's attributes, a dict's
 keys, a container of more than 256 items, more than three steps from a name
-(each container, class, instance, closure, default or decorator is a step), a
-subclass of a container, a metaclass, or a class from outside the notebook.
+(each container, class, base class, instance, closure, default, decorator,
+`partial` and bound method is a step), a subclass of a container, a
+metaclass, or a class from outside the notebook.
 
 ### The full loop
 

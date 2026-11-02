@@ -1730,8 +1730,8 @@ def _notebook_record(notebooks: dict) -> dict[str, str]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
     root)])}``), best effort: a notebook whose entries cannot be taken gives
     none (as on main), with a warning, since an edit then goes unnoticed (a
-    notebook metaclass's attribute hook that raises, say). Once per process:
-    Python shows a repeated warning from one place only once anyway."""
+    notebook metaclass's attribute hook that raises, say). Once per run:
+    ``driver_script_entries`` clears the flag, so a resume warns again."""
     out: dict[str, str] = {}
     for namespace, roots in notebooks.values():
         try:
@@ -1896,6 +1896,12 @@ def driver_script_entries(roots) -> dict:
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not
     mistaken for the code its cells ran. Empty when they cannot be taken."""
+    # A kernel is one long process, and a resume is where a missed edit
+    # costs: warn about the notebook record on every run. (Python's own
+    # once-per-place memory does not hide the repeat: it is cleared whenever
+    # the warning filters change, which a sweep's run does.)
+    _NOTEBOOK_TRUNCATION_WARNED.clear()
+    _NOTEBOOK_FAILURE_WARNED.clear()
     try:
         code: dict[str, str] = {}
         seeds: list[str] = []

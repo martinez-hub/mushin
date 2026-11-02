@@ -282,6 +282,17 @@ NOTEBOOK_NOT_EDITS = {
         ["def helper(x):\n    return x * 2\n", TASK],
         ['def helper(x):\n    """Twice."""\n    # the scale\n    return x*2\n'],
     ),
+    "a docstring of a helper defined in a match case": (
+        [
+            "match 1:\n    case 1:\n\n"
+            '        def helper(x):\n            """Old."""\n            return x * 2\n',
+            TASK,
+        ],
+        [
+            "match 1:\n    case 1:\n\n"
+            '        def helper(x):\n            """New."""\n            return x * 2\n'
+        ],
+    ),
     "a docstring of a helper defined in an except block": (
         [
             "try:\n    import mushin_no_such_module\nexcept ImportError:\n\n"
@@ -872,10 +883,11 @@ def test_a_notebook_change_the_task_cannot_see_is_not_an_edit(kernel, case):
     assert _record(kernel, "task") == first
 
 
-def test_a_notebook_whose_record_fails_warns(kernel, monkeypatch):
+def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
     """A notebook whose entries cannot be taken has none, as on main, but
-    says so, once, with the exception's type and not its message (the
-    notebook's own text)."""
+    says so, once a run, with the exception's type and not its message (the
+    notebook's own text): a kernel is one process, and the resume is where
+    the edit goes unnoticed."""
     import mushin._resume as resume
 
     def fail(namespace, roots):
@@ -884,12 +896,13 @@ def test_a_notebook_whose_record_fails_warns(kernel, monkeypatch):
     monkeypatch.setattr(resume, "_notebook_entries", fail)
     monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
     _run_cells(kernel, ["def helper(x):\n    return x\n", TASK])
-    with pytest.warns(
-        UserWarning, match=r"could not be recorded \(RuntimeError\)"
-    ) as got:
-        entries = resume.driver_script_entries((kernel.ns["task"],))
-    assert entries[resume.NOTEBOOK_ENTRIES] == {}
-    assert len(got) == 1 and "own text" not in str(got[0].message)
+    for _ in range(2):  # a run, then a resume
+        match = r"could not be recorded \(RuntimeError\)"
+        with pytest.warns(UserWarning, match=match) as got:
+            entries = resume.driver_script_entries((kernel.ns["task"],))
+            resume.project_fingerprints(kernel.ns["task"])  # a cell: no second
+        assert entries[resume.NOTEBOOK_ENTRIES] == {}
+        assert len(got) == 1 and "own text" not in str(got[0].message)
 
 
 def test_a_notebook_metaclass_hook_that_raises_warns(kernel, monkeypatch):

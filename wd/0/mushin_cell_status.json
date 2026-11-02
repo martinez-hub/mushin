@@ -1,0 +1,27 @@
+{
+  "status": "completed",
+  "combo": {
+    "a": 1
+  },
+  "attempt": 1,
+  "config_hash": "f9d86028c6e0d64e",
+  "code_hash": "ffaab82476644791",
+  "code_deps": {
+    "python": "3.11",
+    "code": {
+      "fv (script)": "13a7ca2d4b4ad8ea"
+    }
+  },
+  "job_num": 0,
+  "choices": {
+    "hydra/env": "default",
+    "hydra/callbacks": null,
+    "hydra/job_logging": "default",
+    "hydra/hydra_logging": "default",
+    "hydra/hydra_help": "default",
+    "hydra/help": "default",
+    "hydra/sweeper": "basic",
+    "hydra/launcher": "basic",
+    "hydra/output": "default"
+  }
+}

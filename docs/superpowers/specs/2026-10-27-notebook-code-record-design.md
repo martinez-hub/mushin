@@ -245,8 +245,11 @@ are unaffected. Tests import it with `pytest.importorskip`.
   object); the warning reads the exception's name from its slot; the guide
   lists where the write scan looks.
 - Final head (0 + 9 and 0 + 1, nothing on the bar). A per-run reset of the
-  warnings was reverted: Python shows a repeated warning from one place once
-  per process anyway, so it did nothing. Tests now pin the identity check
+  warnings was reverted on a reviewer's claim that Python shows a repeated
+  warning from one place once per process anyway, then restored: that memory
+  is cleared whenever the warning filters change, and a sweep's run changes
+  them (checked: a probe warning repeats after `run()`), so without the
+  reset a resume in the same kernel would never warn. Tests now pin the identity check
   with a raising `__eq__` and the warning with a real metaclass hook. Two
   residuals were left as such, since no change was allowed past the final
   review except for a blocking finding: a class body whose `__module__` is
