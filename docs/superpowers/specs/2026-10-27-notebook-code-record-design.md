@@ -175,10 +175,11 @@ are unaffected. Tests import it with `pytest.importorskip`.
   notebook; a name rebound through `globals()` or `exec`, which no bytecode
   names. Under a multiprocess launcher the rebinding happens in a worker,
   so the kernel's name, and the record, do not change.
-- A notebook metaclass's own methods (`__eq__`, attribute hooks) can run
-  while the record is taken; if one raises, the notebook has no entries (as
-  on main), with a warning, so the edit that then goes unnoticed is not
-  silent.
+- A notebook metaclass's attribute hooks (`__getattribute__`, a property)
+  can run while the record is taken, since a class's `__dict__` and
+  `__mro__` are read through it; if one raises, the notebook has no entries
+  (as on main), with a warning on every run. Types are matched by identity,
+  so a metaclass's `__eq__` never runs.
 - A task that assigns to a class at run time (`Model.f = other`, `setattr`):
   the class's digest is taken from its live members. Wrapping a method in a
   cache (`functools.lru_cache`) and storing a function a method defines are
@@ -236,6 +237,13 @@ are unaffected. Tests import it with `pytest.importorskip`.
   dict keys joined the residuals; the tuple, set, frozenset and `partial`
   keyword branches got their cases; the multiprocess qualifier and the
   docstring wording were fixed.
+- Round 8 (final head, 0 + 9, nothing on the bar): types are matched by
+  identity (a metaclass `__eq__` that answered yes had the scan iterate a
+  notebook object); the failure and truncation warnings fire on every run,
+  not once per kernel, since a resume is where a missed edit costs; the
+  warning reads the exception's name from its slot; the warning test forces
+  the failure instead of relying on a defect; the guide lists where the
+  write scan looks.
 
 ## Tests
 

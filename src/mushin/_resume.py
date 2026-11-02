@@ -1294,7 +1294,7 @@ def _method_functions(value) -> list:
     found: list = []
     if kind is types.FunctionType or kind is lru:
         found = [value]
-    elif kind in (staticmethod, classmethod):
+    elif kind is staticmethod or kind is classmethod:  # identity: see _notebook_writes
         found = [value.__func__]
     elif kind is property:
         found = [value.fget, value.fset, value.fdel]
@@ -1411,8 +1411,8 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     them. A name rebound through ``globals()`` or ``exec`` is not seen. From
     bytecode, so a function whose text the kernel did not keep counts too.
     Taken from the whole namespace before the walk, not from what the walk
-    reaches, since a name the run can rebind must not
-    shape the record (see ``_notebook_entries``). Breadth first, each object
+    reaches, since a name the run can rebind must not shape the record (see
+    ``_notebook_entries``). Breadth first, each object
     at its least depth, and a container walked by its size alone, so the
     result does not depend on iteration order; it depends only on the
     notebook's definitions and the shape of what it holds."""
@@ -1427,6 +1427,12 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     mappings = (dict, collections.defaultdict, collections.OrderedDict)
     containers = (list, tuple, set, frozenset, collections.deque, *mappings)
     callable_kinds = (types.FunctionType, lru, functools.partial, types.MethodType)
+    # Types are matched by identity: `kind in containers` compares with ==,
+    # which runs a notebook metaclass's __eq__, and one that returns
+    # something true would have the scan iterate the notebook's own object.
+    mapping_ids = frozenset(map(id, mappings))
+    container_ids = frozenset(map(id, containers))
+    callable_ids = frozenset(id(k) for k in callable_kinds if k is not None)
     functions: list = []
     seen: set[int] = set()
     # Whether a type's values can lead to a function, by the type's id: a
@@ -1452,8 +1458,8 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
             if id(kind) not in leads:
                 leads[id(kind)] = (
                     kind,
-                    kind in callable_kinds
-                    or kind in containers
+                    id(kind) in callable_ids
+                    or id(kind) in container_ids
                     or issubclass(kind, type)
                     or _notebook_class(kind, namespace) is not None,
                 )
@@ -1481,9 +1487,9 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
                 nxt.extend([value.func, *value.args, *(value.keywords or {}).values()])
             elif kind is types.MethodType:
                 nxt.extend([value.__func__, value.__self__])
-            elif kind in containers:
+            elif id(kind) in container_ids:
                 if len(value) <= _WRITE_SCAN_CONTAINER:
-                    nxt.extend(dict.values(value) if kind in mappings else value)
+                    nxt.extend(dict.values(value) if id(kind) in mapping_ids else value)
             elif _notebook_class(value, namespace) is not None:
                 try:
                     members = list(vars(value).values())
@@ -1719,7 +1725,8 @@ def _notebook_record(notebooks: dict) -> dict[str, str]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
     root)])}``), best effort: a notebook whose entries cannot be taken gives
     none (as on main), with a warning, since an edit then goes unnoticed (a
-    notebook metaclass's ``__eq__`` that raises, say)."""
+    notebook metaclass's attribute hook that raises, say). Once per run:
+    ``driver_script_entries`` clears the flag, so a resume warns again."""
     out: dict[str, str] = {}
     for namespace, roots in notebooks.values():
         try:
@@ -1727,11 +1734,17 @@ def _notebook_record(notebooks: dict) -> dict[str, str]:
         except Exception as error:  # noqa: BLE001 - never fail the record
             if not _NOTEBOOK_FAILURE_WARNED:
                 _NOTEBOOK_FAILURE_WARNED.append(True)
-                # The type only: the message is the notebook's own text.
+                # The type's name only, read from its slot: the message is
+                # the notebook's own text, and `type(error).__name__` could
+                # run a notebook metaclass's property.
+                try:
+                    kind = type.__dict__["__name__"].__get__(type(error))
+                except Exception:  # noqa: BLE001 - a name is not worth failing for
+                    kind = "an error"
                 _best_effort_warning(
                     "resume/cache_dir: the notebook code this task reaches could "
-                    f"not be recorded ({type(error).__name__}), so it is not "
-                    "compared; use a fresh working_dir after editing it."
+                    f"not be recorded ({kind}), so it is not compared; use a "
+                    "fresh working_dir after editing it."
                 )
     return out
 
@@ -1878,6 +1891,10 @@ def driver_script_entries(roots) -> dict:
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not
     mistaken for the code its cells ran. Empty when they cannot be taken."""
+    # A kernel is one long process: warn about the notebook record on every
+    # run, not only the first, since a resume is where a missed edit costs.
+    _NOTEBOOK_TRUNCATION_WARNED.clear()
+    _NOTEBOOK_FAILURE_WARNED.clear()
     try:
         code: dict[str, str] = {}
         seeds: list[str] = []

@@ -861,25 +861,48 @@ def test_a_notebook_change_the_task_cannot_see_is_not_an_edit(kernel, case):
     assert _record(kernel, "task") == first
 
 
-def test_a_notebook_whose_record_fails_warns(kernel, monkeypatch):
+def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
     """A notebook whose entries cannot be taken has none, as on main, but
-    says so: an edit to it then goes unnoticed (round 7 found a notebook
-    metaclass's `__eq__` reached by the write scan)."""
+    says so, on each run: a kernel is one process, and the resume is where
+    the edit goes unnoticed."""
     import mushin._resume as resume
 
+    def fail(namespace, roots):
+        raise RuntimeError("the notebook's own text")
+
+    monkeypatch.setattr(resume, "_notebook_entries", fail)
     monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    _run_cells(kernel, ["def helper(x):\n    return x\n", TASK])
+    for _ in range(2):  # a run, then a resume
+        with pytest.warns(
+            UserWarning, match=r"could not be recorded \(RuntimeError\)"
+        ) as got:
+            entries = resume.driver_script_entries((kernel.ns["task"],))
+        assert entries[resume.NOTEBOOK_ENTRIES] == {}
+        assert "own text" not in str(got[0].message)
+
+
+def test_a_metaclass_eq_does_not_steer_the_write_scan(kernel):
+    """Round 8: types are matched by identity. A notebook metaclass whose
+    `__eq__` answers yes to everything made `kind in containers` true, and
+    the scan iterated the notebook's own object."""
     _run_cells(
         kernel,
         [
-            "class Meta(type):\n    def __eq__(cls, other):\n"
-            "        raise RuntimeError('no')\n\n    __hash__ = type.__hash__\n\n\n"
-            "class Thing(metaclass=Meta):\n    pass\n\n\nobj = Thing()\n",
+            "class Meta(type):\n    def __eq__(cls, other):\n        return True\n\n"
+            "    __hash__ = type.__hash__\n\n\n"
+            "class Feed(metaclass=Meta):\n    calls = 0\n\n    def __len__(self):\n"
+            "        type(self).calls += 1\n        return 1\n\n    def __iter__(self):\n"
+            "        type(self).calls += 1\n        return iter(())\n\n    @property\n"
+            "    def __func__(self):\n        type(self).calls += 1\n        return None\n\n\n"
+            "class Holder:\n    feed = Feed()\n\n    def f(self, x):\n        return x\n\n\n"
+            "feed = Feed()\n",
             "def helper(x):\n    return x\n",
-            TASK,
+            "def task(a):\n    return Holder().f(helper(a))\n",
         ],
     )
-    with pytest.warns(UserWarning, match=r"could not be recorded \(RuntimeError\)"):
-        assert _record(kernel, "task") == {}
+    assert "helper (notebook)" in _record(kernel, "task")
+    assert kernel.ns["Feed"].calls == 0
 
 
 def test_the_write_scan_runs_no_keys_hash():

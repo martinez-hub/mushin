@@ -133,11 +133,17 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A name
-rebound without a `global` statement the notebook's functions show (through
-`globals()` or `exec`, or by a function kept only in an object's attributes or
-a dict's keys) is still compared, so once a run rebinds it in the kernel, a
-resume re-runs the cells.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
+
+mushin finds those functions by looking through the notebook's names: the
+functions they hold, and what those reach through decorators, `partial`s,
+bound methods, classes, closures, defaults and small lists, tuples, sets and
+dicts. A name rebound some other way is still compared, so once a run
+rebinds it in the kernel, the next resume re-runs the cells. That covers
+`globals()` and `exec`, and a `global` statement in a function kept only
+somewhere that look-through does not go: an object's attributes, a dict's
+keys, a container of more than 256 items or nested more than three deep, a
+subclass of a container, a metaclass, or a class from outside the notebook.
 
 ### The full loop
 
