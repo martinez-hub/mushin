@@ -143,7 +143,14 @@ def built_site(tmp_path_factory):
     from mkdocs.commands.build import build
 
     site_dir = tmp_path_factory.mktemp("site")
-    build(mkdocs_config.load_config(str(ROOT / "mkdocs.yml"), site_dir=str(site_dir)))
+    # From the repository, as `mkdocs build` runs: pymdownx.snippets resolves
+    # its base_path against the working directory, not mkdocs.yml.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.chdir(ROOT)
+        config = mkdocs_config.load_config(
+            str(ROOT / "mkdocs.yml"), site_dir=str(site_dir)
+        )
+        build(config)
     return site_dir
 
 
@@ -408,14 +415,14 @@ def test_the_api_entries_match_the_built_site(built_site):
     renders: members, filters, order and re-exports checked by outcome."""
     pages, _ = _pages()
     checked = 0
+    # Every page, so an object the site renders where the hook rendered none
+    # (a directive form it does not read) fails too.
     for _, _, url, _, entries in pages:
-        if not entries:
-            continue
         html = (built_site / url.removeprefix(_site()) / "index.html").read_text(
             encoding="utf-8"
         )
         assert re.findall(r'<h[1-6] id="(mushin\.[^"]+)"', html) == entries, url
-        checked += 1
+        checked += bool(entries)
     assert checked >= 8
 
 
@@ -448,22 +455,20 @@ def test_every_link_in_the_file_is_absolute():
     assert _site() + "guides/exploration-to-paper/" in urls
 
 
-def test_every_site_url_in_the_file_is_a_page():
-    """Every link into the site resolves: a page, or a file the build writes
-    beside them (llms.txt, a notebook's download, an image under docs/)."""
+def test_every_site_url_in_the_file_is_served(built_site):
+    """Every link into the site resolves in the site `mkdocs build` writes: a
+    page, or a file beside them (llms.txt, a notebook's download, an image).
+    Not a page's source: the build serves no .md, and a notebook's download
+    is at notebooks/X/X.ipynb."""
     site = _site()
-    pages = {_site_url(page) for page in _nav_pages(_config()["nav"])}
-    allowed = pages | {site + "llms.txt", site + "llms-full.txt"}
-    bad = sorted(
-        {
-            url
-            for url in (u.split("#", 1)[0] for u in _rendered_full().urls)
-            if url.startswith(site)
-            and url not in allowed
-            and not re.search(r"/([\w-]+)/\1\.ipynb$", url)
-            and not (ROOT / "docs" / url.removeprefix(site)).is_file()
-        }
-    )
+
+    def served(url: str) -> bool:
+        path = built_site / url.removeprefix(site)
+        return path.is_file() or (path / "index.html").is_file()
+
+    urls = {u.split("#", 1)[0] for u in _rendered_full().urls if u.startswith(site)}
+    assert site + "guides/exploration-to-paper/" in urls
+    bad = sorted(url for url in urls if not served(url))
     assert not bad, bad
 
 
@@ -543,7 +548,10 @@ def test_api_cross_references_become_links():
     the URL of the page that documents the name."""
     link = f"[`mushin.original_cwd()`]({_site()}reference/utils/#mushin.original_cwd)"
     assert link in _full()
-    assert not re.search(r"\]\[mushin\.[\w.]+\]", "".join(_rendered_full().text))
+    text = "".join(_rendered_full().text)
+    assert not re.search(r"\]\[mushin\.[\w.]+\]", text)
+    # The collapsed form, `[`mushin.x`][]`, leaves its `][]` outside the code.
+    assert "][]" not in text
 
 
 def test_the_hook_writes_the_file(built_site):

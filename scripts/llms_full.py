@@ -31,8 +31,9 @@ gets rendered here before it can silently differ from the site. A name
 griffe cannot find becomes a heading, so a reference page never breaks the
 build. Relative links (to pages, images, in reference definitions) become
 site URLs, since a relative `guides/mcp.md` means nothing in a single file,
-and an mkdocs-autorefs cross-reference (`[text][mushin.name]`) to an object
-the reference documents becomes a link to its anchor. Code (fences of any
+and an mkdocs-autorefs cross-reference (`[text][mushin.name]`) by the path a
+reference page documents the object under becomes a link to its anchor (not
+by another of its paths, an alias, which the tests reject). Code (fences of any
 length, inline code spans) is left as written; a page using a form this does
 not read (an indented code block outside an admonition, an escaped backtick,
 an unbalanced bracket) fails the tests rather than shipping a relative link.
