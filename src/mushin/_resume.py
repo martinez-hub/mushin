@@ -1159,8 +1159,9 @@ def _namespace_modules(namespace: dict) -> list[str]:
     """For a module with no file (a notebook): the project modules its names
     refer to, by module values, by the modules their functions and classes
     come from, and by the classes of other values, inspected by type only.
-    Its own code is not compared. A package brings the submodules loaded
-    under it: ``import pkg.sub`` binds only ``pkg``.
+    Its own code is not compared. ``import pkg.sub`` binds only ``pkg``, so
+    the dotted names its cells import that way count too
+    (``_cell_dotted_imports``).
 
     On 3.15 a lazy import (PEP 810: ``lazy import m``, or any import under
     ``-X lazy_imports=all`` or a ``__lazy_modules__``) binds a proxy, and it
@@ -1182,7 +1183,6 @@ def _namespace_modules(namespace: dict) -> list[str]:
                 name = _own_attr(value, "__name__")
                 if isinstance(name, str):
                     names.add(name)
-                names.update(_bound_submodules(value))
             elif kind is types.FunctionType or issubclass(kind, type):
                 module = value.__module__
                 if isinstance(module, str):
@@ -1191,53 +1191,72 @@ def _namespace_modules(namespace: dict) -> list[str]:
                 names.add(kind.__module__)  # an instance: its class's module
         except Exception:  # noqa: BLE001 - a value that resists inspection
             continue
+    names.update(_cell_dotted_imports(namespace))
     names.discard(namespace.get("__name__"))
     return sorted(names)
 
 
-def _bound_submodules(package) -> list[str]:
-    """The submodules loaded under project package ``package``, at any depth.
-    The import system binds each submodule it loads as an attribute of its
-    parent, so these are what code holding the package can reach through it.
-    Each module is read through its own ``__dict__`` (``object.__getattribute__``),
-    so a ``ModuleType`` subclass's attribute hooks (a lazy loader's) never run;
-    a value counts when it is a module named under its parent, whatever
-    attribute holds it (``from . import sub as s``). A foreign package is
-    skipped whole (torch holds hundreds of submodules). A lazy import inside a
-    package is not a module, and its file's syntax tree, which
-    ``_file_entries`` follows, has it anyway."""
+#: The names IPython gives a cell's code in ``linecache``: the terminal's (and
+#: IPython 7 kernels') ``<ipython-input-N-hash>``, and ipykernel 6's file per
+#: cell, ``<tmp>/ipykernel_<pid>/<hash>.py``. Other tools keep generated source
+#: there too (attrs' ``<attrs generated init ...>``); that is not a cell.
+_CELL_FILE = re.compile(
+    r"<ipython-input-\d+-[0-9a-f]+>|.*[\\/]ipykernel_\d+[\\/]\d+\.py"
+)
+
+
+def _cell_dotted_imports(namespace: dict) -> set[str]:
+    """The dotted names the kernel's kept cells import with a plain
+    ``import pkg.sub``, which binds only ``pkg``, each while ``pkg`` is still
+    bound in ``namespace`` to a module (or, on 3.15, to a lazy import, which
+    the same statement makes). Read from the cells' text, as a file's imports
+    are, so what merely happens to be loaded under ``pkg`` does not count and
+    no module is touched. A statement at a cell's top level counts, inside
+    ``if``, ``try`` or ``with`` too; one in a function's or class's body binds
+    a local. Every kept cell counts, an earlier version of a re-run cell
+    included. A parallel worker keeps no cells, so it finds none."""
+    import ast
+    import linecache
     import types
 
-    def own_dict(module) -> dict | None:
-        try:
-            found = object.__getattribute__(module, "__dict__")
-        except Exception:  # noqa: BLE001 - a module object that has no dict
-            return None
-        return found if type(found) is dict else None
+    lazy = getattr(types, "LazyImportType", None)  # 3.15+
 
-    root = own_dict(package)
-    name = root.get("__name__") if root is not None else None
-    if not isinstance(name, str) or "__path__" not in root:
-        return []
-    file = root.get("__file__")
-    if _is_foreign_module(name, file if isinstance(file, str) else None):
-        return []
-    found: list[str] = []
-    seen = {id(package)}
-    pending = [(root, name)]
-    while pending and len(seen) < _NAMES_MAX:
-        members, parent = pending.pop()
-        for value in list(members.values()):
-            if id(value) in seen or not issubclass(type(value), types.ModuleType):
-                continue
-            sub = own_dict(value)
-            sub_name = sub.get("__name__") if sub is not None else None
-            if not isinstance(sub_name, str) or not sub_name.startswith(parent + "."):
-                continue
-            seen.add(id(value))
-            found.append(sub_name)
-            if "__path__" in sub:
-                pending.append((sub, sub_name))
+    def binds_a_module(top: str) -> bool:
+        kind = type(namespace.get(top))
+        return kind is lazy or issubclass(kind, types.ModuleType)
+
+    files = [
+        n for n in list(linecache.cache) if type(n) is str and _CELL_FILE.fullmatch(n)
+    ]
+    kept = getattr(linecache, "_ipython_cache", None)
+    if type(kept) is dict:
+        files.extend(n for n in list(kept) if type(n) is str)
+    found: set[str] = set()
+    for filename in dict.fromkeys(files):
+        lines = _cell_lines(filename)
+        if lines is None or not any("import" in line for line in lines):
+            continue
+        tree = _cell_tree(lines)
+        pending = list(tree.body) if tree is not None else []
+        while pending:
+            node = pending.pop()
+            if type(node) is ast.Import:
+                for alias in node.names:
+                    name = alias.name
+                    if (
+                        alias.asname is None
+                        and "." in name
+                        and binds_a_module(name.partition(".")[0])
+                    ):
+                        found.add(name)
+            elif not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                pending.extend(
+                    child
+                    for child in ast.iter_child_nodes(node)
+                    if isinstance(child, (ast.stmt, ast.excepthandler, ast.match_case))
+                )
     return found
 
 

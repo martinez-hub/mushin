@@ -1486,41 +1486,63 @@ def test_a_resume_after_editing_a_submodule_reached_through_its_package_reruns(
         restarted.close()
 
 
-def test_a_foreign_package_brings_no_submodules(kernel):
-    """The standard library is not the project's: its packages are skipped
-    whole, before any of their submodules is looked at."""
-    from mushin._resume import _bound_submodules
-
+def test_a_foreign_dotted_import_records_nothing(kernel):
+    """The standard library is not the project's."""
     kernel.run("import json.decoder\nimport xml.etree.ElementTree\n")
     kernel.run("def task(a):\n    return json.decoder, xml.etree.ElementTree, a\n")
     code = project_fingerprints(kernel.ns["task"])["code"]
     assert not [k for k in code if k.startswith(("json", "xml"))], code
-    # Skipped before the walk, not only filtered after it: torch would cost
-    # hundreds of submodules per record.
-    assert _bound_submodules(kernel.ns["xml"]) == []
-    assert _bound_submodules(kernel.ns["json"]) == []
 
 
-def test_a_submodule_is_read_without_its_attribute_hooks(kernel, sub_project):
-    """A lazy loader's module type runs code on attribute access; the record
-    reads each module's own dict, so the hook never runs."""
-    import importlib
-    import types as std_types
+@pytest.mark.parametrize(
+    ("imports", "use"),
+    [
+        (f"import {SUB_PACKAGE}.sub", f"{SUB_PACKAGE}.sub.f(a)"),
+        (f"import {SUB_PACKAGE}.sub as s", "s.f(a)"),
+        (f"from {SUB_PACKAGE} import sub", "sub.f(a)"),
+        (
+            f"try:\n    import {SUB_PACKAGE}.sub\nexcept ImportError:\n    pass",
+            f"{SUB_PACKAGE}.sub.f(a)",
+        ),
+        pytest.param(
+            f"lazy import {SUB_PACKAGE}.sub",
+            f"{SUB_PACKAGE}.sub.f(a)",
+            marks=lazy_imports,
+        ),
+    ],
+)
+def test_every_way_of_importing_a_submodule_records_it(
+    kernel, sub_project, imports, use
+):
+    """`import pkg.sub` reaches parity with the forms that bind the submodule
+    itself, which the namespace already named."""
+    kernel.run(f"{imports}\n")
+    kernel.run(f"def task(a):\n    return {use}\n")
+    code = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUB_PACKAGE}.sub (file)" in code, code
 
-    calls = []
 
-    class Hooked(std_types.ModuleType):
-        def __getattribute__(self, name):
-            calls.append(name)
-            return super().__getattribute__(name)
+def test_a_submodule_merely_loaded_under_a_package_is_not_recorded(kernel, sub_project):
+    """What counts is what the cells' statements import, not what happens to
+    be loaded: another cell, or a library, loading `pkg.sub` without an
+    `import pkg.sub` statement does not bring it in (an edit to it would
+    otherwise re-run the cells for code the task need not reach)."""
+    kernel.run(f"import importlib\nimport {SUB_PACKAGE}\n")
+    kernel.run(f"importlib.import_module('{SUB_PACKAGE}.sub')\n")
+    kernel.run(f"def task(a):\n    return {SUB_PACKAGE}, a\n")
+    code = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUB_PACKAGE} (file)" in code, code
+    assert f"{SUB_PACKAGE}.sub (file)" not in code, code
 
-    package = importlib.import_module(SUB_PACKAGE)
-    package.hooked = Hooked(f"{SUB_PACKAGE}.hooked")
-    kernel.run(f"import {SUB_PACKAGE}\n")
-    kernel.run(f"def task(a):\n    return {SUB_PACKAGE}.hooked, a\n")
-    calls.clear()
-    project_fingerprints(kernel.ns["task"])
-    assert calls == []
+
+def test_a_rebound_package_name_drops_its_dotted_imports(kernel, sub_project):
+    """The cells' statements count only while the name they bound still holds
+    a module."""
+    kernel.run(f"import {SUB_PACKAGE}.sub\n")
+    kernel.run(f"{SUB_PACKAGE} = 3\n")
+    kernel.run("def task(a):\n    return a\n")
+    code = project_fingerprints(kernel.ns["task"])["code"]
+    assert not [k for k in code if k.startswith(SUB_PACKAGE)], code
 
 
 @lazy_imports
@@ -1815,6 +1837,23 @@ def test_a_real_kernel_restart_and_edit():
     assert records[0] == records[1]
     assert "helper (notebook)" in records[0]
     assert records[2]["helper (notebook)"] != records[0]["helper (notebook)"]
+
+
+def test_a_real_kernel_records_a_submodule_imported_through_its_package(sub_project):
+    """ipykernel names each cell's file `<tmp>/ipykernel_<pid>/<hash>.py`: the
+    record finds the `import pkg.sub` statement in the cell it keeps."""
+    run, close = _kernel_session()
+    try:
+        run(f"import sys\nsys.path.insert(0, {str(sub_project)!r})\n")
+        run(f"import {SUB_PACKAGE}.sub\n")
+        run(f"def task(a):\n    return {SUB_PACKAGE}.sub.f(a)\n")
+        keys = run(
+            "import json\nfrom mushin._resume import project_fingerprints\n"
+            "print(json.dumps(sorted(project_fingerprints(task)['code'])))\n"
+        )
+    finally:
+        close()
+    assert f"{SUB_PACKAGE}.sub (file)" in json.loads(keys.strip().splitlines()[-1])
 
 
 def test_a_real_kernel_resume_under_joblib(tmp_path):
