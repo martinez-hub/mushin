@@ -1642,3 +1642,304 @@ def test_a_real_kernel_resume_under_joblib(tmp_path):
         json.loads(p.read_text()).get("code_deps") for p in tmp_path.rglob(STATUS_FILE)
     ]
     assert records and all("helper (notebook)" in r["code"] for r in records), records
+
+
+# --- the modules the notebook's code names ----------------------------------------
+#
+# A cell's `import pkg.sub` binds only `pkg`: the code the task reaches names
+# the submodule (`pkg.sub.f`), and an import inside a function binds a local.
+# The record follows those names, read from the reached code's bytecode, which
+# a parallel worker has too.
+
+SUBPKG = "mushin_t_subpkg"
+SUBREL = "mushin_t_subrel"
+
+# The constructs the bytecode is read through; the sets below pin what it
+# gives on every supported Python.
+CHAIN_SOURCE = """
+def f(xs):
+    a = pkg.sub.f(1)
+    b = pkg.attr
+    pkg.store.x = 1
+    del pkg.dele.y
+    c = [pkg.comp.b(x) for x in xs]
+    g = lambda: pkg.lam.v
+    def inner():
+        return pkg.inner.w
+    with pkg.ctx.cm():
+        pass
+    pkg.star.f(*xs, **{})
+    pkg.call()
+    if pkg.cond.c:
+        pass
+    x = pkg.tern.w if xs else other.alt.a
+    y = pkg.sub.f is not None and pkg.bool.b
+    z = (pkg.gen.g(x) for x in xs)
+    try:
+        pkg.tr.t()
+    except pkg.exc.E:
+        pass
+    print(f"{pkg.fstr.s}")
+    return pkg.ret.r
+def imports():
+    import pkg.fn_imp
+    import pkg.fn_as.deep as alias
+    from pkg import fn_from, fn_from2
+    from pkg.deep import thing
+    from . import rel
+    from .relmod import r
+class C:
+    v = pkg.cls.v
+    w: int = pkg.ann.v
+    def m(self):
+        return pkg.meth.m
+async def af():
+    await pkg.aw.f()
+    async with pkg.actx.cm():
+        pass
+"""
+CHAINS = {
+    "other.alt.a", "pkg.actx.cm", "pkg.ann.v", "pkg.attr", "pkg.aw.f", "pkg.bool.b",
+    "pkg.call", "pkg.cls.v", "pkg.comp.b", "pkg.cond.c", "pkg.ctx.cm", "pkg.dele",
+    "pkg.exc.E", "pkg.fstr.s", "pkg.gen.g", "pkg.inner.w", "pkg.lam.v", "pkg.meth.m",
+    "pkg.ret.r", "pkg.star.f", "pkg.store", "pkg.sub.f", "pkg.tern.w", "pkg.tr.t",
+}  # fmt: skip
+IMPORTS = {
+    "pkg", "pkg.deep", "pkg.deep.thing", "pkg.fn_as.deep", "pkg.fn_from",
+    "pkg.fn_from2", "pkg.fn_imp",
+}  # fmt: skip
+
+
+def test_the_code_names_the_same_modules_on_every_supported_python():
+    from mushin._resume import _code_modules
+
+    chains, imports = _code_modules(compile(CHAIN_SOURCE, "<cell>", "exec"))
+    assert {".".join(chain) for chain in chains} == CHAINS
+    assert imports == IMPORTS  # a relative import names none
+
+
+@pytest.fixture
+def sub_project(tmp_path, monkeypatch):
+    """A project package with submodules, and a top-level module named like
+    a relative import's target; none of them imported."""
+    import importlib
+
+    root = tmp_path / "subproj"
+    (root / SUBPKG / "a").mkdir(parents=True)
+    (root / SUBPKG / "__init__.py").write_text("")
+    (root / SUBPKG / "a" / "__init__.py").write_text("")
+    for rel in ("sub.py", "other.py", "a/b.py"):
+        (root / SUBPKG / rel).write_text("def f(x):\n    return x + 1\n")
+    (root / f"{SUBREL}.py").write_text("def f(x):\n    return x + 1\n")
+    monkeypatch.syspath_prepend(str(root))
+    importlib.invalidate_caches()
+    yield root
+    for name in [n for n in sys.modules if n.startswith((SUBPKG, SUBREL))]:
+        sys.modules.pop(name)
+
+
+def _files(kernel, *names, **kwargs) -> set:
+    record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
+    return {k for k in record["code"] if k.endswith(" (file)")}
+
+
+@pytest.mark.parametrize(
+    ("imports", "use", "expected"),
+    [
+        (f"import {SUBPKG}.sub", f"{SUBPKG}.sub.f(a)", ["", ".sub"]),
+        (f"import {SUBPKG}.a.b", f"{SUBPKG}.a.b.f(a)", ["", ".a", ".a.b"]),
+        # These bind the submodule itself: the same record.
+        (f"import {SUBPKG}.sub as s", "s.f(a)", ["", ".sub"]),
+        (f"from {SUBPKG} import sub", "sub.f(a)", ["", ".sub"]),
+    ],
+)
+def test_a_submodule_the_task_names_through_its_package_is_recorded(
+    kernel, sub_project, imports, use, expected
+):
+    kernel.run(f"{imports}\n")
+    kernel.run(f"def task(a):\n    return {use}\n")
+    files = _files(kernel, "task")
+    assert {f"{SUBPKG}{e} (file)" for e in expected} <= files, files
+    assert f"{SUBPKG}.other (file)" not in files
+
+
+def test_only_the_code_the_task_reaches_names_modules(kernel, sub_project):
+    """A cell helper the task calls counts; a cell function it does not
+    reach, and a submodule a cell loaded that the reached code never names,
+    do not."""
+    kernel.run(f"import {SUBPKG}.sub\nimport {SUBPKG}.other\n")
+    kernel.run(f"def helper(x):\n    return {SUBPKG}.sub.f(x)\n")
+    kernel.run(f"def unused(x):\n    return {SUBPKG}.other.f(x)\n")
+    kernel.run("def task(a):\n    return helper(a)\n")
+    files = _files(kernel, "task")
+    assert f"{SUBPKG}.sub (file)" in files
+    assert f"{SUBPKG}.other (file)" not in files
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"import {SUBPKG}.sub\n    return {SUBPKG}.sub.f(a)",
+        f"from {SUBPKG} import sub\n    return sub.f(a)",
+        f"from {SUBPKG}.sub import f\n    return f(a)",
+    ],
+)
+def test_an_import_inside_the_tasks_body_is_recorded(kernel, sub_project, body):
+    kernel.run(f"def task(a):\n    {body}\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_relative_import_is_not_read_as_an_absolute_one(kernel, sub_project):
+    # Read without its level, the import would name the top-level module.
+    kernel.run(f"def task(a):\n    from .{SUBREL} import f\n    return f(a)\n")
+    assert f"{SUBREL} (file)" not in _files(kernel, "task")
+
+
+def test_a_name_bound_to_a_value_starts_no_chain(kernel, sub_project):
+    """Only a module (or a lazy import of one) has submodules: a value named
+    like the package gives no seed."""
+    kernel.run(
+        f"import types\n{SUBPKG} = types.SimpleNamespace("
+        "sub=types.SimpleNamespace(f=abs))\n"
+    )
+    kernel.run(f"def task(a):\n    return {SUBPKG}.sub.f(a)\n")
+    assert _files(kernel, "task") == set()
+
+
+def test_a_name_a_notebook_function_rebinds_starts_no_chain(kernel, sub_project):
+    """As the walk does not follow such a name, a chain on it is not
+    followed: what it holds when the run starts can be gone by the next."""
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(f"def reset():\n    global {SUBPKG}\n    {SUBPKG} = None\n")
+    kernel.run(f"def task(a):\n    reset()\n    return {SUBPKG}.sub.f(a)\n")
+    assert f"{SUBPKG}.sub (file)" not in _files(kernel, "task")
+
+
+def test_a_foreign_modules_chain_adds_no_entry(kernel):
+    kernel.run("import os\nimport numpy as np\n")
+    kernel.run("def task(a):\n    return os.path.join('x', str(np.linalg.norm(a)))\n")
+    assert _files(kernel, "task") == set()
+
+
+def test_the_driver_ships_the_modules_the_notebook_code_names(kernel, sub_project):
+    """A worker gets the task by value: the modules the driver's walk found
+    are the ones its cells follow."""
+    from mushin._resume import driver_script_entries
+
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(f"def task(a):\n    return {SUBPKG}.sub.f(a)\n")
+    shipped = driver_script_entries((kernel.ns["task"],))
+    kernel.run(f"{SUBPKG} = None\n")  # this process's own walk would find none
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task", scripts=shipped)
+
+
+def test_a_cut_or_failed_walk_names_no_modules(kernel, sub_project, monkeypatch):
+    """Which modules a cut walk found depends on its order, as its entries
+    do: neither is recorded."""
+    import mushin._resume as resume
+
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run("".join(f"def h{i}(x):\n    return x + {i}\n\n\n" for i in range(10)))
+    kernel.run(
+        f"def task(a):\n    return {SUBPKG}.sub.f(a) + "
+        + " + ".join(f"h{i}(a)" for i in range(10))
+        + "\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 3)
+        patch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
+        with pytest.warns(UserWarning, match="larger than the record covers"):
+            assert f"{SUBPKG}.sub (file)" not in _files(kernel, "task")
+
+    def fail(children):
+        raise RuntimeError("after the modules were found")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(resume, "_components", fail)
+        patch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+        with pytest.warns(UserWarning, match="could not be recorded"):
+            assert f"{SUBPKG}.sub (file)" not in _files(kernel, "task")
+
+
+def test_a_resume_after_editing_a_submodule_named_through_its_package_reruns(
+    kernel, sub_project, tmp_path
+):
+    """The failure this guards: the record held only `pkg`, so an edit to
+    `pkg/sub.py` and a restart reused every cell."""
+    import importlib
+
+    cells = [
+        "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
+        f"import {SUBPKG}.sub\n",
+        "@mushin.sweep\ndef task(a):\n"
+        f"    CALLS.append(a)\n    return {{'v': {SUBPKG}.sub.f(a)}}\n",
+    ]
+    for cell in cells:
+        kernel.run(cell)
+    wd = tmp_path / "wd"
+    assert list(_sweep(kernel, wd, [1, 2])["v"].values) == [2, 3]
+    kernel.close()
+
+    (sub_project / SUBPKG / "sub.py").write_text("def f(x):\n    return x + 100\n")
+    for name in [n for n in sys.modules if n.startswith(SUBPKG)]:
+        sys.modules.pop(name)
+    importlib.invalidate_caches()
+    restarted = Kernel()
+    try:
+        for cell in cells:
+            restarted.run(cell)
+        with pytest.warns(UserWarning, match=rf"{SUBPKG}\.sub \(file\)"):
+            ds = _sweep(restarted, wd, [1, 2], resume=True)
+        assert list(ds["v"].values) == [101, 102]
+        assert restarted.ns["CALLS"] == [1, 2]
+    finally:
+        restarted.close()
+
+
+@lazy_imports
+@pytest.mark.parametrize(
+    ("cell", "use", "expected"),
+    [
+        (f"lazy import {SUBPKG}.sub", f"{SUBPKG}.sub.f(a)", ".sub"),
+        (f"lazy import {SUBPKG}.sub as s", "s.f(a)", ".sub"),
+        (f"lazy from {SUBPKG} import sub", "sub.f(a)", ".sub"),
+        # `pkg` stands for the package, not the module the proxy names: a
+        # chain through it reaches a submodule the cell loaded without
+        # binding it.
+        (
+            f"lazy import {SUBPKG}.a\nimport importlib\n"
+            f"importlib.import_module('{SUBPKG}.a.b')",
+            f"{SUBPKG}.a.b.f(a)",
+            ".a.b",
+        ),
+    ],
+)
+def test_a_lazy_import_records_alike_before_and_after_it_resolves(
+    kernel, sub_project, cell, use, expected
+):
+    kernel.run(f"{cell}\n")
+    kernel.run(f"def task(a):\n    return {use}\n")
+    before = project_fingerprints(kernel.ns["task"])["code"]
+    assert kernel.ns["task"](1) == 2  # resolves the proxy in the kernel
+    after = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUBPKG}{expected} (file)" in before
+    assert before == after
+
+
+@lazy_imports
+def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp_path):
+    """The first run's record is taken before the proxy resolves, the
+    second's after: the key is the same."""
+    for cell in [
+        "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
+        f"lazy import {SUBPKG}.sub\n",
+        "@mushin.sweep\ndef task(a):\n"
+        f"    CALLS.append(a)\n    return {{'v': {SUBPKG}.sub.f(a)}}\n",
+    ]:
+        kernel.run(cell)
+    cache = str(tmp_path / "cache")
+    _sweep(kernel, tmp_path / "one", [1, 2], cache_dir=cache)
+    _sweep(kernel, tmp_path / "two", [1, 2], cache_dir=cache)
+    assert kernel.ns["CALLS"] == [1, 2]

@@ -1202,9 +1202,11 @@ def _lazy_import_name(proxy) -> str | None:
 # Definitions are static. See
 # docs/superpowers/specs/2026-10-27-notebook-code-record-design.md.
 
-#: The key the driver's notebook entries ship under in ``script_entries``: no
-#: script path can be it (those end in ``.py``).
+#: The keys the driver's notebook entries, and the modules the notebook code
+#: names, ship under in ``script_entries``: no script path can be either
+#: (those end in ``.py``).
 NOTEBOOK_ENTRIES = "<notebook>"
+NOTEBOOK_MODULES = "<notebook modules>"
 
 #: IPython's own names in a kernel's namespace (its input and output history
 #: and helpers): they change with every cell and are never the task's code.
@@ -1219,9 +1221,16 @@ _CELL_TREES_MAX = 128
 #: Bytecode that looks a name up in the globals, and that rebinds one.
 _GLOBAL_READS = frozenset({"LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS"})
 _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
+#: Bytecode that reads an attribute of the value it is given: 3.11's
+#: LOAD_METHOD is the method form of LOAD_ATTR, which 3.12 folded into it.
+_ATTR_READS = frozenset({"LOAD_ATTR", "LOAD_METHOD"})
+#: What dis can list that does not run, so never parts an attribute read
+#: from the value it reads.
+_NOT_RUN = frozenset({"EXTENDED_ARG", "CACHE"})
 
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
+_CODE_MODULES: dict = {}
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
 
@@ -1297,6 +1306,85 @@ def _code_names(code) -> tuple[frozenset, frozenset]:
     result = (frozenset(reads), frozenset(writes))
     _cache_put(_CODE_NAMES, code, result)
     return result
+
+
+def _code_modules(code) -> tuple[frozenset, frozenset]:
+    """``(chains, imports)`` of a code object and the code nested in it: the
+    attribute reads on a global (``pkg.sub.f`` is ``("pkg", "sub", "f")``),
+    and the modules its absolute imports name (``import pkg.sub`` names
+    ``pkg.sub``; ``from pkg import sub`` names ``pkg`` and ``pkg.sub``, which
+    may be an attribute). A parallel worker has the bytecode too, though it
+    keeps no cell text. As in ``_code_names``, bytecode only chooses what to
+    follow and is never hashed. An import's level and from-list are the two
+    constants loaded just before it, read by value: the opcodes that load
+    them differ between versions (``LOAD_SMALL_INT`` from 3.14,
+    ``LOAD_COMMON_CONSTANT`` on 3.15)."""
+    import dis
+    import types
+
+    hit = _CODE_MODULES.get(code)
+    if hit is not None:
+        return hit
+    chains: set[tuple[str, ...]] = set()
+    imports: set[str] = set()
+    stack = [code]
+    while stack:
+        current = stack.pop()
+        found = [i for i in dis.get_instructions(current) if i.opname not in _NOT_RUN]
+        chain: list[str] | None = None
+        for n, ins in enumerate(found):
+            if chain is not None:
+                if ins.opname in _ATTR_READS and type(ins.argval) is str:
+                    chain.append(ins.argval)
+                    continue
+                if len(chain) > 1:
+                    chains.add(tuple(chain))
+                chain = None
+            if ins.opname in _GLOBAL_READS and type(ins.argval) is str:
+                chain = [ins.argval]
+            elif ins.opname == "IMPORT_NAME" and type(ins.argval) is str and n >= 2:
+                level, names = found[n - 2].argval, found[n - 1].argval
+                if type(level) is int and level == 0 and ins.argval:
+                    imports.add(ins.argval)
+                    if type(names) is tuple:
+                        imports.update(
+                            f"{ins.argval}.{name}"
+                            for name in names
+                            if type(name) is str and name != "*"
+                        )
+        if chain is not None and len(chain) > 1:
+            chains.add(tuple(chain))
+        stack.extend(k for k in current.co_consts if type(k) is types.CodeType)
+    result = (frozenset(chains), frozenset(imports))
+    _cache_put(_CODE_MODULES, code, result)
+    return result
+
+
+def _chain_base(name: str, value) -> str | None:
+    """The module an attribute chain on the global ``name`` starts from, when
+    the namespace binds it to ``value``: a module's ``__name__``, read as
+    ``_namespace_modules`` reads it. On 3.15 a lazy proxy's name ``pkg.sub``
+    is the same for ``lazy import pkg.sub``, which binds ``pkg`` to the
+    package, and for ``lazy import pkg.sub as s`` and ``lazy from pkg import
+    sub``, which bind the submodule: the base is ``pkg`` when the proxy is
+    bound as ``pkg``, else ``pkg.sub``. None for any other value."""
+    import types
+
+    lazy = getattr(types, "LazyImportType", None)  # 3.15+
+    kind = type(value)
+    try:
+        if kind is lazy:
+            full = _lazy_import_name(value)
+            if full is None:
+                return None
+            top = full.partition(".")[0]
+            return top if name == top else full
+        if issubclass(kind, types.ModuleType):
+            module = value.__name__
+            return module if isinstance(module, str) else None
+    except Exception:  # noqa: BLE001 - a value that resists inspection
+        return None
+    return None
 
 
 def _definition_nodes(code) -> list | None:
@@ -1626,9 +1714,11 @@ def _components(children: dict) -> dict:
     return comp_of
 
 
-def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
-    """The entries of a notebook's code the roots reach: ``{"<name>
-    (notebook)": digest}`` for each name their code looks up (and each root
+def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]]:
+    """``(entries, modules)``: the entries of a notebook's code the roots
+    reach, and the modules that code names (see ``_code_modules``) to follow
+    as files. Entries are ``{"<name> (notebook)": digest}`` for each name
+    their code looks up (and each root
     by its name) that stands for a function or class defined in a cell. A
     function is its definition's syntax tree; a class its ``class``
     statement; an instance, a bound method's instance, its class. A digest
@@ -1641,10 +1731,11 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
     notebook's functions rebinds (``global helper; helper = fast``, see
     ``_notebook_writes``) is not followed: what it holds when the run starts
     can be gone by the next. A record past its
-    object bound has no notebook entries (with a warning): which objects a
-    cut walk took depends on its order. Objects are inspected by type, and
-    only a function's own ``__dict__`` is read, so a lazy proxy is never
-    resolved."""
+    object bound has no notebook entries and no modules (with a warning):
+    which objects a cut walk took depends on its order. Objects are
+    inspected by type, and only a function's own ``__dict__`` and a module's
+    ``__name__`` (which ``_namespace_modules`` reads too) are read, so a
+    lazy proxy is never resolved."""
     import types
 
     def resolve(value):
@@ -1693,6 +1784,15 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         if uid is not None:
             root_units.setdefault(key, []).append(uid)
 
+    def followed_name(name: str) -> bool:
+        """A name the walk follows: not a dunder, not one of IPython's, and
+        not one a notebook function rebinds."""
+        return not (
+            (name.startswith("__") and name.endswith("__"))
+            or _IPYTHON_NAME.fullmatch(name)
+            or name in rebound
+        )
+
     # Follow the names the reached code looks up, breadth first.
     followed: set[str] = set()
     named: dict[str, object] = {}
@@ -1704,11 +1804,7 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
             if name in followed or name not in namespace:
                 continue
             followed.add(name)
-            if (
-                (name.startswith("__") and name.endswith("__"))
-                or _IPYTHON_NAME.fullmatch(name)
-                or name in rebound
-            ):
+            if not followed_name(name):
                 continue
             found = resolve(namespace[name])
             if found is not None:
@@ -1722,7 +1818,21 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
                 "than the record covers, so it is not compared; use a fresh "
                 "working_dir after editing it."
             )
-        return {}
+        return {}, []
+
+    # The project modules the reached code names: a cell's `import pkg.sub`
+    # binds only `pkg`, so `pkg.sub.f` in the code is what reaches the
+    # submodule; an import inside a function binds a local. By name, from
+    # the code, so what happens to be loaded does not count.
+    modules: set[str] = set()
+    for code in codes:
+        chains, imported = _code_modules(code)
+        modules |= imported
+        for chain in chains:
+            if chain[0] in namespace and followed_name(chain[0]):
+                base = _chain_base(chain[0], namespace[chain[0]])
+                if base is not None:
+                    modules.add(".".join((base, *chain[1:])))
 
     def own(uid: int) -> str:
         """A unit's own definition, without what it reaches."""
@@ -1767,19 +1877,23 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         key = f"{name} (notebook)"
         if key not in entries:
             entries[key] = digest(id(obj))
-    return entries
+    return entries, sorted(modules)
 
 
-def _notebook_record(notebooks: dict) -> dict[str, str]:
+def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str]]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
-    root)])}``), best effort: a notebook whose entries cannot be taken gives
-    none (as on main), with a warning, since an edit then goes unnoticed (a
-    notebook metaclass's attribute hook that raises, say). Once per run:
-    ``driver_script_entries`` clears the flag, so a resume warns again."""
+    root)])}``) and the project modules their code names, best effort: a
+    notebook whose entries cannot be taken gives neither (as on main), with
+    a warning, since an edit then goes unnoticed (a notebook metaclass's
+    attribute hook that raises, say). Once per run: ``driver_script_entries``
+    clears the flag, so a resume warns again."""
     out: dict[str, str] = {}
+    modules: set[str] = set()
     for namespace, roots in notebooks.values():
         try:
-            out.update(_notebook_entries(namespace, roots))
+            entries, names = _notebook_entries(namespace, roots)
+            out.update(entries)
+            modules.update(names)
         except Exception as error:  # noqa: BLE001 - never fail the record
             if not _NOTEBOOK_FAILURE_WARNED:
                 _NOTEBOOK_FAILURE_WARNED.append(True)
@@ -1795,7 +1909,7 @@ def _notebook_record(notebooks: dict) -> dict[str, str]:
                     f"not be recorded ({kind}), so it is not compared; use a "
                     "fresh working_dir after editing it."
                 )
-    return out
+    return out, sorted(modules)
 
 
 def _root_layers(root) -> list:
@@ -1934,8 +2048,8 @@ def _script_entry(file: str, namespace: dict, names, objects) -> tuple[str, list
 def driver_script_entries(roots) -> dict:
     """The entries of the driver scripts the roots are defined in, taken in
     the driver when a run starts: ``{file: (digest, imports, package)}``, and
-    for roots defined in a notebook ``{NOTEBOOK_ENTRIES: {key: digest}}``
-    (no script path can be that key). A
+    for roots defined in a notebook ``{NOTEBOOK_ENTRIES: {key: digest},
+    NOTEBOOK_MODULES: [module, ...]}`` (no script path can be those keys). A
     parallel worker runs the driver's pickled script functions, so the
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not
@@ -1962,7 +2076,7 @@ def driver_script_entries(roots) -> dict:
         if notebooks:
             # A worker gets notebook code by value, without its cells' text:
             # the driver's entries are what its cells record.
-            out[NOTEBOOK_ENTRIES] = _notebook_record(notebooks)
+            out[NOTEBOOK_ENTRIES], out[NOTEBOOK_MODULES] = _notebook_record(notebooks)
         return out
     except Exception:  # noqa: BLE001 - best effort: each cell takes its own
         return {}
@@ -2073,8 +2187,14 @@ def _record(roots, targets=(), scripts_given=None) -> dict:
         _target_entries(target, seeds, scripts)
     _script_entries(scripts, code, seeds, scripts_given or {})
     if notebooks:
-        shipped = (scripts_given or {}).get(NOTEBOOK_ENTRIES)
-        code.update(shipped if type(shipped) is dict else _notebook_record(notebooks))
+        given = scripts_given or {}
+        shipped = given.get(NOTEBOOK_ENTRIES), given.get(NOTEBOOK_MODULES)
+        if type(shipped[0]) is dict and type(shipped[1]) is list:
+            notebook, modules = shipped
+        else:
+            notebook, modules = _notebook_record(notebooks)
+        code.update(notebook)
+        seeds.extend(modules)
     entries, cut = _file_entries(seeds)
     code.update(entries)
     if cut and not _TRUNCATION_WARNED:
