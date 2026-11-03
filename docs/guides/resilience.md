@@ -119,8 +119,7 @@ script rule follows names, so a statement that changes an object in place
 (`CFG["lr"] = 0.1`), a function that rebinds a global when called, a
 definition registered inside a block, or a registry filled by
 `__init_subclass__` can hide an edit there; helpers kept in an imported module
-are compared as a whole file. A module loaded through `importlib.util.LazyLoader`
-is imported when the record reaches it, so taking the record runs its code.
+are compared as a whole file.
 
 In a notebook, what counts is the definitions the task's code reaches by name
 in the kernel when the run starts: each function and class defined in a cell,
@@ -134,10 +133,20 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A
-cell's `import pkg.sub` binds only `pkg`, so `pkg/sub.py` is compared only if
-something else brings it in: write `from pkg import sub` (or
-`import pkg.sub as sub`), which binds the submodule itself.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. The
+project files a notebook's names come from are compared as files, but
+`import pkg.sub` binds only `pkg`, so that line alone does not bring
+`pkg/sub.py` in: also write `from pkg import sub` (or `import pkg.sub as sub`)
+when it matters. The same holds in any session with no script file (the plain
+REPL, `python -c`).
+
+Every `run()` fingerprints the code it reaches, and reading a module loaded
+through `importlib.util.LazyLoader` (as `lazy_loader.load` does) imports it:
+in a notebook, every such module the kernel's names hold, installed ones
+included. If that import fails, the error is not raised, the module is left
+half-imported, and the run compares less code than it should (sometimes none,
+with a warning). Import such modules yourself before `run()` when this
+matters.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,
