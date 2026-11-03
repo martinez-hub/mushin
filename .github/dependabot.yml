@@ -29,8 +29,11 @@ updates:
     ignore:
       # setuptools lives in [build-system] requires, which the uv ecosystem
       # updater does not edit at all — same "Declaration not found" failure,
-      # different root cause. The pin is a build-time floor, not a runtime
-      # dependency, and it is exercised on every sdist build in CI.
+      # different root cause. The pin is a build-time floor, exercised on every
+      # sdist build in CI. The ignore also covers uv.lock's setuptools, which
+      # torch requires at run time, so Dependabot opens no PR for an advisory
+      # there either (GHSA-xmj3-9gf7-h52w sat open for a week): bump it by hand
+      # with `uv lock --upgrade-package setuptools`.
       - dependency-name: "setuptools"
 
       # omegaconf 2.4 is incompatible with the hydra-core we support:
