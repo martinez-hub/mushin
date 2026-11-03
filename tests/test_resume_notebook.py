@@ -1703,6 +1703,12 @@ def decorated(x, m=pkg.default.M, *, k: pkg.ann2.T = None):
 class Model(pkg.base.Base, metaclass=pkg.meta.Meta):
     K = pkg.body.CONST
     s = staticmethod(pkg.sm.f)
+@pkg.cdeco.d
+class D:
+    pass
+def kw(*, k=pkg.kwd.K) -> pkg.rann.R:
+    pass
+ld = lambda x, d=pkg.ldef.D: x
 """
 CHAINS = {
     "other.alt.a", "pkg.actx.cm", "pkg.ann.v", "pkg.ann2.T", "pkg.attr", "pkg.aw.f",
@@ -1710,7 +1716,8 @@ CHAINS = {
     "pkg.comp.b", "pkg.cond.c", "pkg.ctx.cm", "pkg.deco.d", "pkg.default.M",
     "pkg.dele.y", "pkg.exc.E", "pkg.fstr.s", "pkg.gen.g", "pkg.inner.w", "pkg.lam.v",
     "pkg.meta.Meta", "pkg.meth.m", "pkg.ret.r", "pkg.sm.f", "pkg.star.f",
-    "pkg.store.x", "pkg.sub.f", "pkg.tern.w", "pkg.tr.t",
+    "pkg.store.x", "pkg.sub.f", "pkg.tern.w", "pkg.tr.t", "pkg.cdeco.d",
+    "pkg.kwd.K", "pkg.rann.R", "pkg.ldef.D",
 }  # fmt: skip
 # Imports, and chains on the names they bind; a relative import names none.
 IMPORT_SOURCE = """
@@ -1737,10 +1744,10 @@ def test_the_syntax_names_the_pinned_modules():
 
     from mushin._resume import _syntax_modules
 
-    modules, chains = _syntax_modules([ast.parse(CHAIN_SOURCE)], set())
+    modules, chains = _syntax_modules([ast.parse(CHAIN_SOURCE)])
     assert modules == set()
     assert {".".join(chain) for chain in chains} == CHAINS
-    modules, chains = _syntax_modules([ast.parse(IMPORT_SOURCE)], set())
+    modules, chains = _syntax_modules([ast.parse(IMPORT_SOURCE)])
     assert modules == IMPORTS
     assert chains == set()
 
@@ -1960,16 +1967,110 @@ def test_an_import_binds_only_in_its_own_scope(kernel, sub_project, task):
     assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
 
 
+def test_a_class_bodys_import_does_not_steer_its_methods_names(kernel, sub_project):
+    """A method's `utils` is the global, not the class body's: reading it
+    through the class body's import would record a file the method never
+    reaches (a recompute on every edit to it)."""
+    kernel.run(f"import {SUBPKG}.a.b\nfrom {SUBPKG} import sub as utils\n")
+    kernel.run(
+        f"class Model:\n    from {SUBPKG} import a as utils\n\n"
+        "    def f(self, x):\n        return utils.b.f(x)\n"
+    )
+    kernel.run("def task(a):\n    return Model().f(a)\n")
+    assert f"{SUBPKG}.a.b (file)" not in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    def inner(x):\n        return utils.b.f(x)\n\n    return inner(a)\n",
+        "    g = lambda x: utils.b.f(x)\n    return g(a)\n",
+    ],
+    ids=["nested function", "lambda"],
+)
+def test_an_enclosing_functions_import_reaches_the_functions_in_it(
+    kernel, sub_project, body
+):
+    kernel.run(f"import {SUBPKG}.a.b\n")  # `utils` is no global here
+    kernel.run(f"def task(a):\n    from {SUBPKG} import a as utils\n{body}")
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+FACTORY = (
+    f"def outer():\n    import {SUBPKG}.a as s\n\n"
+    "    def inner(a):\n        return s.b.f(a)\n\n    return inner\n"
+)
+CLASS_IMPORT = (
+    f"class Model:\n    import {SUBPKG}.a as s\n\n"
+    "    def f(self, a, k=s.b.f):\n        return k(a)\n"
+)
+
+
+@pytest.mark.parametrize("name", ["A_fn", "z_fn"])  # before, after the container
+@pytest.mark.parametrize(
+    ("cell", "bind", "use"),
+    [
+        (FACTORY, "outer()", "outer()(a)"),
+        (CLASS_IMPORT, "Model.f", "Model().f(a)"),
+    ],
+    ids=["closure", "method"],
+)
+def test_what_a_unit_names_does_not_depend_on_the_walk_order(
+    kernel, sub_project, cell, bind, use, name
+):
+    """A closure and its factory, or a method bound by name and its class,
+    are both reached; which is read first follows the names' order, and the
+    record is the same either way."""
+    kernel.run(f"import {SUBPKG}.a.b\n")  # the class's default reads `s.b`
+    kernel.run(cell)
+    kernel.run(f"{name} = {bind}\n")
+    kernel.run(f"def task(a):\n    return {name}(a) + {use}\n")
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [
+            "import functools\n\n\ndef logged(fn):\n"
+            f"    import {SUBPKG}.a as s\n\n    @functools.wraps(fn)\n"
+            "    def wrapper(*args):\n        s.b.f(1)\n        return fn(*args)\n\n"
+            "    return wrapper\n",
+            "@logged\ndef task(a):\n    return a\n",
+        ],
+        [
+            f"def make():\n    from {SUBPKG} import a as A\n\n"
+            "    def task(a):\n        return A.b.f(a)\n\n    return task\n\n\n"
+            "task = make()\n"
+        ],
+    ],
+    ids=["decorator's wrapper", "factory's function"],
+)
+def test_a_function_made_inside_another_reaches_its_imports(kernel, sub_project, cells):
+    """Its definition is the inner `def` only; the module it uses is in its
+    closure."""
+    _run_cells(kernel, cells)
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="type parameters are 3.12+")
+def test_a_type_parameters_bound_is_read(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(f"def task[T: {SUBPKG}.sub.Base](a):\n    return a\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
 def test_the_driver_ships_only_project_modules(kernel, sub_project):
     """An installed package's names are dropped before they ship (by the
-    top-level module's file); a project namespace package, which has no
-    file, is kept for the record to decide."""
+    top-level module's file), and a built-in one's by name; a project
+    namespace package, which has no file, is kept for the record to
+    decide."""
     from mushin._resume import NOTEBOOK_MODULES, driver_script_entries
 
-    kernel.run(f"import os\nimport numpy as np\nimport {SUBNS}.mod\n")
+    kernel.run(f"import os\nimport sys\nimport numpy as np\nimport {SUBNS}.mod\n")
     kernel.run(
         "def task(a):\n    return os.path.join(str(np.linalg.norm(a)), "
-        f"str({SUBNS}.mod.f(a)))\n"
+        f"str({SUBNS}.mod.f(a)), str(sys.path.count(a)))\n"
     )
     shipped = driver_script_entries((kernel.ns["task"],))
     assert shipped[NOTEBOOK_MODULES] == [f"{SUBNS}.mod.f"]

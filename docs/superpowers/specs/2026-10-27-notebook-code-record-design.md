@@ -704,3 +704,70 @@ body), so it was rewritten. The one-binding mutation exposed a test that
 passed by walk order, so the swapped case was added. Cost (three runs each,
 500-cell kernel): main 23-24 ms first, 2.3-2.4 ms after, 1 file; this branch
 26-33 ms, then 4.3-4.4 ms, 11 files.
+
+## Round 6 (2026-11-03): each unit read on its own
+
+The adversarial workflow reviewed round 5 (ba25e95): 4 confirmed. Plan,
+written before any edit.
+- **Walk order** (important, my regression). Round 5 shared one set of walked
+  definitions across units, to save reading a method twice (a
+  `/code-review` efficiency finding). When a closure was reached before the
+  factory that encloses it, the closure was read alone (its `s.deep.f`
+  unresolved), and the factory's read then skipped it, so the factory's
+  `import pkg.sub as s` never applied: renaming a variable could drop
+  `pkg.sub.deep`. Each unit is read on its own again, and the result is the
+  union of the readings, whatever the order. A method is read twice
+  (alone, and in its class); the cost stays within the measured range.
+- **Docs** (important). A class with no method of its own has no statement
+  to read, so its decorators and keywords (`metaclass=`) are not followed
+  either, only its bases (by type). The caveat names the statement, not just
+  the body, and the fragment says "a function's decorator".
+- **Tests** (minor): an enclosing function's import reaching a nested
+  function and a lambda (the `visible` rule had no positive case), and the
+  pinned extraction gains a class decorator, a keyword-only default, a lambda
+  default and a return annotation.
+
+Lesson: the efficiency fix coupled units that were independent, and that
+broke "the record does not depend on walk order". Test an optimization
+against the invariants it can break, not only the cost it saves.
+
+`/code-review` on round 5 (13 findings; its walk-order finding is the one
+above). Added to this round, planned before the edit:
+- **Closures** (it probed a decorator's wrapper and a factory's task): a unit
+  created inside another function never sees that function's imports, since
+  its definition is the inner `def` only. A chain on one of the unit's free
+  variables now resolves through its closure cell, by type as
+  `_chain_bases` reads any value (a module, or a lazy import). That also
+  covers round 5's closure-factory residual.
+- **Type parameters** (3.12+): `def f[T: pkg.sub.Base]` and `class C[T: ...]`
+  bounds and defaults are read where the definition stands.
+- **Standard-library modules with no file** (`sys`, `time`, `math`,
+  `_thread`) count as foreign before shipping, by name, as
+  `_is_foreign_module` judges them; a top-level name that is a file still
+  decides by its file.
+- **Docs:** a class with no method of its own is not compared at all (its
+  text hashes as unknown, as on main), so the caveat says so; and a submodule
+  reached only through something the code does not name (a registry it
+  fills when imported, `importlib.import_module`) may not be compared, a
+  hedged sentence with the new-`working_dir` advice.
+- **Wording:** only imports count as local bindings (a parameter or an
+  assignment shadowing a module global is read as the module: a recompute,
+  never a missed edit), and the docstring says that. Putting the notebook's
+  modules first starts a cut record from them; it does not keep every one,
+  since `_file_entries` is depth-first, and the comment says that.
+- **Cleanup:** the dead `from m import *` branch (a syntax error inside a
+  definition) goes, and the one-use name test is inlined back.
+Not changed: caching the reads and shipping only module prefixes (the cost
+is measured), and finding a methodless class's statement (that is the cell
+scan rounds 1 and 2 rejected).
+
+**Results.** 53 new tests (45 run on 3.11, 52 on 3.15; one needs 3.12+).
+Thirty mutations, each caught by node id (the lazy and type-parameter ones on
+3.15). One survived for a reason worth keeping: with each unit read alone, a
+class body's bindings leaking into its methods can only add files (each
+method is read alone too), so its test now checks that no extra file is
+recorded. The walk-order test fails on round 5's code (ba25e95) and passes
+here.
+Cost (three runs each, 500-cell kernel): main 23-26 ms first, 2.3-2.4 ms
+after; this branch 25-34 ms, then 4.3-4.4 ms (reading each method twice
+added nothing measurable).
