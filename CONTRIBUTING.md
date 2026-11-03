@@ -47,7 +47,7 @@ pre-commit run --all-files
 
 PyTorch's behavior changes across versions (e.g. `torch.load` defaults). If your
 change touches model/metric loading or anything torch/numpy-version sensitive,
-please verify against a recent torch — the CI matrix (Python 3.11–3.14) is the
+please verify against a recent torch — the CI matrix (Python 3.11–3.15) is the
 source of truth.
 
 ## Submitting changes

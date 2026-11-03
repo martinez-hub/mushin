@@ -106,7 +106,7 @@ local pass therefore does not cover them, and you should not claim it does.
   though no comment says so. The docs group's `mkdocs-material < 10` and
   `mkdocstrings[python] < 2` constrain only the docs build. Ask the maintainer
   before adding or removing a cap.
-- **Python 3.11 is the floor** (`target-version = "py311"`); 3.11 to 3.14 are
+- **Python 3.11 is the floor** (`target-version = "py311"`); 3.11 to 3.15 are
   the supported, CI-required versions.
 - **Documented numbers can be pinned by tests.** `tests/test_docs_claims.py`
   checks that thresholds quoted in `docs/guides/statistics.md` match the code.

@@ -6,7 +6,7 @@ Facts to get right when writing code that uses mushin:
 
 - Install with `pip install mushin-py`, import with `import mushin`. The PyPI name is not `mushin`.
 - The core install is the sweep -> dataset workflow. `compare`, the metric batteries, LLM evaluation (`mushin.llm`) and `Study` need the `eval` extra: `pip install "mushin-py[eval]"`. Other extras: `viz`, `netcdf`, `detection`, `image`, `audio`, `mcp`.
-- Supported Python: 3.11 to 3.14.
+- Supported Python: 3.11 to 3.15.
 - The public API is the top-level `mushin` namespace plus the documented `mushin.benchmark` and `mushin.llm` symbols. Modules whose names start with an underscore are internal.
 - A task returns a `dict` of metrics; each key becomes a data variable. Each `mushin.multirun([...])` argument becomes a dimension of the dataset. Use `mushin.hydra_list([...])` to pass a list as one value instead of sweeping it.
 - `pip install mushin-py` also installs torch (>= 2.4) and pytorch-lightning, even for a task that never imports them. Intel macOS is not supported: PyTorch publishes no x86_64 macOS wheels after torch 2.2.

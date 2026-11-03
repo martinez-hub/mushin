@@ -2496,6 +2496,33 @@ def test_a_script_digest_is_the_same_on_every_python(tmp_path):
     assert digest == CROSS_VERSION_DIGEST
 
 
+def test_an_import_dumps_alike_on_every_python():
+    """3.15 gives every import an ``is_lazy`` field (PEP 810), 0 unless the
+    import is ``lazy``. Dumped, it would change the digest of every file that
+    imports anything, and a sweep resumed on 3.15 would re-run every cell."""
+    import ast
+
+    from mushin._resume import _canonical_dump
+
+    tree = ast.parse("import os\nfrom . import a as b\n")
+    assert _canonical_dump(tree) == (
+        "Module(body=[Import(names=[alias(name='os')]),"
+        "ImportFrom(names=[alias(name='a',asname='b')],level=1)])"
+    )
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="`lazy import` is 3.15+")
+def test_making_an_import_lazy_is_an_edit():
+    import ast
+
+    from mushin._resume import _canonical_dump
+
+    for plain in ("import os\n", "from os import path\n"):
+        lazy = "lazy " + plain
+        assert _canonical_dump(ast.parse(lazy)) != _canonical_dump(ast.parse(plain))
+        assert "is_lazy=1" in _canonical_dump(ast.parse(lazy))
+
+
 # --- follow-ups: parent packages, one record per completed cell, one resolve ---
 
 

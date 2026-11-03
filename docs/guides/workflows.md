@@ -367,7 +367,7 @@ subclasses ...` on `hydra-core >= 1.3.6`, which hardened `instantiate` so a
 callable target may no longer return a subclass of `functools.partial`.
 hydra-zen returned one exactly when those two options were combined.
 
-**Resolved in hydra-zen 0.17.0**, which mushin requires alongside
+**Resolved in hydra-zen 0.17.0.** mushin requires 0.17.1 or later, with
 `hydra-core >= 1.3.7`, so a supported install cannot hit it. Nothing in mushin
 uses `zen_wrappers` either way. If you see that error, check whether something
 else in your environment pins hydra-zen below 0.17. A hydra-core pinned to

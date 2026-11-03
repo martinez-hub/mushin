@@ -379,16 +379,24 @@ def _resolve_imports(imports, package: str | None) -> list[str]:
 
 
 def _canonical_dump(node) -> str:
-    """A syntax tree as text, leaving out empty and None fields, so the same
-    source dumps alike on Python 3.11 to 3.14 (``ast.dump`` prints every field,
-    and the fields grow across minors)."""
+    """A syntax tree as text, leaving out the fields a source does not use, so
+    the same source dumps alike on Python 3.11 to 3.15 (``ast.dump`` prints
+    every field, and the fields grow across minors). Unused is ``None`` or
+    ``[]`` for most added fields (3.12's ``type_params``, 3.13's
+    ``default_value``), and 0 for 3.15's ``is_lazy`` on an import that is not
+    ``lazy`` (PEP 810). A ``lazy import`` keeps ``is_lazy=1``, so making an
+    import lazy is an edit. Leaving more out (every field at its default)
+    would change the dump on every version, and with it every recorded
+    digest."""
     import ast
 
     if isinstance(node, ast.AST):
         fields = [
             f"{name}={_canonical_dump(value)}"
             for name, value in ast.iter_fields(node)
-            if value is not None and value != []
+            if value is not None
+            and value != []
+            and not (name == "is_lazy" and value == 0)
         ]
         return f"{type(node).__name__}({','.join(fields)})"
     if isinstance(node, list):
