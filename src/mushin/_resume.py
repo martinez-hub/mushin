@@ -1148,17 +1148,14 @@ def _namespace_modules(namespace: dict) -> list[str]:
     as the name it will import (``_file_entries`` adds the packages)."""
     import types
 
-    lazy = getattr(types, "LazyImportType", None)  # 3.15+
     names = set()
     for value in list(namespace.values()):
         kind = type(value)
         try:
-            if kind is lazy:
-                name = _lazy_import_name(value)
-                if name is not None:
-                    names.add(name)
-            elif issubclass(kind, types.ModuleType):
-                names.add(value.__name__)
+            module_name = _module_name_of(value)
+            if module_name is not None:
+                if module_name[0] is not None:
+                    names.add(module_name[0])
             elif kind is types.FunctionType or issubclass(kind, type):
                 module = value.__module__
                 if isinstance(module, str):
@@ -1221,16 +1218,19 @@ _CELL_TREES_MAX = 128
 #: Bytecode that looks a name up in the globals, and that rebinds one.
 _GLOBAL_READS = frozenset({"LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS"})
 _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
-#: Bytecode that reads an attribute of the value it is given: 3.11's
-#: LOAD_METHOD is the method form of LOAD_ATTR, which 3.12 folded into it.
-_ATTR_READS = frozenset({"LOAD_ATTR", "LOAD_METHOD"})
-#: What dis can list that does not run, so never parts an attribute read
-#: from the value it reads.
-_NOT_RUN = frozenset({"EXTENDED_ARG", "CACHE"})
 
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
-_CODE_MODULES: dict = {}
+
+
+def _kernel_name(name: str) -> bool:
+    """A name a kernel's namespace holds that is never the task's code: a
+    dunder, or one of IPython's (``_IPYTHON_NAME``)."""
+    return bool(
+        (name.startswith("__") and name.endswith("__")) or _IPYTHON_NAME.fullmatch(name)
+    )
+
+
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
 
@@ -1308,83 +1308,100 @@ def _code_names(code) -> tuple[frozenset, frozenset]:
     return result
 
 
-def _code_modules(code) -> tuple[frozenset, frozenset]:
-    """``(chains, imports)`` of a code object and the code nested in it: the
-    attribute reads on a global (``pkg.sub.f`` is ``("pkg", "sub", "f")``),
-    and the modules its absolute imports name (``import pkg.sub`` names
-    ``pkg.sub``; ``from pkg import sub`` names ``pkg`` and ``pkg.sub``, which
-    may be an attribute). A parallel worker has the bytecode too, though it
-    keeps no cell text. As in ``_code_names``, bytecode only chooses what to
-    follow and is never hashed. An import's level and from-list are the two
-    constants loaded just before it, read by value: the opcodes that load
-    them differ between versions (``LOAD_SMALL_INT`` from 3.14,
-    ``LOAD_COMMON_CONSTANT`` on 3.15)."""
-    import dis
-    import types
+def _syntax_modules(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
+    """``(modules, chains)`` that definitions' syntax trees name: the modules
+    their absolute imports name (``import pkg.sub`` names ``pkg.sub``; ``from
+    pkg import sub`` names ``pkg`` and ``pkg.sub``, which may be an
+    attribute), and each maximal attribute chain on a name (``pkg.sub.f`` is
+    ``("pkg", "sub", "f")``). A chain on a name one of those imports binds
+    (``import pkg`` in a function, then ``pkg.sub.f``) is a module already;
+    the rest are for the caller to resolve through the namespace. The trees
+    are the ones a digest hashes, so a decorator, a default, a class's bases
+    and its body count, and they read alike on every supported Python."""
+    import ast
 
-    hit = _CODE_MODULES.get(code)
-    if hit is not None:
-        return hit
+    modules: set[str] = set()
     chains: set[tuple[str, ...]] = set()
-    imports: set[str] = set()
-    stack = [code]
-    while stack:
-        current = stack.pop()
-        found = [i for i in dis.get_instructions(current) if i.opname not in _NOT_RUN]
-        chain: list[str] | None = None
-        for n, ins in enumerate(found):
-            if chain is not None:
-                if ins.opname in _ATTR_READS and type(ins.argval) is str:
-                    chain.append(ins.argval)
-                    continue
-                if len(chain) > 1:
-                    chains.add(tuple(chain))
-                chain = None
-            if ins.opname in _GLOBAL_READS and type(ins.argval) is str:
-                chain = [ins.argval]
-            elif ins.opname == "IMPORT_NAME" and type(ins.argval) is str and n >= 2:
-                level, names = found[n - 2].argval, found[n - 1].argval
-                if type(level) is int and level == 0 and ins.argval:
-                    imports.add(ins.argval)
-                    if type(names) is tuple:
-                        imports.update(
-                            f"{ins.argval}.{name}"
-                            for name in names
-                            if type(name) is str and name != "*"
-                        )
-        if chain is not None and len(chain) > 1:
-            chains.add(tuple(chain))
-        stack.extend(k for k in current.co_consts if type(k) is types.CodeType)
-    result = (frozenset(chains), frozenset(imports))
-    _cache_put(_CODE_MODULES, code, result)
-    return result
+    bound: dict[str, str] = {}  # a name an import in the definitions binds
+    found: list[tuple[str, ...]] = []
+    inner: set[int] = set()  # an attribute that is another one's value
+    for node in nodes:
+        for sub in ast.walk(node):  # breadth first: an outer attribute first
+            kind = type(sub)
+            if kind is ast.Import:
+                for alias in sub.names:
+                    modules.add(alias.name)
+                    top = alias.name.partition(".")[0]
+                    # `import a.b` binds `a`; `import a.b as c` binds `a.b`.
+                    bound[alias.asname or top] = alias.name if alias.asname else top
+            elif kind is ast.ImportFrom:
+                absolute = sub.level == 0 and bool(sub.module)
+                if absolute:
+                    modules.add(sub.module)
+                for alias in sub.names:
+                    if alias.name != "*":
+                        full = f"{sub.module}.{alias.name}" if absolute else ""
+                        if full:
+                            modules.add(full)
+                        # A relative import's name is not the namespace's.
+                        bound[alias.asname or alias.name] = full
+            elif kind is ast.Attribute and id(sub) not in inner:
+                parts = []
+                current = sub
+                while type(current) is ast.Attribute:
+                    inner.add(id(current.value))
+                    parts.append(current.attr)
+                    current = current.value
+                if type(current) is ast.Name:
+                    found.append((current.id, *reversed(parts)))
+    for chain in found:
+        if chain[0] not in bound:
+            chains.add(chain)
+        elif bound[chain[0]]:
+            modules.add(".".join((bound[chain[0]], *chain[1:])))
+    return modules, chains
 
 
-def _chain_base(name: str, value) -> str | None:
-    """The module an attribute chain on the global ``name`` starts from, when
-    the namespace binds it to ``value``: a module's ``__name__``, read as
-    ``_namespace_modules`` reads it. On 3.15 a lazy proxy's name ``pkg.sub``
-    is the same for ``lazy import pkg.sub``, which binds ``pkg`` to the
-    package, and for ``lazy import pkg.sub as s`` and ``lazy from pkg import
-    sub``, which bind the submodule: the base is ``pkg`` when the proxy is
-    bound as ``pkg``, else ``pkg.sub``. None for any other value."""
+def _module_name_of(value) -> tuple[str | None, bool] | None:
+    """For a module, or on 3.15 a lazy import (PEP 810) of one, ``(its name,
+    whether it is lazy)``; the name is None when none can be read. None for
+    any other value. A module's ``__name__`` is read; a lazy proxy is not
+    asked for anything (``_lazy_import_name``). Raises what a module's
+    attribute hook raises."""
     import types
 
-    lazy = getattr(types, "LazyImportType", None)  # 3.15+
     kind = type(value)
-    try:
-        if kind is lazy:
-            full = _lazy_import_name(value)
-            if full is None:
-                return None
-            top = full.partition(".")[0]
-            return top if name == top else full
-        if issubclass(kind, types.ModuleType):
-            module = value.__name__
-            return module if isinstance(module, str) else None
-    except Exception:  # noqa: BLE001 - a value that resists inspection
-        return None
+    if kind is getattr(types, "LazyImportType", None):  # 3.15+
+        return _lazy_import_name(value), True
+    if issubclass(kind, types.ModuleType):
+        name = value.__name__
+        return (name if isinstance(name, str) else None), False
     return None
+
+
+def _chain_bases(name: str, value) -> tuple[str, ...]:
+    """The modules an attribute chain on the global ``name`` can start from,
+    when the namespace binds it to ``value``: a module's name. On 3.15 a lazy
+    proxy names ``pkg.sub`` for ``lazy import pkg.sub``, which binds ``pkg``
+    to the package, and alike for ``lazy import pkg.sub as s`` and ``lazy
+    from pkg import sub``, which bind the submodule. Bound as its first
+    component, it stands for either the package or the full name (``lazy
+    from pkg import pkg``), so both are bases: a reading that names no file
+    costs a lookup, and one that is missed is a missed edit. Otherwise the
+    full name. None of it for any other value."""
+    try:
+        found = _module_name_of(value)
+    except Exception:  # noqa: BLE001 - a value that resists inspection
+        return ()
+    if found is None or found[0] is None:
+        return ()
+    full, lazy = found
+    if not lazy:
+        return (full,)
+    top = full.partition(".")[0]
+    if name != top:
+        return (full,)
+    return (top,) if full == top else (top, full)
 
 
 def _definition_nodes(code) -> list | None:
@@ -1579,11 +1596,7 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     level = [
         value
         for name, value in list(namespace.items())
-        if type(name) is str
-        and not (
-            (name.startswith("__") and name.endswith("__"))
-            or _IPYTHON_NAME.fullmatch(name)
-        )
+        if type(name) is str and not _kernel_name(name)
     ] + [root for _, root in roots]
     depth = 0
     while level and depth <= _WRITE_SCAN_DEPTH:
@@ -1716,7 +1729,7 @@ def _components(children: dict) -> dict:
 
 def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]]:
     """``(entries, modules)``: the entries of a notebook's code the roots
-    reach, and the modules that code names (see ``_code_modules``) to follow
+    reach, and the modules their definitions name (see ``_syntax_modules``) to follow
     as files. Entries are ``{"<name> (notebook)": digest}`` for each name
     their code looks up (and each root
     by its name) that stands for a function or class defined in a cell. A
@@ -1787,11 +1800,7 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     def followed_name(name: str) -> bool:
         """A name the walk follows: not a dunder, not one of IPython's, and
         not one a notebook function rebinds."""
-        return not (
-            (name.startswith("__") and name.endswith("__"))
-            or _IPYTHON_NAME.fullmatch(name)
-            or name in rebound
-        )
+        return not (_kernel_name(name) or name in rebound)
 
     # Follow the names the reached code looks up, breadth first.
     followed: set[str] = set()
@@ -1820,29 +1829,18 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
             )
         return {}, []
 
-    # The project modules the reached code names: a cell's `import pkg.sub`
-    # binds only `pkg`, so `pkg.sub.f` in the code is what reaches the
-    # submodule; an import inside a function binds a local. By name, from
-    # the code, so what happens to be loaded does not count.
-    modules: set[str] = set()
-    for code in codes:
-        chains, imported = _code_modules(code)
-        modules |= imported
-        for chain in chains:
-            if chain[0] in namespace and followed_name(chain[0]):
-                base = _chain_base(chain[0], namespace[chain[0]])
-                if base is not None:
-                    modules.add(".".join((base, *chain[1:])))
-
-    def own(uid: int) -> str:
-        """A unit's own definition, without what it reaches."""
+    def nodes_of(uid: int) -> list | None:
+        """A unit's syntax nodes: a function's definition, a class's
+        ``class`` statement; None when its cell is not kept."""
         kind, obj, _, methods = units[uid]
         if kind == "function":
-            nodes = _definition_nodes(obj.__code__)
-            text = "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
-        else:
-            node = _class_node(obj, methods)
-            text = "?" if node is None else _canonical_dump(node)
+            return _definition_nodes(obj.__code__)
+        node = _class_node(obj, methods)
+        return None if node is None else [node]
+
+    def own(kind: str, nodes) -> str:
+        """A unit's own definition, without what it reaches."""
+        text = "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
         return _short_hash(f"{kind}\n{text}".encode())
 
     # A component hashes its members' own definitions and the digests of the
@@ -1850,7 +1848,24 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     # on the order the walk took. Without captures the edges form no cycle
     # (methods, bases and __wrapped__ only point down); components keep that
     # true if one ever appears.
-    owns = {uid: own(uid) for uid in units}
+    unit_nodes = {uid: nodes_of(uid) for uid in units}
+    owns = {uid: own(units[uid][0], unit_nodes[uid]) for uid in units}
+
+    # The project modules the reached definitions name: a cell's `import
+    # pkg.sub` binds only `pkg`, so `pkg.sub.f` in a definition (its body, a
+    # decorator, a base class) is what reaches the submodule, and an import
+    # inside a function binds a local. By name, from the text the digests
+    # hash, so what happens to be loaded does not count.
+    modules: set[str] = set()
+    for nodes in unit_nodes.values():
+        if nodes is None:
+            continue
+        imported, chains = _syntax_modules(nodes)
+        modules |= imported
+        for chain in chains:
+            if chain[0] in namespace and followed_name(chain[0]):
+                for base in _chain_bases(chain[0], namespace[chain[0]]):
+                    modules.add(".".join((base, *chain[1:])))
     comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}
     for uid, ci in comp_of.items():
@@ -2188,13 +2203,17 @@ def _record(roots, targets=(), scripts_given=None) -> dict:
     _script_entries(scripts, code, seeds, scripts_given or {})
     if notebooks:
         given = scripts_given or {}
-        shipped = given.get(NOTEBOOK_ENTRIES), given.get(NOTEBOOK_MODULES)
-        if type(shipped[0]) is dict and type(shipped[1]) is list:
-            notebook, modules = shipped
-        else:
+        notebook, modules = given.get(NOTEBOOK_ENTRIES), given.get(NOTEBOOK_MODULES)
+        if type(notebook) is not dict:
             notebook, modules = _notebook_record(notebooks)
+        elif type(modules) is not list:
+            # A driver from before modules were shipped (a runner pickled by
+            # 0.17.0) took none; its entries are still the ones that count.
+            modules = []
         code.update(notebook)
-        seeds.extend(modules)
+        # First, so a record cut by _FILES_MAX keeps what the task's own code
+        # names over what the namespace's other modules import.
+        seeds[:0] = modules
     entries, cut = _file_entries(seeds)
     code.update(entries)
     if cut and not _TRUNCATION_WARNED:
@@ -2231,8 +2250,11 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     A root defined where there is no file (a notebook) gives ``"<name>
     (notebook)"`` for each function or class defined in its cells that its
     code reaches by name, by its definition (see ``_notebook_entries``), and
-    the project modules of the objects its namespace holds; the driver takes
-    these when the run starts and ships them in ``scripts``.
+    the project modules of the objects its namespace holds and those its
+    reached definitions name (``pkg.sub.f`` after ``import pkg.sub``, an
+    import inside a function; see ``_syntax_modules``); the driver takes the
+    notebook entries and those modules when the run starts and ships them in
+    ``scripts``.
 
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
