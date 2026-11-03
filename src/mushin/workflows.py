@@ -2513,20 +2513,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             is not reloaded, the old code keeps running while the cells
             computed now are recorded as the new code's, so reload it (or
             restart) before resuming. mushin warns when it had recorded that
-            file earlier in the same process. Every run takes the
-            fingerprint, and reading a module loaded through
-            ``importlib.util.LazyLoader`` imports it, and an error in that
-            import is swallowed, so import such modules before ``run()``. Not
+            file earlier in the same process. Taking the fingerprint can
+            import a module loaded through ``importlib.util.LazyLoader``, and
+            an error from that import may go unreported, so import such a
+            module yourself before ``run()``. Not
             covered: installed packages other than editable ones, data files,
             the environment, in a notebook its values, a function reached
             only through a container (a registry), a closure or a default, a
             name one of its functions rebinds (``global helper``), a class's
             attribute values beyond its text, a ``_target_`` defined
             there, code whose text the kernel does not keep (a ``%%time``
-            cell, ``exec``, a ``%run`` file), a submodule it reaches only
-            through ``import pkg.sub``, which binds only ``pkg`` (also write
-            ``from pkg import sub``), and the project modules its functions
-            import inside their bodies, a
+            cell, ``exec``, a ``%run`` file), possibly a submodule it reaches
+            only through ``import pkg.sub`` (which binds only ``pkg``), and the
+            project modules its functions import inside their bodies, a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

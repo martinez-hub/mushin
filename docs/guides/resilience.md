@@ -133,20 +133,10 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. The
-project files a notebook's names come from are compared as files, but
-`import pkg.sub` binds only `pkg`, so that line alone does not bring
-`pkg/sub.py` in: also write `from pkg import sub` (or `import pkg.sub as sub`)
-when it matters. The same holds in any session with no script file (the plain
-REPL, `python -c`).
-
-Every `run()` fingerprints the code it reaches, and reading a module loaded
-through `importlib.util.LazyLoader` (as `lazy_loader.load` does) imports it:
-in a notebook, every such module the kernel's names hold, installed ones
-included. If that import fails, the error is not raised, the module is left
-half-imported, and the run compares less code than it should (sometimes none,
-with a warning). Import such modules yourself before `run()` when this
-matters.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A
+notebook's `import pkg.sub` binds only `pkg`, so edits to `pkg/sub.py` may not
+be compared: after editing a submodule the task reaches that way, use a new
+`working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,
@@ -159,6 +149,11 @@ keys, a container of more than 256 items, more than three steps from a name
 (each container, class, base class, instance, closure, default, decorator,
 `partial` and bound method is a step), a subclass of a container, a
 metaclass, or a class from outside the notebook.
+
+Reading the code a task reaches can import a module loaded through
+`importlib.util.LazyLoader` (as `lazy_loader.load` does), and an error from
+that import may go unreported. If such a module has side effects or can fail
+to import, import it yourself before calling `run()`.
 
 ### The full loop
 
