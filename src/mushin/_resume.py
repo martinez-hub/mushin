@@ -300,6 +300,26 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
 
 
 @functools.cache
+def _own_dict(module) -> dict | None:
+    """A module's own ``__dict__``, read without running its type's hooks:
+    ``importlib.util.LazyLoader`` makes a module whose every attribute read
+    executes its file, and taking the record must not run user code."""
+    try:
+        found = object.__getattribute__(module, "__dict__")
+    except Exception:  # noqa: BLE001 - an object with no dict of its own
+        return None
+    return found if type(found) is dict else None
+
+
+def _own_attr(module, name: str):
+    """A module attribute (``__name__``, ``__file__``, ``__path__``,
+    ``__spec__``) from its own ``__dict__``, None when absent. A lazily loaded
+    module has them there already: ``module_from_spec`` sets them before the
+    loader swaps the module's class."""
+    found = _own_dict(module)
+    return found.get(name) if found is not None else None
+
+
 def _foreign_by_path(file: str, top: str) -> bool:
     try:
         path = Path(file).resolve()
@@ -334,7 +354,7 @@ def _is_foreign_module(name: str, file: str | None = None) -> bool:
         return True
     if file is None:
         module = sys.modules.get(name)
-        file = getattr(module, "__file__", None) if module is not None else None
+        file = _own_attr(module, "__file__") if module is not None else None
     if file is None:
         file = _find_file(name)  # not imported yet: where it would load from
     if isinstance(file, str) and file:
@@ -454,7 +474,7 @@ def _find_file(name: str) -> str | None:
 
     loaded = sys.modules.get(name)
     if loaded is not None:
-        file = getattr(loaded, "__file__", None)
+        file = _own_attr(loaded, "__file__")
         return file if isinstance(file, str) and file else None
     parts = name.split(".")
     path = None
@@ -468,8 +488,8 @@ def _find_file(name: str) -> str | None:
             return None
         loaded = sys.modules.get(dotted)
         if loaded is not None:
-            path = getattr(loaded, "__path__", None)
-            spec = getattr(loaded, "__spec__", None)
+            path = _own_attr(loaded, "__path__")
+            spec = _own_attr(loaded, "__spec__")
             continue
         if i == 0:
             # Every finder, for the top level only (importing nothing): an
@@ -697,7 +717,7 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
             # A loaded installed package (torch) is foreign as a whole: its
             # submodules need no lookup each.
             module = sys.modules.get(top)
-            file = getattr(module, "__file__", None) if module is not None else None
+            file = _own_attr(module, "__file__") if module is not None else None
             foreign_tops[top] = top == "mushin" or (
                 isinstance(file, str) and bool(file) and _foreign_by_path(file, top)
             )
@@ -1081,7 +1101,7 @@ def _loaded_digest(name: str, digest: str) -> str:
 
     module = sys.modules.get(name)
     if module is not None:
-        identity = (getattr(module, "__spec__", None) or module,)
+        identity = (_own_attr(module, "__spec__") or module,)
         _warn_if_moved(name, name, identity, digest)
     return digest
 
@@ -1159,7 +1179,9 @@ def _namespace_modules(namespace: dict) -> list[str]:
                 if name is not None:
                     names.add(name)
             elif issubclass(kind, types.ModuleType):
-                names.add(value.__name__)
+                name = _own_attr(value, "__name__")
+                if isinstance(name, str):
+                    names.add(name)
                 names.update(_bound_submodules(value))
             elif kind is types.FunctionType or issubclass(kind, type):
                 module = value.__module__
@@ -1946,7 +1968,7 @@ def _root_entries(
         else:
             cls = layer if isinstance(layer, type) else type(layer)
             module = sys.modules.get(getattr(cls, "__module__", ""), None)
-            namespace = getattr(module, "__dict__", None) or {}
+            namespace = (_own_dict(module) if module is not None else None) or {}
             tops = {cls.__qualname__.partition(".")[0]}
             identity = cls
         name, file = namespace.get("__name__"), namespace.get("__file__")
@@ -2046,7 +2068,7 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
     parts = path.split(".")
     if parts[0] == "__main__":
         main = sys.modules.get("__main__")
-        namespace = getattr(main, "__dict__", None) or {}
+        namespace = (_own_dict(main) if main is not None else None) or {}
         file = namespace.get("__file__")
         if (
             len(parts) > 1

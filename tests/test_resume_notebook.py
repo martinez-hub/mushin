@@ -1543,6 +1543,80 @@ def test_a_lazily_imported_submodule_keeps_the_cache_key(kernel, sub_project, tm
     assert kernel.ns["CALLS"] == [1, 2]  # reused
 
 
+# --- a lazily loaded module (importlib.util.LazyLoader) ----------------------------
+
+LL_PACKAGE = "mushin_t_llpkg"
+# The recipe in the importlib docs: the module is in sys.modules at once, and
+# its file runs on the first attribute read.
+LL_INIT = """\
+import importlib.util
+import sys
+
+
+def _lazy(name):
+    spec = importlib.util.find_spec(name)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+heavy = _lazy(__name__ + ".heavy")
+"""
+
+
+@pytest.fixture
+def lazy_loader_project(tmp_path, monkeypatch):
+    import builtins
+    import importlib
+
+    pkg = tmp_path / "proj" / LL_PACKAGE
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text(LL_INIT)
+    (pkg / "heavy.py").write_text(
+        "import builtins\n\nbuiltins.MUSHIN_T_HEAVY_RAN = True\n\n\n"
+        "def f(x):\n    return x + 1\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path / "proj"))
+    importlib.invalidate_caches()
+    yield pkg
+    for name in [n for n in sys.modules if n.startswith(LL_PACKAGE)]:
+        sys.modules.pop(name)
+    builtins.__dict__.pop("MUSHIN_T_HEAVY_RAN", None)
+
+
+def _heavy_loaded() -> bool:
+    import builtins
+
+    return builtins.__dict__.get("MUSHIN_T_HEAVY_RAN", False)
+
+
+def test_the_record_does_not_load_a_lazily_loaded_module(kernel, lazy_loader_project):
+    """A cell binding a lazily loaded module: the record finds its file, from
+    the module's own dict, without running it (any attribute read would)."""
+    kernel.run(f"from {LL_PACKAGE} import heavy\n")
+    kernel.run("def task(a):\n    return heavy.f(a)\n")
+    assert type(sys.modules[f"{LL_PACKAGE}.heavy"]).__name__ == "_LazyModule"
+    code = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{LL_PACKAGE}.heavy (file)" in code, code
+    assert not _heavy_loaded()
+    assert type(sys.modules[f"{LL_PACKAGE}.heavy"]).__name__ == "_LazyModule"
+
+
+def test_finding_a_file_does_not_load_a_lazily_loaded_module(lazy_loader_project):
+    """A file task importing the module reaches it by name, through
+    `_find_file`."""
+    import importlib
+
+    from mushin._resume import _find_file
+
+    importlib.import_module(LL_PACKAGE)
+    found = _find_file(f"{LL_PACKAGE}.heavy")
+    assert found is not None and found.endswith("heavy.py"), found
+    assert not _heavy_loaded()
+
+
 def test_the_driver_ships_the_notebook_entries(kernel):
     """A worker gets the task by value, without the kernel's cell text: the
     driver's entries, shipped with the run, are the ones its cells record."""
