@@ -7,7 +7,8 @@ if hydra-zen can build a sweeper from the installed hydra-core. That pairing has
 broken before: hydra-core 1.3.7 began refusing to instantiate the
 ``hydra._internal`` sweeper target that hydra-zen named directly, which took out
 every sweep on a fresh install. hydra-zen 0.17.0 builds the sweeper through
-Hydra's plugin registry instead, and ``pyproject.toml`` floors hydra-zen there.
+Hydra's plugin registry instead, and ``pyproject.toml`` floors hydra-zen above
+it (0.17.1, the first release that also imports on Python 3.15).
 
 Sweeper construction happens in the one ``launch`` call every sweep goes
 through, so a break of that kind fails most of the suite at once. This file

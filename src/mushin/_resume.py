@@ -387,7 +387,13 @@ def _canonical_dump(node) -> str:
     ``lazy`` (PEP 810). A ``lazy import`` keeps ``is_lazy=1``, so making an
     import lazy is an edit. Leaving more out (every field at its default)
     would change the dump on every version, and with it every recorded
-    digest."""
+    digest.
+
+    A string is written with ``ascii``, which is ``repr`` for an ASCII string.
+    ``repr`` escapes what the running Python's Unicode database calls
+    unprintable, and each minor ships a newer database, so a literal holding a
+    character new in Unicode 17 would dump differently on 3.15 than on
+    3.14."""
     import ast
 
     if isinstance(node, ast.AST):
@@ -401,6 +407,8 @@ def _canonical_dump(node) -> str:
         return f"{type(node).__name__}({','.join(fields)})"
     if isinstance(node, list):
         return "[" + ",".join(_canonical_dump(item) for item in node) + "]"
+    if isinstance(node, str):
+        return ascii(node)
     return repr(node)
 
 
@@ -1131,14 +1139,25 @@ def _namespace_modules(namespace: dict) -> list[str]:
     """For a module with no file (a notebook): the project modules its names
     refer to, by module values, by the modules their functions and classes
     come from, and by the classes of other values, inspected by type only.
-    Its own code is not compared."""
+    Its own code is not compared.
+
+    On 3.15 a lazy import (PEP 810: ``lazy import m``, or any import under
+    ``-X lazy_imports=all`` or a ``__lazy_modules__``) binds a proxy, and it
+    stays in the namespace until a lookup of its name imports the module,
+    usually when the task first runs, after this record is taken. It counts
+    as the name it will import (``_file_entries`` adds the packages)."""
     import types
 
+    lazy = getattr(types, "LazyImportType", None)  # 3.15+
     names = set()
     for value in list(namespace.values()):
         kind = type(value)
         try:
-            if issubclass(kind, types.ModuleType):
+            if kind is lazy:
+                name = _lazy_import_name(value)
+                if name is not None:
+                    names.add(name)
+            elif issubclass(kind, types.ModuleType):
                 names.add(value.__name__)
             elif kind is types.FunctionType or issubclass(kind, type):
                 module = value.__module__
@@ -1150,6 +1169,21 @@ def _namespace_modules(namespace: dict) -> list[str]:
             continue
     names.discard(namespace.get("__name__"))
     return sorted(names)
+
+
+def _lazy_import_name(proxy) -> str | None:
+    """The dotted name a PEP 810 lazy import will import: ``m``, or ``m.f``
+    for ``lazy from m import f``, which names a module or an attribute (an
+    attribute resolves to no file, and ``m``'s is recorded through it). An
+    unresolved proxy refuses every attribute (AttributeError), and resolving
+    it would import the module, so the name comes from the type's repr,
+    ``<lazy_import 'm.f'>``. That format is
+    CPython's, pinned by a test on every supported version that has lazy
+    imports."""
+    import re
+
+    match = re.fullmatch(r"<lazy_import '([\w.]+)'>", type(proxy).__repr__(proxy))
+    return match.group(1) if match else None
 
 
 # --- code defined in a notebook ----------------------------------------------

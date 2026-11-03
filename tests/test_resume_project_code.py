@@ -2511,6 +2511,25 @@ def test_an_import_dumps_alike_on_every_python():
     )
 
 
+def test_a_string_dumps_alike_on_every_python():
+    """``repr`` of a string follows the running Python's Unicode database:
+    U+1FAEA, assigned in Unicode 17 (3.15), is escaped on 3.11 to 3.14 and
+    printed as is on 3.15. The dump must not move with it."""
+    import ast
+
+    from mushin._resume import _canonical_dump
+
+    for source, constant in [
+        ("x = '\\U0001faea'\n", r"'\U0001faea'"),
+        ("x = 'caf\\xe9'\n", r"'caf\xe9'"),
+        ("x = 'plain'\n", "'plain'"),
+    ]:
+        assert _canonical_dump(ast.parse(source)) == (
+            "Module(body=[Assign(targets=[Name(id='x',ctx=Store())],"
+            f"value=Constant(value={constant}))])"
+        )
+
+
 @pytest.mark.skipif(sys.version_info < (3, 15), reason="`lazy import` is 3.15+")
 def test_making_an_import_lazy_is_an_edit():
     import ast

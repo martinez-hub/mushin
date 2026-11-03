@@ -38,7 +38,7 @@ Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 
 | Platform | Python | torch | NumPy |
 |---|---|---|---|
-| Linux / Windows / macOS (Apple Silicon) | 3.11 – 3.15 | ≥ 2.4 | ≥ 2 |
+| Linux / Windows / macOS (Apple Silicon) | 3.11 – 3.15 | ≥ 2.4 (≥ 2.15 on 3.15) | ≥ 2 |
 
 A few notes:
 

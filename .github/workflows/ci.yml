@@ -120,6 +120,12 @@ jobs:
         run: uv sync --extra eval --extra detection --extra image --extra audio --python ${{ matrix.python-version }}
       - name: Show resolved environment
         run: uv pip list
+      - name: Check that PyYAML has libyaml (ubuntu, 3.15)
+        # The only 3.15 leg that tests the libyaml hydra.yaml read: PyYAML has
+        # no 3.15 wheel, and this leg's source build finds the image's headers.
+        # Without them its libyaml tests would skip and the leg stay green.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.15'
+        run: uv run --no-sync python -c "import sys, yaml; sys.exit(0 if yaml.__with_libyaml__ else 'PyYAML was built without libyaml')"
       - name: Run tests
         run: uv run --extra eval --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 
