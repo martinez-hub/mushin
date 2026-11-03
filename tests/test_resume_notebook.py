@@ -1311,7 +1311,9 @@ def test_a_target_in_a_module_without_a_file_keeps_mains_entries(tmp_path, monke
 lazy_imports = pytest.mark.skipif(
     sys.version_info < (3, 15), reason="lazy imports are new in 3.15"
 )
-LAZY_MODULES = ("mushin_t_lazymod", "mushin_t_lazypkg")
+# U+00B7 is an identifier character that the regex class `\w` does not match.
+DOTTED = "mushin_t_lazy\u00b7dot"
+LAZY_MODULES = ("mushin_t_lazymod", "mushin_t_lazypkg", DOTTED)
 
 
 @pytest.fixture
@@ -1322,6 +1324,9 @@ def lazy_project(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     (root / "mushin_t_lazypkg").mkdir(parents=True)
     (root / "mushin_t_lazymod.py").write_text("def f(x):\n    return x + 1\n")
+    (root / f"{DOTTED}.py").write_text(
+        "def f(x):\n    return x + 1\n", encoding="utf-8"
+    )
     (root / "mushin_t_lazypkg" / "__init__.py").write_text("")
     (root / "mushin_t_lazypkg" / "sub.py").write_text("def f(x):\n    return x + 1\n")
     monkeypatch.syspath_prepend(str(root))
@@ -1336,6 +1341,7 @@ def lazy_project(tmp_path, monkeypatch):
     ("imports", "use", "expected"),
     [
         ("import mushin_t_lazymod", "mushin_t_lazymod.f(a)", ["mushin_t_lazymod"]),
+        (f"import {DOTTED}", f"{DOTTED}.f(a)", [DOTTED]),
         ("from mushin_t_lazymod import f", "f(a)", ["mushin_t_lazymod"]),
         (
             "from mushin_t_lazypkg import sub",

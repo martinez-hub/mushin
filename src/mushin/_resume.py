@@ -1182,7 +1182,9 @@ def _lazy_import_name(proxy) -> str | None:
     imports."""
     import re
 
-    match = re.fullmatch(r"<lazy_import '([\w.]+)'>", type(proxy).__repr__(proxy))
+    # Any text up to the quote: an identifier cannot hold one, and `\w` misses
+    # identifier characters such as U+00B7 MIDDLE DOT and Indic vowel signs.
+    match = re.fullmatch(r"<lazy_import '([^']+)'>", type(proxy).__repr__(proxy))
     return match.group(1) if match else None
 
 
