@@ -298,3 +298,57 @@ The `run()` docstring, `project_fingerprints`'s docstring,
 `docs/guides/resilience.md`, `docs/guides/exploration-to-paper.md`,
 `src/mushin/agent_guide.md`, `changes/270.changed.md` (its notebook sentence
 amended, unreleased), and `changes/278.changed.md`.
+
+## Follow-up (2026-11-02): submodules a notebook reaches through a package
+
+Plan, written before any edit.
+
+**The gap** (found by `/code-review` on #283, reproduced on 3.15 and 3.11):
+`import pkg.sub` binds only `pkg` in the namespace, and `_namespace_modules`
+records a module value by its own name. So `pkg/sub.py` is not in the record,
+and after an edit and a restart a resume reuses every cell. It is a wrong
+result, on every Python. A file task is not affected: `_import_pairs` reads
+`import pkg.sub` from the syntax tree. `from pkg import sub` and
+`import pkg.sub as s` are not affected either: they bind the submodule
+itself. On 3.15 the lazy form (`lazy import pkg.sub`) records `pkg.sub` while
+unresolved and only `pkg` once resolved. That makes `cache_dir` miss on a
+second run in the same kernel (a residual of #283).
+
+**Fix.** A project package held by the namespace also brings the submodules
+bound under it, at any depth. The import system binds a submodule as an
+attribute of its parent whenever it is imported, so these are the modules
+the task can reach through the name.
+- Read from the module's own `__dict__` via `object.__getattribute__`, so a
+  `ModuleType` subclass's attribute hooks never run (lazy loaders such as
+  `lazy_loader` subclass it). A value counts when it is a module whose
+  `__name__` (from its own dict) starts with the parent's name plus a dot. The
+  check is by name, not by attribute name, so `from . import sub as s` counts.
+- Foreign packages (`_is_foreign_module`, by the top package's file) are
+  skipped whole before any walk: torch holds hundreds of loaded submodules.
+- A `seen` set by `id`; bounded by `_NAMES_MAX`.
+- A `LazyImportType` value inside a package's dict is skipped on purpose. It
+  comes from the package's own lazy import, which `_file_entries` already
+  follows through the package file's syntax tree.
+
+**Expected costs (bar: a spurious re-run is a regression, so these are
+written down now rather than left for a reviewer to find)**
+- A submodule loaded under a project package by something other than the
+  task (another cell, the package's own `__getattr__`) is recorded too, and an
+  edit to it re-runs the cells. It is reachable through the name the
+  namespace holds, as `from pkg import other` already is.
+- A task that imports a submodule when it runs (`import pkg.extra` inside its
+  body) binds it after run 1, so run 2's record gains a key. Resume compares
+  shared keys only and is unaffected; `cache_dir` misses once per code state,
+  the same residual as `lazy from m import K`.
+
+**Tests**
+- Eager `import pkg.sub`, and `import pkg.a.b`, record every level.
+- End to end: eager `import pkg.sub`, edit `pkg/sub.py`, restart, resume →
+  re-runs with the new values.
+- 3.15: `lazy import pkg.sub`, two `cache_dir` runs in one kernel → the second
+  reuses. This turns #283's residual into a fix for this form.
+- Foreign: `import xml.etree.ElementTree` and `import json.decoder` add
+  nothing.
+- A submodule whose class's `__getattribute__` raises does not break the
+  record or run.
+- Mutation-check each test by node id.
