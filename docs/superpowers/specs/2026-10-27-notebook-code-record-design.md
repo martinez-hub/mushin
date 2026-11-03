@@ -618,3 +618,89 @@ Two of my measurements in this round were wrong before they were right: a
 cross-version check through bare interpreters compared five identical
 tracebacks (mushin was not importable there), and an earlier timing run
 differed by 2x from the next. Compare the output itself, and repeat a timing.
+
+## Round 5 (2026-11-03): scopes, methodless classes, installed packages
+
+`/code-review` (10 findings) and the adversarial workflow (5 confirmed, 1
+refuted: the LazyLoader import, which main shows too and the docs state)
+reviewed round 4 (8a1afb8). Plan, written before any edit.
+
+**Scopes** (both reviews; the worst finding). One flat map of import
+bindings per unit let an import in one scope steer chains in another. A
+nested function's `from email import utils` turned the task's own
+`utils.b.f` into `email.utils.b.f`, so the project submodule was dropped: a
+missed edit. `_syntax_modules` now walks scope by scope:
+- a function's decorators, defaults and annotations, and a class's
+  decorators, bases and keywords, are read in the enclosing scope;
+- a function or lambda body is its own scope and sees its enclosing
+  functions' bindings; a class body is its own scope, and its bindings are
+  not visible to the functions inside it;
+- a name can have several bindings in one scope (`if`/`else`, `try`/`except
+  ImportError`), and a chain on it resolves through each;
+- a name with no binding in its scope or an enclosing function's is the
+  namespace's.
+The import names come from `_import_pairs` (the file record's reader), so the
+two cannot drift; the binding map stays local. A definition node walked once
+in a record is not walked again (a class's statement holds its methods' defs,
+and each method is a unit too).
+
+**Methodless classes** (both reviews). A class with no method of its own (a
+dataclass or `Enum` of fields, `class Model(pkg.sub.Base): K = 3`) has no
+statement to read, so its bases named nothing. For each reached class, each
+base that is not a notebook class now adds its module, read as
+`_notebook_class` reads it (`vars(base).get("__module__")`, no new kind of
+read). Notebook bases are units already, so a methodless notebook base's own
+bases count. What such a class's body names (`K = pkg.sub.CONST`) is still not
+followed: the docs say so ("may", with the new-`working_dir` advice).
+
+**Rebound names** (`/code-review`). The walk skips a name a notebook function
+rebinds because the definition it holds can be gone by the next run. A chain
+does not need that: a reload helper (`global pkg; pkg = importlib.reload(pkg)`)
+keeps a module there, and skipping it drops the submodule. Chains skip only
+the kernel's own names. A rebinding to something else changes the record
+next run: a recompute, not a missed edit.
+
+**Installed packages** (`/code-review`). The driver now drops a module whose
+top-level name resolves to a foreign file before shipping (the rule
+`_file_entries` applies to a loaded top-level package, by its file, once per
+top-level name), so `np.linalg.norm` is neither shipped nor looked up in each
+cell. A top-level name with no file (a namespace package) is kept for
+`_file_entries` to decide, which avoids round 1's misjudged namespace packages.
+
+**Unchanged, with reasons**
+- Two bases for an ambiguous lazy proxy (`/code-review` asked again): when
+  both readings are files (`pkg/utils/utils.py`, `lazy import pkg.utils`),
+  the record before the proxy resolves holds one more file than after, so a
+  second `cache_dir` run misses. One base would instead miss an edit for
+  `lazy from pkg import pkg`. The fragment drops its 3.15 sentence rather
+  than claim more.
+- A closure factory's import (`def make(): import pkg.sub as s; def
+  task(a): return s.f(a)`) is not followed: the reached unit is `task`, and
+  the enclosing function's body is not its definition. Main recorded nothing
+  there either, and closures are a documented limit.
+
+**Tests** (each mutation-checked by node id):
+- an import in a nested function, and one in the body read against a
+  default, do not change what the task's own chain names;
+- two bindings of one name in one function both count;
+- a class body's import is not what its method's name means;
+- a methodless class's base, and a methodless notebook base's base, record
+  the base's module;
+- a reload helper rebinding the package keeps the submodule;
+- the driver ships no installed package's names, and keeps a project
+  namespace package's;
+- `from pkg import a as A`, then `A.b.f`, records `pkg.a.b`;
+- the pinned extraction, with `from pkg import x as y` added.
+
+**Docs:** the methodless-class caveat at the three sites; the stale bytecode
+comment in the tests; the fragment without the 3.15 sentence, naming bases,
+decorators and defaults.
+
+**Results.** 42 new tests (35 run on 3.11, all 42 on 3.15). Twenty-one
+mutations, one per rule of rounds 4 and 5, each caught by node id. Two
+survived at first, and each needed a different fix. The nested-scope mutation
+was ineffective as written (a nested `def` is a statement of the task's own
+body), so it was rewritten. The one-binding mutation exposed a test that
+passed by walk order, so the swapped case was added. Cost (three runs each,
+500-cell kernel): main 23-24 ms first, 2.3-2.4 ms after, 1 file; this branch
+26-33 ms, then 4.3-4.4 ms, 11 files.

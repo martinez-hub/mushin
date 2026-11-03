@@ -1648,12 +1648,14 @@ def test_a_real_kernel_resume_under_joblib(tmp_path):
 #
 # A cell's `import pkg.sub` binds only `pkg`: the code the task reaches names
 # the submodule (`pkg.sub.f`), and an import inside a function binds a local.
-# The record follows those names, read from the reached code's bytecode, which
-# a parallel worker has too.
+# The record follows those names, read from the syntax trees the digests hash
+# (bodies, decorators, defaults, bases, class bodies); the driver ships them to
+# a worker beside the notebook entries.
 
 SUBPKG = "mushin_t_subpkg"
 SUBREL = "mushin_t_subrel"
 SUBWIDE = "mushin_t_subwide"
+SUBNS = "mushin_t_subns"
 SUB_SOURCE = (
     "def f(x):\n    return x + 1\n\n\nclass Base:\n    pass\n\n\nCONST = 1\n\n\n"
     "def deco(fn):\n    return fn\n"
@@ -1720,11 +1722,13 @@ def imports():
     from . import rel
     from .relmod import r
     import pkg as top
-    return top.sub.f, alias.x, fn_from.y, r.z, rel.w
+    from pkg import fn_from3 as fa
+    return top.sub.f, alias.x, fn_from.y, r.z, rel.w, fa.q.r
 """
 IMPORTS = {
     "pkg", "pkg.deep", "pkg.deep.thing", "pkg.fn_as.deep", "pkg.fn_as.deep.x",
-    "pkg.fn_from", "pkg.fn_from.y", "pkg.fn_from2", "pkg.fn_imp", "pkg.sub.f",
+    "pkg.fn_from", "pkg.fn_from.y", "pkg.fn_from2", "pkg.fn_from3",
+    "pkg.fn_from3.q.r", "pkg.fn_imp", "pkg.sub.f",
 }  # fmt: skip
 
 
@@ -1733,10 +1737,10 @@ def test_the_syntax_names_the_pinned_modules():
 
     from mushin._resume import _syntax_modules
 
-    modules, chains = _syntax_modules([ast.parse(CHAIN_SOURCE)])
+    modules, chains = _syntax_modules([ast.parse(CHAIN_SOURCE)], set())
     assert modules == set()
     assert {".".join(chain) for chain in chains} == CHAINS
-    modules, chains = _syntax_modules([ast.parse(IMPORT_SOURCE)])
+    modules, chains = _syntax_modules([ast.parse(IMPORT_SOURCE)], set())
     assert modules == IMPORTS
     assert chains == set()
 
@@ -1759,6 +1763,8 @@ def sub_project(tmp_path, monkeypatch):
     (root / SUBPKG / SUBPKG / "__init__.py").write_text("")
     (root / SUBPKG / SUBPKG / "deep.py").write_text("def f(x):\n    return x + 1\n")
     (root / f"{SUBREL}.py").write_text("def f(x):\n    return x + 1\n")
+    (root / SUBNS).mkdir()  # a namespace package: no __init__.py
+    (root / SUBNS / "mod.py").write_text("def f(x):\n    return x + 1\n")
     # A package whose __init__ imports more files than a small bound holds.
     (root / SUBWIDE).mkdir()
     (root / SUBWIDE / "__init__.py").write_text("from . import x0, x1, x2\n")
@@ -1767,7 +1773,9 @@ def sub_project(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(root))
     importlib.invalidate_caches()
     yield root
-    for name in [n for n in sys.modules if n.startswith((SUBPKG, SUBREL, SUBWIDE))]:
+    for name in [
+        n for n in sys.modules if n.startswith((SUBPKG, SUBREL, SUBWIDE, SUBNS))
+    ]:
         sys.modules.pop(name)
 
 
@@ -1803,7 +1811,7 @@ def test_a_submodule_the_task_names_through_its_package_is_recorded(
     assert f"{SUBPKG}.other (file)" not in files
 
 
-MODEL_TASK = "def task(a):\n    return Model().f(a)\n"
+MODEL_TASK = "def task(a):\n    return Model()\n"
 HELPER_TASK = "def task(a):\n    return helper(a)\n"
 
 
@@ -1821,8 +1829,23 @@ HELPER_TASK = "def task(a):\n    return helper(a)\n"
         ],
         [f"@{SUBPKG}.sub.deco\ndef helper(x):\n    return x\n"],
         [f"def helper(x, g={SUBPKG}.sub.f):\n    return g(x)\n"],
+        # A class with no method of its own has no statement to read: its
+        # bases count by type, and a notebook base's bases too.
+        [f"class Model({SUBPKG}.sub.Base):\n    K = 3\n"],
+        [
+            f"class Mid({SUBPKG}.sub.Base):\n    K = 3\n",
+            "class Model(Mid):\n    def f(self, x):\n        return x\n",
+        ],
     ],
-    ids=["base", "class attribute", "staticmethod", "decorator", "default"],
+    ids=[
+        "base",
+        "class attribute",
+        "staticmethod",
+        "decorator",
+        "default",
+        "methodless base",
+        "methodless notebook base",
+    ],
 )
 def test_a_submodule_a_definition_names_outside_a_body_is_recorded(
     kernel, sub_project, cells
@@ -1830,7 +1853,8 @@ def test_a_submodule_a_definition_names_outside_a_body_is_recorded(
     """A cell runs a class's bases and body, a decorator and a default
     itself, not in a function: the definition's text names the module."""
     kernel.run(f"import {SUBPKG}.sub\n")
-    _run_cells(kernel, [*cells, MODEL_TASK if "Model" in cells[0] else HELPER_TASK])
+    task = MODEL_TASK if any("Model" in c for c in cells) else HELPER_TASK
+    _run_cells(kernel, [*cells, task])
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
 
 
@@ -1854,11 +1878,14 @@ def test_only_the_code_the_task_reaches_names_modules(kernel, sub_project):
         f"from {SUBPKG} import sub\n    return sub.f(a)",
         f"from {SUBPKG}.sub import f\n    return f(a)",
         f"import {SUBPKG}\n    return {SUBPKG}.sub.f(a)",
+        f"from {SUBPKG} import sub as S\n    return S.f(a)",
+        f"from {SUBPKG} import a as A\n    return A.b.f(a)",
     ],
 )
 def test_an_import_inside_the_tasks_body_is_recorded(kernel, sub_project, body):
     kernel.run(f"def task(a):\n    {body}\n")
-    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+    expected = ".a.b" if "A.b" in body else ".sub"
+    assert f"{SUBPKG}{expected} (file)" in _files(kernel, "task")
 
 
 def test_a_relative_import_is_not_read_as_an_absolute_one(kernel, sub_project):
@@ -1884,13 +1911,69 @@ def test_a_name_bound_to_a_value_starts_no_chain(kernel, sub_project):
     assert _files(kernel, "task") == set()
 
 
-def test_a_name_a_notebook_function_rebinds_starts_no_chain(kernel, sub_project):
-    """As the walk does not follow such a name, a chain on it is not
-    followed: what it holds when the run starts can be gone by the next."""
-    kernel.run(f"import {SUBPKG}.sub\n")
-    kernel.run(f"def reset():\n    global {SUBPKG}\n    {SUBPKG} = None\n")
-    kernel.run(f"def task(a):\n    reset()\n    return {SUBPKG}.sub.f(a)\n")
-    assert f"{SUBPKG}.sub (file)" not in _files(kernel, "task")
+def test_a_reload_helper_rebinding_the_package_keeps_the_submodule(kernel, sub_project):
+    """The walk skips a name a notebook function rebinds, since the definition
+    it holds can be gone by the next run. A chain does not: a reload helper
+    keeps a module there, and skipping it would drop the submodule."""
+    kernel.run(f"import importlib\nimport {SUBPKG}.sub\n")
+    kernel.run(
+        f"def refresh():\n    global {SUBPKG}\n"
+        f"    {SUBPKG} = importlib.reload({SUBPKG})\n"
+    )
+    kernel.run(f"def task(a):\n    refresh()\n    return {SUBPKG}.sub.f(a)\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+SCOPE_CELL = f"import {SUBPKG}.a.b\nfrom {SUBPKG} import a as utils\n"
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        # An import in a nested function binds there, not in the task.
+        "def task(a):\n    def stamp():\n        from email import utils\n"
+        "        return utils.formatdate()\n\n    return utils.b.f(a)\n",
+        # A default is evaluated where the definition stands, not in its body.
+        "def task(a, g=utils.b.f):\n    from email import utils\n"
+        "    return g(a) if utils else 0\n",
+        # A class body's names are not its methods'.
+        "class Model:\n    from email import utils\n\n"
+        "    def f(self, x):\n        return utils.b.f(x)\n\n\n"
+        "def task(a):\n    return Model().f(a)\n",
+        # Two bindings of one name: a chain on it resolves through each.
+        f"def task(a, fast=True):\n    if fast:\n        from {SUBPKG} import a as h\n"
+        f"    else:\n        from {SUBPKG} import sub as h\n    return h.b.f(a)\n",
+        f"def task(a, fast=True):\n    if fast:\n        from {SUBPKG} import sub as h\n"
+        f"    else:\n        from {SUBPKG} import a as h\n    return h.b.f(a)\n",
+    ],
+    ids=[
+        "nested function",
+        "default",
+        "class body",
+        "two bindings",
+        "two bindings, other order",
+    ],
+)
+def test_an_import_binds_only_in_its_own_scope(kernel, sub_project, task):
+    kernel.run(SCOPE_CELL)
+    kernel.run(task)
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+def test_the_driver_ships_only_project_modules(kernel, sub_project):
+    """An installed package's names are dropped before they ship (by the
+    top-level module's file); a project namespace package, which has no
+    file, is kept for the record to decide."""
+    from mushin._resume import NOTEBOOK_MODULES, driver_script_entries
+
+    kernel.run(f"import os\nimport numpy as np\nimport {SUBNS}.mod\n")
+    kernel.run(
+        "def task(a):\n    return os.path.join(str(np.linalg.norm(a)), "
+        f"str({SUBNS}.mod.f(a)))\n"
+    )
+    shipped = driver_script_entries((kernel.ns["task"],))
+    assert shipped[NOTEBOOK_MODULES] == [f"{SUBNS}.mod.f"]
+    assert f"{SUBNS}.mod (file)" in _files(kernel, "task", scripts=shipped)
 
 
 def test_a_foreign_modules_chain_adds_no_entry(kernel):

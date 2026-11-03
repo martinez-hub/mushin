@@ -133,7 +133,10 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. The
+modules a notebook class's body names may not be compared when the class has
+no method of its own (a dataclass or an `Enum` of fields): after editing such
+a module, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

@@ -167,7 +167,9 @@ rules:
   an edit. In a notebook, the functions and classes its cells define that
   the task reaches by name count, by their definitions, as the kernel holds
   them when the run starts; no value does (a number, a model name, a dict
-  config), so pass values as swept parameters. Taking
+  config), so pass values as swept parameters. The modules a class's body
+  names may not be compared when the class has no method of its own: after
+  editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed

@@ -2521,8 +2521,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             the environment, in a notebook its values, a function reached
             only through a container (a registry), a closure or a default, a
             name one of its functions rebinds (``global helper``), a class's
-            attribute values beyond its text, a ``_target_`` defined
-            there, code whose text the kernel does not keep (a ``%%time``
+            attribute values beyond its text, possibly the modules a class
+            with no method of its own names in its body, a ``_target_``
+            defined there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
