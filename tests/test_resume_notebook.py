@@ -1306,6 +1306,111 @@ def test_a_target_in_a_module_without_a_file_keeps_mains_entries(tmp_path, monke
         sys.modules.pop("mushin_t_extpkg", None)
 
 
+# --- lazy imports (PEP 810, 3.15+) ------------------------------------------------
+
+lazy_imports = pytest.mark.skipif(
+    sys.version_info < (3, 15), reason="lazy imports are new in 3.15"
+)
+# U+00B7 is an identifier character that the regex class `\w` does not match.
+MIDDLE_DOT = "mushin_t_lazy\u00b7dot"
+LAZY_MODULES = ("mushin_t_lazymod", "mushin_t_lazypkg", MIDDLE_DOT)
+
+
+@pytest.fixture
+def lazy_project(tmp_path, monkeypatch):
+    """A project module and a package with a submodule, none of them imported."""
+    import importlib
+
+    root = tmp_path / "proj"
+    (root / "mushin_t_lazypkg").mkdir(parents=True)
+    (root / "mushin_t_lazymod.py").write_text("def f(x):\n    return x + 1\n")
+    (root / f"{MIDDLE_DOT}.py").write_text(
+        "def f(x):\n    return x + 1\n", encoding="utf-8"
+    )
+    (root / "mushin_t_lazypkg" / "__init__.py").write_text("")
+    (root / "mushin_t_lazypkg" / "sub.py").write_text("def f(x):\n    return x + 1\n")
+    monkeypatch.syspath_prepend(str(root))
+    importlib.invalidate_caches()
+    yield root
+    for name in [n for n in sys.modules if n.startswith(LAZY_MODULES)]:
+        sys.modules.pop(name)
+
+
+@lazy_imports
+@pytest.mark.parametrize(
+    ("imports", "use", "expected"),
+    [
+        ("import mushin_t_lazymod", "mushin_t_lazymod.f(a)", ["mushin_t_lazymod"]),
+        (f"import {MIDDLE_DOT}", f"{MIDDLE_DOT}.f(a)", [MIDDLE_DOT]),
+        (f"from {MIDDLE_DOT} import f", "f(a)", [MIDDLE_DOT]),
+        ("from mushin_t_lazymod import f", "f(a)", ["mushin_t_lazymod"]),
+        (
+            "from mushin_t_lazypkg import sub",
+            "sub.f(a)",
+            ["mushin_t_lazypkg", "mushin_t_lazypkg.sub"],
+        ),
+    ],
+)
+def test_a_lazily_imported_project_module_is_recorded(
+    kernel, lazy_project, imports, use, expected
+):
+    """A lazy import binds a proxy that a lookup of its name resolves, which
+    is when the task runs, after the record is taken. The record counts the
+    module it will import, with the digests the plain import gives, and does
+    not import it."""
+    expected = {f"{name} (file)" for name in expected}
+    kernel.run(f"lazy {imports}\n")
+    kernel.run(f"def task(a):\n    return {use}\n")
+    lazy = project_fingerprints(kernel.ns["task"])["code"]
+    assert expected <= set(lazy), lazy
+    assert not [n for n in sys.modules if n.startswith(LAZY_MODULES)]
+
+    plain_kernel = Kernel("mushin_t_kernel_plain")
+    try:
+        plain_kernel.run(f"{imports}\n")
+        plain_kernel.run(f"def task(a):\n    return {use}\n")
+        plain = project_fingerprints(plain_kernel.ns["task"])["code"]
+    finally:
+        plain_kernel.close()
+    assert {k: lazy[k] for k in expected} == {k: plain[k] for k in expected}
+
+
+@lazy_imports
+def test_a_resume_after_editing_a_lazily_imported_module_reruns(
+    kernel, lazy_project, tmp_path
+):
+    """The failure this guards: a restarted kernel binds the proxy again, so
+    a record that skipped it would compare nothing and reuse every cell."""
+    import importlib
+
+    cells = [
+        "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
+        "lazy import mushin_t_lazymod\n",
+        "@mushin.sweep\ndef task(a):\n"
+        "    CALLS.append(a)\n    return {'v': mushin_t_lazymod.f(a)}\n",
+    ]
+    for cell in cells:
+        kernel.run(cell)
+    wd = tmp_path / "wd"
+    assert list(_sweep(kernel, wd, [1, 2])["v"].values) == [2, 3]
+    kernel.close()
+
+    (lazy_project / "mushin_t_lazymod.py").write_text("def f(x):\n    return x + 100\n")
+    for name in [n for n in sys.modules if n.startswith(LAZY_MODULES)]:
+        sys.modules.pop(name)
+    importlib.invalidate_caches()
+    restarted = Kernel()
+    try:
+        for cell in cells:
+            restarted.run(cell)
+        with pytest.warns(UserWarning, match=r"mushin_t_lazymod \(file\)"):
+            ds = _sweep(restarted, wd, [1, 2], resume=True)
+        assert list(ds["v"].values) == [101, 102]
+        assert restarted.ns["CALLS"] == [1, 2]
+    finally:
+        restarted.close()
+
+
 def test_the_driver_ships_the_notebook_entries(kernel):
     """A worker gets the task by value, without the kernel's cell text: the
     driver's entries, shipped with the run, are the ones its cells record."""

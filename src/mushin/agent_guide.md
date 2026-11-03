@@ -31,7 +31,7 @@ package named `mushin` is not this project.
 | `pip install hydra-joblib-launcher` | `launcher="joblib"`, to run cells in parallel (a Hydra plugin, not an extra) |
 | `pip install hydra-ray-launcher` | the Ray launcher, to pack several jobs onto each GPU (a Hydra plugin, not an extra) |
 
-Python 3.11 to 3.14 is supported. Intel macOS is not.
+Python 3.11 to 3.15 is supported. Intel macOS is not.
 
 ## Choosing an entry point
 

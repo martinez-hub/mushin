@@ -89,17 +89,22 @@ jobs:
         include:
           # macOS (Apple Silicon): researchers' most common dev platform, and its
           # arm64 wheels are exercised nowhere else. Legs on the oldest (3.11)
-          # and a recent (3.13) Python, plus 3.14 below. Intel macOS is not
-          # supported (no x86_64 macOS torch wheels after 2.2).
+          # and a recent (3.13) Python, plus 3.14 and 3.15 below. Intel macOS is
+          # not supported (no x86_64 macOS torch wheels after 2.2).
           - { os: macos-latest, python-version: "3.11", experimental: false }
           - { os: macos-latest, python-version: "3.13", experimental: false }
-          # 3.14 is a supported, advertised version: these legs block like any
-          # other.
-          # 3.15 is not here yet: it is blocked upstream and tracked by the
-          # non-required python-315-preview.yml workflow.
+          # 3.14 and 3.15 are supported, advertised versions: these legs block
+          # like any other.
           - { os: ubuntu-latest, python-version: "3.14", experimental: false }
           - { os: windows-latest, python-version: "3.14", experimental: false }
           - { os: macos-latest, python-version: "3.14", experimental: false }
+          # PyYAML has no 3.15 wheel, so these legs build it from source: with
+          # libyaml on ubuntu (its image has the headers), without it on
+          # windows and macos, so they also cover mushin's hydra.yaml read
+          # without libyaml, which no wheel-installed leg reaches.
+          - { os: ubuntu-latest, python-version: "3.15", experimental: false }
+          - { os: windows-latest, python-version: "3.15", experimental: false }
+          - { os: macos-latest, python-version: "3.15", experimental: false }
     continue-on-error: ${{ matrix.experimental }}
 
     steps:
@@ -115,6 +120,12 @@ jobs:
         run: uv sync --extra eval --extra detection --extra image --extra audio --python ${{ matrix.python-version }}
       - name: Show resolved environment
         run: uv pip list
+      - name: Check that PyYAML has libyaml (ubuntu, 3.15)
+        # The only 3.15 leg that tests the libyaml hydra.yaml read: PyYAML has
+        # no 3.15 wheel, and this leg's source build finds the image's headers.
+        # Without them its libyaml tests would skip and the leg stay green.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.15'
+        run: uv run --no-sync python -c "import sys, yaml; sys.exit(0 if yaml.__with_libyaml__ else 'PyYAML was built without libyaml')"
       - name: Run tests
         run: uv run --extra eval --extra detection --extra image --extra audio pytest tests/ --hypothesis-profile fast -p no:cacheprovider
 

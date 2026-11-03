@@ -38,7 +38,7 @@ Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.
 
 | Platform | Python | torch | NumPy |
 |---|---|---|---|
-| Linux / Windows / macOS (Apple Silicon) | 3.11 – 3.14 | ≥ 2.4 | ≥ 2 |
+| Linux / Windows / macOS (Apple Silicon) | 3.11 – 3.15 | ≥ 2.4 (≥ 2.15 on 3.15) | ≥ 2 |
 
 A few notes:
 
@@ -59,16 +59,10 @@ A few notes:
   has no wheels for Python 3.13+): `python3.11 -m pip install "mushin-py<0.15"`.
 - **Python 3.10** is not supported: it reached end-of-life on 2026-10-01,
   and `mushin` requires Python ≥ 3.11.
-- **Python 3.15** is not supported yet. It is waiting on PyTorch, which has
-  not published 3.15 wheels to PyPI. The 3.15 builds on PyTorch's own index
-  crash on macOS and Windows: tensor operations outside the main thread can
-  segfault, and on macOS the process can also segfault at exit after a
-  backward pass, even single-threaded. The fix ships in torch 2.15
-  ([pytorch#200779](https://github.com/pytorch/pytorch/issues/200779)).
-  hydra-zen's 3.15 import failure is fixed in hydra-zen 0.17.1
-  ([hydra-zen#903](https://github.com/mit-ll-responsible-ai/hydra-zen/pull/903)).
-  With hydra-zen 0.17.1 and torch from PyTorch's index, mushin's test suite
-  passes on Linux and Windows 3.15 (its Windows tests do not hit that crash).
-  Support will be announced in the changelog once 3.15 installs from PyPI and
-  is tested in the required CI.
+- **Python 3.15** needs torch 2.15 or later, the first release with 3.15
+  wheels, and on a Mac those wheels need macOS 14 or later. PyYAML has no
+  3.15 wheel yet, so pip builds it from source. Without libyaml's headers
+  that build has no C parser, and mushin reads each run's `hydra.yaml`
+  through OmegaConf instead: the same results, more slowly when you reload
+  a large sweep.
 - These floors are enforced by the `min-versions` CI job on every pull request.

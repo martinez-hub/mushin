@@ -773,6 +773,8 @@ def test_the_second_write_back_runs_only_where_the_emitters_differ(
     """OmegaConf's Python dumper (1.8 ms) runs only for text libyaml's emitter
     writes differently (escapes, complex keys), so a hand-edited file does not
     pay for it before going to OmegaConf."""
+    if _hydra_yaml.CParser is None:
+        pytest.skip("PyYAML built without libyaml: reloads take OmegaConf's path")
     calls = []
     real = _hydra_yaml._write_back
 
