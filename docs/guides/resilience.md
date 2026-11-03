@@ -133,7 +133,10 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. The
+project files a notebook imports count as they do for a script, each file
+whole: the modules its names hold or come from, and each submodule loaded
+under a package it imports (`import pkg.sub` binds only `pkg`).
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

@@ -166,8 +166,10 @@ rules:
   calls, `print` calls or what only they read, so extending the grid is not
   an edit. In a notebook, the functions and classes its cells define that
   the task reaches by name count, by their definitions, as the kernel holds
-  them when the run starts; no value does (a number, a model name, a dict
-  config), so pass values as swept parameters. It does not see an installed
+  them when the run starts, with the project files its names come from
+  (each submodule loaded under a package it imports included); no value
+  does (a number, a model name, a dict config), so pass values as swept
+  parameters. It does not see an installed
   package, data files, or code reached only through some other string. After
   such a
   change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still
