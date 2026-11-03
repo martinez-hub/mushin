@@ -509,8 +509,10 @@ depend on its order.
 - `os.path.join` and `np.linalg.norm` add no entry.
 
 **Cost**, measured before review: `project_fingerprints(task)` on a kernel
-keeping 500 cells, with a task reaching 50 cell functions, on main and on the
-branch.
+keeping 500 cells, with a task reaching 50 cell functions that name 10
+submodules (3.11 on an Apple M1). Main: 31 ms the first time, 2.5 ms after (median of
+20), recording 1 file. The branch: 28 ms, then 2.9 ms, recording 11 (the
+package and the 10 submodules). The difference is the 10 files followed.
 
 **Docs:** remove the `import pkg.sub` limit from `docs/guides/resilience.md`,
 `src/mushin/agent_guide.md` and the `run()` docstring, and the docstring's

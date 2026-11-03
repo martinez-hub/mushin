@@ -1922,6 +1922,8 @@ def test_a_lazy_import_records_alike_before_and_after_it_resolves(
     kernel.run(f"{cell}\n")
     kernel.run(f"def task(a):\n    return {use}\n")
     before = project_fingerprints(kernel.ns["task"])["code"]
+    if "importlib" not in cell:  # taking the record imported nothing
+        assert not [n for n in sys.modules if n.startswith(SUBPKG)]
     assert kernel.ns["task"](1) == 2  # resolves the proxy in the kernel
     after = project_fingerprints(kernel.ns["task"])["code"]
     assert f"{SUBPKG}{expected} (file)" in before

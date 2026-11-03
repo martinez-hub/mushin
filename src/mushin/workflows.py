@@ -2523,9 +2523,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             name one of its functions rebinds (``global helper``), a class's
             attribute values beyond its text, a ``_target_`` defined
             there, code whose text the kernel does not keep (a ``%%time``
-            cell, ``exec``, a ``%run`` file), possibly a submodule it reaches
-            only through ``import pkg.sub`` (which binds only ``pkg``), and the
-            project modules its functions import inside their bodies, a
+            cell, ``exec``, a ``%run`` file), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script
