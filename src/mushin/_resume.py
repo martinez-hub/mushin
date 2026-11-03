@@ -1139,7 +1139,8 @@ def _namespace_modules(namespace: dict) -> list[str]:
     """For a module with no file (a notebook): the project modules its names
     refer to, by module values, by the modules their functions and classes
     come from, and by the classes of other values, inspected by type only.
-    Its own code is not compared.
+    Its own code is not compared. A package brings the submodules loaded
+    under it: ``import pkg.sub`` binds only ``pkg``.
 
     On 3.15 a lazy import (PEP 810: ``lazy import m``, or any import under
     ``-X lazy_imports=all`` or a ``__lazy_modules__``) binds a proxy, and it
@@ -1159,6 +1160,7 @@ def _namespace_modules(namespace: dict) -> list[str]:
                     names.add(name)
             elif issubclass(kind, types.ModuleType):
                 names.add(value.__name__)
+                names.update(_bound_submodules(value))
             elif kind is types.FunctionType or issubclass(kind, type):
                 module = value.__module__
                 if isinstance(module, str):
@@ -1169,6 +1171,52 @@ def _namespace_modules(namespace: dict) -> list[str]:
             continue
     names.discard(namespace.get("__name__"))
     return sorted(names)
+
+
+def _bound_submodules(package) -> list[str]:
+    """The submodules loaded under project package ``package``, at any depth.
+    The import system binds each submodule it loads as an attribute of its
+    parent, so these are what code holding the package can reach through it.
+    Each module is read through its own ``__dict__`` (``object.__getattribute__``),
+    so a ``ModuleType`` subclass's attribute hooks (a lazy loader's) never run;
+    a value counts when it is a module named under its parent, whatever
+    attribute holds it (``from . import sub as s``). A foreign package is
+    skipped whole (torch holds hundreds of submodules). A lazy import inside a
+    package is not a module, and its file's syntax tree, which
+    ``_file_entries`` follows, has it anyway."""
+    import types
+
+    def own_dict(module) -> dict | None:
+        try:
+            found = object.__getattribute__(module, "__dict__")
+        except Exception:  # noqa: BLE001 - a module object that has no dict
+            return None
+        return found if type(found) is dict else None
+
+    root = own_dict(package)
+    name = root.get("__name__") if root is not None else None
+    if not isinstance(name, str) or "__path__" not in root:
+        return []
+    file = root.get("__file__")
+    if _is_foreign_module(name, file if isinstance(file, str) else None):
+        return []
+    found: list[str] = []
+    seen = {id(package)}
+    pending = [(root, name)]
+    while pending and len(seen) < _NAMES_MAX:
+        members, parent = pending.pop()
+        for value in list(members.values()):
+            if id(value) in seen or not issubclass(type(value), types.ModuleType):
+                continue
+            sub = own_dict(value)
+            sub_name = sub.get("__name__") if sub is not None else None
+            if not isinstance(sub_name, str) or not sub_name.startswith(parent + "."):
+                continue
+            seen.add(id(value))
+            found.append(sub_name)
+            if "__path__" in sub:
+                pending.append((sub, sub_name))
+    return found
 
 
 def _lazy_import_name(proxy) -> str | None:

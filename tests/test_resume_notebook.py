@@ -1411,6 +1411,138 @@ def test_a_resume_after_editing_a_lazily_imported_module_reruns(
         restarted.close()
 
 
+# --- submodules reached through a package ------------------------------------------
+
+SUB_PACKAGE = "mushin_t_subpkg"
+
+
+@pytest.fixture
+def sub_project(tmp_path, monkeypatch):
+    """A package with a submodule and a nested package, none of them imported.
+    The package's own file imports neither, as `import pkg.sub` allows."""
+    import importlib
+
+    root = tmp_path / "proj"
+    pkg = root / SUB_PACKAGE
+    (pkg / "a").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "a" / "__init__.py").write_text("")
+    for path in (pkg / "sub.py", pkg / "a" / "b.py"):
+        path.write_text("def f(x):\n    return x + 1\n")
+    monkeypatch.syspath_prepend(str(root))
+    importlib.invalidate_caches()
+    yield root
+    for name in [n for n in sys.modules if n.startswith(SUB_PACKAGE)]:
+        sys.modules.pop(name)
+
+
+@pytest.mark.parametrize(
+    ("dotted", "levels"),
+    [("sub", ["", ".sub"]), ("a.b", ["", ".a", ".a.b"])],
+)
+def test_a_submodule_imported_through_its_package_is_recorded(
+    kernel, sub_project, dotted, levels
+):
+    """`import pkg.sub` binds only `pkg`; the task reaches `pkg.sub` through
+    it, so its file is part of the record, at every level."""
+    kernel.run(f"import {SUB_PACKAGE}.{dotted}\n")
+    kernel.run(f"def task(a):\n    return {SUB_PACKAGE}.{dotted}.f(a)\n")
+    code = project_fingerprints(kernel.ns["task"])["code"]
+    assert {f"{SUB_PACKAGE}{level} (file)" for level in levels} <= set(code), code
+
+
+def test_a_resume_after_editing_a_submodule_reached_through_its_package_reruns(
+    kernel, sub_project, tmp_path
+):
+    """The failure: the record held `pkg` only, so after an edit to
+    `pkg/sub.py` and a restart, a resume reused every cell."""
+    import importlib
+
+    cells = [
+        "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
+        f"import {SUB_PACKAGE}.sub\n",
+        "@mushin.sweep\ndef task(a):\n"
+        f"    CALLS.append(a)\n    return {{'v': {SUB_PACKAGE}.sub.f(a)}}\n",
+    ]
+    for cell in cells:
+        kernel.run(cell)
+    wd = tmp_path / "wd"
+    assert list(_sweep(kernel, wd, [1, 2])["v"].values) == [2, 3]
+    kernel.close()
+
+    (sub_project / SUB_PACKAGE / "sub.py").write_text("def f(x):\n    return x + 100\n")
+    for name in [n for n in sys.modules if n.startswith(SUB_PACKAGE)]:
+        sys.modules.pop(name)
+    importlib.invalidate_caches()
+    restarted = Kernel()
+    try:
+        for cell in cells:
+            restarted.run(cell)
+        with pytest.warns(UserWarning, match=rf"{SUB_PACKAGE}\.sub \(file\)"):
+            ds = _sweep(restarted, wd, [1, 2], resume=True)
+        assert list(ds["v"].values) == [101, 102]
+        assert restarted.ns["CALLS"] == [1, 2]
+    finally:
+        restarted.close()
+
+
+def test_a_foreign_package_brings_no_submodules(kernel):
+    """The standard library is not the project's: its packages are skipped
+    whole, before any of their submodules is looked at."""
+    from mushin._resume import _bound_submodules
+
+    kernel.run("import json.decoder\nimport xml.etree.ElementTree\n")
+    kernel.run("def task(a):\n    return json.decoder, xml.etree.ElementTree, a\n")
+    code = project_fingerprints(kernel.ns["task"])["code"]
+    assert not [k for k in code if k.startswith(("json", "xml"))], code
+    # Skipped before the walk, not only filtered after it: torch would cost
+    # hundreds of submodules per record.
+    assert _bound_submodules(kernel.ns["xml"]) == []
+    assert _bound_submodules(kernel.ns["json"]) == []
+
+
+def test_a_submodule_is_read_without_its_attribute_hooks(kernel, sub_project):
+    """A lazy loader's module type runs code on attribute access; the record
+    reads each module's own dict, so the hook never runs."""
+    import importlib
+    import types as std_types
+
+    calls = []
+
+    class Hooked(std_types.ModuleType):
+        def __getattribute__(self, name):
+            calls.append(name)
+            return super().__getattribute__(name)
+
+    package = importlib.import_module(SUB_PACKAGE)
+    package.hooked = Hooked(f"{SUB_PACKAGE}.hooked")
+    kernel.run(f"import {SUB_PACKAGE}\n")
+    kernel.run(f"def task(a):\n    return {SUB_PACKAGE}.hooked, a\n")
+    calls.clear()
+    project_fingerprints(kernel.ns["task"])
+    assert calls == []
+
+
+@lazy_imports
+def test_a_lazily_imported_submodule_keeps_the_cache_key(kernel, sub_project, tmp_path):
+    """Unresolved, `lazy import pkg.sub` names `pkg.sub`; resolved, the name
+    holds `pkg`, which now brings `pkg.sub` too. The record, and the cache key,
+    are the same before and after the task resolves it."""
+    cells = [
+        "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
+        f"lazy import {SUB_PACKAGE}.sub\n",
+        "@mushin.sweep\ndef task(a):\n"
+        f"    CALLS.append(a)\n    return {{'v': {SUB_PACKAGE}.sub.f(a)}}\n",
+    ]
+    for cell in cells:
+        kernel.run(cell)
+    cache = str(tmp_path / "cache")
+    _sweep(kernel, tmp_path / "one", [1, 2], cache_dir=cache)
+    assert kernel.ns["CALLS"] == [1, 2]
+    _sweep(kernel, tmp_path / "two", [1, 2], cache_dir=cache)
+    assert kernel.ns["CALLS"] == [1, 2]  # reused
+
+
 def test_the_driver_ships_the_notebook_entries(kernel):
     """A worker gets the task by value, without the kernel's cell text: the
     driver's entries, shipped with the run, are the ones its cells record."""
