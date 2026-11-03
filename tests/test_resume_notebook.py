@@ -1535,6 +1535,21 @@ def test_a_submodule_merely_loaded_under_a_package_is_not_recorded(kernel, sub_p
     assert f"{SUB_PACKAGE}.sub (file)" not in code, code
 
 
+def test_generated_source_in_linecache_is_not_a_cell(kernel, sub_project):
+    """Libraries keep generated code in linecache with no mtime, as IPython
+    keeps cells (attrs does); only entries named like a cell count."""
+    name = "<attrs generated init mushin_t_fake>"
+    text = f"import {SUB_PACKAGE}.sub\n"
+    linecache.cache[name] = (len(text), None, [text], name)
+    try:
+        kernel.run(f"import {SUB_PACKAGE}\n")
+        kernel.run("def task(a):\n    return a\n")
+        code = project_fingerprints(kernel.ns["task"])["code"]
+    finally:
+        linecache.cache.pop(name, None)
+    assert f"{SUB_PACKAGE}.sub (file)" not in code, code
+
+
 def test_a_rebound_package_name_drops_its_dotted_imports(kernel, sub_project):
     """The cells' statements count only while the name they bound still holds
     a module."""
