@@ -380,3 +380,45 @@ every site: `_is_foreign_module`, `_find_file`, `_file_entries`,
   unfired); `_find_file` returns its file without loading it.
 - A standard-library dotted import records nothing.
 - Mutation-check each by node id.
+
+**Round 2 (2026-11-03): deferred to 0.17.1.** `/code-review` (11) and the
+adversarial workflow (7 confirmed, minor) reviewed 420d14c.
+- **The cell scan has unresolved design problems.**
+  - A parallel worker keeps no cells.
+  - The scan costs about 0.8 s per run once a session keeps 500 cells, since
+    the 128-tree cache thrashes.
+  - Its cell-name whitelist is narrower than how notebook definitions are
+    found (Databricks' `<command-N>`, `IPYKERNEL_CELL_NAME`).
+  - Compiling every import cell prints stray `SyntaxWarning`s.
+- **The hook-free reads opened new cases and missed sites.**
+  - `object.__getattribute__(m, "__dict__")` still runs a `__dict__` property
+    on the module's type, and apipkg's `ApiModule` (`import py`) has one that
+    loads everything, which main never triggered.
+  - A `ModuleType` subclass holding `__file__` on its class is no longer found.
+  - `isinstance` on a partial's bound argument reads `__class__`, which
+    `_LazyModule` intercepts.
+  - Two sites (`_file_entries`' top-level read, `_find_file`'s parent walk)
+    have no test.
+
+The hook-free commit came from a grep inventory added mid-PR, and round 2
+showed that inventory was incomplete, so it is not merged on its own either.
+
+**Plan for 0.17.1**, each part planned before code:
+- **Seeds:** take them from what the record already follows. That is the
+  bytecode of the reached code (`IMPORT_NAME`, and `LOAD_GLOBAL pkg` followed
+  by `LOAD_ATTR sub`), which travels with the task to workers and covers
+  imports inside function bodies. Alternatively, the driver ships its seeds
+  beside `"<notebook>"`. Either replaces the cell scan.
+- **Hook-free reads:**
+  - first, a complete inventory of every operation the record performs on a
+    module object or a value (attribute reads, `isinstance`, `issubclass` on
+    instances, `repr`, `hasattr`);
+  - then reads through `types.ModuleType.__dict__["__dict__"].__get__(module)`
+    for module instances, `type()` checks instead of `isinstance`, and a
+    class-dict fallback for plain values only.
+
+**0.17.0 documents both limits:**
+- `import pkg.sub` in a notebook counts only through `pkg`; write
+  `from pkg import sub`.
+- A module loaded through `importlib.util.LazyLoader` is imported when the
+  record reaches it.
