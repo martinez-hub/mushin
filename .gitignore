@@ -35,6 +35,12 @@ site/
 # Jupyter
 .ipynb_checkpoints/
 
-# stray runtime artifacts (seed-persistence, env snapshots) if a run lands in-tree
-mushin_seed*.json
-mushin_env*.txt
+# stray runtime artifacts if a run lands in-tree: a sweep directory under any
+# name holds these, so ignoring them keeps `git add -A` from committing one
+# (a probe's working_dir="wd" landed on main in #278)
+mushin_*.json
+mushin_*.txt
+mushin_*.yaml
+mushin_workflow.log
+multirun.yaml
+.hydra/
