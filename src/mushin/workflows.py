@@ -2504,7 +2504,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             reaches by name in the kernel as the run starts: each function and
             class its cells define (through decorators, a ``partial``, a bound
             method or an instance), so re-running an edited cell and resuming
-            re-runs the cells. No value is compared (a number, a string, a
+            re-runs the cells; the project files its names come from count as
+            files, and so does a submodule a cell imports with
+            ``import pkg.sub``. No value is compared (a number, a string, a
             dict config, what a default or a closure holds): pass one as a
             swept parameter, or use a new ``working_dir`` after editing it. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name
