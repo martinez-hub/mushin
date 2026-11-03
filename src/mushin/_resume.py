@@ -299,7 +299,6 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
     return {name: tuple(paths) for name, paths in by_name.items()}
 
 
-@functools.cache
 def _own_dict(module) -> dict | None:
     """A module's own ``__dict__``, read without running its type's hooks:
     ``importlib.util.LazyLoader`` makes a module whose every attribute read
@@ -320,6 +319,7 @@ def _own_attr(module, name: str):
     return found.get(name) if found is not None else None
 
 
+@functools.cache
 def _foreign_by_path(file: str, top: str) -> bool:
     try:
         path = Path(file).resolve()
