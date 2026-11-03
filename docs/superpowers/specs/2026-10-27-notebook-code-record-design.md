@@ -603,3 +603,18 @@ per top-level name, and the measured cost is within noise.
 - a record cut by `_FILES_MAX` keeps the submodule the task names;
 - the extraction on the probe's source gives the pinned names.
 Each new rule mutation-checked by node id; the cost measured again.
+
+**Results.** 33 new tests (26 run on 3.11, all 33 on 3.15). Thirteen
+mutations, one per rule (namespace chains, import-bound chains, the level, both
+lazy bases, the aliased proxy, the truncation guard, the per-key shipment, the
+shipment used, the seed order, a value starting a chain, a rebound name, inner
+attributes, a relative import's names), each caught by node id. Cost, three
+runs each on the 500-cell kernel: main 27-37 ms the first time, 2.7-2.9 ms
+after, recording 1 file; this branch 29-33 ms, then 4.6-5.0 ms, recording 11.
+The 2 ms is the reached definitions' walk and the 10 files; a record is taken
+once per run per process, so it is not cached.
+
+Two of my measurements in this round were wrong before they were right: a
+cross-version check through bare interpreters compared five identical
+tracebacks (mushin was not importable there), and an earlier timing run
+differed by 2x from the next. Compare the output itself, and repeat a timing.
