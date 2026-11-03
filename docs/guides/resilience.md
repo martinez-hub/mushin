@@ -119,7 +119,8 @@ script rule follows names, so a statement that changes an object in place
 (`CFG["lr"] = 0.1`), a function that rebinds a global when called, a
 definition registered inside a block, or a registry filled by
 `__init_subclass__` can hide an edit there; helpers kept in an imported module
-are compared as a whole file.
+are compared as a whole file. A module loaded through `importlib.util.LazyLoader`
+is imported when the record reaches it, so taking the record runs its code.
 
 In a notebook, what counts is the definitions the task's code reaches by name
 in the kernel when the run starts: each function and class defined in a cell,
@@ -133,7 +134,10 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A
+cell's `import pkg.sub` binds only `pkg`, so `pkg/sub.py` is compared only if
+something else brings it in: write `from pkg import sub` (or
+`import pkg.sub as sub`), which binds the submodule itself.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

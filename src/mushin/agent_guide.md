@@ -167,7 +167,9 @@ rules:
   an edit. In a notebook, the functions and classes its cells define that
   the task reaches by name count, by their definitions, as the kernel holds
   them when the run starts; no value does (a number, a model name, a dict
-  config), so pass values as swept parameters. It does not see an installed
+  config), so pass values as swept parameters; `import pkg.sub` in a cell
+  binds only `pkg`, so write `from pkg import sub` for edits to that
+  submodule to count. It does not see an installed
   package, data files, or code reached only through some other string. After
   such a
   change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still

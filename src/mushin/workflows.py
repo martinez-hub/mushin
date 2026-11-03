@@ -2521,7 +2521,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             attribute values beyond its text, a ``_target_`` defined
             there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file) and the project modules its
-            functions import inside their bodies, a
+            functions import inside their bodies, a submodule it reaches only
+            through ``import pkg.sub``, which binds only ``pkg`` (write
+            ``from pkg import sub``), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script
@@ -2529,7 +2531,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             metaclass registry, a definition registered inside a block (``if
             ENABLED: @register class ...``), a class body reading the module's
             name it shadows (``SCALE = SCALE``), and code reached only through
-            some other string. The script rule follows names, so state
+            some other string. A module loaded through
+            ``importlib.util.LazyLoader`` is imported when the record reaches
+            it. The script rule follows names, so state
             reached another way (``globals()``, ``exec``) can hide an edit:
             keep helpers in an imported module, which is compared as a whole
             file, when that matters. In a notebook, a name rebound through
