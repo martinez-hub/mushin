@@ -314,41 +314,69 @@ itself. On 3.15 the lazy form (`lazy import pkg.sub`) records `pkg.sub` while
 unresolved and only `pkg` once resolved. That makes `cache_dir` miss on a
 second run in the same kernel (a residual of #283).
 
-**Fix.** A project package held by the namespace also brings the submodules
-bound under it, at any depth. The import system binds a submodule as an
-attribute of its parent whenever it is imported, so these are the modules
-the task can reach through the name.
-- Read from the module's own `__dict__` via `object.__getattribute__`, so a
-  `ModuleType` subclass's attribute hooks never run (lazy loaders such as
-  `lazy_loader` subclass it). A value counts when it is a module whose
-  `__name__` (from its own dict) starts with the parent's name plus a dot. The
-  check is by name, not by attribute name, so `from . import sub as s` counts.
-- Foreign packages (`_is_foreign_module`, by the top package's file) are
-  skipped whole before any walk: torch holds hundreds of loaded submodules.
-- A `seen` set by `id`; bounded by `_NAMES_MAX`.
-- A `LazyImportType` value inside a package's dict is skipped on purpose. It
-  comes from the package's own lazy import, which `_file_entries` already
-  follows through the package file's syntax tree.
+**First design, replaced after review.** It walked the live module graph:
+a project package held by the namespace brought every submodule bound under
+it. `/code-review`, the adversarial workflow (4 lenses) and Codex on 9bc983d
+showed it fails this record's own bar:
+- the record depended on what happened to be loaded (an unrelated cell's
+  `import pkg.plotting` made an edit there re-run every cell, and changed the
+  `cache_dir` key between two runs);
+- names it found reached `_find_file`'s `getattr` on a `LazyLoader` module,
+  so taking the record executed it (and, if its import failed, swallowed the
+  error and left the module half-executed);
+- its package-level foreign check misjudged namespace packages both ways.
+The gap is syntactic (`import pkg.sub` is in the cell's text), so its fix
+inspected the wrong thing. That was my altitude error, against this design's
+own "inspect by type only".
 
-**Expected costs (bar: a spurious re-run is a regression, so these are
-written down now rather than left for a reviewer to find)**
-- A submodule loaded under a project package by something other than the
-  task (another cell, the package's own `__getattr__`) is recorded too, and an
-  edit to it re-runs the cells. It is reachable through the name the
-  namespace holds, as `from pkg import other` already is.
-- A task that imports a submodule when it runs (`import pkg.extra` inside its
-  body) binds it after run 1, so run 2's record gains a key. Resume compares
-  shared keys only and is unaffected; `cache_dir` misses once per code state,
-  the same residual as `lazy from m import K`.
+**Second design.** The dotted names the kernel's kept cells import with a
+plain `import pkg.sub` (no `as`), read from the cells' text, each kept only
+while `pkg` is bound in the namespace to a module, or on 3.15 to a lazy
+import. That brings `import pkg.sub` to parity with `from pkg import sub` and
+`import pkg.sub as s`, which bind the submodule and are recorded already.
+- Kept cells: `linecache` entries named like an IPython cell
+  (`<ipython-input-N-hash>`, or ipykernel's `ipykernel_<pid>/<n>.py`) with no
+  mtime, and IPython 7's `_ipython_cache`. A cell's statements at its top
+  level count, including inside `if`/`try`/`with`; a function's or class's
+  body does not, since its import binds a local.
+- No module object is read, so nothing is loaded and nothing that merely
+  happens to be loaded counts.
+- 3.15: `lazy import pkg.sub` is the same statement (`is_lazy=1`), and `pkg`
+  is bound to a proxy or, once resolved, to the package, so the record is
+  stable across resolution.
+
+**Separately: module attributes read hook-free.** The record read
+`__name__`, `__file__`, `__path__` and `__spec__` of modules with `getattr`,
+which runs an `importlib.util.LazyLoader` module's file. That is reachable on
+main without this PR: a cell binding such a module directly, or a file task
+importing one. One helper reads them from the module's own `__dict__`
+(`module_from_spec` puts them there before the loader swaps the class), at
+every site: `_is_foreign_module`, `_find_file`, `_file_entries`,
+`_loaded_digest`, `_namespace_modules`, and a class's module dict.
+
+**Residuals**
+- A parallel worker has no `linecache`, so under joblib the seeds are absent:
+  a missed edit, which the bar tolerates. Notebook records already differ
+  between serial and joblib, since cloudpickle ships only the globals the
+  task references. Shipping the seeds from the driver beside `"<notebook>"`
+  is the complete fix.
+- Every kept cell counts, including an older version of a re-run cell, so an
+  `import pkg.old` since deleted from the notebook is still a seed while
+  `pkg` is bound. A recompute, not a wrong result.
+- An import inside a notebook function's body binds a local, so the module it
+  names is not recorded (as before this PR).
 
 **Tests**
-- Eager `import pkg.sub`, and `import pkg.a.b`, record every level.
-- End to end: eager `import pkg.sub`, edit `pkg/sub.py`, restart, resume →
-  re-runs with the new values.
-- 3.15: `lazy import pkg.sub`, two `cache_dir` runs in one kernel → the second
-  reuses. This turns #283's residual into a fix for this form.
-- Foreign: `import xml.etree.ElementTree` and `import json.decoder` add
-  nothing.
-- A submodule whose class's `__getattribute__` raises does not break the
-  record or run.
-- Mutation-check each test by node id.
+- `import pkg.sub` and `import pkg.a.b` record every level; parity: `import
+  pkg.sub`, `import pkg.sub as s`, `from pkg import sub` (and on 3.15 `lazy
+  import pkg.sub`) all record `pkg.sub (file)`.
+- End to end: edit `pkg/sub.py`, restart, resume -> re-runs with new values.
+- Load state does not count: a submodule loaded by `importlib.import_module`
+  and not imported by a statement is not recorded; `pkg` rebound to a value
+  drops the seed.
+- 3.15: two `cache_dir` runs with `lazy import pkg.sub` in one kernel reuse.
+- A real `LazyLoader` module in `sys.modules`, bound directly in a cell: the
+  record keeps its file and does not load it (`_LazyModule` still, side effect
+  unfired); `_find_file` returns its file without loading it.
+- A standard-library dotted import records nothing.
+- Mutation-check each by node id.
