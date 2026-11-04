@@ -1757,15 +1757,17 @@ def test_the_syntax_names_the_pinned_modules():
     from mushin._resume import _unit_reading
 
     tree = ast.parse(CHAIN_SOURCE)
-    modules, chains, cells = _unit_reading(tree, [tree])
+    modules, chains, cells, rebound = _unit_reading(tree, [tree])
     assert modules == set()
     assert {".".join(chain) for chain in chains} == CHAINS
     assert cells == set()
+    assert rebound == set()
     tree = ast.parse(IMPORT_SOURCE)
-    modules, chains, cells = _unit_reading(tree, [tree])
+    modules, chains, cells, rebound = _unit_reading(tree, [tree])
     assert modules == IMPORTS
     assert chains == set()
     assert cells == set()  # the relative imports' names are the unit's own
+    assert rebound == set()
 
 
 @pytest.fixture
@@ -1826,13 +1828,19 @@ def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
     import mushin._resume as resume
 
     resume._NOTEBOOK_FAILURE_WARNED.clear()  # it warns once per run otherwise
+    resume._CELL_SCAN_WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
     for w in caught:
         warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
     if not allow_failure:
-        failed = [w for w in caught if "could not be recorded" in str(w.message)]
+        failed = [
+            w
+            for w in caught
+            if "could not be recorded" in str(w.message)
+            or "could not be read" in str(w.message)
+        ]
         assert not failed, failed
     return {k for k in record["code"] if k.endswith(" (file)")}
 
@@ -2163,16 +2171,28 @@ def test_the_driver_ships_the_modules_the_notebook_code_names(kernel, sub_projec
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task", scripts=shipped)
 
 
-def test_an_older_drivers_shipment_still_counts(kernel):
-    """A runner pickled by 0.17.0 ships the notebook entries without the
-    modules. In a worker, which keeps no cell text, they are still the
-    record's notebook entries."""
-    from mushin._resume import NOTEBOOK_MODULES, driver_script_entries
+@pytest.mark.parametrize(
+    "missing",
+    [("<notebook modules>", "<notebook later modules>"), ("<notebook later modules>",)],
+    ids=["0.17.0", "0.17.0 with #291 and #293"],
+)
+def test_an_older_drivers_shipment_still_counts(kernel, missing):
+    """A runner pickled by 0.17.0 ships the notebook entries without either
+    list of modules, and one with #291 and #293 without the later ones. In a
+    worker, which keeps no cell text, they are still the record's notebook
+    entries."""
+    from mushin._resume import (
+        NOTEBOOK_LATER_MODULES,
+        NOTEBOOK_MODULES,
+        driver_script_entries,
+    )
 
+    assert {NOTEBOOK_MODULES, NOTEBOOK_LATER_MODULES} >= set(missing)
     _run_cells(kernel, ["def helper(x):\n    return x * 2\n", TASK])
     shipped = driver_script_entries((kernel.ns["task"],))
     taken = _notebook(project_fingerprints(kernel.ns["task"], scripts=shipped))
-    del shipped[NOTEBOOK_MODULES]
+    for key in missing:
+        del shipped[key]
     for name in kernel.names:
         linecache.cache.pop(name, None)  # as in a worker
     assert "helper (notebook)" in taken
@@ -2819,15 +2839,18 @@ def test_a_scan_of_the_cells_that_fails_warns_and_keeps_the_entries(
     _run_cells(
         kernel, [f"import {SUBPKG}.other\n", "def helper(x):\n    return x\n", TASK]
     )
-    with pytest.warns(UserWarning) as got:
-        record = project_fingerprints(kernel.ns["task"])
-    messages = [str(w.message) for w in got]
-    assert any("cells import could not be read (RuntimeError)" in m for m in messages)
-    # The entries still count, so the walk's own warning does not fire.
-    assert not [m for m in messages if "could not be recorded" in m], messages
-    assert not resume._NOTEBOOK_FAILURE_WARNED
-    assert "helper (notebook)" in record["code"]
-    assert f"{SUBPKG}.other (file)" not in record["code"]
+    for _ in range(2):  # a run, then a resume: each warns once
+        with pytest.warns(UserWarning) as got:
+            shipped = resume.driver_script_entries((kernel.ns["task"],))
+            record = project_fingerprints(kernel.ns["task"], scripts=shipped)
+            project_fingerprints(kernel.ns["task"])  # a cell: no second
+        messages = [str(w.message) for w in got]
+        read = [m for m in messages if "cells import could not be read" in m]
+        assert len(read) == 1 and "(RuntimeError)" in read[0], messages
+        # The entries still count, so the walk's own warning does not fire.
+        assert not [m for m in messages if "could not be recorded" in m], messages
+        assert "helper (notebook)" in record["code"]
+        assert f"{SUBPKG}.other (file)" not in record["code"]
 
 
 def test_the_driver_ships_the_cells_modules_apart(kernel, cell_imports):
@@ -2835,7 +2858,7 @@ def test_the_driver_ships_the_cells_modules_apart(kernel, cell_imports):
     after every other seed; a worker, which keeps no cells, follows them
     too."""
     from mushin._resume import (
-        NOTEBOOK_CELL_MODULES,
+        NOTEBOOK_LATER_MODULES,
         NOTEBOOK_MODULES,
         driver_script_entries,
     )
@@ -2844,7 +2867,7 @@ def test_the_driver_ships_the_cells_modules_apart(kernel, cell_imports):
     kernel.run(f"def task(a):\n    return {SUBPKG}.sub.f(a)\n")
     shipped = driver_script_entries((kernel.ns["task"],))
     assert shipped[NOTEBOOK_MODULES] == [f"{SUBPKG}.sub.f"]
-    assert shipped[NOTEBOOK_CELL_MODULES] == [f"{SUBPKG}.a.b", f"{SUBPKG}.sub"]
+    assert shipped[NOTEBOOK_LATER_MODULES] == [f"{SUBPKG}.a.b", f"{SUBPKG}.sub"]
     for name in kernel.names:
         linecache.cache.pop(name, None)  # as in a worker
     assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task", scripts=shipped)
@@ -3022,19 +3045,17 @@ def _rebinds(indent: str) -> str:
 )
 def test_rebinding_a_declared_name_stays_bounded(kernel, sub_project, walk, most):
     """`x = x.left`, `x = x.right`, ... under a declaration: each alias's
-    targets are added where the declaration sends `x`, resolved without the
-    others, so they do not compound (one after another they reach the cap);
-    more distinct targets than the cap stop at it."""
+    targets go on the binding the declaration sends `x` to, and no rebinding
+    feeds another's resolution, so they do not compound (fed into one another
+    they reach the cap); more distinct targets than the cap stop at it."""
     from mushin._resume import _TARGETS_MAX, _cell_lines, _cell_tree, _index_entry
 
     kernel.run(f"import {SUBPKG}.sub\n")
     kernel.run(f"{walk}\n\ndef task(a):\n    return {SUBPKG}.sub.f(a)\n")
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
     tree = _cell_tree(_cell_lines(kernel.ns["task"].__code__.co_filename))
-    scopes = _index_entry(tree)[1][0]
-    found = next(sc for sc in scopes if getattr(sc.node, "name", None) == "walk")
-    assert found.declared
-    assert max(map(len, found.declared.values())) <= (most or _TARGETS_MAX)
+    rebound = _index_entry(tree)[1][3]
+    assert rebound and max(map(len, rebound.values())) <= (most or _TARGETS_MAX)
 
 
 def test_ipython_before_8_6_cells_imports_count(cell_imports):
@@ -3061,7 +3082,7 @@ def test_a_record_cut_short_keeps_the_seeds_main_had_before_the_cells(
     monkeypatch.setattr(resume, "_TRUNCATION_WARNED", [])
     kernel.run(f"import {SUBPKG}.wide\nfrom {SUBREL} import f\n")
     kernel.run("def task(a):\n    return f(a)\n")
-    with pytest.warns(UserWarning, match="more project files"):
+    with pytest.warns(UserWarning, match="cells import reach more files"):
         files = _files(kernel, "task")
     assert f"{SUBREL} (file)" in files, files
 
@@ -3081,16 +3102,29 @@ def test_a_cell_the_parser_rejects_does_not_stop_the_scan(kernel, cell_imports):
 
 
 def test_the_cell_cache_holds_the_cells_the_last_scan_saw(kernel, cell_imports):
-    """Bounded by what linecache keeps: a cell gone from it leaves the cache
-    at the next scan."""
+    """A cell already read is not parsed again, and the cache is bounded by
+    what linecache keeps: a cell gone from it leaves at the next scan."""
     import mushin._resume as resume
 
     kernel.run(f"import {SUBPKG}.other  # mushin_t_cache_probe\n")
     kernel.run("def task(a):\n    return a\n")
     assert f"{SUBPKG}.other (file)" in _files(kernel, "task")
     held = len(resume._CELL_IMPORTS)
-    linecache.cache.pop(kernel.names[0])
-    assert f"{SUBPKG}.other (file)" not in _files(kernel, "task")
+    parsed = []
+    real = resume._cell_imports
+
+    def counted(text):
+        parsed.append(text)
+        return real(text)
+
+    resume._cell_imports = counted
+    try:
+        assert f"{SUBPKG}.other (file)" in _files(kernel, "task")
+        assert parsed == []  # nothing changed: every cell a cache hit
+        linecache.cache.pop(kernel.names[0])
+        assert f"{SUBPKG}.other (file)" not in _files(kernel, "task")
+    finally:
+        resume._cell_imports = real
     assert len(resume._CELL_IMPORTS) == held - 1
 
 
@@ -3110,4 +3144,135 @@ def test_only_a_cells_own_imports_bind_a_lazy_name(kernel, cell_imports):
     kernel.run(f"def task(a):\n    return {SUBPKG}.other.f(a)\n")
     files = _files(kernel, "task")
     assert f"{SUBPKG}.other (file)" in files
+    assert f"{SUBPKG}.{SUBPKG} (file)" in files  # still a cell's import
     assert f"{SUBPKG}.{SUBPKG}.other (file)" not in files
+
+
+def test_a_rebinding_in_another_function_counts_for_the_binding(kernel, sub_project):
+    """`rebind` sets the `s` that `task` reads (`nonlocal`, or `global` for the
+    namespace's): what it can hold counts for `task`'s chains, so the record
+    reads alike before and after a run rebinds it."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.sub')\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
+    )
+    kernel.run(
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def rebind():\n        nonlocal s\n"
+        f"        s = {SUBPKG}.{SUBPKG}\n\n    def task(a):\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "        rebind()\n        return out\n\n    return task\n\n\n"
+        "task = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+def test_an_import_in_another_function_counts_for_the_binding(kernel, sub_project):
+    """`nonlocal s; import pkg.pkg as s` in `rebind`: the module counts for
+    `task`'s chains on `s` before the run rebinds it."""
+    kernel.run(f"import importlib\nimportlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n")
+    kernel.run(
+        "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
+        f"        import {SUBPKG}.{SUBPKG} as s\n\n    def task(a):\n"
+        "        out = a + 1 if s is None else s.deep.f(a)\n"
+        "        rebind()\n        return out\n\n    return task\n\n\n"
+        "task = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+def test_a_global_rebinding_in_the_same_cell_counts(kernel, sub_project):
+    """The namespace's `s` starts as a value: a module it held would itself
+    be recorded by value, and drop out once rebound (a name a notebook
+    function rebinds is a documented limit)."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\ns = None\n"
+    )
+    kernel.run(
+        f"def rebind():\n    global s\n    s = {SUBPKG}.{SUBPKG}\n\n\n"
+        "def task(a):\n    out = a + 1 if s is None else s.deep.f(a)\n"
+        "    rebind()\n    return out\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the namespace's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+LATER_CUT_CASES = {
+    # A default holding a wide package (the round 2 probe).
+    "a default": (
+        "import importlib\n\n\ndef make(mod):\n    def task(a, m=mod):\n"
+        "        return m.x0.X + f(a)\n\n    return task\n\n\n"
+        f"task = make(importlib.import_module('{SUBWIDE}'))\n"
+    ),
+    # A sibling's rebinding reaching a wide submodule.
+    "a rebinding": (
+        "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
+        f"        s = {SUBPKG}\n\n    def task(a):\n"
+        "        return f(a) if s is None else s.wide.X\n\n    return task\n\n\n"
+        "task = make()\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(LATER_CUT_CASES))
+def test_a_later_reading_cut_short_keeps_the_seeds_main_had(
+    kernel, sub_project, monkeypatch, case
+):
+    """Every reading main's record did not have is followed after main's
+    seeds: a wide one cannot push the namespace's module out of the bound."""
+    import mushin._resume as resume
+
+    (sub_project / SUBPKG / "wide.py").write_text(f"import {SUBWIDE}\nX = 1\n")
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(f"import {SUBPKG}\nfrom {SUBREL} import f\n")
+    kernel.run(LATER_CUT_CASES[case])
+    with pytest.warns(UserWarning, match="reach more files"):
+        files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files, files
+
+
+@lazy_imports
+def test_a_lazy_proxys_other_reading_cut_short_keeps_the_seeds_main_had(
+    kernel, cell_imports, monkeypatch
+):
+    import mushin._resume as resume
+
+    (cell_imports / SUBPKG / SUBPKG / "wide.py").write_text(
+        f"import {SUBWIDE}\nX = 1\n"
+    )
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(f"lazy import {SUBPKG}.{SUBPKG}\nfrom {SUBREL} import f\n")
+    kernel.run(f"def task(a):\n    return f(a) if a else {SUBPKG}.wide.X\n")
+    kernel.run(f"{SUBPKG}\n")  # resolves the proxy
+    assert type(kernel.ns[SUBPKG]) is types.ModuleType
+    with pytest.warns(UserWarning, match="reach more files"):
+        files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files, files
+
+
+@lazy_imports
+def test_a_lazy_reading_does_not_follow_a_name_rebound_to_another_module(
+    kernel, cell_imports
+):
+    """`import other as pkg` after `lazy import pkg.pkg`: `pkg` holds another
+    module now, so the proxy's readings do not apply to it."""
+    (cell_imports / SUBPKG / SUBPKG / "other.py").write_text(
+        "def f(x):\n    return x + 1\n"
+    )
+    kernel.run(f"lazy import {SUBPKG}.{SUBPKG}\n")
+    kernel.run(f"import {SUBREL} as {SUBPKG}\n")
+    kernel.run(f"def task(a):\n    return {SUBPKG}.other.f(a)\n")
+    files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files
+    assert not {f"{SUBPKG}.other (file)", f"{SUBPKG}.{SUBPKG}.other (file)"} & files

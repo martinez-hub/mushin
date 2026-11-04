@@ -1329,6 +1329,108 @@ lowered; the instance's module stays.
   now starts from an empty cache. A cached path can hide a patched function;
   reset the cache in such a test.
 
+### #294 review round 2 (2026-11-04): plan
+
+`/code-review` (10) and the adversarial workflow (5 confirmed, 0 refuted)
+reviewed 0c77dad. Plan, written before any edit.
+
+**Blocking, and my mistake again:** round 1 fixed one member of a class, not
+the class. The invariant is that the file walk keeps every file main's walk
+kept, so everything main did not read must be followed after all of main's
+seeds. The cells' modules moved, but three other readings this PR added
+still went into `reached`, which `_record` puts first: a parameter's
+default, the 3.15 extra bases, and the targets of a `nonlocal` or `global`
+alias. A default holding a wide package pushed the namespace's module out
+of a bound of 3 (reproduced against main). The fix is by the invariant, not
+by site:
+- **Two passes over the files.** `_file_entries` takes a shared `seen` and
+  a file budget. Pass one is main's seed list in main's order (the reached
+  modules main's readings give, then the namespace's, the targets', the
+  scripts'). Pass two is everything this PR adds, with what is left. Pass
+  one is therefore main's walk, whatever pass two holds. A cut in pass two
+  alone gets its own warning (the cells' or the added readings' files, not
+  "the task's code").
+- **The added readings are kept apart from the start.** `_notebook_entries`
+  returns `(entries, modules, added)`: `added` holds what only the defaults
+  read and the 3.15 extra bases give. `_notebook_record` ships `added` and
+  the cells' modules together as the later modules
+  (`NOTEBOOK_LATER_MODULES`, renamed from the cell-only key, which never
+  shipped).
+- **Rebinds move out of the scope reading** (this also fixes `/code-review`'s
+  sibling case: `rebind()` doing `nonlocal s; s = pkg.pkg` while `task`
+  reads `s.deep`, so the record still followed the cell's value, and an edit
+  to `pkg/pkg/deep.py` went unnoticed after the run). A `nonlocal` or
+  `global` alias no longer adds to the declaring scope's `declared`.
+  `_index_entry` registers its targets on the binding the declaration sends
+  it to: the nearest enclosing function that binds the name, or the
+  module's for `global`, keyed `(scope id, name)` and capped. `_unit_reading`
+  then adds them for every chain that resolves through that binding, the
+  task's own, a sibling's, or any function in the tree. They are returned
+  apart, as added, so the scope reading main's floor sits beside is
+  unchanged. A `global` rebinding in another cell stays a documented limit
+  ("a name one of its functions rebinds").
+
+**Smaller (the reviews' minor findings):**
+- the 3.15 extra bases apply only while the namespace's value is that
+  name's module or its submodule (an eager `import other as pkg` later does
+  not pick up an old `lazy import pkg.sub`'s readings);
+- the fragment says, as #291's did, that a resume keeps a reused cell's
+  record, so a sweep started earlier does not compare these modules for its
+  completed cells;
+- tests: an old shipment without the later key (a 0.17.0 runner and a
+  #293 one), the scan warning's per-run reset, a cache hit (no parse when
+  the cells did not change), `_files` failing on the scan's warning too,
+  the nested import still counting as a cell module in the 3.15 binding test,
+  the sibling rebind, and a cut test for each added reading;
+- `_cell_tree`'s dead `SyntaxError` branch and the unwrapped docstring.
+
+**Not changed, with reasons:**
+- *Code a library writes into `linecache`* (sympy's `lambdify`, attrs,
+  dynamo repros) is scanned like a cell: its imports are rarely of the
+  project, and the cost is a recompute;
+- *a default's chain read from the outer parts* (`def task(a, m=m.sub)`)
+  can join the parameter's default: a recompute at most, when such a file
+  exists;
+- *one rule for what an import binds, three readers*: kept, since each
+  reads a different structure; the cell scan reads names only;
+- *`MemoryError` during a parse* is the 3.11 parser's depth guard in
+  practice; a real out-of-memory there loses that cell's imports for the
+  run;
+- *the fixtures turn the scan off for the reading's tests*: the scan only
+  adds modules, and its own tests run with it on.
+
+**Stopping rule:** one more round of both reviews on the delta. If it finds
+nothing blocking, merge.
+
+**Results (round 2 fixes).**
+- **Tests:** 260 in the module; on 3.11, 237 run; on 3.15, all 260 pass.
+  `make check`: 1611 passed. Against 0c77dad, the sibling and same-cell
+  rebinding tests and the cut tests for a default, a rebinding and (on 3.15)
+  a lazy proxy's other reading all fail.
+- **Mutations:** thirty-four for this PR. All are caught: rebinds feeding the
+  resolution again hangs; a rebinding registered on the declaring scope, a
+  declared import left unregistered, the later modules put back into pass
+  one, the added readings put back with the reached ones, a cache never read,
+  and the scan warning's reset each fail a test. #293's table matches its
+  merge table, its floor still caught (now by one test: the registry covers
+  the other floor case too).
+- **The reviewers' own probes**, run against this code: the wide cell import
+  (`zz_big`) keeps `zz_exp`, and editing `zz_exp.py` changes the record; the
+  depth-guard cell no longer stops the scan.
+- **Cost** (three runs each, interleaved, the 500-cell kernel): main 22-62 ms
+  the first time, then 2.9-3.0 ms; this branch 25-27 ms, then 3.5-3.6 ms,
+  recording the same 11 files. The 0.6 ms is the scan hashing each kept
+  cell's text.
+- **A global rebinding still moves the namespace's own value** (the
+  same-cell test starts `s` as a value): `_namespace_modules` records a
+  module bound in the namespace by value, as on main, so one a notebook
+  function rebinds drops out after the run. That is the documented "a name
+  one of its functions rebinds".
+- **My mistake this round** was the class one: round 1's plan named the
+  cells' modules only, when the invariant covers every reading main lacked.
+  Write the invariant down first and list its members from the diff (here:
+  every line that adds to `modules` and is not in main's reading).
+
 ### PR 2: classes with no method of their own
 
 Planned in its own PR, after this one merges.
