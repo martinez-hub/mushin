@@ -125,22 +125,26 @@ In a notebook, what counts is the definitions the task's code reaches by name
 in the kernel when the run starts: each function and class defined in a cell,
 through decorators, a `partial`, a bound method or an instance. Re-run the
 edited cell, then resume, and the cells re-run with a warning naming it
-(`helper (notebook)`). No value is compared: not a number, a string, a dict
-config, nor what a default or a closure holds. A value is only safe to compare
+(`helper (notebook)`). No value is compared: not a number, a string or a dict
+config. A value is only safe to compare
 when every writer of it is known, and in a notebook a writer can sit anywhere
 a value can. So pass a value the results depend on (a model name, a scale) to
 the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A
-submodule a notebook reaches through its package (`import pkg.sub`) may still
-not be compared in some cases: a registry the submodule fills when imported,
-`importlib.import_module`, a module passed in as an argument or returned by a
-call, a module held in a local name the syntax cannot follow
-(`m = pkg if a else None`, `for m in mods`). Nor may a class with no method of
-its own (a dataclass or an `Enum` of fields), or what it names beyond its
-bases. After editing such a module or class, use a new `working_dir`.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. For
+such a task, every project module that a cell whose text the kernel keeps
+imports counts too, whether or not the task names it, so an edit to it
+re-runs the cells.
+`cache_dir=` keys on the same record, so importing another project module in
+a cell, or a restart after removing one's import, can make the cells compute
+again. A module loaded other than by an `import` statement of such a cell
+(`importlib.import_module`, a plugin loader that fills a registry, an import
+in a `%%time` cell) may not be compared, as in a script, nor may a class with
+no method of its own (a dataclass or an `Enum` of fields), or what it names
+beyond its bases. After editing such a module or class, use a new
+`working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,
@@ -154,7 +158,7 @@ keys, a container of more than 256 items, more than three steps from a name
 `partial` and bound method is a step), a subclass of a container, a
 metaclass, or a class from outside the notebook.
 
-Reading the code a task reaches can import a module loaded through
+Taking the record can import a module loaded through
 `importlib.util.LazyLoader` (as `lazy_loader.load` does), and an error from
 that import may go unreported. If such a module has side effects or can fail
 to import, import it yourself before calling `run()`.

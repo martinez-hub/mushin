@@ -24,7 +24,12 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import mushin._resume
 from mushin._resume import cell_project_record, project_fingerprints
+
+#: The scan of the kept cells' imports, kept here so a fixture can turn it
+#: back on (``getattr``: the file also runs against an older ``_resume``).
+KEPT_CELL_READING = getattr(mushin._resume, "_kept_cell_reading", None)
 
 KERNEL = "mushin_t_kernel"
 
@@ -901,7 +906,7 @@ def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
     the edit goes unnoticed."""
     import mushin._resume as resume
 
-    def fail(namespace, roots):
+    def fail(namespace, roots, *rest):
         raise RuntimeError("the notebook's own text")
 
     monkeypatch.setattr(resume, "_notebook_entries", fail)
@@ -1318,8 +1323,15 @@ LAZY_MODULES = ("mushin_t_lazymod", "mushin_t_lazypkg", MIDDLE_DOT)
 
 @pytest.fixture
 def lazy_project(tmp_path, monkeypatch):
-    """A project module and a package with a submodule, none of them imported."""
+    """A project module and a package with a submodule, none of them imported.
+    The scan of the kept cells' imports is off: these tests pin how the
+    namespace's proxies are read, and the cell's statement would record the
+    module anyway."""
     import importlib
+
+    monkeypatch.setattr(
+        mushin._resume, "_kept_cell_reading", lambda: (set(), {}), raising=False
+    )
 
     root = tmp_path / "proj"
     (root / "mushin_t_lazypkg").mkdir(parents=True)
@@ -1745,22 +1757,31 @@ def test_the_syntax_names_the_pinned_modules():
     from mushin._resume import _unit_reading
 
     tree = ast.parse(CHAIN_SOURCE)
-    modules, chains, cells = _unit_reading(tree, [tree])
+    modules, chains, cells, rebound = _unit_reading(tree, [tree])
     assert modules == set()
     assert {".".join(chain) for chain in chains} == CHAINS
     assert cells == set()
+    assert rebound == set()
     tree = ast.parse(IMPORT_SOURCE)
-    modules, chains, cells = _unit_reading(tree, [tree])
+    modules, chains, cells, rebound = _unit_reading(tree, [tree])
     assert modules == IMPORTS
     assert chains == set()
     assert cells == set()  # the relative imports' names are the unit's own
+    assert rebound == set()
 
 
 @pytest.fixture
 def sub_project(tmp_path, monkeypatch):
     """A project package with submodules, and a top-level module named like
-    a relative import's target; none of them imported."""
+    a relative import's target; none of them imported. The scan of the kept
+    cells' imports is off: most tests here pin how the reached code names a
+    module, and a cell's `import pkg.sub` would record it anyway
+    (``cell_imports`` turns it back on)."""
     import importlib
+
+    monkeypatch.setattr(
+        mushin._resume, "_kept_cell_reading", lambda: (set(), {}), raising=False
+    )
 
     root = tmp_path / "subproj"
     (root / SUBPKG / "a").mkdir(parents=True)
@@ -1790,6 +1811,15 @@ def sub_project(tmp_path, monkeypatch):
         sys.modules.pop(name)
 
 
+@pytest.fixture
+def cell_imports(sub_project, monkeypatch):
+    """``sub_project`` with the scan of the kept cells' imports on."""
+    monkeypatch.setattr(
+        mushin._resume, "_kept_cell_reading", KEPT_CELL_READING, raising=False
+    )
+    return sub_project
+
+
 def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
     """The record's file keys. Unless ``allow_failure``, a record whose
     notebook entries could not be taken fails the test, so an assertion that
@@ -1798,13 +1828,19 @@ def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
     import mushin._resume as resume
 
     resume._NOTEBOOK_FAILURE_WARNED.clear()  # it warns once per run otherwise
+    getattr(resume, "_CELL_SCAN_WARNED", []).clear()  # (absent before #294)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
     for w in caught:
         warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
     if not allow_failure:
-        failed = [w for w in caught if "could not be recorded" in str(w.message)]
+        failed = [
+            w
+            for w in caught
+            if "could not be recorded" in str(w.message)
+            or "could not be read" in str(w.message)
+        ]
         assert not failed, failed
     return {k for k in record["code"] if k.endswith(" (file)")}
 
@@ -1886,7 +1922,8 @@ def test_a_submodule_a_definition_names_outside_a_body_is_recorded(
 def test_only_the_code_the_task_reaches_names_modules(kernel, sub_project):
     """A cell helper the task calls counts; a cell function it does not
     reach, and a submodule a cell loaded that the reached code never names,
-    do not."""
+    do not. (That is the reached code's reading: the cells' own imports
+    count too, see `test_every_project_module_a_cell_imports_counts`.)"""
     kernel.run(f"import {SUBPKG}.sub\nimport {SUBPKG}.other\n")
     kernel.run(f"def helper(x):\n    return {SUBPKG}.sub.f(x)\n")
     kernel.run(f"def unused(x):\n    return {SUBPKG}.other.f(x)\n")
@@ -2134,16 +2171,28 @@ def test_the_driver_ships_the_modules_the_notebook_code_names(kernel, sub_projec
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task", scripts=shipped)
 
 
-def test_an_older_drivers_shipment_still_counts(kernel):
-    """A runner pickled by 0.17.0 ships the notebook entries without the
-    modules. In a worker, which keeps no cell text, they are still the
-    record's notebook entries."""
-    from mushin._resume import NOTEBOOK_MODULES, driver_script_entries
+@pytest.mark.parametrize(
+    "missing",
+    [("<notebook modules>", "<notebook later modules>"), ("<notebook later modules>",)],
+    ids=["0.17.0", "0.17.0 with #291 and #293"],
+)
+def test_an_older_drivers_shipment_still_counts(kernel, missing):
+    """A runner pickled by 0.17.0 ships the notebook entries without either
+    list of modules, and one with #291 and #293 without the later ones. In a
+    worker, which keeps no cell text, they are still the record's notebook
+    entries."""
+    from mushin._resume import (
+        NOTEBOOK_LATER_MODULES,
+        NOTEBOOK_MODULES,
+        driver_script_entries,
+    )
 
+    assert {NOTEBOOK_MODULES, NOTEBOOK_LATER_MODULES} >= set(missing)
     _run_cells(kernel, ["def helper(x):\n    return x * 2\n", TASK])
     shipped = driver_script_entries((kernel.ns["task"],))
     taken = _notebook(project_fingerprints(kernel.ns["task"], scripts=shipped))
-    del shipped[NOTEBOOK_MODULES]
+    for key in missing:
+        del shipped[key]
     for name in kernel.names:
         linecache.cache.pop(name, None)  # as in a worker
     assert "helper (notebook)" in taken
@@ -2306,6 +2355,12 @@ def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp
         (f"def task(a):\n    m = {SUBPKG}\n    n = m\n    return n.a.b.f(a)\n", ".a.b"),
         (f"def task(a, lib={SUBPKG}):\n    return lib.sub.f(a)\n", ".sub"),
         (f"def task(a, {SUBPKG}={SUBPKG}):\n    return {SUBPKG}.sub.f(a)\n", ".sub"),
+        # Not a unit, so no value of its default is read: the syntax tells.
+        (
+            f"def task(a):\n    def inner(x, lib={SUBPKG}):\n"
+            "        return lib.sub.f(x)\n\n    return inner(a)\n",
+            ".sub",
+        ),
         # The closure holds `m`, not `lib`: the alias's own cell counts.
         (
             "def make(lib):\n    m = lib\n\n    def task(a):\n"
@@ -2326,6 +2381,7 @@ def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp
         "alias of an alias",
         "default",
         "default named like the module",
+        "a nested function's default",
         "alias in a factory",
         "factory default",
     ],
@@ -2654,3 +2710,675 @@ def test_main_s_reading_is_the_floor(kernel, sub_project, setup, task):
     kernel.run(setup)
     kernel.run(task)
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+# --- the modules the kept cells import (#292) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [
+            f"import functools\nimport {SUBPKG}.sub\n",
+            "def work(a, mod):\n    return mod.f(a)\n",
+            f"task = functools.partial(work, mod={SUBPKG}.sub)\n",
+        ],
+        [
+            f"import operator\nimport {SUBPKG}.sub\n\nget = operator.attrgetter('sub')\n",
+            f"def task(a):\n    return get({SUBPKG}).f(a)\n",
+        ],
+        [
+            f"import {SUBPKG}.sub\n",
+            f"def task(a):\n    m = {SUBPKG} if a else None\n    return m.sub.f(a)\n",
+        ],
+        [
+            f"import {SUBPKG}.sub\n\nMODS = [{SUBPKG}.sub]\n",
+            "def task(a):\n    for m in MODS:\n        a = m.f(a)\n    return a\n",
+        ],
+        [f"import {SUBPKG}.sub\n", "def task(a):\n    return a\n"],
+        [
+            f"import {SUBPKG}\n\n\ndef setup():\n    import {SUBPKG}.sub\n",
+            "def task(a):\n    return a\n",
+        ],
+    ],
+    ids=[
+        "an argument",
+        "a call's result",
+        "a conditional alias",
+        "a loop over modules",
+        "not named by the task",
+        "in a function the task does not reach",
+    ],
+)
+def test_every_project_module_a_cell_imports_counts(kernel, cell_imports, cells):
+    """A submodule's code runs only if something imported it, and a cell's
+    import is there however the task reaches the module, including ways its
+    syntax cannot follow."""
+    _run_cells(kernel, cells)
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_module_no_cell_imports_by_a_statement_is_not_a_cells(kernel, cell_imports):
+    """Load state does not count: a submodule only `importlib` loaded, which
+    the task never names, is not recorded; nor is a relative import's
+    target, an installed package, or what a file's text imports."""
+    kernel.run(
+        f"import importlib\nimport numpy\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.other')\n"
+    )
+    kernel.run(f"def task(a):\n    from .{SUBREL} import f\n    return f(a)\n")
+    # A file's text in linecache (a `%run` file, a traceback's): it has an
+    # mtime, and the file can have changed since.
+    ran = str(cell_imports / "ran.py")
+    linecache.cache[ran] = (30, 1793100000.0, [f"import {SUBPKG}.other\n"], ran)
+    try:
+        files = _files(kernel, "task")
+    finally:
+        linecache.cache.pop(ran, None)
+    assert f"{SUBPKG} (file)" in files
+    assert not {f"{SUBPKG}.other (file)", f"{SUBREL} (file)"} & files
+    assert not [k for k in files if k.startswith("numpy")]
+
+
+def test_reading_a_cell_shows_no_warning_again(kernel, cell_imports):
+    """The kernel showed a cell's warning (an invalid escape sequence) when
+    it ran; the record parses the cell again and shows nothing."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        kernel.run(f"import {SUBPKG}.sub\nPATTERN = '\\d'  # mushin_t_escape_one\n")
+        kernel.run(
+            f"def task(a):\n    return '\\d' and {SUBPKG}.sub.f(a)  # mushin_t_escape\n"
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = project_fingerprints(kernel.ns["task"])
+    assert f"{SUBPKG}.sub (file)" in record["code"]
+    assert not [w for w in caught if w.filename == "<cell>"], caught
+
+
+def test_the_cells_imports_count_when_the_walk_is_cut_or_fails(
+    kernel, cell_imports, monkeypatch
+):
+    """The cells' imports do not depend on the walk, so they count when it
+    passes its bound or fails (its own modules do not)."""
+    import mushin._resume as resume
+
+    kernel.run(f"import {SUBPKG}.other\n")
+    kernel.run("".join(f"def h{i}(x):\n    return x + {i}\n\n\n" for i in range(10)))
+    kernel.run(
+        "def task(a):\n    return " + " + ".join(f"h{i}(a)" for i in range(10)) + "\n"
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 3)
+        patch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
+        with pytest.warns(UserWarning, match="larger than the record covers"):
+            assert f"{SUBPKG}.other (file)" in _files(kernel, "task")
+
+    def fail(children):
+        raise RuntimeError("after the modules were found")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(resume, "_components", fail)
+        with pytest.warns(UserWarning, match="could not be recorded"):
+            files = _files(kernel, "task", allow_failure=True)
+        assert f"{SUBPKG}.other (file)" in files
+
+
+def test_a_scan_of_the_cells_that_fails_warns_and_keeps_the_entries(
+    kernel, cell_imports, monkeypatch
+):
+    import mushin._resume as resume
+
+    def fail(text):
+        raise RuntimeError("the cell's own text")
+
+    monkeypatch.setattr(resume, "_cell_imports", fail)
+    monkeypatch.setattr(resume, "_CELL_IMPORTS", {})  # nothing cached
+    monkeypatch.setattr(resume, "_CELL_SCAN_WARNED", [])
+    monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    _run_cells(
+        kernel, [f"import {SUBPKG}.other\n", "def helper(x):\n    return x\n", TASK]
+    )
+    for _ in range(2):  # a run, then a resume: each warns once
+        with pytest.warns(UserWarning) as got:
+            shipped = resume.driver_script_entries((kernel.ns["task"],))
+            record = project_fingerprints(kernel.ns["task"], scripts=shipped)
+            project_fingerprints(kernel.ns["task"])  # a cell: no second
+        messages = [str(w.message) for w in got]
+        read = [m for m in messages if "cells import could not be read" in m]
+        assert len(read) == 1 and "(RuntimeError)" in read[0], messages
+        # The entries still count, so the walk's own warning does not fire.
+        assert not [m for m in messages if "could not be recorded" in m], messages
+        assert "helper (notebook)" in record["code"]
+        assert f"{SUBPKG}.other (file)" not in record["code"]
+
+
+def test_the_driver_ships_the_cells_modules_apart(kernel, cell_imports):
+    """Under their own key, with no installed package, so a cell follows them
+    after every other seed; a worker, which keeps no cells, follows them
+    too."""
+    from mushin._resume import (
+        NOTEBOOK_LATER_MODULES,
+        NOTEBOOK_MODULES,
+        driver_script_entries,
+    )
+
+    kernel.run(f"import numpy\nimport {SUBPKG}.sub\nimport {SUBPKG}.a.b\n")
+    kernel.run(f"def task(a):\n    return {SUBPKG}.sub.f(a)\n")
+    shipped = driver_script_entries((kernel.ns["task"],))
+    assert shipped[NOTEBOOK_MODULES] == [f"{SUBPKG}.sub.f"]
+    assert shipped[NOTEBOOK_LATER_MODULES] == [f"{SUBPKG}.a.b", f"{SUBPKG}.sub"]
+    for name in kernel.names:
+        linecache.cache.pop(name, None)  # as in a worker
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task", scripts=shipped)
+
+
+def test_a_resume_after_editing_a_module_a_cell_imports_reruns(
+    kernel, cell_imports, tmp_path
+):
+    """The task reaches the submodule through a local name its syntax cannot
+    follow; the cell's import still counts, so an edit and a restart re-run
+    the cells."""
+    import importlib
+
+    cells = [
+        "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
+        f"import {SUBPKG}.sub\n",
+        "@mushin.sweep\ndef task(a):\n    CALLS.append(a)\n"
+        f"    m = {SUBPKG} if a else None\n    return {{'v': m.sub.f(a)}}\n",
+    ]
+    for cell in cells:
+        kernel.run(cell)
+    wd = tmp_path / "wd"
+    assert list(_sweep(kernel, wd, [1, 2])["v"].values) == [2, 3]
+    kernel.close()
+
+    (cell_imports / SUBPKG / "sub.py").write_text("def f(x):\n    return x + 100\n")
+    for name in [n for n in sys.modules if n.startswith(SUBPKG)]:
+        sys.modules.pop(name)
+    importlib.invalidate_caches()
+    restarted = Kernel()
+    try:
+        for cell in cells:
+            restarted.run(cell)
+        with pytest.warns(UserWarning, match=rf"{SUBPKG}\.sub \(file\)"):
+            ds = _sweep(restarted, wd, [1, 2], resume=True)
+        assert list(ds["v"].values) == [101, 102]
+        assert restarted.ns["CALLS"] == [1, 2]
+    finally:
+        restarted.close()
+
+
+@lazy_imports
+@pytest.mark.parametrize(
+    ("cell", "loaded", "expected"),
+    [
+        # The proxy names `pkg.sub`, and the task reads `pkg.other`: before it
+        # resolves the proxy reads as `pkg.sub`, after as `pkg`.
+        (f"lazy import {SUBPKG}.sub", "other", ".sub"),
+        # Both readings are files (`pkg/other.py`, `pkg/pkg/other.py`).
+        (f"lazy import {SUBPKG}.{SUBPKG}", "other", f".{SUBPKG}.other"),
+        # The same, with a plain import that `__lazy_modules__` makes lazy.
+        (
+            f"__lazy_modules__ = ['{SUBPKG}.{SUBPKG}']\nimport {SUBPKG}.{SUBPKG}",
+            "other",
+            f".{SUBPKG}.other",
+        ),
+        # Bound under its package's name, it resolves to the submodule, and
+        # the package's reading carries over.
+        (f"lazy import {SUBPKG}.{SUBPKG} as {SUBPKG}", f"{SUBPKG}.other", ".other"),
+    ],
+    ids=[
+        "proxy named past",
+        "both readings files",
+        "made lazy by the namespace",
+        "bound under the package's name",
+    ],
+)
+def test_a_lazy_import_the_task_reads_past_records_alike(
+    kernel, cell_imports, cell, loaded, expected
+):
+    (cell_imports / SUBPKG / SUBPKG / "other.py").write_text(
+        "def f(x):\n    return x + 1\n"
+    )
+    kernel.run(
+        f"{cell}\nimport importlib\nimportlib.import_module('{SUBPKG}.{loaded}')\n"
+    )
+    kernel.run(f"def task(a):\n    return {SUBPKG}.other.f(a)\n")
+    assert type(kernel.ns[SUBPKG]) is types.LazyImportType
+    before = project_fingerprints(kernel.ns["task"])["code"]
+    assert kernel.ns["task"](1) == 2  # resolves the proxy in the kernel
+    assert type(kernel.ns[SUBPKG]) is types.ModuleType
+    after = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUBPKG}{expected} (file)" in before
+    assert before == after
+
+
+def test_a_closure_the_run_rebinds_records_alike_before_and_after(kernel, sub_project):
+    """`nonlocal s; s = pkg.pkg`: the alias's targets count where the
+    declaration sends the name, so the record does not follow the cell's
+    value from one run to the next."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.sub')\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
+    )
+    kernel.run(
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def task(a):\n        nonlocal s\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        f"        s = {SUBPKG}.{SUBPKG}\n        return out\n\n    return task\n\n\n"
+        "task = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+@pytest.mark.parametrize(
+    "params", ["a, m=mod", "a, *, m=mod"], ids=["positional", "keyword"]
+)
+def test_a_default_holding_a_module_records_its_submodule(kernel, sub_project, params):
+    """The default's value is what the parameter holds when no caller passes
+    one, and here the syntax cannot tell it (`m=mod`, in a factory)."""
+    kernel.run(
+        f"import importlib\n\n\ndef make(mod):\n    def task({params}):\n"
+        "        return m.deep.f(a)\n\n    return task\n\n\n"
+        f"task = make(importlib.import_module('{SUBPKG}.{SUBPKG}'))\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
+    )
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in _files(kernel, "task")
+
+
+def test_a_free_variable_the_unit_also_reads_as_a_global_is_read_both_ways(
+    kernel, sub_project
+):
+    """`g` reads the namespace's `m` (`global m`), the task its closure's:
+    the namespace's module counts for the chain."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG} as m\nimport types\n"
+        f"importlib.import_module('{SUBPKG}.sub')\n"
+    )
+    kernel.run(
+        "def make(m):\n    def task(a):\n        def g():\n            global m\n"
+        "            return m.sub.f(a)\n\n        return g() + m.f(a)\n\n"
+        "    return task\n\n\ntask = make(types.SimpleNamespace(f=abs))\n"
+    )
+    assert kernel.ns["task"](1) == 3
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_free_variable_reads_the_namespaces_module_too(kernel, sub_project):
+    """The task's `m` is its closure's, but a chain on it reads the
+    namespace's module of that name too, as main did: a recompute when that
+    module changes (Codex on #291), kept for the case below."""
+    kernel.run(f"import {SUBPKG} as m\nimport types\n")
+    kernel.run(
+        "def make(m):\n    def task(a):\n        return m.sub.f(a)\n\n    return task\n\n\n"
+        "task = make(types.SimpleNamespace(sub=types.SimpleNamespace(f=abs)))\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_closure_a_sibling_fills_during_the_run_reads_the_namespace(
+    kernel, sub_project
+):
+    """The closure is empty when the record is taken, and `setup` fills it
+    with what the syntax cannot tell: the namespace's module of that name is
+    what records the submodule (round 3 of #294)."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\nimportlib.import_module('{SUBPKG}.sub')\n"
+    )
+    kernel.run(
+        f"def make():\n    {SUBPKG} = None\n\n    def setup():\n"
+        f"        nonlocal {SUBPKG}\n"
+        f"        {SUBPKG} = importlib.import_module('{SUBPKG}')\n\n"
+        f"    def task(a):\n        if {SUBPKG} is None:\n            setup()\n"
+        f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\ntask = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2
+    assert f"{SUBPKG}.sub (file)" in before
+    assert _files(kernel, "task") == before
+
+
+def _rebinds(indent: str) -> str:
+    return "".join(f"{indent}x = x.{'left' if i % 2 else 'right'}\n" for i in range(40))
+
+
+@pytest.mark.parametrize(
+    ("walk", "most"),
+    [
+        (f"def walk():\n    global x\n{_rebinds('    ')}    return 0\n", 2),
+        (
+            "def outer():\n    x = None\n\n    def walk():\n        nonlocal x\n"
+            f"{_rebinds('        ')}        return 0\n\n    return walk\n",
+            4,
+        ),
+        (
+            "def walk():\n    global x\n"
+            + "".join(f"    x = x.a{i}\n" for i in range(70))
+            + "    return 0\n",
+            0,  # the cap
+        ),
+    ],
+    ids=["global", "nonlocal", "past the cap"],
+)
+def test_rebinding_a_declared_name_stays_bounded(kernel, sub_project, walk, most):
+    """`x = x.left`, `x = x.right`, ... under a declaration: each alias's
+    targets go on the binding the declaration sends `x` to, and no rebinding
+    feeds another's resolution, so they do not compound (fed into one another
+    they reach the cap); more distinct targets than the cap stop at it."""
+    from mushin._resume import _TARGETS_MAX, _cell_lines, _cell_tree, _index_entry
+
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(f"{walk}\n\ndef task(a):\n    return {SUBPKG}.sub.f(a)\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+    tree = _cell_tree(_cell_lines(kernel.ns["task"].__code__.co_filename))
+    rebound = _index_entry(tree)[1][3]
+    assert rebound and max(map(len, rebound.values())) <= (most or _TARGETS_MAX)
+
+
+def test_ipython_before_8_6_cells_imports_count(cell_imports):
+    """Its cells' linecache entries have an mtime; its own cache keeps them."""
+    legacy = Kernel(legacy=True)
+    try:
+        legacy.run(f"import {SUBPKG}.sub\n")
+        legacy.run("def task(a):\n    return a\n")
+        assert f"{SUBPKG}.sub (file)" in _files(legacy, "task")
+    finally:
+        legacy.close()
+
+
+def test_a_record_cut_short_keeps_the_seeds_main_had_before_the_cells(
+    kernel, cell_imports, monkeypatch
+):
+    """The cells' modules come after every other seed: a cell importing a
+    wide project module must not push a namespace module out of the bound
+    (main recorded it)."""
+    import mushin._resume as resume
+
+    (cell_imports / SUBPKG / "wide.py").write_text(f"import {SUBWIDE}\n")
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_TRUNCATION_WARNED", [])
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(f"import {SUBPKG}.wide\nfrom {SUBREL} import f\n")
+    kernel.run("def task(a):\n    return f(a)\n")
+    for _ in range(2):  # a run, then a resume: each warns once
+        with pytest.warns(UserWarning) as got:
+            shipped = resume.driver_script_entries((kernel.ns["task"],))
+            files = _files(kernel, "task", scripts=shipped)
+            project_fingerprints(kernel.ns["task"], scripts=shipped)  # no second
+        cut = [w for w in got if "cells import, and those" in str(w.message)]
+        assert len(cut) == 1, [str(w.message) for w in got]
+        assert not [w for w in got if "the task's code imports" in str(w.message)]
+        assert f"{SUBREL} (file)" in files, files
+
+
+def test_a_cell_the_parser_rejects_does_not_stop_the_scan(kernel, cell_imports):
+    """A cell too deep for the parser (3.11 raises MemoryError) never ran,
+    so it imports nothing; the other cells' imports still count."""
+    deep = "import os\nx = " + "2**" * 3000 + "1\n"
+    name = "<ipython-input-999-mushin_t_deep>"
+    linecache.cache[name] = (len(deep), None, deep.splitlines(True), name)
+    try:
+        kernel.run(f"import {SUBPKG}.sub\n")
+        kernel.run("def task(a):\n    return a\n")
+        assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+    finally:
+        linecache.cache.pop(name, None)
+
+
+def test_the_cell_cache_holds_the_cells_the_last_scan_saw(kernel, cell_imports):
+    """A cell already read is not parsed again, and the cache is bounded by
+    what linecache keeps: a cell gone from it leaves at the next scan."""
+    import mushin._resume as resume
+
+    kernel.run(f"import {SUBPKG}.other  # mushin_t_cache_probe\n")
+    kernel.run("def task(a):\n    return a\n")
+    assert f"{SUBPKG}.other (file)" in _files(kernel, "task")
+    held = len(resume._CELL_IMPORTS)
+    parsed = []
+    real = resume._cell_imports
+
+    def counted(text):
+        parsed.append(text)
+        return real(text)
+
+    resume._cell_imports = counted
+    try:
+        assert f"{SUBPKG}.other (file)" in _files(kernel, "task")
+        assert parsed == []  # nothing changed: every cell a cache hit
+        linecache.cache.pop(kernel.names[0])
+        assert f"{SUBPKG}.other (file)" not in _files(kernel, "task")
+    finally:
+        resume._cell_imports = real
+    assert len(resume._CELL_IMPORTS) == held - 1
+
+
+@lazy_imports
+def test_only_a_cells_own_imports_bind_a_lazy_name(kernel, cell_imports):
+    """An import in a function binds a local, never the namespace's name, so
+    it adds no reading of a proxy (here `__lazy_modules__` makes every
+    import a candidate)."""
+    (cell_imports / SUBPKG / SUBPKG / "other.py").write_text(
+        "def f(x):\n    return x + 1\n"
+    )
+    kernel.run(
+        f"__lazy_modules__ = ['mushin_t_none']\nimport importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.other')\n\n\n"
+        f"def setup():\n    import {SUBPKG}.{SUBPKG}\n"
+    )
+    kernel.run(f"def task(a):\n    return {SUBPKG}.other.f(a)\n")
+    files = _files(kernel, "task")
+    assert f"{SUBPKG}.other (file)" in files
+    assert f"{SUBPKG}.{SUBPKG} (file)" in files  # still a cell's import
+    assert f"{SUBPKG}.{SUBPKG}.other (file)" not in files
+
+
+def test_a_rebinding_in_another_function_counts_for_the_binding(kernel, sub_project):
+    """`rebind` sets the `s` that `task` reads (`nonlocal`, or `global` for the
+    namespace's): what it can hold counts for `task`'s chains, so the record
+    reads alike before and after a run rebinds it."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.sub')\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
+    )
+    kernel.run(
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def rebind():\n        nonlocal s\n"
+        f"        s = {SUBPKG}.{SUBPKG}\n\n    def task(a):\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "        rebind()\n        return out\n\n    return task\n\n\n"
+        "task = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+def test_an_import_in_another_function_counts_for_the_binding(kernel, sub_project):
+    """`nonlocal s; import pkg.pkg as s` in `rebind`: the module counts for
+    `task`'s chains on `s` before the run rebinds it."""
+    kernel.run(f"import importlib\nimportlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n")
+    kernel.run(
+        "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
+        f"        import {SUBPKG}.{SUBPKG} as s\n\n    def task(a):\n"
+        "        out = a + 1 if s is None else s.deep.f(a)\n"
+        "        rebind()\n        return out\n\n    return task\n\n\n"
+        "task = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+def test_a_global_rebinding_in_the_same_cell_counts(kernel, sub_project):
+    """The namespace's `s` starts as a value: a module it held would itself
+    be recorded by value, and drop out once rebound (a name a notebook
+    function rebinds is a documented limit)."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\ns = None\n"
+    )
+    kernel.run(
+        f"def rebind():\n    global s\n    s = {SUBPKG}.{SUBPKG}\n\n\n"
+        "def task(a):\n    out = a + 1 if s is None else s.deep.f(a)\n"
+        "    rebind()\n    return out\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the namespace's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+LATER_CUT_CASES = {
+    # A default holding a wide package (the round 2 probe).
+    "a default": (
+        "import importlib\n\n\ndef make(mod):\n    def task(a, m=mod):\n"
+        "        return m.x0.X + f(a)\n\n    return task\n\n\n"
+        f"task = make(importlib.import_module('{SUBWIDE}'))\n"
+    ),
+    # A sibling's import into the name.
+    "an import rebinding": (
+        "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
+        f"        import {SUBPKG}.wide as s\n\n    def task(a):\n"
+        "        return f(a) if s is None else s.X\n\n    return task\n\n\n"
+        "task = make()\n"
+    ),
+    # A sibling's rebinding reaching a wide submodule.
+    "a rebinding": (
+        "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
+        f"        s = {SUBPKG}\n\n    def task(a):\n"
+        "        return f(a) if s is None else s.wide.X\n\n    return task\n\n\n"
+        "task = make()\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(LATER_CUT_CASES))
+def test_a_later_reading_cut_short_keeps_the_seeds_main_had(
+    kernel, sub_project, monkeypatch, case
+):
+    """Every reading main's record did not have is followed after main's
+    seeds: a wide one cannot push the namespace's module out of the bound."""
+    import mushin._resume as resume
+
+    (sub_project / SUBPKG / "wide.py").write_text(f"import {SUBWIDE}\nX = 1\n")
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(f"import {SUBPKG}\nfrom {SUBREL} import f\n")
+    kernel.run(LATER_CUT_CASES[case])
+    with pytest.warns(UserWarning, match="reaches through a default"):
+        files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files, files
+    assert len(files) <= 3, files  # the later pass gets what the first left
+
+
+@lazy_imports
+def test_a_lazy_proxys_other_reading_cut_short_keeps_the_seeds_main_had(
+    kernel, cell_imports, monkeypatch
+):
+    import mushin._resume as resume
+
+    (cell_imports / SUBPKG / SUBPKG / "wide.py").write_text(
+        f"import {SUBWIDE}\nX = 1\n"
+    )
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(f"lazy import {SUBPKG}.{SUBPKG}\nfrom {SUBREL} import f\n")
+    kernel.run(f"def task(a):\n    return f(a) if a else {SUBPKG}.wide.X\n")
+    kernel.run(f"{SUBPKG}\n")  # resolves the proxy
+    assert type(kernel.ns[SUBPKG]) is types.ModuleType
+    with pytest.warns(UserWarning, match="reach more files"):
+        files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files, files
+    assert len(files) <= 3, files
+
+
+@lazy_imports
+def test_a_lazy_reading_does_not_follow_a_name_rebound_to_another_module(
+    kernel, cell_imports
+):
+    """`import other as pkg` after `lazy import pkg.pkg`: `pkg` holds another
+    module now, so the proxy's readings do not apply to it."""
+    (cell_imports / SUBPKG / SUBPKG / "other.py").write_text(
+        "def f(x):\n    return x + 1\n"
+    )
+    kernel.run(f"lazy import {SUBPKG}.{SUBPKG}\n")
+    kernel.run(f"import {SUBREL} as {SUBPKG}\n")
+    kernel.run(f"def task(a):\n    return {SUBPKG}.other.f(a)\n")
+    files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files
+    assert not {f"{SUBPKG}.other (file)", f"{SUBPKG}.{SUBPKG}.other (file)"} & files
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        # `rebind` sits in `mid`, which does not bind `s`: the binding is
+        # `make`'s.
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def mid():\n        def rebind():\n"
+        f"            nonlocal s\n            s = {SUBPKG}.{SUBPKG}\n\n"
+        "        rebind()\n\n    def task(a):\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "        mid()\n        return out\n\n    return task\n\n\n",
+        # An outer function binds `s` too; `make`'s, the nearest, is the one.
+        f"def outer():\n    s = None\n\n    def make():\n        s = {SUBPKG}.sub\n\n"
+        f"        def rebind():\n            nonlocal s\n            s = {SUBPKG}.{SUBPKG}\n\n"
+        "        def task(a):\n"
+        "            out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "            rebind()\n            return out\n\n        return task\n\n"
+        "    return make\n\n\nmake = outer()\n",
+    ],
+    ids=["through a function that does not bind it", "the nearest binding"],
+)
+def test_a_rebinding_goes_on_the_binding_it_rebinds(kernel, sub_project, factory):
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.sub')\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
+    )
+    kernel.run(f"{factory}task = make()\n")
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before
+
+
+@pytest.mark.parametrize("shape", ["filled by a sibling", "a parameter"])
+def test_a_free_variables_namespace_read_is_one_of_mains_seeds(
+    kernel, cell_imports, monkeypatch, shape
+):
+    """The namespace read of a free variable is main's reading, so it is
+    followed in the first pass: later modules filling the rest of the bound
+    cannot push it out."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_TRUNCATION_WARNED", [])
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\nimport {SUBPKG}.a.b\n"
+        f"importlib.import_module('{SUBPKG}.sub')\nimport types\n"
+    )
+    if shape == "a parameter":
+        kernel.run(
+            f"def make({SUBPKG}):\n    def task(a):\n"
+            f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\n"
+            "task = make(types.SimpleNamespace(sub=types.SimpleNamespace(f=abs)))\n"
+        )
+    else:
+        kernel.run(
+            f"def make():\n    {SUBPKG} = None\n\n    def setup():\n"
+            f"        nonlocal {SUBPKG}\n"
+            f"        {SUBPKG} = importlib.import_module('{SUBPKG}')\n\n"
+            f"    def task(a):\n        if {SUBPKG} is None:\n            setup()\n"
+            f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\ntask = make()\n"
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the later pass is cut
+        files = _files(kernel, "task")
+    assert f"{SUBPKG}.sub (file)" in files, files

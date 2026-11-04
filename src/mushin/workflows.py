@@ -2501,12 +2501,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             defined in it, when the first cell naming it runs), so editing it
             while the sweep runs does not change what its cells record. A task
             defined in a notebook is compared by the definitions its code
-            reaches by name in the kernel as the run starts: each function and
-            class its cells define (through decorators, a ``partial``, a bound
-            method or an instance), so re-running an edited cell and resuming
-            re-runs the cells. No value is compared (a number, a string, a
-            dict config, what a default or a closure holds): pass one as a
-            swept parameter, or use a new ``working_dir`` after editing it. A re-run
+            reaches by name in the kernel as the run starts (each function
+            and class its cells define, through decorators, a ``partial``, a
+            bound method or an instance) and by every project module its
+            cells import, so re-running an edited cell and resuming re-runs
+            the cells; with ``cache_dir``, importing another project module
+            in a cell can make them compute again. No value is compared (a
+            number, a string, a dict config): pass one as a swept parameter,
+            or use a new ``working_dir`` after editing it. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name
             (``helper (notebook)``). Files are compared as
             they are on disk: if one changes after this process loaded it and
@@ -2521,12 +2523,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             the environment, in a notebook its values, a function reached
             only through a container (a registry), a closure or a default, a
             name one of its functions rebinds (``global helper``), a class's
-            attribute values beyond its text, possibly a submodule reached
-            through its package in some cases (a registry,
-            ``importlib.import_module``, a module passed as an argument or
-            returned by a call, a local name the syntax cannot follow),
-            possibly a
-            class with no method of
+            attribute values beyond its text, possibly a module loaded other
+            than by a cell's ``import`` statement (``importlib.import_module``,
+            a plugin loader that fills a registry, an import in a ``%%time``
+            cell), possibly a class with no method of
             its own and what it names beyond its bases, a ``_target_``
             defined there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file), a
