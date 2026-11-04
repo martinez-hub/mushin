@@ -801,3 +801,267 @@ the innermost enclosing binding wins.
   the task resolves through another attribute, and closure cells the run
   rebinds;
 - caching the per-unit reading, and one copy of the foreign-top rule.
+
+## Follow-up #292 (2026-11-03): bindings and where a unit stands
+
+Plan, written before any edit, for the cases #291 left (issue #292).
+
+**The class.** Most of the missed edits share one cause: `_syntax_modules`
+treats only imports as bindings, and reads every unit as if it stood at the
+top of its cell. So it misses a module bound some other way (`m = pkg`,
+`lib=pkg`), and a module bound by the function or class a unit is defined in
+(a class made in a factory, a method's default naming a class-body import).
+The inverse is the over-recording Codex found: a parameter or local that
+shadows a module global is read as the module.
+
+**The design.**
+- **Each cell tree is read once into scopes** (cached per tree, the tree
+  pinned). A scope is a function, a lambda, a class body or a comprehension.
+  For each scope we keep:
+  - its own nodes (nested scopes' bodies excluded, their outer parts
+    included);
+  - its bindings: name -> targets;
+  - its `global` and `nonlocal` names.
+
+  For each definition, the tree records where it stands (the scope that
+  evaluates its outer parts) and which scope its body is.
+- **Bindings, as Python makes them local** (parameters, assignment and `del`
+  targets, `for`/`with`/`except`/`match` names, imports, nested `def` and
+  `class` names), minus `global`/`nonlocal`. Each target is one of:
+  - a module (an import, or an alias whose value resolves to one: `m = pkg`,
+    `s = pkg.sub`, `m = n` for an alias `n`, iterated to a fixpoint);
+  - a chain on a global (`m = pkg` where `pkg` is the namespace's, resolved
+    when the record is taken);
+  - unknown.
+
+  A parameter's default is resolved where the definition stands.
+- **Resolving a chain:** the innermost scope that binds its name decides. Its
+  module and global targets count, and unknown ones name nothing (shadowing).
+  - Not bound anywhere, or declared `global`: the namespace's.
+  - Bound to an unknown target in a function the unit is defined in (outside
+    the unit): the unit's closure cell, never the namespace. Python makes
+    that name a free variable.
+- **Visibility:** a class body's bindings reach neither its methods nor its
+  comprehensions (except the first iterable); a function's, a lambda's and a
+  comprehension's reach the scopes inside them.
+- **A unit's reading:** its outer parts in the scope it stands in, then every
+  scope inside its body. Each unit is still read alone, so the union does not
+  depend on walk order. The result is cached per (tree, definition).
+
+**Also in this PR**
+- 3.15: a lazy proxy bound as its own first component (`lazy import
+  pkg.sub`, bound as `pkg`) records the package only, as the eager import's
+  binding does. Before, it recorded `pkg.sub` before the proxy resolved and
+  `pkg` after, a `cache_dir` miss when the task does not name `pkg.sub`.
+- One foreign-top rule (`_file_entries` and the shipping filter share it).
+- The lazy-import type is looked up once.
+
+**Not in this PR, with reasons (they stay in #292 and the docs):**
+- A class with no method of its own: nothing pins which cell defined it before
+  3.14. A methodless class has no function whose code names its cell, and a
+  cell re-run after an edit leaves both texts in the kernel's cache, so
+  matching by name would pick the wrong one exactly when it matters.
+- 3.15 recomputes when both readings of an ambiguous proxy are files, and
+  closure cells a run rebinds (`nonlocal`): rare, and a recompute, not a missed
+  edit.
+- A walrus inside a comprehension binds in the enclosing function. It is read
+  as the comprehension's: a missed alias at most, rare.
+
+**Tests** (each rule mutation-checked by node id; every #291 test still
+passes):
+- aliases: `m = pkg`, `s = pkg.sub`, an alias of an alias, a parameter default
+  (at the top and in a factory);
+- shadowing (Codex's case): a parameter, an assignment, `for`/`with`/
+  `except`/nested `def` names, all recording nothing extra;
+- `global` inside a function whose enclosing function binds the name locally;
+- a class made in a factory; a factory's import named only in an inner
+  definition's decorator; a class-body import named only in a method's
+  default, with only the method reached;
+- a class-body comprehension does not see the class's binding;
+- 3.15: `lazy import pkg.sub` with a task naming only `pkg.other` records the
+  same before and after.
+
+**Stopping rule, set now:** one round of `/code-review` and the adversarial
+workflow. Fix a confirmed case that records less than main (77882c4), or a
+false claim. A second round only if the first round's fixes changed code;
+otherwise merge, with what is left recorded in #292.
+
+**Results.**
+- **New tests:** 23 for #292, and 78 module tests in all. On 3.11, 68 run (the
+  lazy-import and type-parameter ones skip); on 3.15, all 78 run.
+- **Against main (77882c4):** 15 of the new tests fail there. The other four
+  pin rules main happens to follow: an alias of a submodule, `global`,
+  `nonlocal`, and the cache holding no namespace value.
+- **Mutations:** thirty-three, one per rule, each caught by node id (the lazy
+  and type-parameter ones on 3.15).
+- **Two mistakes during the work:**
+  - I named the reading's result `named`, overwriting the walk's own
+    variable, the same slip as in round 4.
+  - I inserted `_foreign_top` under `_foreign_by_path`'s `@functools.cache`,
+    the same slip as in #284. Before adding a definition next to another,
+    check the lines above it.
+- **Cost,** three runs each on the 500-cell kernel: main 26-32 ms the first
+  time, then 4.4-4.5 ms, recording 11 files; this branch 27-28 ms, then
+  2.9-3.0 ms, recording the same 11. The per-tree cache pays for the scope
+  index.
+
+### #293 review round 1 (2026-11-03): what records less than main, and a hang
+
+`/code-review` (12 findings) and the adversarial workflow (9 confirmed, 1
+refuted) reviewed 03f6ee2. Plan, written before any edit. The stopping rule
+allows this round because its fixes change code; after it, one more review,
+then merge.
+
+**Blocking (a hang, or recording less than main)**
+- **The alias fixpoint grows exponentially** (`node = node.left; node =
+  node.right` repeated), so a resume hangs and eats memory, even for a
+  function no task reaches. Aliases resolve once each, in dependency order.
+  An alias in a cycle (`x = x.a`, `a = x.l; x = a.r`) binds something unknown.
+  A name's targets are capped (64); past the cap the name is unknown.
+- **An alias in an enclosing function loses its own name.** `m = lib` in a
+  factory made the inner task's chain start at `lib`, while its closure
+  holds `m`. An alias (outside a class body) now also binds its own name's
+  cell, so the closure is asked for `m`.
+- **A class body's binding is not a shadow.** A class body reads a name with
+  `LOAD_NAME`, which falls back to the globals before the binding runs
+  (`pkg = pkg.sub.CONST`). A class-body binding's targets now count with the
+  namespace's.
+- **`lazy from pkg import pkg`** names a subpackage bound as its first
+  component, so `_namespace_modules` keeps the full name when the proxy's
+  last component is the bound name. It collapses to the package only
+  otherwise (`lazy import pkg.sub`).
+- **A parameter or local named like a module.** `def helper(pkg, a)` is
+  called with the module; main recorded its submodule by the name, and
+  shadowing dropped it. A binding the syntax cannot tell (a parameter, a
+  plain assignment, a loop or `with` or `except` name) now counts the
+  namespace's module of that name too. That brings Codex's over-recording
+  back (a recompute, never a missed edit), so it returns to #292. A nested
+  `def`/`class` name and a relative import still bind something known not
+  to be the namespace's.
+
+**Claims and tests**
+- The docs keep "a module passed in as an argument or returned by a call" as
+  a case that may not be compared; the fragment drops the shadowing claim,
+  and says the 3.15 reuse holds for a task that names `pkg` itself, not one
+  that reads `pkg.<attr>` (both readings of the proxy count before it
+  resolves, by design).
+- Tests: the cycle and the long rebind chain finish quickly; an alias in a
+  factory; a class body's read-before-bind; `lazy from pkg import pkg`; a
+  parameter named like the module and passed it; a default named like the
+  module; a comprehension's first iterable in a class body; the vacuous
+  alias-of-a-submodule case replaced. The tests' `_files` fails on the
+  record-failure warning unless a test expects it, so an assertion that a
+  file is absent cannot pass because the reading crashed.
+
+**Cleanups:** the scope index and its readings share one cache entry per tree,
+bounded like the trees (128). `_file_entries` keeps main's loaded-only check
+(no `find_spec` per record), and only the shipping filter looks unloaded
+names up. The dead `_definition_nodes` and `_class_node` wrappers go.
+
+**Into #292:** a parameter default naming a factory's unknown binding (the
+value is in `__defaults__`, never read), a class made in a factory from its
+parameters (a class has no closure), and Codex's shadowing case.
+
+**Results (round 2).**
+- **Tests:** 81 module tests: 71 run on 3.11, all 82 on 3.15 with the digest
+  test.
+- **Mutations:** forty, each caught by node id (the lazy and type-parameter
+  ones on 3.15). Removing the cycle rule and the cap together makes the suite
+  hang, which counts as caught.
+- **Five tests were vacuous at first, and each needed fixing:**
+  - The hang test put the rebinds in their own cell, which is never indexed,
+    so the test checked nothing. The rebinds now sit in the reached task's
+    cell.
+  - The `global` and class-body-fallback tests were masked by this round's
+    own rule that unknown bindings read the namespace too. They now use a
+    binding known not to be the namespace's (an alias of another name, a
+    `def`).
+  - The class-body comprehension test was masked by the same fallback. It now
+    uses a global that is not a module.
+- **Against round 1's code:** the factory-alias, parameter-named-like-a-module
+  and class-read-before-rebind tests fail on 03f6ee2 and pass here.
+
+### #293 review round 2 (2026-11-04): the last fixes before merging
+
+`/code-review` (12) and the adversarial workflow (9 confirmed, 1 refuted)
+reviewed 22ae791. By the stopping rule this was the last round: these fixes
+go in, then the PR merges. Every one either adds targets (the safe
+direction) or goes back to main's rule. Plan, written before any edit:
+- **An import under `global` or `nonlocal`** keeps its module: `global pkg;
+  import pkg` rebinds the namespace's `pkg`, so the import's targets count
+  where the declaration sends the name.
+- **The compiler's free variables decide:** a chain whose first name is
+  one of the unit's free variables asks its closure, whatever the scope
+  model says. This covers a walrus in a comprehension (PEP 572 binds it in
+  the enclosing function) and any form the model misses.
+- **An import in a function also binds its cell,** so a unit made inside asks
+  its closure, as main did.
+- **An alias derived from something unknown** (`pkg = a`) also reads the
+  namespace's module of its own name, as main did.
+- **3.15:** `_namespace_modules` goes back to main's rule (the proxy's full
+  name). `lazy import pkg.sub as pkg` binds the submodule, and its repr reads
+  like `lazy import pkg.sub`, so collapsing to the package missed an edit.
+  The recompute for `lazy import pkg.sub` returns to #292, and the fragment
+  drops its 3.15 sentence.
+- **`_file_entries`, loaded only:** decided by the module's file alone, as
+  on main, with no stdlib-name rule (a project namespace package named like
+  a stdlib module stays the project's).
+- **Cost:** a unit's outer parts are walked directly instead of filtering
+  the standing scope's nodes, and the scopes inside it come from its own
+  nodes, so a cell with a large literal costs each unit only its own size.
+- **Claims:** the docs keep "a module held in a local name the syntax cannot
+  follow"; `_unit_reading`'s docstring says unknown bindings read the
+  namespace too; the dead `_scope_index` goes.
+- **Tests:** a fresh-kernel `global` import; the walrus closure; an alias of a
+  parameter named like the module; `lazy import pkg.sub as pkg`; a doubling
+  alias chain that reaches the cap, asserted by target counts, not wall-clock
+  time. `_files` resets the once-per-run failure flag, so its guard holds.
+- **Memory:** an index entry is evicted with its cell tree.
+
+**Results (the last fixes).**
+- **Tests:** 86 module tests: 75 run on 3.11, all 87 on 3.15 with the digest
+  test.
+- **Mutations:** forty-two. The three that only exist on 3.12+ or 3.15 were
+  caught there.
+- **One surviving mutation, kept on purpose:** an alias's own cell. Asking the
+  closure for every free variable, and reading an alias of something unknown
+  as unknown, now cover every case it covered. It stays as a backstop.
+- **Two of my test mistakes this round:**
+  - The namespace-package test first failed on the unmutated code, so the
+    whole mutation table read one extra failure per row until it was fixed.
+    The lesson: run the baseline before trusting a table.
+  - It went through the shipping filter (main's rule) instead of
+    `_file_entries`. It now binds the submodule directly; it passes on main and
+    fails on 03f6ee2.
+- **Also:** the `global` test needed a binding the syntax tells is
+  not a module, because this round's alias rule masked it.
+
+### Codex on a6708f0 (2026-11-04): main's reading becomes the floor
+
+Codex found two more shapes that recorded less than main: a nested
+initializer importing into a `nonlocal` name the task binds to a placeholder
+`def`, and a comprehension that rebinds the imported name to itself. That made
+four rounds in a row of the same class of finding, each patched case by case.
+So the class is closed instead. Main's reading (`_syntax_modules` at 77882c4)
+is kept unchanged as `_floor_reading`, and every unit's record also takes what
+it names, resolved as main resolved it (the closure first, then the
+namespace). The scope-aware reading can then only add; "never record less
+than main" holds by construction, not by review.
+
+The cost of the floor is precision beyond main: two tests asserted that the
+record holds less than main (a nested `def` named like the package, and a
+class-body comprehension not seeing the class's names), and both went, since
+over-recording is a recompute, not a wrong result. The floor's body is
+checked to be identical to main's (an AST comparison), and removing it fails
+the two Codex shapes, which pass on main.
+
+With the floor in place, the mutation table changes in a way it predicts.
+The rules added to match main survive their mutations, because main's
+reading now covers their cases: the declared imports, the free-variable
+closure, the alias of something unknown, unknown bindings reading the
+namespace, `global`/`nonlocal`, and the class-body fallback. They stay as
+written, but the floor is what guarantees those cases. The rules that add
+recall beyond main are still caught by their tests: aliases, defaults read
+where the definition stands, enclosing scopes, outer parts, bases, the
+shipment, and the cap (a hang without it). The rules that only exist on
+3.12+ or 3.15 were caught there.

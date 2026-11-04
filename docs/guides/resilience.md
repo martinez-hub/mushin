@@ -135,11 +135,12 @@ default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
 keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. A
 submodule a notebook reaches through its package (`import pkg.sub`) may still
-not be compared in some cases: the package held in a local name, a class or
-a decorator made inside another function, a registry the submodule fills when
-imported, `importlib.import_module`. Nor may a class with no method of its
-own (a dataclass or an `Enum` of fields), or what it names beyond its bases.
-After editing such a module or class, use a new `working_dir`.
+not be compared in some cases: a registry the submodule fills when imported,
+`importlib.import_module`, a module passed in as an argument or returned by a
+call, a module held in a local name the syntax cannot follow
+(`m = pkg if a else None`, `for m in mods`). Nor may a class with no method of
+its own (a dataclass or an `Enum` of fields), or what it names beyond its
+bases. After editing such a module or class, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

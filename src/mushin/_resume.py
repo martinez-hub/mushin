@@ -299,6 +299,34 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
     return {name: tuple(paths) for name, paths in by_name.items()}
 
 
+def _foreign_top(top: str, loaded_only: bool = False) -> bool:
+    """True when the top-level module ``top`` is foreign as a whole, so none
+    of its submodules needs a lookup: mushin; one whose file an installed
+    package or the standard library holds (``torch``, loaded or not: the file
+    decides, so a checkout's ``code/`` stays the project's); or one with no
+    file that the standard library has by name (``sys``). Any other top-level
+    name with no file (a namespace package, one not found) is not: each of
+    its modules is judged by its own file. ``loaded_only`` judges only a
+    loaded one, by its file alone (main's rule for ``_file_entries``), so a
+    record of many files does no ``find_spec`` per name it has not seen
+    loaded."""
+    import sys
+
+    if top == "mushin":
+        return True
+    if loaded_only:  # main's rule: a loaded module, by its file alone
+        module = sys.modules.get(top)
+        file = getattr(module, "__file__", None) if module is not None else None
+        return isinstance(file, str) and bool(file) and _foreign_by_path(file, top)
+    try:
+        file = _find_file(top)
+        if isinstance(file, str) and file:
+            return _foreign_by_path(file, top)
+    except Exception:  # noqa: BLE001 - undecided here: judged per module
+        return False
+    return top in sys.stdlib_module_names or top in sys.builtin_module_names
+
+
 @functools.cache
 def _foreign_by_path(file: str, top: str) -> bool:
     try:
@@ -680,7 +708,6 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
     the list short. Each file as it is now; one that changed since this
     process first recorded that load of it warns. A name that cannot be
     resolved costs its own entry only."""
-    import sys
 
     out: dict[str, str] = {}
     pending = list(reversed(list(names)))
@@ -694,13 +721,9 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
         seen.add(current)
         top = current.partition(".")[0]
         if top not in foreign_tops:
-            # A loaded installed package (torch) is foreign as a whole: its
+            # An installed package (torch) is foreign as a whole: its
             # submodules need no lookup each.
-            module = sys.modules.get(top)
-            file = getattr(module, "__file__", None) if module is not None else None
-            foreign_tops[top] = top == "mushin" or (
-                isinstance(file, str) and bool(file) and _foreign_by_path(file, top)
-            )
+            foreign_tops[top] = _foreign_top(top, loaded_only=True)
         if foreign_tops[top]:
             continue
         # Importing `pkg.models` runs `pkg/__init__.py` first, so a module's
@@ -1221,6 +1244,10 @@ _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
 
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
+#: A cell tree's scope index and its units' readings, one entry per tree
+#: (the tree kept with it, so its nodes' ids stay its own), bounded like the
+#: trees.
+_SCOPE_INDEXES: dict = {}
 
 
 def _kernel_name(name: str) -> bool:
@@ -1273,7 +1300,8 @@ def _cell_tree(lines):
     except (SyntaxError, ValueError, RecursionError):
         tree = None
     while len(_CELL_TREES) >= _CELL_TREES_MAX:
-        _CELL_TREES.pop(next(iter(_CELL_TREES)))
+        evicted = _CELL_TREES.pop(next(iter(_CELL_TREES)))
+        _SCOPE_INDEXES.pop(id(evicted), None)  # its scope index goes with it
     _CELL_TREES[key] = tree
     return tree
 
@@ -1337,23 +1365,308 @@ def _outer_parts(node) -> list:
     return [*node.decorator_list, *parts, *returns, *typed]
 
 
-def _syntax_modules(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
-    """``(modules, chains)`` that definitions' syntax trees name: the modules
-    their absolute imports name (as ``_import_pairs`` reads them: ``from pkg
-    import sub`` names ``pkg`` and ``pkg.sub``, which may be an attribute),
-    and each maximal attribute chain on a name (``pkg.sub.f`` is ``("pkg",
-    "sub", "f")``). Scope by scope, as Python resolves names, with imports as
-    the only bindings: a chain on a name an import binds in its scope, or in
-    an enclosing function's (``import pkg`` in a function, then
-    ``pkg.sub.f``), is a module through each such binding; a relative
-    import's name names none; the rest are for the caller to resolve (a
-    parameter or an assignment shadowing a module global is read as the
-    module: a recompute, never a missed edit). A definition's decorators,
-    defaults, annotations, bases and keywords are read in the enclosing
-    scope, and a class body's bindings are not visible to the functions in
-    it. Each call reads its nodes alone, so what one unit names does not
-    depend on which units were read before it. The trees are the ones a
-    digest hashes, and they read alike on every supported Python."""
+class _Scope:
+    """A scope of a cell's syntax tree: the module's, a function's or a
+    lambda's, a class body, or a comprehension's."""
+
+    __slots__ = (
+        "kind", "node", "own", "bound", "globals", "nonlocals", "declared", "visible"
+    )  # fmt: skip
+
+    def __init__(self, kind: str, node, visible: tuple):
+        self.kind = kind  # "module", "function", "class" or "comp"
+        self.node = node  # what opens it (the tree, for the module)
+        self.own: list = []  # its nodes; a nested scope's body is not
+        self.bound: dict[str, set] = {}  # name -> its targets
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+        # The modules an import binds to a name declared `global` or
+        # `nonlocal` here: they count where the declaration sends the name.
+        self.declared: dict[str, set] = {}
+        # The function scopes around it whose names it sees, outermost first
+        # (a class body's are seen by neither its methods nor its
+        # comprehensions).
+        self.visible = visible
+
+
+def _name_chain(node) -> tuple[str, ...] | None:
+    """``("pkg", "sub")`` for the expression ``pkg.sub``, ``("pkg",)`` for
+    ``pkg``; None for anything else."""
+    import ast
+
+    parts = []
+    while type(node) is ast.Attribute:
+        parts.append(node.attr)
+        node = node.value
+    if type(node) is not ast.Name:
+        return None
+    return (node.id, *reversed(parts))
+
+
+def _resolve_chain(scope: _Scope, chain: tuple[str, ...]) -> set:
+    """The targets of ``chain`` read in ``scope``, as Python resolves its first
+    name: the innermost scope that binds it decides (``nonlocal`` skips the
+    scope itself; ``global`` makes it the namespace's). A target is
+    ``("module", path)``, ``("global", chain)`` (the namespace's, resolved
+    when the record is taken) or ``("cell", scope id, chain)`` (a name bound to
+    something unknown, in that scope)."""
+    name, rest = chain[0], chain[1:]
+
+    def extended(targets) -> set:
+        out = set()
+        for target in targets:
+            if target[0] == "cell":
+                out.add(("cell", target[1], target[2] + rest))
+            else:
+                out.add((target[0], target[1] + rest))
+        return out
+
+    # `global pkg; import pkg` binds the namespace's `pkg`: its module counts.
+    extra: set = set()
+    for current in (scope, *reversed(scope.visible)):
+        if name in current.globals:
+            extra |= extended(current.declared.get(name, ()))
+            break
+        if name in current.nonlocals:
+            extra |= extended(current.declared.get(name, ()))
+            continue
+        hit = current.bound.get(name)
+        if hit is not None:
+            out = extended(hit) | extra
+            if current.kind == "class":
+                # A class body reads a name it binds with LOAD_NAME, which
+                # falls back to the globals before the binding has run.
+                out.add(("global", chain))
+            return out
+    return {("global", chain)} | extra
+
+
+#: The most targets one name keeps; past it the name is unknown (as on main,
+#: which read every local as unknown), so a long rebind chain stays cheap.
+_TARGETS_MAX = 64
+
+
+def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
+    """Fill ``scope.bound``: every name Python makes local to it, minus its
+    ``global`` and ``nonlocal`` names.
+
+    - An import binds a module.
+    - An alias (``m = pkg``, ``s = pkg.sub``, a parameter defaulting to
+      ``pkg``, read where the definition stands) binds what its value
+      resolves to, and outside a class body its own cell too (a function
+      made inside reads it through its closure).
+    - Anything the syntax cannot tell (a parameter a caller passes, a plain
+      assignment, a loop, ``with``, ``except`` or ``match`` name) binds its
+      cell and the namespace's module of that name. A missed edit is the
+      cost of guessing wrong the other way; a recompute is this one's.
+    - A nested ``def`` or ``class`` name, and a relative import, bind only
+      their cell: whatever it holds, it is not the namespace's module.
+
+    Aliases resolve once each, in dependency order. One in a cycle (``x =
+    x.a``, ``a = x.l; x = a.r``) binds as unknown, and a name past
+    ``_TARGETS_MAX`` targets becomes unknown, so the cost stays linear. The
+    module's names are the namespace's, so it binds none."""
+    import ast
+
+    if scope.kind == "module":
+        return
+    for node in scope.own:
+        if type(node) is ast.Global:
+            scope.globals.update(node.names)
+        elif type(node) is ast.Nonlocal:
+            scope.nonlocals.update(node.names)
+    skip = scope.globals | scope.nonlocals
+    sid = id(scope)
+
+    def bind(name: str, *targets) -> None:
+        if name not in skip:
+            scope.bound.setdefault(name, set()).update(targets)
+
+    def cell(name: str) -> tuple:
+        return ("cell", sid, (name,))
+
+    def unknown(name: str) -> None:
+        bind(name, cell(name), ("global", (name,)))
+
+    def imported(name: str, target) -> None:
+        # Its cell too: a function made inside asks its closure, as on main.
+        if name in skip:
+            scope.declared.setdefault(name, set()).add(target)
+        else:
+            bind(name, target, cell(name))
+
+    aliases: list = []  # (name, chain), read in this scope
+    if scope.kind == "function":
+        args = scope.node.args
+        positional = [*args.posonlyargs, *args.args]
+        defaults = dict(
+            zip(
+                [a.arg for a in positional[len(positional) - len(args.defaults) :]],
+                args.defaults,
+                strict=True,
+            )
+        )
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+            if default is not None:
+                defaults[arg.arg] = default
+        for arg in (*positional, *args.kwonlyargs, args.vararg, args.kwarg):
+            if arg is None:
+                continue
+            unknown(arg.arg)  # a caller can pass anything
+            chain = _name_chain(defaults.get(arg.arg))
+            if chain is not None:
+                # Read where the definition stands, whose names are final.
+                bind(arg.arg, *_resolve_chain(standing, chain))
+    alias_names: set[int] = set()
+    for node in scope.own:
+        kind = type(node)
+        if kind is ast.Assign or kind is ast.AnnAssign or kind is ast.NamedExpr:
+            chain = _name_chain(node.value) if node.value is not None else None
+            targets = node.targets if kind is ast.Assign else [node.target]
+            for target in targets:
+                if chain is not None and type(target) is ast.Name:
+                    aliases.append((target.id, chain))
+                    alias_names.add(id(target))
+    for node in scope.own:
+        kind = type(node)
+        if kind is ast.Name:
+            if type(node.ctx) is not ast.Load and id(node) not in alias_names:
+                unknown(node.id)
+        elif kind is ast.Import:
+            for alias in node.names:
+                # `import a.b` binds `a`; `import a.b as c` binds `a.b`.
+                top = alias.name.partition(".")[0]
+                path = tuple(alias.name.split(".")) if alias.asname else (top,)
+                imported(alias.asname or top, ("module", path))
+        elif kind is ast.ImportFrom:
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if node.level == 0 and node.module:
+                    path = (*node.module.split("."), alias.name)
+                    imported(name, ("module", path))
+                else:
+                    bind(name, cell(name))  # relative: the closure can tell
+        elif kind in (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef):
+            bind(node.name, cell(node.name))
+        elif kind is ast.ExceptHandler and node.name:
+            unknown(node.name)
+        elif kind.__name__ in ("MatchAs", "MatchStar") and node.name:
+            unknown(node.name)
+        elif kind.__name__ == "MatchMapping" and node.rest:
+            unknown(node.rest)
+    named = {name for name, _ in aliases if name not in skip}
+    for name in named:
+        scope.bound.setdefault(name, set())
+        if scope.kind != "class":
+            bind(name, cell(name))
+    # What each name holds before aliases add to it (an import, a default):
+    # the cap keeps these, so it never drops a module main recorded.
+    seeds = {name: set(scope.bound[name]) for name in named}
+    # Each alias depends on the alias its value starts from; resolve them
+    # dependencies first, and a cycle as unknown.
+    depends = {name: set() for name in named}
+    for name, chain in aliases:
+        if name in named and chain[0] in named:
+            depends[name].add(chain[0])
+    comp_of = _components({name: sorted(deps) for name, deps in depends.items()})
+    sizes: dict[int, int] = {}
+    for comp in comp_of.values():
+        sizes[comp] = sizes.get(comp, 0) + 1
+    for name, chain in sorted(
+        (a for a in aliases if a[0] in named), key=lambda a: comp_of[a[0]]
+    ):
+        if sizes[comp_of[name]] > 1 or name in depends[name]:
+            unknown(name)
+        else:
+            resolved = _resolve_chain(scope, chain)
+            bind(name, *resolved)
+            if any(target[0] != "module" for target in resolved):
+                # From something unknown, or from a global another function
+                # may set before this runs: also as main read the name.
+                unknown(name)
+        if len(scope.bound[name]) > _TARGETS_MAX:
+            scope.bound[name] = seeds[name] | {cell(name), ("global", (name,))}
+
+
+def _index_entry(tree) -> tuple:
+    """``(tree, (scopes, opens, standing), readings)`` for a cell tree, built
+    once. ``scopes`` is every scope, the module's first and each before the
+    scopes in it; ``opens`` maps each definition or comprehension node (by
+    id) to the scope it opens; ``standing`` maps each scope (by id) to the
+    scope it stands in; ``readings`` holds the units' readings
+    (``_unit_reading``). Syntax only: nothing from a unit, a closure or the
+    namespace is in it (a name bound to the namespace's value is a
+    ``("global", ...)`` target, resolved later), so it is cached per tree,
+    with the tree kept so its nodes' ids stay its own, and evicted with it."""
+    import ast
+
+    hit = _SCOPE_INDEXES.get(id(tree))
+    if hit is not None and hit[0] is tree:
+        return hit
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    module = _Scope("module", tree, ())
+    scopes = [module]
+    opens: dict[int, _Scope] = {}
+    standing: dict[int, _Scope] = {id(module): None}
+    roots = list(tree.body) if type(tree) is ast.Module else [tree]
+    pending = [(module, roots)]
+    while pending:
+        scope, nodes = pending.pop()
+        stack = list(nodes)
+        while stack:
+            node = stack.pop()
+            kind = type(node)
+            if kind in defs:
+                # Its decorators, defaults, annotations and bases are
+                # evaluated here; its body is a scope of its own.
+                stack.extend(_outer_parts(node))
+                if kind is not ast.Lambda:
+                    scope.own.append(node)  # it binds its name here
+                body = [node.body] if kind is ast.Lambda else list(node.body)
+                child_kind = "class" if kind is ast.ClassDef else "function"
+            elif kind in comps:
+                # The first iterable is evaluated here; the rest in its own
+                # scope.
+                first, *later = node.generators
+                stack.append(first.iter)
+                body = [first.target, *first.ifs]
+                for gen in later:
+                    body += [gen.target, gen.iter, *gen.ifs]
+                body += [node.key, node.value] if kind is ast.DictComp else [node.elt]
+                child_kind = "comp"
+            else:
+                scope.own.append(node)
+                stack.extend(ast.iter_child_nodes(node))
+                continue
+            sees = scope.visible
+            if scope.kind in ("function", "comp"):
+                sees = (*sees, scope)
+            child = _Scope(child_kind, node, sees)
+            opens[id(node)] = child
+            standing[id(child)] = scope
+            scopes.append(child)
+            pending.append((child, body))
+    for scope in scopes:  # each after the scope it stands in
+        _scope_bindings(scope, standing[id(scope)])
+    entry = (tree, (scopes, opens, standing), {})
+    while len(_SCOPE_INDEXES) >= _CELL_TREES_MAX:
+        _SCOPE_INDEXES.pop(next(iter(_SCOPE_INDEXES)))
+    _SCOPE_INDEXES[id(tree)] = entry
+    return entry
+
+
+def _floor_reading(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
+    """The reading main took before #293, kept as the floor: whatever it names
+    counts too, so the scope-aware reading (``_unit_reading``) only adds to
+    what main recorded and never misses what it caught.
+
+    ``(modules, chains)`` that definitions' syntax trees name: the modules
+    their absolute imports name (as ``_import_pairs`` reads them) and each
+    maximal attribute chain on a name, scope by scope with imports as the
+    only bindings; a chain on a name an import binds is a module through each
+    binding, a relative import's name names none, and the rest are for the
+    caller to resolve (the closure first, then the namespace)."""
     import ast
 
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -1420,18 +1733,101 @@ def _syntax_modules(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
     return modules, chains
 
 
+def _standing_nodes(root) -> list:
+    """The nodes of a definition's outer parts, which run where it stands,
+    as ``_index_entry`` puts them in that scope: a definition or
+    comprehension among them adds its own outer parts (or first iterable),
+    not its body."""
+    import ast
+
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    out: list = []
+    stack = list(_outer_parts(root))
+    while stack:
+        node = stack.pop()
+        kind = type(node)
+        if kind in defs:
+            stack.extend(_outer_parts(node))
+        elif kind in comps:
+            stack.append(node.generators[0].iter)
+        else:
+            out.append(node)
+            stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset]:
+    """``(modules, global chains, cell chains)`` that a unit's definitions
+    (``roots``, nodes of ``tree``) name: the modules their absolute imports
+    name (as ``_import_pairs`` reads them) and the attribute chains they read
+    (``pkg.sub.f``) through a binding to a module; the chains on a name the
+    namespace binds (``("pkg", "sub", "f")``), for the caller to resolve; and
+    the chains on a name a function around the unit binds to something
+    unknown, which the unit's closure holds. A chain on a name the unit binds
+    to something unknown (a parameter, a loop variable) reads the
+    namespace's module of that name (``_scope_bindings``). The definitions'
+    outer parts are read where they stand. Each unit is read
+    alone, so what one names does not depend on which were read before it;
+    the reading is cached per (tree, definitions)."""
+    import ast
+
+    _, (scopes, opens, standing), readings = _index_entry(tree)
+    key = tuple(id(root) for root in roots)
+    if key in readings:
+        return readings[key]
+    within = [id(n) for root in roots for n in ast.walk(root)]
+    inside = [opens[i] for i in within if i in opens]
+    if scopes[0].node in roots:  # the whole module (a test reads one so)
+        inside.append(scopes[0])
+    inside_ids = {id(scope) for scope in inside}
+    reads = [(scope, scope.own) for scope in inside]
+    for root in roots:
+        if id(root) in opens:  # its outer parts, where it stands
+            reads.append((standing[id(opens[id(root)])], _standing_nodes(root)))
+    modules: set[str] = set()
+    global_chains: set[tuple[str, ...]] = set()
+    cell_chains: set[tuple[str, ...]] = set()
+    for scope, nodes in reads:
+        inner = {id(n.value) for n in nodes if type(n) is ast.Attribute}
+        for node in nodes:
+            kind = type(node)
+            if kind is ast.Import or kind is ast.ImportFrom:
+                modules.update(n for n, level in _import_pairs(node) if level == 0)
+                continue
+            if kind is not ast.Attribute or id(node) in inner:
+                continue
+            chain = _name_chain(node)
+            if chain is None:
+                continue
+            for target in _resolve_chain(scope, chain):
+                if target[0] == "module":
+                    modules.add(".".join(target[1]))
+                elif target[0] == "global":
+                    global_chains.add(target[1])
+                elif target[1] not in inside_ids:
+                    cell_chains.add(target[2])
+    result = (frozenset(modules), frozenset(global_chains), frozenset(cell_chains))
+    readings[key] = result
+    return result
+
+
+#: The types a namespace value is checked against, looked up once (``types``
+#: is loaded with the interpreter). LazyImportType is new in 3.15.
+_MODULE_TYPE = type(functools)
+_LAZY_IMPORT_TYPE = getattr(__import__("types"), "LazyImportType", None)
+
+
 def _module_name_of(value) -> tuple[str | None, bool] | None:
     """For a module, or on 3.15 a lazy import (PEP 810) of one, ``(its name,
     whether it is lazy)``; the name is None when none can be read. None for
     any other value. A module's ``__name__`` is read; a lazy proxy is not
     asked for anything (``_lazy_import_name``). Raises what a module's
     attribute hook raises."""
-    import types
-
     kind = type(value)
-    if kind is getattr(types, "LazyImportType", None):  # 3.15+
+    if kind is _LAZY_IMPORT_TYPE:
         return _lazy_import_name(value), True
-    if issubclass(kind, types.ModuleType):
+    if issubclass(kind, _MODULE_TYPE):
         name = value.__name__
         return (name if isinstance(name, str) else None), False
     return None
@@ -1462,12 +1858,13 @@ def _chain_bases(name: str, value) -> tuple[str, ...]:
     return (top,) if full == top else (top, full)
 
 
-def _definition_nodes(code) -> list | None:
-    """The syntax nodes that define a function in its cell: the ``def`` named
-    like it whose first line (or a decorator's, which is a decorated
-    function's first line) is the code's, or for a lambda the lambdas on its
-    line, so a lambda passed to ``run(...)`` does not bring the grid. None
-    when the cell is not kept or names something else."""
+def _definition_site(code) -> tuple | None:
+    """``(tree, nodes)``: the cell's syntax tree and the nodes in it that
+    define a function: the ``def`` named like it whose first line (or a
+    decorator's, which is a decorated function's first line) is the code's,
+    or for a lambda the lambdas on its line, so a lambda passed to
+    ``run(...)`` does not bring the grid. None when the cell is not kept or
+    names something else. One lookup, so the nodes are the tree's own."""
     import ast
 
     lines = _cell_lines(code.co_filename)
@@ -1479,7 +1876,7 @@ def _definition_nodes(code) -> list | None:
         found = [
             n for n in ast.walk(tree) if type(n) is ast.Lambda and n.lineno == line
         ]
-        return sorted(found, key=lambda n: n.col_offset) or None
+        return (tree, sorted(found, key=lambda n: n.col_offset)) if found else None
     for node in ast.walk(tree):
         if (
             type(node) in (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -1489,7 +1886,7 @@ def _definition_nodes(code) -> list | None:
                 or any(d.lineno == line for d in node.decorator_list)
             )
         ):
-            return [node]
+            return tree, [node]
     return None
 
 
@@ -1521,10 +1918,11 @@ def _method_functions(value) -> list:
     return out
 
 
-def _class_node(cls, methods):
-    """The ``class`` statement that defined ``cls``, found through a method
-    defined in its body (``inspect.getsource`` cannot find a class in a
-    notebook): the innermost one with its name spanning the method's line."""
+def _class_site(cls, methods) -> tuple | None:
+    """``(tree, node)``: the cell's syntax tree and the ``class`` statement in
+    it that defined ``cls``, found through a method defined in its body
+    (``inspect.getsource`` cannot find a class in a notebook): the innermost
+    one with its name spanning the method's line."""
     import ast
 
     for fn in methods:
@@ -1543,7 +1941,7 @@ def _class_node(cls, methods):
             ):
                 best = node
         if best is not None:
-            return best
+            return tree, best
     return None
 
 
@@ -1786,35 +2184,18 @@ def _components(children: dict) -> dict:
 
 
 def _maybe_project(name: str, foreign_tops: dict) -> bool:
-    """False when ``name``'s top-level module is mushin, resolves to a file
-    an installed package or the standard library holds (``numpy``), as
-    ``_file_entries`` judges a loaded top-level package, or has no file and is
-    the standard library's by name (``sys``), as ``_is_foreign_module``
-    does; once per top-level name. Any other top-level name with no file (a
-    namespace package, one that is not found) is kept for ``_file_entries``
-    to decide."""
-    import sys
-
+    """False when ``name``'s top-level module is foreign as a whole
+    (``_foreign_top``), decided once per top-level name in
+    ``foreign_tops``."""
     top = name.partition(".")[0]
     if top not in foreign_tops:
-        try:
-            file = _find_file(top)
-            if isinstance(file, str) and file:
-                # The file decides: a checkout's `code/` is the project's.
-                foreign = _foreign_by_path(file, top)
-            else:  # a built-in module (`sys`), or one with no file
-                foreign = top in sys.stdlib_module_names or (
-                    top in sys.builtin_module_names
-                )
-            foreign_tops[top] = top == "mushin" or foreign
-        except Exception:  # noqa: BLE001 - undecided here: _file_entries decides
-            foreign_tops[top] = False
+        foreign_tops[top] = _foreign_top(top)
     return not foreign_tops[top]
 
 
 def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]]:
     """``(entries, modules)``: the entries of a notebook's code the roots
-    reach, and the modules their definitions name (see ``_syntax_modules``) to follow
+    reach, and the modules their definitions name (see ``_unit_reading``) to follow
     as files. Entries are ``{"<name> (notebook)": digest}`` for each name
     their code looks up (and each root
     by its name) that stands for a function or class defined in a cell. A
@@ -1920,14 +2301,15 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
             )
         return {}, []
 
-    def nodes_of(uid: int) -> list | None:
-        """A unit's syntax nodes: a function's definition, a class's
-        ``class`` statement; None when its cell is not kept."""
+    def site_of(uid: int) -> tuple | None:
+        """``(tree, nodes)``: a unit's cell tree and its syntax nodes in it (a
+        function's definition, a class's ``class`` statement); None when its
+        cell is not kept."""
         kind, obj, _, methods = units[uid]
         if kind == "function":
-            return _definition_nodes(obj.__code__)
-        node = _class_node(obj, methods)
-        return None if node is None else [node]
+            return _definition_site(obj.__code__)
+        found = _class_site(obj, methods)
+        return None if found is None else (found[0], [found[1]])
 
     def own(kind: str, nodes) -> str:
         """A unit's own definition, without what it reaches."""
@@ -1939,8 +2321,11 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     # on the order the walk took. Without captures the edges form no cycle
     # (methods, bases and __wrapped__ only point down); components keep that
     # true if one ever appears.
-    unit_nodes = {uid: nodes_of(uid) for uid in units}
-    owns = {uid: own(units[uid][0], unit_nodes[uid]) for uid in units}
+    unit_sites = {uid: site_of(uid) for uid in units}
+    owns = {
+        uid: own(units[uid][0], None if site is None else site[1])
+        for uid, site in unit_sites.items()
+    }
 
     # The project modules the reached definitions name: a cell's `import
     # pkg.sub` binds only `pkg`, so `pkg.sub.f` in a definition (its body, a
@@ -1951,23 +2336,44 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     # rebinds (a reload helper) still holds a module, and skipping it would
     # drop the submodule.
     modules: set[str] = set(base_modules)
-    for uid, nodes in unit_nodes.items():
-        if nodes is None:
+    for uid, site in unit_sites.items():
+        if site is None:
             continue
         # Each unit alone (a method in its class's statement and on its own):
         # the union does not depend on the order the walk took.
-        imported, chains = _syntax_modules(nodes)
-        modules |= imported
-        # A unit made inside another function (a decorator's wrapper, a
-        # factory's function) reaches that function's imports through its
-        # closure: its definition is the inner `def` only.
+        unit_modules, global_chains, cell_chains = _unit_reading(*site)
+        modules |= unit_modules
+        # A name a function around the unit binds to something unknown is a
+        # free variable of the unit: its closure holds the value.
         kind, obj = units[uid][0], units[uid][1]
         free = {}
         if kind == "function":
             # A function's closure has one cell per free variable.
             cells = obj.__closure__ or ()
             free = dict(zip(obj.__code__.co_freevars, cells, strict=False))
-        for chain in chains:
+        # The compiler's free variables decide (a walrus in a comprehension
+        # binds in the enclosing function, which the scopes read as the
+        # comprehension's): a chain on one asks the closure too.
+        asked = cell_chains | {c for c in global_chains if c[0] in free}
+        for chain in asked:
+            if chain[0] not in free:
+                continue
+            try:
+                value = free[chain[0]].cell_contents
+            except ValueError:  # an empty cell: nothing bound yet
+                continue
+            for base in _chain_bases(chain[0], value):
+                modules.add(".".join((base, *chain[1:])))
+        for chain in global_chains:
+            if chain[0] in namespace and not _kernel_name(chain[0]):
+                for base in _chain_bases(chain[0], namespace[chain[0]]):
+                    modules.add(".".join((base, *chain[1:])))
+        # The floor: what main's reading names counts too, resolved as main
+        # resolved it (the closure first, then the namespace), so this record
+        # never holds less than main's did.
+        floor_modules, floor_chains = _floor_reading(site[1])
+        modules |= floor_modules
+        for chain in floor_chains:
             if chain[0] in free:
                 try:
                     value = free[chain[0]].cell_contents
@@ -2367,7 +2773,7 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     code reaches by name, by its definition (see ``_notebook_entries``), and
     the project modules of the objects its namespace holds and those its
     reached definitions name (``pkg.sub.f`` after ``import pkg.sub``, an
-    import inside a function; see ``_syntax_modules``); the driver takes the
+    import inside a function; see ``_unit_reading``); the driver takes the
     notebook entries and those modules when the run starts and ships them in
     ``scripts``.
 

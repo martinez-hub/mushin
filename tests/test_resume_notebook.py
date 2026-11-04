@@ -1742,14 +1742,18 @@ IMPORTS = {
 def test_the_syntax_names_the_pinned_modules():
     import ast
 
-    from mushin._resume import _syntax_modules
+    from mushin._resume import _unit_reading
 
-    modules, chains = _syntax_modules([ast.parse(CHAIN_SOURCE)])
+    tree = ast.parse(CHAIN_SOURCE)
+    modules, chains, cells = _unit_reading(tree, [tree])
     assert modules == set()
     assert {".".join(chain) for chain in chains} == CHAINS
-    modules, chains = _syntax_modules([ast.parse(IMPORT_SOURCE)])
+    assert cells == set()
+    tree = ast.parse(IMPORT_SOURCE)
+    modules, chains, cells = _unit_reading(tree, [tree])
     assert modules == IMPORTS
     assert chains == set()
+    assert cells == set()  # the relative imports' names are the unit's own
 
 
 @pytest.fixture
@@ -1786,8 +1790,22 @@ def sub_project(tmp_path, monkeypatch):
         sys.modules.pop(name)
 
 
-def _files(kernel, *names, **kwargs) -> set:
-    record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
+def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
+    """The record's file keys. Unless ``allow_failure``, a record whose
+    notebook entries could not be taken fails the test, so an assertion that
+    a file is absent cannot pass because the reading crashed. Other warnings
+    pass through."""
+    import mushin._resume as resume
+
+    resume._NOTEBOOK_FAILURE_WARNED.clear()  # it warns once per run otherwise
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
+    for w in caught:
+        warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+    if not allow_failure:
+        failed = [w for w in caught if "could not be recorded" in str(w.message)]
+        assert not failed, failed
     return {k for k in record["code"] if k.endswith(" (file)")}
 
 
@@ -2175,7 +2193,8 @@ def test_a_cut_or_failed_walk_names_no_modules(kernel, sub_project, monkeypatch)
         patch.setattr(resume, "_components", fail)
         patch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
         with pytest.warns(UserWarning, match="could not be recorded"):
-            assert f"{SUBPKG}.sub (file)" not in _files(kernel, "task")
+            files = _files(kernel, "task", allow_failure=True)
+        assert f"{SUBPKG}.sub (file)" not in files
 
 
 def test_a_resume_after_editing_a_submodule_named_through_its_package_reruns(
@@ -2274,3 +2293,364 @@ def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp
     _sweep(kernel, tmp_path / "one", [1, 2], cache_dir=cache)
     _sweep(kernel, tmp_path / "two", [1, 2], cache_dir=cache)
     assert kernel.ns["CALLS"] == [1, 2]
+
+
+# --- bindings and where a unit stands (#292) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        (f"def task(a):\n    m = {SUBPKG}\n    return m.sub.f(a)\n", ".sub"),
+        (f"def task(a):\n    s = {SUBPKG}.a\n    return s.b.f(a)\n", ".a.b"),
+        (f"def task(a):\n    m = {SUBPKG}\n    n = m\n    return n.a.b.f(a)\n", ".a.b"),
+        (f"def task(a, lib={SUBPKG}):\n    return lib.sub.f(a)\n", ".sub"),
+        (f"def task(a, {SUBPKG}={SUBPKG}):\n    return {SUBPKG}.sub.f(a)\n", ".sub"),
+        # The closure holds `m`, not `lib`: the alias's own cell counts.
+        (
+            "def make(lib):\n    m = lib\n\n    def task(a):\n"
+            "        return m.sub.f(a)\n\n    return task\n\n\n"
+            f"task = make({SUBPKG})\n",
+            ".sub",
+        ),
+        (
+            f"def make():\n    import {SUBPKG}.a as s\n\n"
+            "    def task(a, lib=s):\n        return lib.b.f(a)\n\n    return task\n\n\n"
+            "task = make()\n",
+            ".a.b",
+        ),
+    ],
+    ids=[
+        "alias",
+        "alias of a submodule",
+        "alias of an alias",
+        "default",
+        "default named like the module",
+        "alias in a factory",
+        "factory default",
+    ],
+)
+def test_an_alias_of_the_package_is_followed(kernel, sub_project, task, expected):
+    kernel.run(f"import {SUBPKG}.sub\nimport {SUBPKG}.a.b\n")
+    kernel.run(task)
+    assert f"{SUBPKG}{expected} (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        f"def helper({SUBPKG}, a):\n    return {SUBPKG}.sub.f(a)\n",
+        f"def helper(m, a):\n    {SUBPKG} = m\n    return {SUBPKG}.sub.f(a)\n",
+    ],
+    ids=["parameter", "alias of a parameter"],
+)
+def test_a_name_the_syntax_cannot_tell_reads_the_namespaces_module(
+    kernel, sub_project, helper
+):
+    """A caller can pass the module itself, so a name the syntax cannot tell
+    counts the namespace's module of that name: a recompute if it is
+    something else, never a missed edit."""
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(helper)
+    kernel.run(f"def task(a):\n    return helper({SUBPKG}, a)\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_class_body_reads_the_global_before_rebinding_it(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(
+        f"class Model:\n    v = {SUBPKG}.sub.CONST\n\n"
+        f"    def {SUBPKG}(self):\n        pass\n\n"
+        "    def f(self, x):\n        return x\n"
+    )
+    kernel.run("def task(a):\n    return Model().f(a)\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_class_bodys_comprehension_reads_its_first_iterable_there(
+    kernel, sub_project
+):
+    kernel.run(f"import {SUBPKG}.a.b\nfrom {SUBPKG} import sub as utils\n")
+    kernel.run(
+        f"class Model:\n    from {SUBPKG} import a as utils\n\n"
+        "    vals = [x for x in [utils.b.f(1)]]\n\n"
+        "    def f(self, x):\n        return x\n"
+    )
+    kernel.run("def task(a):\n    return Model().f(a)\n")
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "".join(f"    x = x.{'left' if i % 2 else 'right'}\n" for i in range(40)),
+        "    a = x.l\n    a = x.r\n    x = a.l\n    x = a.r\n" * 10,
+        "    a0 = x.l\n    a0 = x.r\n"
+        + "".join(
+            f"    a{i} = a{i - 1}.l\n    a{i} = a{i - 1}.r\n" for i in range(1, 40)
+        ),
+    ],
+    ids=["rebinding itself", "a cycle", "a doubling chain"],
+)
+def test_rebinding_aliases_stay_bounded(kernel, sub_project, body):
+    """A local rebound from itself, two locals rebound from each other, and a
+    chain whose targets double at each step bind as unknown or stop at the
+    cap: resolving them in full would multiply targets each time. The cell
+    holds the reached task, so the whole cell is read into scopes."""
+    from mushin._resume import _TARGETS_MAX, _cell_lines, _cell_tree, _index_entry
+
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(
+        f"def walk(x):\n{body}    return 0\n\n\n"
+        f"def task(a):\n    return {SUBPKG}.sub.f(a)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+    tree = _cell_tree(_cell_lines(kernel.ns["task"].__code__.co_filename))
+    scopes = _index_entry(tree)[1][0]
+    walk = next(sc for sc in scopes if getattr(sc.node, "name", None) == "walk")
+    assert max(len(targets) for targets in walk.bound.values()) <= _TARGETS_MAX
+
+
+def test_a_global_declaration_reads_the_namespace(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(
+        f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    def inner(x):\n"
+        f"        global {SUBPKG}\n        return {SUBPKG}.sub.f(x)\n\n"
+        "    return inner(a)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_nonlocal_declaration_reads_the_enclosing_function(kernel, sub_project):
+    kernel.run(
+        f"def task(a):\n    from {SUBPKG} import a as m\n\n    def inner(x):\n"
+        "        nonlocal m\n        r = m.b.f(x)\n        m = None\n        return r\n\n"
+        "    return inner(a)\n"
+    )
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [
+            f"def make():\n    import {SUBPKG}.sub as s\n\n    class M:\n"
+            "        k = s.CONST\n\n        def f(self, x):\n            return x * self.k\n\n"
+            "    return M\n\n\nm = make()()\n",
+            "def task(a):\n    return m.f(a)\n",
+        ],
+        [
+            f"def factory():\n    import {SUBPKG}.sub as s\n\n    @s.deco\n"
+            "    def inner(a):\n        return a\n\n    return inner\n\n\ntask = factory()\n"
+        ],
+        [
+            f"class Model:\n    import {SUBPKG}.sub as s\n\n"
+            "    def f(self, a, k=s.f):\n        return k(a)\n\n\nzf = Model.f\n",
+            "def task(a):\n    return zf(None, a)\n",
+        ],
+    ],
+    ids=["class made in a factory", "factory's decorator", "class body's default"],
+)
+def test_a_module_the_enclosing_definition_binds_is_followed(
+    kernel, sub_project, cells
+):
+    """The unit is defined inside another definition whose import names the
+    module, and that is the only way to it: the class has no closure, the
+    decorator and the default are evaluated where the definition stands."""
+    _run_cells(kernel, cells)
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_the_cached_reading_holds_no_namespace_value(sub_project):
+    """Two kernels run the same cell text, so they share its cached tree and
+    reading; what `s` is comes from each kernel's own namespace."""
+    one, two = Kernel("mushin_t_kernel_one"), Kernel("mushin_t_kernel_two")
+    try:
+        one.run(f"import {SUBPKG}.sub as s\n")
+        two.run("import types\ns = types.SimpleNamespace(f=abs)\n")
+        for k in (one, two):
+            k.run("def task(a):\n    return s.f(a)\n")
+        assert f"{SUBPKG}.sub (file)" in _files(one, "task")
+        assert f"{SUBPKG}.sub (file)" not in _files(two, "task")
+    finally:
+        one.close()
+        two.close()
+
+
+def test_a_function_made_inside_another_reaches_what_its_closure_holds(
+    kernel, sub_project
+):
+    """The enclosing function binds the module to a value the syntax cannot
+    tell (a call): only the closure holds it."""
+    kernel.run(
+        "import importlib\n\n\ndef make():\n"
+        f"    s = importlib.import_module('{SUBPKG}.sub')\n\n"
+        "    def task(a):\n        return s.f(a)\n\n    return task\n\n\ntask = make()\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+@lazy_imports
+def test_a_lazy_from_import_of_a_same_named_subpackage_records_it_alike(
+    kernel, sub_project
+):
+    """`lazy from pkg import pkg` binds `pkg` to the subpackage `pkg.pkg`: its
+    full name counts, before the proxy resolves and after."""
+    kernel.run(f"lazy from {SUBPKG} import {SUBPKG}\n")
+    kernel.run(f"def task(a):\n    return a if {SUBPKG} else 0\n")
+    before = project_fingerprints(kernel.ns["task"])["code"]
+    assert kernel.ns["task"](1) == 1  # resolves the proxy in the kernel
+    after = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUBPKG}.{SUBPKG} (file)" in before
+    assert before == after
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [
+            f"def _warm():\n    import {SUBPKG}.sub\n\n\n_warm()\ndel _warm\n",
+            f"def task(a):\n    global {SUBPKG}\n    import {SUBPKG}\n"
+            f"    return {SUBPKG}.sub.f(a)\n",
+        ],
+        [
+            f"def factory():\n    {SUBPKG} = None\n\n    def task(a):\n"
+            f"        nonlocal {SUBPKG}\n        import {SUBPKG}\n"
+            f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\n"
+            "task = factory()\n",
+        ],
+    ],
+    ids=["global", "nonlocal"],
+)
+def test_an_import_under_a_declaration_keeps_its_module(kernel, sub_project, cells):
+    """`global pkg; import pkg` binds the namespace's `pkg`, which a fresh
+    kernel does not hold yet when the record is taken: the import names it."""
+    _run_cells(kernel, cells)
+    assert SUBPKG not in kernel.ns
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_walrus_in_a_comprehension_is_read_through_the_closure(kernel, sub_project):
+    """PEP 572 binds the walrus in the enclosing function, so the task made
+    there reads it from its closure."""
+    kernel.run(
+        "import importlib\n\n\ndef make():\n"
+        f"    [s := importlib.import_module('{SUBPKG}.sub') for _ in range(1)]\n\n"
+        "    def task(a):\n        return s.f(a)\n\n    return task\n\n\n"
+        "task = make()\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+@lazy_imports
+@pytest.mark.parametrize(
+    "cell",
+    [
+        f"lazy import {SUBPKG}.sub as {SUBPKG}",
+        f"lazy from {SUBPKG} import sub as {SUBPKG}",
+    ],
+)
+def test_a_lazy_submodule_bound_under_its_packages_name_is_recorded(
+    kernel, sub_project, cell
+):
+    """It binds the submodule, though its repr reads like `lazy import
+    pkg.sub`: the full name counts, before the proxy resolves and after."""
+    kernel.run(f"{cell}\n")
+    kernel.run(f"def task(a):\n    return a if {SUBPKG} else 0\n")
+    before = project_fingerprints(kernel.ns["task"])["code"]
+    assert kernel.ns["task"](1) == 1
+    after = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUBPKG}.sub (file)" in before
+    assert before == after
+
+
+def test_a_project_namespace_package_named_like_a_stdlib_module_stays_the_projects(
+    kernel, tmp_path, monkeypatch
+):
+    """A loaded package with no file is judged module by module, as on main,
+    though the standard library lists its name (one this platform lacks)."""
+    import importlib
+    import importlib.util
+
+    name = next(
+        n
+        for n in sorted(sys.stdlib_module_names)
+        if n.isidentifier()
+        and not n.startswith("_")
+        and n not in sys.modules
+        and importlib.util.find_spec(n) is None
+    )
+    (tmp_path / name).mkdir()  # a namespace package: no __init__.py
+    (tmp_path / name / "mushin_t_mod.py").write_text("def f(x):\n    return x\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    try:
+        # Bound directly, so `_file_entries` alone decides (a chain on the
+        # package would go through the shipping filter, which judges by name).
+        kernel.run(f"from {name} import mushin_t_mod\n")
+        kernel.run("def task(a):\n    return mushin_t_mod.f(a)\n")
+        assert f"{name}.mushin_t_mod (file)" in _files(kernel, "task")
+    finally:
+        for mod in [m for m in sys.modules if m == name or m.startswith(f"{name}.")]:
+            sys.modules.pop(mod)
+
+
+def test_capping_an_alias_keeps_what_its_import_binds(kernel, sub_project):
+    """Past the cap a name becomes unknown, but the module its own import
+    binds still counts (the namespace need not hold the name)."""
+    params = ", ".join(f"a{i}=None" for i in range(70))
+    branches = "".join(f"    if x == {i}:\n        m = a{i}\n" for i in range(70))
+    kernel.run(
+        f"def task(x, {params}):\n    import {SUBPKG} as m\n{branches}"
+        "    return m.sub.f(x)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_an_alias_of_a_global_set_later_reads_the_namespaces_module(
+    kernel, sub_project
+):
+    """`current` is None when the record is taken and set by a call the task
+    makes, so the alias named like the package reads the namespace's module
+    of its own name too, as main did."""
+    kernel.run(f"import {SUBPKG}.sub\ncurrent = None\n")
+    kernel.run(f"def init():\n    global current\n    current = {SUBPKG}\n")
+    kernel.run(
+        f"def task(a):\n    init()\n    {SUBPKG} = current\n"
+        f"    return {SUBPKG}.sub.f(a)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+BOUND = f"import {SUBPKG}.sub\n"  # the package bound in the namespace
+LOADED = f"def _warm():\n    import {SUBPKG}.sub\n\n\n_warm()\ndel _warm\n"
+
+
+@pytest.mark.parametrize(
+    ("setup", "task"),
+    [
+        # A nested initializer imports into a `nonlocal` name the task binds
+        # to a placeholder `def`.
+        (
+            BOUND,
+            f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    def init():\n"
+            f"        nonlocal {SUBPKG}\n        import {SUBPKG}\n\n    init()\n"
+            f"    return {SUBPKG}.sub.f(a)\n",
+        ),
+        # A comprehension rebinds the imported name to itself, with no global
+        # of that name to fall back on.
+        (
+            LOADED,
+            f"def task(a):\n    import {SUBPKG}\n"
+            f"    return [{SUBPKG}.sub.f(a) for {SUBPKG} in [{SUBPKG}]][0]\n",
+        ),
+    ],
+    ids=["nonlocal import into a placeholder", "comprehension rebinding"],
+)
+def test_main_s_reading_is_the_floor(kernel, sub_project, setup, task):
+    """Shapes the scope model reads one way and main another (both found by
+    Codex): what main named still counts, so the record never holds less
+    than main's."""
+    kernel.run(setup)
+    kernel.run(task)
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
