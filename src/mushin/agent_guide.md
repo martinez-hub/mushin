@@ -169,10 +169,10 @@ rules:
   them when the run starts; no value does (a number, a model name, a dict
   config), so pass values as swept parameters. Every project module a cell
   imports counts too, so with `cache_dir=`, importing another one in a cell
-  can make the cells compute again. A module loaded other than by an
-  `import` statement (`importlib.import_module`, a plugin loader) may not be
-  compared, nor may a class with no method of its own: after editing one,
-  use a new `working_dir`. Taking
+  can make the cells compute again. A module loaded other than by a cell's
+  `import` statement (`importlib.import_module`, a plugin loader, an import
+  in a `%%time` cell) may not be compared, nor may a class with no method of
+  its own: after editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed

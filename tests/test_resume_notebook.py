@@ -1828,7 +1828,7 @@ def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
     import mushin._resume as resume
 
     resume._NOTEBOOK_FAILURE_WARNED.clear()  # it warns once per run otherwise
-    resume._CELL_SCAN_WARNED.clear()
+    getattr(resume, "_CELL_SCAN_WARNED", []).clear()  # (absent before #294)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
@@ -3008,17 +3008,38 @@ def test_a_free_variable_the_unit_also_reads_as_a_global_is_read_both_ways(
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
 
 
-def test_a_free_variable_is_not_read_from_the_namespace(kernel, sub_project):
-    """The task's `m` is its closure's (a value here), never the namespace's
-    module of that name (Codex on #291)."""
+def test_a_free_variable_reads_the_namespaces_module_too(kernel, sub_project):
+    """The task's `m` is its closure's, but a chain on it reads the
+    namespace's module of that name too, as main did: a recompute when that
+    module changes (Codex on #291), kept for the case below."""
     kernel.run(f"import {SUBPKG} as m\nimport types\n")
     kernel.run(
         "def make(m):\n    def task(a):\n        return m.sub.f(a)\n\n    return task\n\n\n"
         "task = make(types.SimpleNamespace(sub=types.SimpleNamespace(f=abs)))\n"
     )
-    files = _files(kernel, "task")
-    assert f"{SUBPKG} (file)" in files  # the namespace's own module, by value
-    assert f"{SUBPKG}.sub (file)" not in files
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_closure_a_sibling_fills_during_the_run_reads_the_namespace(
+    kernel, sub_project
+):
+    """The closure is empty when the record is taken, and `setup` fills it
+    with what the syntax cannot tell: the namespace's module of that name is
+    what records the submodule (round 3 of #294)."""
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\nimportlib.import_module('{SUBPKG}.sub')\n"
+    )
+    kernel.run(
+        f"def make():\n    {SUBPKG} = None\n\n    def setup():\n"
+        f"        nonlocal {SUBPKG}\n"
+        f"        {SUBPKG} = importlib.import_module('{SUBPKG}')\n\n"
+        f"    def task(a):\n        if {SUBPKG} is None:\n            setup()\n"
+        f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\ntask = make()\n"
+    )
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2
+    assert f"{SUBPKG}.sub (file)" in before
+    assert _files(kernel, "task") == before
 
 
 def _rebinds(indent: str) -> str:
@@ -3080,11 +3101,18 @@ def test_a_record_cut_short_keeps_the_seeds_main_had_before_the_cells(
     (cell_imports / SUBPKG / "wide.py").write_text(f"import {SUBWIDE}\n")
     monkeypatch.setattr(resume, "_FILES_MAX", 3)
     monkeypatch.setattr(resume, "_TRUNCATION_WARNED", [])
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
     kernel.run(f"import {SUBPKG}.wide\nfrom {SUBREL} import f\n")
     kernel.run("def task(a):\n    return f(a)\n")
-    with pytest.warns(UserWarning, match="cells import reach more files"):
-        files = _files(kernel, "task")
-    assert f"{SUBREL} (file)" in files, files
+    for _ in range(2):  # a run, then a resume: each warns once
+        with pytest.warns(UserWarning) as got:
+            shipped = resume.driver_script_entries((kernel.ns["task"],))
+            files = _files(kernel, "task", scripts=shipped)
+            project_fingerprints(kernel.ns["task"], scripts=shipped)  # no second
+        cut = [w for w in got if "cells import, and those" in str(w.message)]
+        assert len(cut) == 1, [str(w.message) for w in got]
+        assert not [w for w in got if "the task's code imports" in str(w.message)]
+        assert f"{SUBREL} (file)" in files, files
 
 
 def test_a_cell_the_parser_rejects_does_not_stop_the_scan(kernel, cell_imports):
@@ -3213,6 +3241,13 @@ LATER_CUT_CASES = {
         "        return m.x0.X + f(a)\n\n    return task\n\n\n"
         f"task = make(importlib.import_module('{SUBWIDE}'))\n"
     ),
+    # A sibling's import into the name.
+    "an import rebinding": (
+        "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
+        f"        import {SUBPKG}.wide as s\n\n    def task(a):\n"
+        "        return f(a) if s is None else s.X\n\n    return task\n\n\n"
+        "task = make()\n"
+    ),
     # A sibling's rebinding reaching a wide submodule.
     "a rebinding": (
         "def make():\n    s = None\n\n    def rebind():\n        nonlocal s\n"
@@ -3236,9 +3271,10 @@ def test_a_later_reading_cut_short_keeps_the_seeds_main_had(
     monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
     kernel.run(f"import {SUBPKG}\nfrom {SUBREL} import f\n")
     kernel.run(LATER_CUT_CASES[case])
-    with pytest.warns(UserWarning, match="reach more files"):
+    with pytest.warns(UserWarning, match="reaches through a default"):
         files = _files(kernel, "task")
     assert f"{SUBREL} (file)" in files, files
+    assert len(files) <= 3, files  # the later pass gets what the first left
 
 
 @lazy_imports
@@ -3259,6 +3295,7 @@ def test_a_lazy_proxys_other_reading_cut_short_keeps_the_seeds_main_had(
     with pytest.warns(UserWarning, match="reach more files"):
         files = _files(kernel, "task")
     assert f"{SUBREL} (file)" in files, files
+    assert len(files) <= 3, files
 
 
 @lazy_imports
@@ -3276,3 +3313,36 @@ def test_a_lazy_reading_does_not_follow_a_name_rebound_to_another_module(
     files = _files(kernel, "task")
     assert f"{SUBREL} (file)" in files
     assert not {f"{SUBPKG}.other (file)", f"{SUBPKG}.{SUBPKG}.other (file)"} & files
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        # `rebind` sits in `mid`, which does not bind `s`: the binding is
+        # `make`'s.
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def mid():\n        def rebind():\n"
+        f"            nonlocal s\n            s = {SUBPKG}.{SUBPKG}\n\n"
+        "        rebind()\n\n    def task(a):\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "        mid()\n        return out\n\n    return task\n\n\n",
+        # An outer function binds `s` too; `make`'s, the nearest, is the one.
+        f"def outer():\n    s = None\n\n    def make():\n        s = {SUBPKG}.sub\n\n"
+        f"        def rebind():\n            nonlocal s\n            s = {SUBPKG}.{SUBPKG}\n\n"
+        "        def task(a):\n"
+        "            out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "            rebind()\n            return out\n\n        return task\n\n"
+        "    return make\n\n\nmake = outer()\n",
+    ],
+    ids=["through a function that does not bind it", "the nearest binding"],
+)
+def test_a_rebinding_goes_on_the_binding_it_rebinds(kernel, sub_project, factory):
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\n"
+        f"importlib.import_module('{SUBPKG}.sub')\n"
+        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
+    )
+    kernel.run(f"{factory}task = make()\n")
+    before = _files(kernel, "task")
+    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
+    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
+    assert _files(kernel, "task") == before

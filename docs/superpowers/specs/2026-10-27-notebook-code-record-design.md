@@ -1198,8 +1198,11 @@ imports, and the digest-pinned and restart tests (notebook entries only).
   cells a run rebinds: fixed (the cells' imports; the 3.15 bases; declared
   aliases). A closure rebound to a value the syntax cannot tell, holding a
   module only a computed name imports, can still change the `cache_dir` key;
-- Codex's over-recording: the free-variable double read is fixed; the
-  parameter named like a namespace module stays, as the floor;
+- Codex's over-recording: kept whole, as a documented recompute. The
+  parameter named like a namespace module is the floor's reading; the
+  free-variable double read was dropped in round 1 and restored in round 3,
+  since main's namespace read is what records a closure a sibling fills
+  during the run;
 - cleanups: the per-unit cache and the one lazy-type lookup were done in
   #293; the two foreign rules stay two, on purpose.
 
@@ -1430,6 +1433,62 @@ nothing blocking, merge.
   cells' modules only, when the invariant covers every reading main lacked.
   Write the invariant down first and list its members from the diff (here:
   every line that adds to `modules` and is not in main's reading).
+
+### #294 review round 3 (2026-11-04): plan
+
+`/code-review` (9, none blocking) and the adversarial workflow (7 confirmed:
+1 important, 6 minor) reviewed 0c5646f. Plan, written before any edit.
+
+**Blocking: the free-variable skip records less than main.** Round 1 dropped
+the scope reading's namespace read for a unit's free variable, on the
+argument that a free variable never reads the namespace. It does not, but
+the closure can be empty when the record is taken and filled during the run
+by a sibling with a value the syntax cannot follow (`nonlocal zzp; zzp =
+importlib.import_module("zzp")`), and then main's namespace read of `zzp`
+was what recorded `zzp.sub`. Reproduced against main. Round 2 weighed this
+very trade (the advisor asked for the reason in writing) and judged the
+shape contrived; a lazy initializer is not. The skip goes, and Codex's
+over-recording stays whole, as a documented recompute. Lesson: under "never
+less than main", a removal from main's reading needs a proof, not a judgment
+that the counterexample is rare. Tests: the reviewers' shape as a
+regression; the free-variable test now expects main's reading.
+
+**Minor (tests the reviews showed unpinned):** an import rebinding as a cut
+case; the registry's owner search past a direct parent (a `mid` function
+that does not bind the name, and an outer binding the nearest one shadows);
+the total held to the bound in the cut tests; the later warning's per-run
+reset; the cells' cut test patching the right flag.
+
+**Wording:**
+- the guide's "every project module a cell imports" leaves out a cell the
+  kernel keeps no text for, as the definitions' sentence does. A `%%time`
+  cell's import is run through a string, so it joins the "loaded other than
+  by an `import` statement" example;
+- the later warning names the readings too, not only the cells' imports.
+
+**Cleanup:** `_kept_cell_reading` and `_cell_lines` share one predicate for
+a kept cell.
+
+**Not changed, with reasons** (`/code-review`): the registry's cap and its
+dropped cell targets (neither is below main, which had no registry); a
+`__lazy_modules__` that names other modules still makes every binding a
+candidate (a recompute at most); the two passes, kept so each warning names
+its cause; hashing each cell's text per record (0.6 ms per 500 cells; a name
+can be reused for other text).
+
+**Stopping rule:** both reviews on this delta. Merge if they find nothing
+blocking.
+
+**Results (round 3 fixes).** 264 tests in the module (241 run on 3.11, all
+264 pass on 3.15); `make check` 1615 passed. The reviewers' shape (a closure
+a sibling fills during the run) passes on main and fails on 0c5646f, and
+the free-variable test, now expecting main's reading, does the same. Seven
+mutations for this round (the owner search taking the nearest function or
+the outermost, pass two given a full bound, the later warning's reset gone,
+an import rebinding put with the reached modules, the free-variable skip
+back, the registry ignored), each caught by node id. The test helper reads
+`_CELL_SCAN_WARNED` with `getattr`, so the file runs against main too, which
+is how the regression was checked there.
 
 ### PR 2: classes with no method of their own
 

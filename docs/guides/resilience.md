@@ -134,15 +134,16 @@ function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
 keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. Every
-project module that a cell the kernel has run imports counts too, whether or
-not the task names it, so an edit to it re-runs the cells. `cache_dir=` keys
-on the same record, so importing another project module in a cell, or a
-restart after removing one's import, can make the cells compute again. A
-module loaded other than by an `import` statement (`importlib.import_module`,
-a plugin loader that fills a registry) may not be compared, as in a script,
-nor may a class with no method of its own (a dataclass or an `Enum` of
-fields), or what it names beyond its bases. After editing such a module or
-class, use a new `working_dir`.
+project module that a cell whose text the kernel keeps imports counts too,
+whether or not the task names it, so an edit to it re-runs the cells.
+`cache_dir=` keys on the same record, so importing another project module in
+a cell, or a restart after removing one's import, can make the cells compute
+again. A module loaded other than by an `import` statement of such a cell
+(`importlib.import_module`, a plugin loader that fills a registry, an import
+in a `%%time` cell) may not be compared, as in a script, nor may a class with
+no method of its own (a dataclass or an `Enum` of fields), or what it names
+beyond its bases. After editing such a module or class, use a new
+`working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

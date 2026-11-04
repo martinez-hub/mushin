@@ -1277,6 +1277,13 @@ def _cell_entry(entry) -> bool:
     return type(entry) is tuple and len(entry) == 4 and type(entry[2]) is list
 
 
+def _kept_cell(entry, legacy: bool) -> bool:
+    """Whether a ``linecache`` entry is a notebook cell's text: one with no
+    mtime (IPython 8.6 and later, ipykernel), or any entry of IPython 7's own
+    ``linecache._ipython_cache`` (``legacy``), which wrote one."""
+    return _cell_entry(entry) and (legacy or entry[1] is None)
+
+
 def _cell_lines(filename) -> list | None:
     """The text of a notebook cell, as IPython keeps it in ``linecache``: an
     entry with no modification time (a file on disk has one, and can have
@@ -1285,12 +1292,12 @@ def _cell_lines(filename) -> list | None:
     import linecache
 
     entry = linecache.cache.get(filename)
-    if _cell_entry(entry) and entry[1] is None:
+    if _kept_cell(entry, legacy=False):
         return entry[2]
     kept = getattr(linecache, "_ipython_cache", None)
     if type(kept) is dict:
         entry = kept.get(filename)
-        if _cell_entry(entry):
+        if _kept_cell(entry, legacy=True):
             return entry[2]
     return None
 
@@ -1395,8 +1402,8 @@ def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
     """What every cell the kernel keeps imports (``_cell_imports``, cached by
     the cell's text): ``(modules, bindings)``, ``bindings`` mapping a name to
     ``(dotted, lazy)`` for each import binding it to a dotted module starting
-    with it. A cell is a ``linecache`` entry ``_cell_lines`` would serve: one
-    with no mtime, or one in IPython 7's own cache. Every kept cell counts,
+    with it. A cell is a ``linecache`` entry ``_cell_lines`` would serve
+    (``_kept_cell``). Every kept cell counts,
     an older version of a re-run cell too: a submodule's code runs only if
     something imported it, and a cell's import is there however the task then
     reaches the module (an argument, a call's result, a local name the syntax
@@ -1410,7 +1417,7 @@ def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
     texts: set[str] = set()
     for source in sources:
         for entry in list(source.values()):
-            if _cell_entry(entry) and (entry[1] is None or source is legacy):
+            if _kept_cell(entry, legacy=source is legacy):
                 try:
                     texts.add("".join(entry[2]))
                 except TypeError:  # a line that is not text
@@ -2611,13 +2618,11 @@ def _notebook_entries(
         kind, obj = units[uid][0], units[uid][1]
         free = {}
         defaults: dict = {}
-        reads: frozenset = frozenset()
         if kind == "function":
             # A function's closure has one cell per free variable.
             cells = obj.__closure__ or ()
             free = dict(zip(obj.__code__.co_freevars, cells, strict=False))
             defaults = _parameter_defaults(obj)
-            reads = _code_names(obj.__code__)[0]
         # The compiler's free variables decide (a walrus in a comprehension
         # binds in the enclosing function, which the scopes read as the
         # comprehension's): a chain on one asks the closure too.
@@ -2630,12 +2635,11 @@ def _notebook_entries(
             except ValueError:  # an empty cell: nothing bound yet
                 continue
             follow(modules, _chain_bases(chain[0], value), chain[1:])
+        # The namespace too, for a free variable as well: its closure can be
+        # empty now and filled during the run with what the syntax cannot
+        # tell (`nonlocal pkg; pkg = importlib.import_module("pkg")`), and
+        # main's record read the namespace's module of that name.
         for chain in global_chains:
-            if chain[0] in free and chain[0] not in reads:
-                # A free variable is read from the closure (above), never
-                # from the namespace, unless the unit's code also reads the
-                # name as a global somewhere.
-                continue
             if chain[0] in namespace and not _kernel_name(chain[0]):
                 found = _chain_bases(chain[0], namespace[chain[0]])
                 follow(modules, found, chain[1:])
@@ -3096,9 +3100,10 @@ def _record(roots, targets=(), scripts_given=None) -> dict:
     elif later_cut and not cut and not _LATER_TRUNCATION_WARNED:
         _LATER_TRUNCATION_WARNED.append(True)
         _best_effort_warning(
-            "resume/cache_dir: the project modules the notebook's cells import "
-            "reach more files than the fingerprint covers, so an edit past that "
-            "point may go unnoticed; use a fresh working_dir after editing one."
+            "resume/cache_dir: the project modules the notebook's cells import, "
+            "and those its code reaches through a default, a rebinding or a lazy "
+            "import, reach more files than the fingerprint covers, so an edit past "
+            "that point may go unnoticed; use a fresh working_dir after editing one."
         )
     return {"python": f"{sys.version_info[0]}.{sys.version_info[1]}", "code": code}
 
