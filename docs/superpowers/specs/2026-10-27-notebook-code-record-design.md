@@ -1065,3 +1065,201 @@ recall beyond main are still caught by their tests: aliases, defaults read
 where the definition stands, enclosing scopes, outer parts, bases, the
 shipment, and the cap (a hang without it). The rules that only exist on
 3.12+ or 3.15 were caught there.
+
+## The rest of #292 (2026-11-04): plan for two PRs
+
+The maintainer asked that every case still open in #292 be resolved before
+0.17.1. Plan, written before any edit. Each case is either fixed, or closed
+with the reason a fix would trade a missed edit for precision (the bar: a
+missed edit is a wrong result; over-recording costs a recompute).
+
+**Most of the list has one cause.** A submodule's code runs only if
+something imported it: a cell, a project file (`_file_entries` follows those
+already), or a name computed at run time. The reached-definitions reading
+looks for the submodule in the task's syntax, so every way of reaching it the
+syntax cannot follow (an argument, a call's result, `m = pkg if a else
+None`, `for m in mods`) misses it. The import statement is in a kept cell
+whichever way the task reaches the module, so reading the cells' imports
+closes the class instead of patching shapes. It also brings `import pkg.sub`
+to parity with `from pkg import sub` and `import pkg.sub as s`, which bind a
+module value and are recorded already (`_namespace_modules`).
+
+### PR 1: the modules the kept cells import
+
+- **The cells' imports** (missed edits: a module passed in, returned by a
+  call, held in a local name the syntax cannot follow). Every absolute import
+  anywhere in a kept cell (`_cell_lines`' rule: a `linecache` entry with no
+  mtime, and IPython 7's `_ipython_cache`) adds what `_import_pairs` names,
+  filtered as the other notebook modules are (`_maybe_project`). Round 2's
+  objections to a cell scan, each answered:
+  - a worker keeps no cells: the driver ships the modules
+    (`NOTEBOOK_MODULES`), as it does now;
+  - cost: a per-cell index (imports only, no trees), cached by the cell's
+    text, bounded; a cell without the word `import` is not parsed;
+  - a cell-name whitelist: none, the same rule `_cell_lines` uses;
+  - stray `SyntaxWarning`s: the parse runs with warnings ignored (and
+    `_cell_tree`'s too).
+  The cost is precision, by design: a cell's `import pkg.plotting` now counts
+  for every task, as `from pkg import plotting` already did. An old version
+  of a re-run cell counts too (a recompute, not a wrong result). The cells'
+  modules come after the reached code's in the shipment, so a record cut by
+  `_FILES_MAX` still starts from what the task names. They are kept when the
+  walk passes its bound or fails, since they do not depend on it.
+- **3.15, `lazy import pkg.sub`** (recompute). Before the proxy resolves
+  `_namespace_modules` records `pkg.sub`, after only `pkg`. The cell's
+  statement now records `pkg.sub` either way. When both readings of an
+  ambiguous proxy are files (`pkg/utils/utils.py`), a chain on the name after
+  it resolves also takes the readings the proxy had: on 3.15, a kept cell's
+  import binding `n` with a dotted name starting at `n` (`import pkg.utils`,
+  `import pkg.utils as pkg`, `from pkg import pkg`) adds `n` and that name
+  as bases for chains on `n`. Only adds, so the floor is untouched.
+- **Closure cells a run rebinds** (recompute). With the cells' imports, the
+  module before and after a `nonlocal` rebinding are both recorded when a cell
+  imports them. Also, a `nonlocal` or `global` alias (`nonlocal s; s =
+  pkg.other`) adds its targets where the declaration sends the name, as a
+  declared import does now. Each is resolved without the scope's other
+  declared aliases (otherwise `s = s.a` repeated doubles the targets each
+  time, round 1's hang) and capped at `_TARGETS_MAX`.
+- **A parameter's default value** (missed edit: `def make(mod): def task(a,
+  m=mod): return m.sub.f(a)`). The default is in `__defaults__`, never read.
+  A chain on one of a function unit's own parameters also reads its default
+  value, by type, as a closure cell is read (`_chain_bases`).
+- **Codex's over-recording** (recompute). Two parts:
+  - the scope reading reads a chain on a free variable through the closure
+    and the namespace both. A free variable never reads the namespace, so the
+    namespace read is dropped when the unit's own code never loads that name
+    as a global (`_code_names`). The floor is untouched (it already reads the
+    closure only).
+  - a parameter or local named like a namespace module reads that module.
+    This is the floor (main's reading), and it is what records a module
+    passed in under its own name (`def helper(pkg, a)` called with `pkg`).
+    Dropping it can miss an edit, so it stays, as a documented recompute.
+- **Cleanups listed in the issue:** the per-unit reading is cached and the
+  lazy type is looked up once (both done in #293). The foreign rules stay
+  two: `_is_foreign_module` judges one module, `_foreign_top` a whole
+  top-level name, and they differ on purpose for a namespace package.
+
+**Tests** (each rule mutation-checked by node id, the baseline run first):
+- the four syntax-blind shapes (an argument through a `partial`, a call's
+  result, a conditional alias, a loop over a list of modules), each with
+  `import pkg.sub` in a cell, record `pkg.sub`; each fails on main;
+- an import inside an unreached cell function counts; a module loaded only
+  by `importlib.import_module` still does not; a foreign import adds nothing;
+- `test_only_the_code_the_task_reaches_names_modules` asserted that a cell's
+  `import pkg.other` the task never names is not recorded. That precision is
+  what this PR gives up, so the case moves to a module only `importlib` loads;
+- a cell with an invalid escape sequence prints no warning;
+- the cells' modules survive a walk past its bound;
+- 3.15: `lazy import pkg.sub` with a task naming `pkg.other.g`, and the
+  `pkg/utils/utils.py` case, record alike before and after the proxy
+  resolves;
+- a `nonlocal` rebinding records alike before and after the run;
+- a default holding a module records its submodule;
+- a free variable named like a namespace module adds no file through the
+  namespace.
+
+**Where it is taken.** In `_notebook_record`, once per record and apart
+from each namespace's walk: `_notebook_entries` returns nothing when its
+walk passes its bound or fails, and the cells' imports do not depend on the
+walk. The scan enumerates `linecache.cache` (and `_ipython_cache`) with
+`_cell_lines`' rule, since `_cell_lines` itself takes one filename. A scan
+that raises gives no cell modules and the record-failure warning. The cells
+are the process's, not one namespace's: in a kernel that is the same thing.
+
+**Existing tests that encode the precision given up**, each decided:
+- `test_only_the_code_the_task_reaches_names_modules`: precision dropped by
+  design (a cell's `import pkg.other` now counts). Its "a submodule the
+  reached code never names" half moves to one only `importlib` loads.
+- `test_a_class_bodys_import_does_not_steer_its_methods_names`: its subject
+  (a class body's import does not steer a method's chain) still holds, but its
+  setup's `import pkg.a.b` now records the file itself, masking it. The setup
+  drops that import.
+- `test_a_cut_or_failed_walk_names_no_modules`: its subject (the walk's
+  modules go with a cut walk) holds; its setup's `import pkg.sub` now records
+  the file through the cells. The setup binds the package without importing
+  the submodule by a statement, and a new case checks that a cell's import
+  survives the cut.
+- `test_the_cached_reading_holds_no_namespace_value`: two simulated kernels
+  share one process's `linecache`, so the first's `import pkg.sub as s` is a
+  kept cell for the second too. Its subject (the cached reading holds no
+  namespace value) holds; the first kernel closes before the second records.
+- `test_the_driver_ships_only_project_modules`: the shipment now also lists
+  the cells' project module (`SUBNS.mod`); what it checks (no installed or
+  built-in name ships) is unchanged.
+Not affected, checked: a value bound under the package's name
+(`import types` only), a relative import (level 1 is skipped), foreign
+imports, and the digest-pinned and restart tests (notebook entries only).
+
+**#292, every bullet's disposition** (for the close-out comment):
+- missed edits: an argument, a call's result, a local the syntax cannot
+  follow, a factory's default: fixed (the cells' imports; the defaults);
+- a class with no method of its own: PR 2;
+- 3.15 recomputes (`lazy import pkg.sub`, both readings files), closure
+  cells a run rebinds: fixed (the cells' imports; the 3.15 bases; declared
+  aliases). A closure rebound to a value the syntax cannot tell, holding a
+  module only a computed name imports, can still change the `cache_dir` key;
+- Codex's over-recording: the free-variable double read is fixed; the
+  parameter named like a namespace module stays, as the floor;
+- cleanups: the per-unit cache and the one lazy-type lookup were done in
+  #293; the two foreign rules stay two, on purpose.
+
+**Docs:** the caveat at the three sites shrinks to a module imported only by
+a name computed at run time (`importlib.import_module(name)`, a plugin
+loader), as in a script, and the methodless class (until PR 2). The record's
+rule gains a sentence: every project module a cell imports counts.
+
+**Results (PR 1).**
+- **Tests:** 23 new test items (245 in the module). On 3.11, 225 run; on
+  3.15, all 245 pass. Against main (3a8f6d7), 17 of the new items fail (14 on
+  3.11, the three lazy ones on 3.15); the load-state test passes there, as
+  it should.
+- **Fixtures:** `sub_project` and `lazy_project` turn the scan off, since
+  their cells import the very submodules most of their tests assert (round
+  2's `import pkg.sub` setups): with the scan on, those tests would pass
+  without the rules they pin. `cell_imports` turns it back on for the scan's
+  own tests. The two precision tests planned for edits above needed none:
+  with the scan off they test the reached code's reading, and their
+  docstrings say so.
+- **Mutations:** twenty for this PR, run by node id after a baseline. All
+  are caught but two: widening the free-variable condition to any name the
+  unit does not read as a global (the floor and the defaults read cover what
+  it drops, so the record is unchanged), and taking any binding as a lazy
+  one's (a base no file has). The three 3.15 ones were caught on 3.15;
+  compounding declared aliases without the cap hangs (caught). #293's
+  forty-five, run again, match its merge table except one: the new defaults
+  read masked "defaults not read where the definition stands", so a nested
+  function's default (not a unit, so its value is never read) pins it again.
+- **Cost** (three runs each, the 500-cell kernel, 3.11 on an Apple M1):
+  main 46-54 ms the first time, then 7.7-7.9 ms; this branch 54-72 ms, then
+  7.2-8.8 ms, recording the same 11 files. The first record parses each cell
+  with an import once.
+- **My mistakes this round, each caught before review:**
+  - the mutation runner split node ids on spaces (the new ids have
+    parameter names with spaces), so its first table ran no test at all and
+    every row read "0.00s". Read the counts before reading a table;
+  - the 3.15 bases first applied to every import on 3.15, so an eager
+    `import pkg.sub` gave chains bases it never has (a shipping test showed
+    it on 3.15 only). They now come only from a statement that can bind a
+    proxy (`lazy`, `-X lazy_imports=all`, `__lazy_modules__`);
+  - the scan masked most of #291's and #293's positive tests, found by
+    reading the floor test before the mutation run; hence the fixtures;
+  - the new defaults read masked an older rule's test (above). A new rule
+    can mask an old one's tests, not only its own: re-run the old table.
+
+### PR 2: classes with no method of their own
+
+Planned in its own PR, after this one merges.
+
+### Mistakes to avoid this time (from the earlier rounds)
+
+- variable names: `named`, `modules` and `seeds` are taken in
+  `_notebook_entries` and `_scope_bindings`; check before naming a new one;
+- a new definition goes below the previous one's decorators, not between;
+- anything that grows targets is linear by construction, and has a test that
+  would hang without it;
+- an optimization is tested against the invariants it can break (walk
+  order, never less than main);
+- mutation tests: run the baseline first, check each mutation string matches
+  once, run new tests by node id with their counts, and make sure a test
+  fails for the reason it names (not a second path, not walk order);
+- measurements compare the output itself and are repeated.

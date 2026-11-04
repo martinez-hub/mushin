@@ -1284,19 +1284,35 @@ def _cell_lines(filename) -> list | None:
     return None
 
 
+def _parse_cell(text: str):
+    """A cell's syntax tree, or None when it does not parse. Its warnings (an
+    invalid escape sequence's ``SyntaxWarning``) are not shown again: the
+    kernel showed them when the cell ran. (Changing the filters resets
+    Python's once-per-place memory; this module's own warnings keep their
+    own.)"""
+    import ast
+    import warnings
+
+    # A cell may await at the top level (ipykernel compiles it so).
+    flags = ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return compile(text, "<cell>", "exec", flags)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+
+
 def _cell_tree(lines):
     """A cell's syntax tree without docstrings, cached by its text (a few,
     since a long session runs many cells); None when it does not parse."""
-    import ast
-
     text = "".join(lines)
     key = _short_hash(text.encode())
     if key in _CELL_TREES:
         return _CELL_TREES[key]
+    tree = _parse_cell(text)
     try:
-        # A cell may await at the top level (ipykernel compiles it so).
-        flags = ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
-        tree = _strip_tree(compile(text, "<cell>", "exec", flags), main_guards=False)
+        tree = _strip_tree(tree, main_guards=False) if tree is not None else None
     except (SyntaxError, ValueError, RecursionError):
         tree = None
     while len(_CELL_TREES) >= _CELL_TREES_MAX:
@@ -1304,6 +1320,118 @@ def _cell_tree(lines):
         _SCOPE_INDEXES.pop(id(evicted), None)  # its scope index goes with it
     _CELL_TREES[key] = tree
     return tree
+
+
+#: What each kept cell imports, by its text: names only, no trees, so a
+#: session keeping many cells parses each once.
+_CELL_IMPORTS: dict[str, tuple] = {}
+_CELL_IMPORTS_MAX = 4096
+
+
+def _cell_imports(
+    text: str,
+) -> tuple[tuple[str, ...], tuple[tuple[str, str, bool], ...]]:
+    """``(modules, bindings)`` for a cell's text. ``modules``: what its
+    absolute imports name, at any depth (``_import_pairs``). ``bindings``:
+    ``(name, dotted, lazy)`` for each import that binds ``name`` to a dotted
+    module starting with it (``import pkg.sub`` binds ``pkg``, and so do
+    ``import pkg.sub as pkg`` and ``from pkg import pkg``), ``lazy`` when it
+    is written ``lazy import`` (3.15): such a statement's proxy reads two ways
+    (``_chain_bases``). A cell without the word ``import`` is not parsed.
+    Cached by the text."""
+    import ast
+
+    key = _short_hash(text.encode("utf-8", "surrogatepass"))
+    hit = _CELL_IMPORTS.get(key)
+    if hit is not None:
+        return hit
+    modules: tuple[str, ...] = ()
+    bindings: tuple[tuple[str, str, bool], ...] = ()
+    tree = _parse_cell(text) if "import" in text else None
+    if tree is not None:
+        modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
+        found: set[tuple[str, str, bool]] = set()
+        for node in ast.walk(tree):
+            if type(node) is ast.Import:
+                pairs = [
+                    (a.asname or a.name.partition(".")[0], a.name) for a in node.names
+                ]
+            elif type(node) is ast.ImportFrom and node.level == 0 and node.module:
+                pairs = [
+                    (a.asname or a.name, f"{node.module}.{a.name}")
+                    for a in node.names
+                    if a.name != "*"
+                ]
+            else:
+                continue
+            lazy = bool(getattr(node, "is_lazy", 0))
+            found.update(
+                (name, dotted, lazy)
+                for name, dotted in pairs
+                if dotted != name and dotted.partition(".")[0] == name
+            )
+        bindings = tuple(sorted(found))
+    while len(_CELL_IMPORTS) >= _CELL_IMPORTS_MAX:
+        _CELL_IMPORTS.pop(next(iter(_CELL_IMPORTS)))
+    _CELL_IMPORTS[key] = (modules, bindings)
+    return modules, bindings
+
+
+def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
+    """What every cell the kernel keeps imports (``_cell_imports``):
+    ``(modules, bindings)``, ``bindings`` mapping a name to ``(dotted,
+    lazy)`` for each import binding it to a dotted module starting with it. A cell is a ``linecache`` entry
+    ``_cell_lines`` would serve: one with no mtime, or one in IPython 7's own
+    cache. Every kept cell counts, an older version of a re-run cell too: a
+    submodule's code runs only if something imported it, and a cell's import
+    is there however the task then reaches the module (an argument, a call's
+    result, a local name the syntax cannot follow)."""
+    import linecache
+
+    sources = [linecache.cache]
+    legacy = getattr(linecache, "_ipython_cache", None)
+    if type(legacy) is dict:
+        sources.append(legacy)
+    texts: set[str] = set()
+    for source in sources:
+        for entry in list(source.values()):
+            if _cell_entry(entry) and (entry[1] is None or source is legacy):
+                try:
+                    texts.add("".join(entry[2]))
+                except TypeError:  # a line that is not text
+                    continue
+    modules: set[str] = set()
+    bindings: dict[str, set[tuple[str, bool]]] = {}
+    for text in texts:
+        found, bound = _cell_imports(text)
+        modules.update(found)
+        for name, dotted, lazy in bound:
+            bindings.setdefault(name, set()).add((dotted, lazy))
+    return modules, bindings
+
+
+def _lazy_bindings(bindings: dict, namespace: dict) -> dict[str, set[str]]:
+    """Of the kept cells' ``bindings`` (``_kept_cell_reading``), the dotted
+    modules a statement binding each name may have bound a lazy proxy for,
+    in ``namespace``: one written ``lazy import``, or any once lazy imports are
+    on for every import (``-X lazy_imports=all``) or for some of the
+    namespace's (``__lazy_modules__``). Empty before 3.15, and when lazy
+    imports are off."""
+    import sys
+
+    get_mode = getattr(sys, "get_lazy_imports", None)
+    if _LAZY_IMPORT_TYPE is None or get_mode is None:
+        return {}
+    mode = get_mode()
+    if mode == "none":
+        return {}
+    every = mode == "all" or "__lazy_modules__" in namespace
+    out: dict[str, set[str]] = {}
+    for name, pairs in bindings.items():
+        lazy = {dotted for dotted, written in pairs if written or every}
+        if lazy:
+            out[name] = lazy
+    return out
 
 
 def _code_names(code) -> tuple[frozenset, frozenset]:
@@ -1461,6 +1589,9 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
       cost of guessing wrong the other way; a recompute is this one's.
     - A nested ``def`` or ``class`` name, and a relative import, bind only
       their cell: whatever it holds, it is not the namespace's module.
+    - An import or an alias of a name declared ``global`` or ``nonlocal``
+      here adds its targets to ``scope.declared``, where the declaration
+      sends the name.
 
     Aliases resolve once each, in dependency order. One in a cycle (``x =
     x.a``, ``a = x.l; x = a.r``) binds as unknown, and a name past
@@ -1586,6 +1717,19 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
                 unknown(name)
         if len(scope.bound[name]) > _TARGETS_MAX:
             scope.bound[name] = seeds[name] | {cell(name), ("global", (name,))}
+    # An alias of a name declared `global` or `nonlocal` here (`nonlocal s;
+    # s = pkg.other`) rebinds it where the declaration sends it: its targets
+    # count there, as a declared import's do, so the record reads alike
+    # before and after a run rebinds the cell. All resolve before any is
+    # added, so `s = s.a` repeated cannot compound; past the cap, the
+    # declared imports' targets are what stays.
+    rebinds = [
+        (name, _resolve_chain(scope, chain)) for name, chain in aliases if name in skip
+    ]
+    for name, targets in rebinds:
+        held = scope.declared.setdefault(name, set())
+        if len(held | targets) <= _TARGETS_MAX:
+            held |= targets
 
 
 def _index_entry(tree) -> tuple:
@@ -2193,10 +2337,32 @@ def _maybe_project(name: str, foreign_tops: dict) -> bool:
     return not foreign_tops[top]
 
 
-def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]]:
+def _parameter_defaults(fn) -> dict:
+    """A function's parameters that have a default, by name, with the value
+    its ``__defaults__`` or ``__kwdefaults__`` holds."""
+    code = fn.__code__
+    positional = code.co_varnames[: code.co_argcount]
+    out: dict = {}
+    values = fn.__defaults__
+    if type(values) is tuple and len(values) <= len(positional):
+        names = positional[len(positional) - len(values) :]
+        out.update(zip(names, values, strict=True))
+    keyword = fn.__kwdefaults__
+    if type(keyword) is dict:
+        end = code.co_argcount + code.co_kwonlyargcount
+        kwonly = set(code.co_varnames[code.co_argcount : end])
+        out.update((k, v) for k, v in keyword.items() if k in kwonly)
+    return out
+
+
+def _notebook_entries(
+    namespace: dict, roots, cell_bindings: dict | None = None
+) -> tuple[dict[str, str], list[str]]:
     """``(entries, modules)``: the entries of a notebook's code the roots
     reach, and the modules their definitions name (see ``_unit_reading``) to follow
-    as files. Entries are ``{"<name> (notebook)": digest}`` for each name
+    as files, through the closure, the namespace or a parameter's default
+    value. ``cell_bindings`` (``_lazy_bindings``, on 3.15) adds the readings
+    a lazy proxy had before it resolved. Entries are ``{"<name> (notebook)": digest}`` for each name
     their code looks up (and each root
     by its name) that stands for a function or class defined in a cell. A
     function is its definition's syntax tree; a class its ``class``
@@ -2216,6 +2382,8 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     ``__name__`` (which ``_namespace_modules`` reads too) are read, so a
     lazy proxy is never resolved."""
     import types
+
+    cell_bindings = cell_bindings or {}
 
     def resolve(value):
         return _notebook_object(value, namespace)
@@ -2335,6 +2503,15 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     # A chain skips only the kernel's own names: a name a notebook function
     # rebinds (a reload helper) still holds a module, and skipping it would
     # drop the submodule.
+    def namespace_bases(name: str) -> tuple[str, ...]:
+        """The modules a chain on the namespace's ``name`` starts from
+        (``_chain_bases``) and, on 3.15, both readings a lazy proxy of a kept
+        cell's import binding ``name`` has (``cell_bindings``): once the
+        proxy resolves, the record reads as it did before."""
+        found = _chain_bases(name, namespace[name])
+        extra = cell_bindings.get(name) if found else None
+        return (*found, name, *sorted(extra)) if extra else found
+
     modules: set[str] = set(base_modules)
     for uid, site in unit_sites.items():
         if site is None:
@@ -2347,10 +2524,14 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
         # free variable of the unit: its closure holds the value.
         kind, obj = units[uid][0], units[uid][1]
         free = {}
+        defaults: dict = {}
+        reads: frozenset = frozenset()
         if kind == "function":
             # A function's closure has one cell per free variable.
             cells = obj.__closure__ or ()
             free = dict(zip(obj.__code__.co_freevars, cells, strict=False))
+            defaults = _parameter_defaults(obj)
+            reads = _code_names(obj.__code__)[0]
         # The compiler's free variables decide (a walrus in a comprehension
         # binds in the enclosing function, which the scopes read as the
         # comprehension's): a chain on one asks the closure too.
@@ -2365,8 +2546,13 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
             for base in _chain_bases(chain[0], value):
                 modules.add(".".join((base, *chain[1:])))
         for chain in global_chains:
+            if chain[0] in free and chain[0] not in reads:
+                # A free variable is read from the closure (above), never
+                # from the namespace, unless the unit's code also reads the
+                # name as a global somewhere.
+                continue
             if chain[0] in namespace and not _kernel_name(chain[0]):
-                for base in _chain_bases(chain[0], namespace[chain[0]]):
+                for base in namespace_bases(chain[0]):
                     modules.add(".".join((base, *chain[1:])))
         # The floor: what main's reading names counts too, resolved as main
         # resolved it (the closure first, then the namespace), so this record
@@ -2376,15 +2562,22 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
         for chain in floor_chains:
             if chain[0] in free:
                 try:
-                    value = free[chain[0]].cell_contents
+                    bases = _chain_bases(chain[0], free[chain[0]].cell_contents)
                 except ValueError:  # an empty cell: nothing bound yet
                     continue
             elif chain[0] in namespace and not _kernel_name(chain[0]):
-                value = namespace[chain[0]]
+                bases = namespace_bases(chain[0])
             else:
                 continue
-            for base in _chain_bases(chain[0], value):
+            for base in bases:
                 modules.add(".".join((base, *chain[1:])))
+        # A chain on one of the unit's own parameters that has a default: the
+        # default is a value it can hold, which the syntax may not tell (`m=mod`
+        # in a factory), read by type as a closure cell is.
+        for chain in global_chains | floor_chains:
+            if chain[0] in defaults:
+                for base in _chain_bases(chain[0], defaults[chain[0]]):
+                    modules.add(".".join((base, *chain[1:])))
     modules = {m for m in modules if _maybe_project(m, foreign_tops)}
     comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}
@@ -2415,36 +2608,56 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
     return entries, sorted(modules)
 
 
+def _warn_notebook_unrecorded(error: BaseException) -> None:
+    """Warn, once per run (``driver_script_entries`` clears the flag, so a
+    resume warns again), that a notebook's record could not be taken."""
+    if _NOTEBOOK_FAILURE_WARNED:
+        return
+    _NOTEBOOK_FAILURE_WARNED.append(True)
+    # The type's name only, read from its slot: the message is the notebook's
+    # own text, and `type(error).__name__` could run a notebook metaclass's
+    # property.
+    try:
+        kind = type.__dict__["__name__"].__get__(type(error))
+    except Exception:  # noqa: BLE001 - a name is not worth failing for
+        kind = "an error"
+    _best_effort_warning(
+        "resume/cache_dir: the notebook code this task reaches could "
+        f"not be recorded ({kind}), so it is not compared; use a "
+        "fresh working_dir after editing it."
+    )
+
+
 def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str]]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
-    root)])}``) and the project modules their code names, best effort: a
-    notebook whose entries cannot be taken gives neither (as on main), with
-    a warning, since an edit then goes unnoticed (a notebook metaclass's
-    attribute hook that raises, say). Once per run: ``driver_script_entries``
-    clears the flag, so a resume warns again."""
+    root)])}``) and the project modules to follow: first those their reached
+    code names, then those the kernel's kept cells import
+    (``_kept_cell_reading``), which do not depend on the walk, so they count
+    when it passes its bound or fails. Best effort: a notebook whose entries
+    cannot be taken gives neither its entries nor its modules (as on main),
+    and a scan of the cells that fails gives no cell modules, each with a
+    warning, since an edit then goes unnoticed (a notebook metaclass's
+    attribute hook that raises, say)."""
     out: dict[str, str] = {}
-    modules: set[str] = set()
+    reached: set[str] = set()
+    cell_modules: set[str] = set()
+    cell_bindings: dict = {}
+    try:
+        cell_modules, cell_bindings = _kept_cell_reading()
+        foreign_tops: dict[str, bool] = {}
+        cell_modules = {m for m in cell_modules if _maybe_project(m, foreign_tops)}
+    except Exception as error:  # noqa: BLE001 - never fail the record
+        cell_modules, cell_bindings = set(), {}
+        _warn_notebook_unrecorded(error)
     for namespace, roots in notebooks.values():
         try:
-            entries, names = _notebook_entries(namespace, roots)
+            lazy = _lazy_bindings(cell_bindings, namespace)
+            entries, names = _notebook_entries(namespace, roots, lazy)
             out.update(entries)
-            modules.update(names)
+            reached.update(names)
         except Exception as error:  # noqa: BLE001 - never fail the record
-            if not _NOTEBOOK_FAILURE_WARNED:
-                _NOTEBOOK_FAILURE_WARNED.append(True)
-                # The type's name only, read from its slot: the message is
-                # the notebook's own text, and `type(error).__name__` could
-                # run a notebook metaclass's property.
-                try:
-                    kind = type.__dict__["__name__"].__get__(type(error))
-                except Exception:  # noqa: BLE001 - a name is not worth failing for
-                    kind = "an error"
-                _best_effort_warning(
-                    "resume/cache_dir: the notebook code this task reaches could "
-                    f"not be recorded ({kind}), so it is not compared; use a "
-                    "fresh working_dir after editing it."
-                )
-    return out, sorted(modules)
+            _warn_notebook_unrecorded(error)
+    return out, sorted(reached) + sorted(cell_modules - reached)
 
 
 def _root_layers(root) -> list:
@@ -2771,9 +2984,10 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     A root defined where there is no file (a notebook) gives ``"<name>
     (notebook)"`` for each function or class defined in its cells that its
     code reaches by name, by its definition (see ``_notebook_entries``), and
-    the project modules of the objects its namespace holds and those its
+    the project modules of the objects its namespace holds, those its
     reached definitions name (``pkg.sub.f`` after ``import pkg.sub``, an
-    import inside a function; see ``_unit_reading``); the driver takes the
+    import inside a function; see ``_unit_reading``), and every one its
+    kept cells import (``_kept_cell_reading``); the driver takes the
     notebook entries and those modules when the run starts and ships them in
     ``scripts``.
 
