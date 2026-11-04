@@ -1490,6 +1490,26 @@ back, the registry ignored), each caught by node id. The test helper reads
 `_CELL_SCAN_WARNED` with `getattr`, so the file runs against main too, which
 is how the regression was checked there.
 
+### #294 review round 4 (2026-11-04): nothing blocking
+
+`/code-review` (10) and the adversarial workflow (1 confirmed, minor)
+reviewed a59a603. Nothing records less than main, so by the stopping rule
+the PR merges after the touch-ups:
+- a cut variant of the free-variable tests: the namespace read is main's
+  reading, so it must stay in the first pass; a mutant moving it to the
+  later pass recorded less than main and passed every test until now;
+- the guide and the fragment say the cells' imports count for a task
+  defined in a notebook (a task from a file never scans the cells);
+- `_cell_tree` keys its cache as the scan does (`surrogatepass`), so a lone
+  surrogate in a cell cannot fail the record;
+- the later-cut warning's flag comment says what it is in a worker.
+Accepted with reasons, as in earlier rounds: the `cache_dir` key moving with
+what cells import, library-generated `linecache` entries, the registry's
+cap and its dropped cell targets, `catch_warnings`, a `lazy from pkg import
+pkg` that resolves to a non-module (a recompute once), and keeping the
+default, rebinding and lazy readings beside the scan (they cover modules
+loaded without an import statement).
+
 ### PR 2: classes with no method of their own
 
 Planned in its own PR, after this one merges.

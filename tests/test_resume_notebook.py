@@ -3346,3 +3346,39 @@ def test_a_rebinding_goes_on_the_binding_it_rebinds(kernel, sub_project, factory
     assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
     assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
     assert _files(kernel, "task") == before
+
+
+@pytest.mark.parametrize("shape", ["filled by a sibling", "a parameter"])
+def test_a_free_variables_namespace_read_is_one_of_mains_seeds(
+    kernel, cell_imports, monkeypatch, shape
+):
+    """The namespace read of a free variable is main's reading, so it is
+    followed in the first pass: later modules filling the rest of the bound
+    cannot push it out."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_TRUNCATION_WARNED", [])
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\nimport {SUBPKG}.a.b\n"
+        f"importlib.import_module('{SUBPKG}.sub')\nimport types\n"
+    )
+    if shape == "a parameter":
+        kernel.run(
+            f"def make({SUBPKG}):\n    def task(a):\n"
+            f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\n"
+            "task = make(types.SimpleNamespace(sub=types.SimpleNamespace(f=abs)))\n"
+        )
+    else:
+        kernel.run(
+            f"def make():\n    {SUBPKG} = None\n\n    def setup():\n"
+            f"        nonlocal {SUBPKG}\n"
+            f"        {SUBPKG} = importlib.import_module('{SUBPKG}')\n\n"
+            f"    def task(a):\n        if {SUBPKG} is None:\n            setup()\n"
+            f"        return {SUBPKG}.sub.f(a)\n\n    return task\n\n\ntask = make()\n"
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the later pass is cut
+        files = _files(kernel, "task")
+    assert f"{SUBPKG}.sub (file)" in files, files

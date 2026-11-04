@@ -133,9 +133,10 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. Every
-project module that a cell whose text the kernel keeps imports counts too,
-whether or not the task names it, so an edit to it re-runs the cells.
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. For
+such a task, every project module that a cell whose text the kernel keeps
+imports counts too, whether or not the task names it, so an edit to it
+re-runs the cells.
 `cache_dir=` keys on the same record, so importing another project module in
 a cell, or a restart after removing one's import, can make the cells compute
 again. A module loaded other than by an `import` statement of such a cell

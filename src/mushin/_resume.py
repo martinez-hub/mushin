@@ -1268,8 +1268,9 @@ def _kernel_name(name: str) -> bool:
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
 _CELL_SCAN_WARNED: list = []
-#: Per run too (``driver_script_entries``): the notebook's later modules cut
-#: by the file bound.
+#: The notebook's later modules cut by the file bound: per run in the driver
+#: (``driver_script_entries`` clears it), once per process in a parallel
+#: worker, as ``_TRUNCATION_WARNED`` is.
 _LATER_TRUNCATION_WARNED: list = []
 
 
@@ -1327,7 +1328,7 @@ def _cell_tree(lines):
     """A cell's syntax tree without docstrings, cached by its text (a few,
     since a long session runs many cells); None when it does not parse."""
     text = "".join(lines)
-    key = _short_hash(text.encode())
+    key = _short_hash(text.encode("utf-8", "surrogatepass"))
     if key in _CELL_TREES:
         return _CELL_TREES[key]
     tree = _parse_cell(text)
