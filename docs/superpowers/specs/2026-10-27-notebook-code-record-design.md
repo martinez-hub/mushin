@@ -980,3 +980,58 @@ parameters (a class has no closure), and Codex's shadowing case.
     uses a global that is not a module.
 - **Against round 1's code:** the factory-alias, parameter-named-like-a-module
   and class-read-before-rebind tests fail on 03f6ee2 and pass here.
+
+### #293 review round 2 (2026-11-04): the last fixes before merging
+
+`/code-review` (12) and the adversarial workflow (9 confirmed, 1 refuted)
+reviewed 22ae791. By the stopping rule this was the last round: these fixes
+go in, then the PR merges. Every one either adds targets (the safe
+direction) or goes back to main's rule. Plan, written before any edit:
+- **An import under `global` or `nonlocal`** keeps its module: `global pkg;
+  import pkg` rebinds the namespace's `pkg`, so the import's targets count
+  where the declaration sends the name.
+- **The compiler's free variables decide:** a chain whose first name is
+  one of the unit's free variables asks its closure, whatever the scope
+  model says. This covers a walrus in a comprehension (PEP 572 binds it in
+  the enclosing function) and any form the model misses.
+- **An import in a function also binds its cell,** so a unit made inside asks
+  its closure, as main did.
+- **An alias derived from something unknown** (`pkg = a`) also reads the
+  namespace's module of its own name, as main did.
+- **3.15:** `_namespace_modules` goes back to main's rule (the proxy's full
+  name). `lazy import pkg.sub as pkg` binds the submodule, and its repr reads
+  like `lazy import pkg.sub`, so collapsing to the package missed an edit.
+  The recompute for `lazy import pkg.sub` returns to #292, and the fragment
+  drops its 3.15 sentence.
+- **`_file_entries`, loaded only:** decided by the module's file alone, as
+  on main, with no stdlib-name rule (a project namespace package named like
+  a stdlib module stays the project's).
+- **Cost:** a unit's outer parts are walked directly instead of filtering
+  the standing scope's nodes, and the scopes inside it come from its own
+  nodes, so a cell with a large literal costs each unit only its own size.
+- **Claims:** the docs keep "a module held in a local name the syntax cannot
+  follow"; `_unit_reading`'s docstring says unknown bindings read the
+  namespace too; the dead `_scope_index` goes.
+- **Tests:** a fresh-kernel `global` import; the walrus closure; an alias of a
+  parameter named like the module; `lazy import pkg.sub as pkg`; a doubling
+  alias chain that reaches the cap, asserted by target counts, not wall-clock
+  time. `_files` resets the once-per-run failure flag, so its guard holds.
+- **Memory:** an index entry is evicted with its cell tree.
+
+**Results (the last fixes).**
+- **Tests:** 86 module tests: 75 run on 3.11, all 87 on 3.15 with the digest
+  test.
+- **Mutations:** forty-two. The three that only exist on 3.12+ or 3.15 were
+  caught there.
+- **One surviving mutation, kept on purpose:** an alias's own cell. Asking the
+  closure for every free variable, and reading an alias of something unknown
+  as unknown, now cover every case it covered. It stays as a backstop.
+- **Two of my test mistakes this round:**
+  - The namespace-package test first failed on the unmutated code, so the
+    whole mutation table read one extra failure per row until it was fixed.
+    The lesson: run the baseline before trusting a table.
+  - It went through the shipping filter (main's rule) instead of
+    `_file_entries`. It now binds the submodule directly; it passes on main and
+    fails on 03f6ee2.
+- **Also:** the `global` test needed a binding the syntax tells is
+  not a module, because this round's alias rule masked it.

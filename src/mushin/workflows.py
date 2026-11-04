@@ -2524,7 +2524,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             attribute values beyond its text, possibly a submodule reached
             through its package in some cases (a registry,
             ``importlib.import_module``, a module passed as an argument or
-            returned by a call), possibly a
+            returned by a call, a local name the syntax cannot follow),
+            possibly a
             class with no method of
             its own and what it names beyond its bases, a ``_target_``
             defined there, code whose text the kernel does not keep (a ``%%time``
