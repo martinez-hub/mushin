@@ -771,3 +771,33 @@ here.
 Cost (three runs each, 500-cell kernel): main 23-26 ms first, 2.3-2.4 ms
 after; this branch 25-34 ms, then 4.3-4.4 ms (reading each method twice
 added nothing measurable).
+
+## Round 6 review and the merge (2026-11-03)
+
+`/code-review` (12) and the adversarial workflow (6, all minor) reviewed
+round 6 (ff31ae9). Nothing records less than main: every miss they found,
+main misses too. The maintainer chose to touch up docs and tests and merge,
+with the rest as a follow-up issue rather than a seventh round.
+
+**A correction.** Rounds 3 and 4 said no module attribute is read beyond
+what main reads. That stopped being true in round 6: a closure-held module's
+`__name__` is read, and `_find_file` reads the `__file__` of a top-level module
+that only an import inside a definition names. Either can run an
+`importlib.util.LazyLoader` module's file. The LazyLoader caveat in the docs
+("reading the code a task reaches can import" one) covers both.
+
+**Touch-up:** a general hedged caveat at the three doc sites (a submodule
+reached through its package may still not be compared in some cases, with
+examples, and the new-`working_dir` advice), and three test pins: `import a.b`
+in a body binds `a`, a closure cell wins over a global of the same name, and
+the innermost enclosing binding wins.
+
+**Follow-up (not in this PR):**
+- a package held in a local name or a bare-name default (`m = pkg`, `lib=pkg`);
+- a class made inside a factory, and a factory's or class body's import named
+  only in an inner definition's decorator or default;
+- a comprehension in a class body read in the class's scope;
+- 3.15 recomputes: a proxy read two ways when both readings are files, a proxy
+  the task resolves through another attribute, and closure cells the run
+  rebinds;
+- caching the per-unit reading, and one copy of the foreign-top rule.

@@ -1887,11 +1887,13 @@ def test_only_the_code_the_task_reaches_names_modules(kernel, sub_project):
         f"import {SUBPKG}\n    return {SUBPKG}.sub.f(a)",
         f"from {SUBPKG} import sub as S\n    return S.f(a)",
         f"from {SUBPKG} import a as A\n    return A.b.f(a)",
+        # `import pkg.sub` binds `pkg`, so `pkg.a.b` is the package's.
+        f"import {SUBPKG}.sub\n    return {SUBPKG}.a.b.f(a)",
     ],
 )
 def test_an_import_inside_the_tasks_body_is_recorded(kernel, sub_project, body):
     kernel.run(f"def task(a):\n    {body}\n")
-    expected = ".a.b" if "A.b" in body else ".sub"
+    expected = ".a.b" if ("A.b" in body or ".a.b" in body) else ".sub"
     assert f"{SUBPKG}{expected} (file)" in _files(kernel, "task")
 
 
@@ -1996,6 +1998,17 @@ def test_an_enclosing_functions_import_reaches_the_functions_in_it(
     assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
 
 
+def test_the_innermost_enclosing_binding_is_in_force(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.a.b\n")
+    kernel.run(
+        f"def task(a):\n    from {SUBPKG} import sub as utils\n\n    def mid(x):\n"
+        f"        from {SUBPKG} import a as utils\n\n        def inner(y):\n"
+        "            return utils.b.f(y)\n\n        return inner(x)\n\n"
+        "    return mid(a)\n"
+    )
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
 FACTORY = (
     f"def outer():\n    import {SUBPKG}.a as s\n\n"
     "    def inner(a):\n        return s.b.f(a)\n\n    return inner\n"
@@ -2043,8 +2056,16 @@ def test_what_a_unit_names_does_not_depend_on_the_walk_order(
             "    def task(a):\n        return A.b.f(a)\n\n    return task\n\n\n"
             "task = make()\n"
         ],
+        # A global of the same name is not what the closure holds.
+        [
+            f"import functools\nimport {SUBPKG}.sub as s\n\n\ndef logged(fn):\n"
+            f"    import {SUBPKG}.a as s\n\n    @functools.wraps(fn)\n"
+            "    def wrapper(*args):\n        s.b.f(1)\n        return fn(*args)\n\n"
+            "    return wrapper\n",
+            "@logged\ndef task(a):\n    return a\n",
+        ],
     ],
-    ids=["decorator's wrapper", "factory's function"],
+    ids=["decorator's wrapper", "factory's function", "global of the same name"],
 )
 def test_a_function_made_inside_another_reaches_its_imports(kernel, sub_project, cells):
     """Its definition is the inner `def` only; the module it uses is in its
