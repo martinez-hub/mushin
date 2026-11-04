@@ -1580,8 +1580,10 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
         else:
             resolved = _resolve_chain(scope, chain)
             bind(name, *resolved)
-            if any(target[0] == "cell" for target in resolved):
-                unknown(name)  # from something unknown: as main read it
+            if any(target[0] != "module" for target in resolved):
+                # From something unknown, or from a global another function
+                # may set before this runs: also as main read the name.
+                unknown(name)
         if len(scope.bound[name]) > _TARGETS_MAX:
             scope.bound[name] = seeds[name] | {cell(name), ("global", (name,))}
 

@@ -2630,3 +2630,18 @@ def test_capping_an_alias_keeps_what_its_import_binds(kernel, sub_project):
         "    return m.sub.f(x)\n"
     )
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_an_alias_of_a_global_set_later_reads_the_namespaces_module(
+    kernel, sub_project
+):
+    """`current` is None when the record is taken and set by a call the task
+    makes, so the alias named like the package reads the namespace's module
+    of its own name too, as main did."""
+    kernel.run(f"import {SUBPKG}.sub\ncurrent = None\n")
+    kernel.run(f"def init():\n    global current\n    current = {SUBPKG}\n")
+    kernel.run(
+        f"def task(a):\n    init()\n    {SUBPKG} = current\n"
+        f"    return {SUBPKG}.sub.f(a)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
