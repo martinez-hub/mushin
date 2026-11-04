@@ -2506,7 +2506,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             bound method or an instance) and by every project module its
             cells import, so re-running an edited cell and resuming re-runs
             the cells; with ``cache_dir``, importing another project module
-            in a cell can make them compute again. No value is compared (a
+            in a cell can make them compute again, as can a class whose
+            ``class`` statement cannot be told from another kept version of
+            its cell. No value is compared (a
             number, a string, a dict config): pass one as a swept parameter,
             or use a new ``working_dir`` after editing it. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name

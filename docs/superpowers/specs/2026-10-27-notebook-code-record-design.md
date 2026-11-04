@@ -1656,3 +1656,91 @@ the callbacks measured.
   statement 93-95 us against 65 us without the watch (the transform and the
   pin).
 
+### #295 review round 1 (2026-11-04): plan
+
+`/code-review` (10) and the adversarial workflow (6 confirmed, 0 refuted)
+reviewed df8fc95. Plan, written before any edit.
+
+**My mistake, a third time:** the readings of a class found by steps 2 to 4
+went into `modules`, main's first pass, though main read nothing there. #294
+made "everything main did not read goes to the later pass" the invariant,
+and I did not list this PR's new reading as one of its members. They go to
+`added`. The lesson stands from #294: list the invariant's members from the
+diff before review, every line that adds to `modules`.
+
+**Blocking:**
+- *A `%%capture` cell's pin is overwritten* (both reviews, reproduced): the
+  magic runs its body as a nested cell, whose `post_run_cell` pins the class
+  to the body; the outer cell's then repins it to the magic's call, which
+  holds no `class` statement, and the class falls to a new token each re-run.
+  The first pin wins, and a cell whose text holds no statement of the class
+  pins it as unreadable instead: a `%%time` cell or `exec` made it, so the
+  kept cells' older texts must not be taken for it (`/code-review`: a stale
+  match, a missed edit). An unreadable pin is ambiguous.
+- *Step 4 judged ambiguity per node, not per text* (adversarial): a factory
+  with the class in both branches of an `if` got a token in every session.
+  Candidates are grouped by text: each kept text's statements of the
+  qualname together (after the first-line filter). One distinct group is
+  exact, its nodes read together; several are ambiguous. A text editing
+  either branch is a new text, so no edit is missed. Every tree of the
+  winning group is read, so which of two identical texts the scan met first
+  cannot change the modules (`/code-review`: a set's order chose the tree).
+- *A pinned cell with two top-level statements of the class*
+  (`/code-review`: `class C` twice in one cell, a record after each): on
+  3.13+ the first line tells them apart; on 3.11/3.12 two top-level
+  statements in the pinned text are ambiguous. (A factory's branches are
+  inside a function: one group, as above.)
+- *A failing scan dropped every entry* (both reviews): the class index is
+  built once per record, in `_notebook_record`'s guarded scan; when it
+  cannot be, an unpinned methodless class is ambiguous, and the scan's own
+  warning says so.
+
+**Minor:**
+- the callback read a class's `__dict__` through `vars()`, which runs a
+  notebook metaclass's `__getattribute__`; it reads through the type slot,
+  and `__module__` is compared only when it is a `str`;
+- one class index per record (each methodless class re-scanned the cells);
+- the parse trigger is the `class NAME` regex, not the substring (a cell
+  with `num_classes` parsed for nothing);
+- 3.13+: a class without `__firstlineno__` was not made by a `class`
+  statement (`type()`, `make_dataclass`), so no kept text is taken for it;
+- the docs state the token's recompute with may/can wording at the three
+  sites;
+- tests: `%%capture` exact and stable across re-runs, `%%time` never matched
+  to an older text, the cut test for a class body's reading, a factory's two
+  branches stable across processes, `class C` twice in one cell, a metaclass
+  hook untouched by the callbacks, and two processes' tokens differing.
+
+**Not changed, with reasons:**
+- *registration at import* (`/code-review` asked for the first run): a
+  notebook that defines a class in two cells, both run on every Run All, is
+  exact only if the watch saw them; registered at the first run, every restart
+  would re-run its cells. IPython already transforms each cell twice (once
+  to decide whether it runs async), so a third time adds no new kind of side
+  effect.
+- *the fix depth* (`/code-review`: treat every unpinned class as ambiguous):
+  a factory's class is never pinned, so each re-run of `C = make()` would
+  recompute; the grouping above keeps it exact.
+
+**Stopping rule:** one more round of both reviews after these fixes; merge if
+it finds nothing blocking.
+
+**Results (#295 round 1 fixes).**
+- **Tests:** 284 in the module; all pass on 3.11, 3.12, 3.14 and 3.15. On
+  3.13, one run in a freshly built environment failed
+  `test_the_driver_ships_only_project_modules` once; it passed alone and on
+  a full rerun, and I could not reproduce it. Recorded here as unexplained.
+- **Against df8fc95:** the shell test (the magic's pin, `%%time`, two
+  statements in one cell, the metaclass hook), the factory's two branches,
+  the identical texts, the cut and the failing scan each fail there.
+- **Mutations:** ten for this round, by node id after a baseline, all
+  caught. Two needed a sharper test first. The unreadable pin falling back
+  to the kept cells survived, because the shell test's `%%time` class had
+  several kept texts and read as ambiguous anyway; a class with one kept
+  text, then remade in a `%%time` cell, now pins it. And the no-statement
+  check (3.13+) runs only on 3.13+, so it was checked on 3.15.
+- **A test of mine was wrong at first:** the metaclass-hook assertion read
+  the whole output, which includes a record taken inside a cell later (a
+  record can run a metaclass hook: a documented residual). It now reads only
+  what the callbacks printed.
+

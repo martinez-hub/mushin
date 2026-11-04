@@ -3524,7 +3524,36 @@ run("raise ValueError('before the statement')\\nclass Config:\\n    LR = 0.3\\n"
 raised = own()
 run("%%capture\\nclass Config:\\n    LR = 0.4\\n")
 magic = own()
+run("%%capture\\nclass Config:\\n    LR = 0.4\\n")
+magic_again = own()
+run("class Config:\\n    LR = 0.4\\n")
+plain = own()
+run("%%time\\nclass Config:\\n    LR = 0.6\\n")
+timed = own()
+timed_same = own()
+# A class with one kept text, then a `%%time` cell remaking it: the kept text
+# is not this class's statement.
+run("class Solo:\\n    X = 1\\n")
+run("def task2(a):\\n    return a * Solo.X\\n")
+from mushin._resume import project_fingerprints as _fp
+solo = _fp(shell.user_ns["task2"])["code"]["Solo (notebook)"]
+run("%%time\\nclass Solo:\\n    X = 2\\n")
+solo_timed = _fp(shell.user_ns["task2"])["code"]["Solo (notebook)"]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.7\\n\\n_A = _pf(task)['code']['Config (notebook)']\\n"
+    "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
+)
+twice = [shell.user_ns["_A"], shell.user_ns["_B"]]
+mark = len(out.getvalue())  # the callbacks' own output, before any record
+run(
+    "class M(type):\\n    def __getattribute__(cls, n):\\n"
+    "        if n == '__dict__':\\n            print('hook ran')\\n"
+    "        return super().__getattribute__(n)\\n"
+)
+run("class Hooked(metaclass=M):\\n    X = 1\\n")
 run(v1)
+hook = "hook ran" in out.getvalue()[mark:]
 run(
     "from mushin._resume import project_fingerprints as _pf\\n"
     "class Config:\\n    LR = 0.5\\n\\n"
@@ -3542,6 +3571,8 @@ print(json.dumps({
     "first": first, "edited": edited, "reverted": reverted, "raised": raised,
     "magic": magic, "inside": inside, "after_cell": after_cell,
     "callbacks": [callbacks, reloaded], "after_reload": after_reload,
+    "magic_again": magic_again, "plain": plain, "timed": [timed, timed_same],
+    "twice": twice, "hook": hook, "solo": [solo, solo_timed],
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3553,7 +3584,8 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     so an edit, a revert, a cell that raised before its statement, a magic's
     cell, a record taken inside the defining cell and a reload of mushin all
     give the exact statement (several texts on one line would otherwise read
-    as ambiguous)."""
+    as ambiguous). A `%%time` cell's class, whose text is not kept, is never
+    taken for an older kept text."""
     pytest.importorskip("IPython")
     script = tmp_path / "watch.py"
     script.write_text(CELL_WATCH_SCRIPT)
@@ -3564,8 +3596,162 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["edited"] != got["first"]
     assert got["reverted"] == got["first"]
     assert got["raised"] == got["first"]  # the statement never ran
-    assert got["magic"] not in (got["first"], got["edited"])
+    # A magic's nested cell pins the class to its body: exact, and stable.
+    assert got["magic"] == got["magic_again"] == got["plain"]
+    # A `%%time` cell's text is not kept: never an older kept text's digest.
+    timed, timed_same = got["timed"]
+    assert timed == timed_same
+    assert timed not in (got["first"], got["edited"], got["magic"])
+    assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
+    assert got["twice"][0] != got["twice"][1]  # two statements in one cell
+    # The callbacks ran no notebook metaclass hook (taking a record still can:
+    # a documented residual).
+    assert not got["hook"]
     assert got["inside"] == got["after_cell"]
     assert got["callbacks"][0] == got["callbacks"][1]  # not registered twice
     assert got["after_reload"] == got["first"]
     assert got["errors"] == []
+
+
+def test_a_factory_with_the_class_in_two_branches_is_exact(kernel, monkeypatch):
+    """One text holds both branches' statements: they count together (which
+    one runs is a value), so the digest is the same in a new process."""
+    import itertools
+
+    import mushin._resume as resume
+
+    cells = [
+        "def make(kind):\n    if kind == 'a':\n\n        class C:\n            K = 1\n\n"
+        "    else:\n\n        class C:\n            K = 2\n\n    return C\n\n\n"
+        "C = make('a')\n",
+        "def task(a):\n    return a * C.K\n",
+    ]
+    _run_cells(kernel, cells)
+    first = _own(kernel, "C")
+    monkeypatch.setattr(resume, "_PROCESS_TOKEN", [])
+    monkeypatch.setattr(resume, "_CLASS_GENERATIONS", {})
+    monkeypatch.setattr(resume, "_GENERATION_COUNTER", itertools.count())
+    again = Kernel("mushin_t_kernel_again")
+    try:
+        _run_cells(again, cells)
+        assert _own(again, "C") == first
+    finally:
+        again.close()
+
+
+def test_an_ambiguous_class_s_digest_differs_in_another_process(kernel, monkeypatch):
+    """The token is the process's: the same sequence in a new process gives
+    another digest, so it never matches what an earlier one recorded."""
+    import itertools
+
+    import mushin._resume as resume
+
+    factory = (
+        "def make():\n    class C:\n        K = {}\n\n    return C\n\n\nC = make()\n"
+    )
+    cells = [factory.format(2), "def task(a):\n    return a * C.K\n", factory.format(3)]
+    monkeypatch.setattr(resume, "_GENERATION_COUNTER", itertools.count())
+    _run_cells(kernel, cells)
+    first = _own(kernel, "C")
+    kernel.close()
+    monkeypatch.setattr(resume, "_PROCESS_TOKEN", [])
+    monkeypatch.setattr(resume, "_CLASS_GENERATIONS", {})
+    monkeypatch.setattr(resume, "_GENERATION_COUNTER", itertools.count())
+    again = Kernel("mushin_t_kernel_again")
+    try:
+        _run_cells(again, cells)
+        assert _own(again, "C") != first
+    finally:
+        again.close()
+
+
+def test_identical_class_texts_read_every_cell_they_stand_in(kernel, sub_project):
+    """Two factories hold the same class statement, around different imports:
+    both are read, so the record does not depend on which the scan met first."""
+    for sub, name in (("a.b", "make_one"), ("sub", "make_two")):
+        kernel.run(
+            f"def {name}():\n    import {SUBPKG}.{sub} as m\n\n    class C:\n"
+            "        y = m.f\n\n    return C\n"
+        )
+    kernel.run(
+        "def make():\n    class C:\n        y = 1\n\n    return C\n\n\nC = make()\n"
+    )
+    kernel.run("def task(a):\n    return a * C.y\n")
+    # The class bound is `make.<locals>.C`; the two texts above are other
+    # qualnames, so only `make`'s statement counts.
+    files = _files(kernel, "task")
+    assert f"{SUBPKG}.a.b (file)" not in files
+    kernel.run(
+        f"def make():\n    import {SUBPKG}.a.b as m\n\n    class C:\n"
+        "        y = m.f\n\n    return C\n\n\nC = make()\n"
+    )
+    kernel.run(
+        f"def make():\n    import {SUBPKG}.sub as m\n\n    class C:\n"
+        "        y = m.f\n\n    return C\n\n\nC = make()\n"
+    )
+    files = _files(kernel, "task")
+    assert {f"{SUBPKG}.a.b (file)", f"{SUBPKG}.sub (file)"} <= files, files
+
+
+def test_a_method_less_class_s_reading_is_followed_after_main_s_seeds(
+    kernel, sub_project, monkeypatch
+):
+    """Main read nothing of a class with no method: what its body names goes
+    to the later pass, so it cannot push the namespace's module out."""
+    import mushin._resume as resume
+
+    (sub_project / SUBPKG / "wide.py").write_text(f"import {SUBWIDE}\nX = 1\n")
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\nfrom {SUBREL} import f\n"
+        f"importlib.import_module('{SUBPKG}.wide')\n"
+    )
+    kernel.run(f"class Config:\n    K = {SUBPKG}.wide.X\n")
+    kernel.run("def task(a):\n    return f(a) + Config.K\n")
+    with pytest.warns(UserWarning, match="reach more files"):
+        files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files, files
+
+
+def test_a_failing_scan_keeps_the_entries_with_a_method_less_class(
+    kernel, cell_imports, monkeypatch
+):
+    """The class index comes from the same guarded scan: when it fails, the
+    class is ambiguous and every other entry still counts."""
+    import mushin._resume as resume
+
+    def fail(text):
+        raise RuntimeError("the cell's own text")
+
+    monkeypatch.setattr(resume, "_cell_imports", fail)
+    monkeypatch.setattr(resume, "_CELL_IMPORTS", {})
+    monkeypatch.setattr(resume, "_CELL_SCAN_WARNED", [])
+    monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    _run_cells(
+        kernel,
+        [
+            "class Config:\n    LR = 0.1\n",
+            "def helper(x):\n    return x\n",
+            "def task(a):\n    return helper(a) * Config.LR\n",
+        ],
+    )
+    with pytest.warns(UserWarning, match="cells import could not be read"):
+        record = project_fingerprints(kernel.ns["task"])
+    assert {"helper (notebook)", "Config (notebook)"} <= set(record["code"])
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+def test_a_class_no_statement_made_is_not_an_older_statement(kernel):
+    """3.13+: `make_dataclass` makes a class without `__firstlineno__`, so the
+    kept `class Config` statement is not taken for it."""
+    _run_cells(
+        kernel,
+        ["class Config:\n    LR = 0.1\n", "def task(a):\n    return a * Config.LR\n"],
+    )
+    statement = _own(kernel)
+    kernel.run(
+        "import dataclasses\n\nConfig = dataclasses.make_dataclass("
+        "'Config', [('LR', float, 0.2)])\n"
+    )
+    assert _own(kernel) != statement

@@ -139,7 +139,10 @@ imports counts too, whether or not the task names it, so an edit to it
 re-runs the cells.
 `cache_dir=` keys on the same record, so importing another project module in
 a cell, or a restart after removing one's import, can make the cells compute
-again. A module loaded other than by an `import` statement of such a cell
+again. So can a class whose `class` statement cannot be told from another kept
+version of its cell (one a function makes, or one edited before `import
+mushin`): its cells can compute again when its cell runs again, or after a
+restart. A module loaded other than by an `import` statement of such a cell
 (`importlib.import_module`, a plugin loader that fills a registry, an import
 in a `%%time` cell) may not be compared, as in a script: after editing such a
 module, use a new `working_dir`.
