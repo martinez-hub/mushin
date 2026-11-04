@@ -169,7 +169,7 @@ rules:
   them when the run starts; no value does (a number, a model name, a dict
   config), so pass values as swept parameters. A submodule a cell reaches
   through its package (`import pkg.sub`) may still not be compared in some
-  cases (a local alias, a class made inside a function, a registry), nor
+  cases (a registry, `importlib.import_module`, a module a call returns), nor
   may a class with no method of its own: after editing one, use a new
   `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an

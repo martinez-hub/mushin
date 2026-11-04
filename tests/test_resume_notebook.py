@@ -1742,14 +1742,18 @@ IMPORTS = {
 def test_the_syntax_names_the_pinned_modules():
     import ast
 
-    from mushin._resume import _syntax_modules
+    from mushin._resume import _unit_reading
 
-    modules, chains = _syntax_modules([ast.parse(CHAIN_SOURCE)])
+    tree = ast.parse(CHAIN_SOURCE)
+    modules, chains, cells = _unit_reading(tree, [tree])
     assert modules == set()
     assert {".".join(chain) for chain in chains} == CHAINS
-    modules, chains = _syntax_modules([ast.parse(IMPORT_SOURCE)])
+    assert cells == set()
+    tree = ast.parse(IMPORT_SOURCE)
+    modules, chains, cells = _unit_reading(tree, [tree])
     assert modules == IMPORTS
     assert chains == set()
+    assert cells == set()  # the relative imports' names are the unit's own
 
 
 @pytest.fixture
@@ -2274,3 +2278,162 @@ def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp
     _sweep(kernel, tmp_path / "one", [1, 2], cache_dir=cache)
     _sweep(kernel, tmp_path / "two", [1, 2], cache_dir=cache)
     assert kernel.ns["CALLS"] == [1, 2]
+
+
+# --- bindings and where a unit stands (#292) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        (f"def task(a):\n    m = {SUBPKG}\n    return m.sub.f(a)\n", ".sub"),
+        (f"def task(a):\n    s = {SUBPKG}.sub\n    return s.f(a)\n", ".sub"),
+        (f"def task(a):\n    m = {SUBPKG}\n    n = m\n    return n.a.b.f(a)\n", ".a.b"),
+        (f"def task(a, lib={SUBPKG}):\n    return lib.sub.f(a)\n", ".sub"),
+        (
+            f"def make():\n    import {SUBPKG}.a as s\n\n"
+            "    def task(a, lib=s):\n        return lib.b.f(a)\n\n    return task\n\n\n"
+            "task = make()\n",
+            ".a.b",
+        ),
+    ],
+    ids=[
+        "alias",
+        "alias of a submodule",
+        "alias of an alias",
+        "default",
+        "factory default",
+    ],
+)
+def test_an_alias_of_the_package_is_followed(kernel, sub_project, task, expected):
+    kernel.run(f"import {SUBPKG}.sub\nimport {SUBPKG}.a.b\n")
+    kernel.run(task)
+    assert f"{SUBPKG}{expected} (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        f"def task(a, {SUBPKG}=None):\n    return {SUBPKG}.other.f(a) if {SUBPKG} else a\n",
+        f"def task(a):\n    {SUBPKG} = a\n    return {SUBPKG}.other.f(1)\n",
+        f"def task(a):\n    for {SUBPKG} in a:\n        {SUBPKG}.other.f(1)\n",
+        f"def task(a):\n    with a as {SUBPKG}:\n        return {SUBPKG}.other.f(1)\n",
+        f"def task(a):\n    try:\n        pass\n    except Exception as {SUBPKG}:\n"
+        f"        return {SUBPKG}.other.f(1)\n",
+        f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    return {SUBPKG}.other\n",
+        "def task(a):\n    model = a\n    return model.other.f(1)\n",
+    ],
+    ids=["parameter", "assignment", "for", "with", "except", "def", "an alias's name"],
+)
+def test_a_local_shadowing_the_package_names_nothing(kernel, sub_project, task):
+    """Python makes the name local to the task, so the global module is never
+    what it holds (a recompute on every edit to that module otherwise)."""
+    kernel.run(f"import {SUBPKG}.other\nimport {SUBPKG} as model\n")
+    kernel.run(task)
+    assert f"{SUBPKG}.other (file)" not in _files(kernel, "task")
+
+
+def test_a_global_declaration_reads_the_namespace(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(
+        f"def task(a):\n    {SUBPKG} = None\n\n    def inner(x):\n"
+        f"        global {SUBPKG}\n        return {SUBPKG}.sub.f(x)\n\n"
+        "    return inner(a)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_nonlocal_declaration_reads_the_enclosing_function(kernel, sub_project):
+    kernel.run(
+        f"def task(a):\n    from {SUBPKG} import a as m\n\n    def inner(x):\n"
+        "        nonlocal m\n        r = m.b.f(x)\n        m = None\n        return r\n\n"
+        "    return inner(a)\n"
+    )
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [
+            f"def make():\n    import {SUBPKG}.sub as s\n\n    class M:\n"
+            "        k = s.CONST\n\n        def f(self, x):\n            return x * self.k\n\n"
+            "    return M\n\n\nm = make()()\n",
+            "def task(a):\n    return m.f(a)\n",
+        ],
+        [
+            f"def factory():\n    import {SUBPKG}.sub as s\n\n    @s.deco\n"
+            "    def inner(a):\n        return a\n\n    return inner\n\n\ntask = factory()\n"
+        ],
+        [
+            f"class Model:\n    import {SUBPKG}.sub as s\n\n"
+            "    def f(self, a, k=s.f):\n        return k(a)\n\n\nzf = Model.f\n",
+            "def task(a):\n    return zf(None, a)\n",
+        ],
+    ],
+    ids=["class made in a factory", "factory's decorator", "class body's default"],
+)
+def test_a_module_the_enclosing_definition_binds_is_followed(
+    kernel, sub_project, cells
+):
+    """The unit is defined inside another definition whose import names the
+    module, and that is the only way to it: the class has no closure, the
+    decorator and the default are evaluated where the definition stands."""
+    _run_cells(kernel, cells)
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_class_bodys_comprehension_does_not_see_its_names(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.a.b\nfrom {SUBPKG} import a as utils\n")
+    kernel.run(
+        f"class Model:\n    from {SUBPKG} import sub as utils\n\n"
+        "    vals = [utils.b.f(x) for x in range(2)]\n\n"
+        "    def f(self, x):\n        return x\n"
+    )
+    kernel.run("def task(a):\n    return Model().f(a)\n")
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+def test_the_cached_reading_holds_no_namespace_value(sub_project):
+    """Two kernels run the same cell text, so they share its cached tree and
+    reading; what `s` is comes from each kernel's own namespace."""
+    one, two = Kernel("mushin_t_kernel_one"), Kernel("mushin_t_kernel_two")
+    try:
+        one.run(f"import {SUBPKG}.sub as s\n")
+        two.run("import types\ns = types.SimpleNamespace(f=abs)\n")
+        for k in (one, two):
+            k.run("def task(a):\n    return s.f(a)\n")
+        assert f"{SUBPKG}.sub (file)" in _files(one, "task")
+        assert f"{SUBPKG}.sub (file)" not in _files(two, "task")
+    finally:
+        one.close()
+        two.close()
+
+
+@lazy_imports
+def test_a_lazy_submodule_bound_as_its_package_records_the_package_alike(
+    kernel, sub_project
+):
+    """`lazy import pkg.sub` binds `pkg` to the package, as `import pkg.sub`
+    does, so a task that never names `pkg.sub` records the package before
+    the proxy resolves and after."""
+    kernel.run(f"lazy import {SUBPKG}.sub\n")
+    kernel.run(f"def task(a):\n    return a if {SUBPKG} else 0\n")
+    before = project_fingerprints(kernel.ns["task"])["code"]
+    assert kernel.ns["task"](1) == 1  # resolves the proxy in the kernel
+    after = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUBPKG}.sub (file)" not in before
+    assert before == after
+
+
+def test_a_function_made_inside_another_reaches_what_its_closure_holds(
+    kernel, sub_project
+):
+    """The enclosing function binds the module to a value the syntax cannot
+    tell (a call): only the closure holds it."""
+    kernel.run(
+        "import importlib\n\n\ndef make():\n"
+        f"    s = importlib.import_module('{SUBPKG}.sub')\n\n"
+        "    def task(a):\n        return s.f(a)\n\n    return task\n\n\ntask = make()\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")

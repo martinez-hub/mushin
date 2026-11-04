@@ -2522,9 +2522,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             only through a container (a registry), a closure or a default, a
             name one of its functions rebinds (``global helper``), a class's
             attribute values beyond its text, possibly a submodule reached
-            through its package in some cases (a local alias, a class or a
-            decorator made inside another function, a registry,
-            ``importlib.import_module``), possibly a class with no method of
+            through its package in some cases (a registry,
+            ``importlib.import_module``, a module a call returns), possibly a
+            class with no method of
             its own and what it names beyond its bases, a ``_target_``
             defined there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file), a
