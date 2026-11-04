@@ -1499,7 +1499,9 @@ the PR merges after the touch-ups:
   reading, so it must stay in the first pass; a mutant moving it to the
   later pass recorded less than main and passed every test until now;
 - the guide and the fragment say the cells' imports count for a task
-  defined in a notebook (a task from a file never scans the cells);
+  defined in a notebook (a run scans the cells only when some root is
+  defined there: the task, `pre_task` or a `Study` training function; the
+  docs name the common case);
 - `_cell_tree` keys its cache as the scan does (`surrogatepass`), so a lone
   surrogate in a cell cannot fail the record;
 - the later-cut warning's flag comment says what it is in a worker.
