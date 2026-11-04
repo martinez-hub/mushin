@@ -141,10 +141,8 @@ re-runs the cells.
 a cell, or a restart after removing one's import, can make the cells compute
 again. A module loaded other than by an `import` statement of such a cell
 (`importlib.import_module`, a plugin loader that fills a registry, an import
-in a `%%time` cell) may not be compared, as in a script, nor may a class with
-no method of its own (a dataclass or an `Enum` of fields), or what it names
-beyond its bases. After editing such a module or class, use a new
-`working_dir`.
+in a `%%time` cell) may not be compared, as in a script: after editing such a
+module, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

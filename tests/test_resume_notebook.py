@@ -102,6 +102,43 @@ TASK = "def task(a):\n    return helper(a)\n"
 # the code a later call of `task` runs, so the record must change; a NOT_EDIT
 # does not, so it must not.
 NOTEBOOK_EDITS = {
+    # A class with no method of its own: its statement is found through the
+    # kept cells (and, on 3.14+, a dataclass's `__annotate_func__`).
+    "a method-less dataclass's default": (
+        [
+            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
+            "def task(a):\n    return a * Cfg().lr\n",
+        ],
+        ["@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n"],
+    ),
+    "an Enum member": (
+        [
+            "import enum\n\n\nclass Color(enum.Enum):\n    RED = 1\n",
+            "def task(a):\n    return a + Color.RED.value\n",
+        ],
+        ["class Color(enum.Enum):\n    RED = 2\n"],
+    ),
+    "a method-less class's attribute": (
+        ["class Config:\n    LR = 0.1\n", "def task(a):\n    return a * Config.LR\n"],
+        ["class Config:\n    LR = 0.2\n"],
+    ),
+    "a method-less class a factory makes": (
+        [
+            "def make():\n    class C:\n        K = 2\n\n    return C\n\n\nC = make()\n",
+            "def task(a):\n    return a * C.K\n",
+        ],
+        ["def make():\n    class C:\n        K = 3\n\n    return C\n\n\nC = make()\n"],
+    ),
+    # Every method wrapped by a notebook decorator that keeps no `__wrapped__`:
+    # the wrapper's code is the decorator's cell, so no method locates it.
+    "a class whose every method a notebook decorator wraps": (
+        [
+            "def deco(fn):\n    def wrapper(*a):\n        return fn(*a)\n\n    return wrapper\n",
+            "class Model:\n    @deco\n    def f(self, x):\n        return x * 2\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        ["class Model:\n    @deco\n    def f(self, x):\n        return x * 3\n"],
+    ),
     "a helper's body": (
         ["def helper(x):\n    return x * 2\n", TASK],
         ["def helper(x):\n    return x * 3\n"],
@@ -449,12 +486,13 @@ NOTEBOOK_NOT_EDITS = {
             "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return x * self.K\n",
         ],
     ),
-    "a method-less dataclass's default (documented: not compared)": (
+    "a method-less class's cell run again unchanged": (
         [
-            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
-            "def task(a):\n    return a * Cfg().lr\n",
+            "import enum\n\n\nclass Color(enum.Enum):\n    RED = 1\n",
+            "class Config:\n    LR = 0.1\n",
+            "def task(a):\n    return a * Config.LR + Color.RED.value\n",
         ],
-        ["@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n"],
+        ["class Config:\n    LR = 0.1\n", "class Color(enum.Enum):\n    RED = 1\n"],
     ),
     "a callable reached only through a container (documented)": (
         [
@@ -1461,7 +1499,7 @@ CROSS_VERSION_CELLS = [
     "def task(a):\n    return model.f(a) * Cfg().lr + scaled(a) + cached(a) + FLAG"
     " + len(NOTE) + len(walrus(a)) + shadow(a)\n",
 ]
-CROSS_VERSION_DIGEST = "a765645c7f2d03eb"
+CROSS_VERSION_DIGEST = "4fdf8a6535b53657"
 
 
 def test_the_record_reads_alike_on_every_supported_python(kernel):
@@ -1890,9 +1928,10 @@ HELPER_TASK = "def task(a):\n    return helper(a)\n"
         ],
         [f"@{SUBPKG}.sub.deco\ndef helper(x):\n    return x\n"],
         [f"def helper(x, g={SUBPKG}.sub.f):\n    return g(x)\n"],
-        # A class with no method of its own has no statement to read: its
-        # bases count by type, and a notebook base's bases too.
+        # A class with no method of its own: its statement is found through
+        # the kept cells, and its bases count by type too.
         [f"class Model({SUBPKG}.sub.Base):\n    K = 3\n"],
+        [f"class Model:\n    K = {SUBPKG}.sub.CONST\n"],
         [
             f"class Mid({SUBPKG}.sub.Base):\n    K = 3\n",
             "class Model(Mid):\n    def f(self, x):\n        return x\n",
@@ -1905,6 +1944,7 @@ HELPER_TASK = "def task(a):\n    return helper(a)\n"
         "decorator",
         "default",
         "methodless base",
+        "methodless body",
         "methodless notebook base",
     ],
 )
@@ -3382,3 +3422,150 @@ def test_a_free_variables_namespace_read_is_one_of_mains_seeds(
         warnings.simplefilter("ignore")  # the later pass is cut
         files = _files(kernel, "task")
     assert f"{SUBPKG}.sub (file)" in files, files
+
+
+# --- classes with no method of their own (#292) ----------------------------------
+
+
+def _own(kernel, name: str = "Config") -> str:
+    return _record(kernel, "task")[f"{name} (notebook)"]
+
+
+def test_an_ambiguous_class_recomputes_once_then_reuses(kernel):
+    """Two kept texts of a factory's class, which nothing tells apart: the
+    digest is new, then the same while the object stays, and new again once
+    the cell runs again (a new object)."""
+    factory = (
+        "def make():\n    class C:\n        K = {}\n\n    return C\n\n\nC = make()\n"
+    )
+    _run_cells(kernel, [factory.format(2), "def task(a):\n    return a * C.K\n"])
+    exact = _own(kernel, "C")
+    kernel.run(factory.format(3))
+    first = _own(kernel, "C")
+    assert first != exact
+    assert _own(kernel, "C") == first
+    kernel.run(factory.format(3))
+    assert _own(kernel, "C") != first
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+@pytest.mark.parametrize("decorated", [False, True], ids=["plain", "decorated"])
+def test_a_class_s_first_line_tells_its_texts_apart(kernel, decorated):
+    """3.13+: a reverted cell's class is found exactly by its first line (a
+    decorated class's first decorator's), so the record is the first one
+    again. An `Enum` has no annotations, so no `__annotate_func__` finds it."""
+    deco = "@enum.unique\n" if decorated else ""
+    v1 = f"import enum\n\n\n{deco}class Color(enum.Enum):\n    RED = 1\n"
+    v2 = f"{deco}class Color(enum.Enum):\n    RED = 2\n"
+    _run_cells(kernel, [v1, "def task(a):\n    return a + Color.RED.value\n"])
+    first = _own(kernel, "Color")
+    kernel.run(v2)
+    assert _own(kernel, "Color") != first
+    kernel.run(v1)
+    assert _own(kernel, "Color") == first
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="__annotate_func__ is 3.14+")
+@pytest.mark.parametrize("slots", [False, True], ids=["dataclass", "slots"])
+def test_a_class_with_annotations_is_found_through_its_annotate_function(kernel, slots):
+    """3.14+: the compiler's `__annotate_func__` names the cell, so two texts
+    on the same line are told apart (a `slots=True` dataclass, a new class,
+    keeps it)."""
+    head = f"@dataclasses.dataclass(slots={slots})\nclass Cfg:\n    lr: float = "
+    _run_cells(
+        kernel,
+        [
+            "import dataclasses\n",
+            head + "0.1\n",
+            "def task(a):\n    return a * Cfg().lr\n",
+        ],
+    )
+    first = _own(kernel, "Cfg")
+    kernel.run(head + "0.2\n")
+    assert _own(kernel, "Cfg") != first
+    kernel.run(head + "0.1\n")
+    assert _own(kernel, "Cfg") == first
+
+
+CELL_WATCH_SCRIPT = """
+import importlib
+import io
+import json
+import sys
+from contextlib import redirect_stderr, redirect_stdout
+
+from IPython.core.interactiveshell import InteractiveShell
+
+shell = InteractiveShell.instance()
+out, err = io.StringIO(), io.StringIO()
+
+
+def run(cell):
+    with redirect_stdout(out), redirect_stderr(err):
+        shell.run_cell(cell, store_history=True)
+
+
+def own():
+    from mushin._resume import project_fingerprints
+
+    return project_fingerprints(shell.user_ns["task"])["code"]["Config (notebook)"]
+
+
+run("import mushin._resume")  # the watch starts here
+v1 = "class Config:\\n    LR = 0.1\\n"
+run(v1)
+run("def task(a):\\n    return a * Config.LR\\n")
+first = own()
+run("class Config:\\n    LR = 0.2\\n")
+edited = own()
+run(v1)  # reverted: the same text as the first cell
+reverted = own()
+run("raise ValueError('before the statement')\\nclass Config:\\n    LR = 0.3\\n")
+raised = own()
+run("%%capture\\nclass Config:\\n    LR = 0.4\\n")
+magic = own()
+run(v1)
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.5\\n\\n"
+    "_INSIDE = _pf(task)['code']['Config (notebook)']\\n"
+)
+inside = shell.user_ns["_INSIDE"]
+after_cell = own()
+callbacks = len(shell.events.callbacks["post_run_cell"])
+importlib.reload(sys.modules["mushin._resume"])
+run("import mushin._resume")
+reloaded = len(shell.events.callbacks["post_run_cell"])
+run(v1)
+after_reload = own()
+print(json.dumps({
+    "first": first, "edited": edited, "reverted": reverted, "raised": raised,
+    "magic": magic, "inside": inside, "after_cell": after_cell,
+    "callbacks": [callbacks, reloaded], "after_reload": after_reload,
+    "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
+               if "callback" in line.lower()],
+}))
+"""
+
+
+def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
+    """A real shell: the watch pins a class statement to its cell as it runs,
+    so an edit, a revert, a cell that raised before its statement, a magic's
+    cell, a record taken inside the defining cell and a reload of mushin all
+    give the exact statement (several texts on one line would otherwise read
+    as ambiguous)."""
+    pytest.importorskip("IPython")
+    script = tmp_path / "watch.py"
+    script.write_text(CELL_WATCH_SCRIPT)
+    done = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, check=True
+    )
+    got = json.loads(done.stdout.strip().splitlines()[-1])
+    assert got["edited"] != got["first"]
+    assert got["reverted"] == got["first"]
+    assert got["raised"] == got["first"]  # the statement never ran
+    assert got["magic"] not in (got["first"], got["edited"])
+    assert got["inside"] == got["after_cell"]
+    assert got["callbacks"][0] == got["callbacks"][1]  # not registered twice
+    assert got["after_reload"] == got["first"]
+    assert got["errors"] == []

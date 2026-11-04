@@ -1514,7 +1514,116 @@ loaded without an import statement).
 
 ### PR 2: classes with no method of their own
 
-Planned in its own PR, after this one merges.
+Plan, written before any edit (#294 merged as 3ca30cc).
+
+**The gap.** A class's statement is found through a method's code: a
+function's `co_filename` names its cell. A class with no method of its own
+(a dataclass or an `Enum` of fields, `class Config: lr = 0.1`) has none, so
+its own digest is a constant and an edit to it is missed. Main misses it
+too. So is a class whose every method is wrapped by a notebook decorator
+(#278's residual): the wrapper's code is the decorator's cell.
+
+**Where the statement is found, the first that answers:**
+1. **A method,** as now.
+2. **3.14+: `__annotate_func__`,** the function the compiler makes for a
+   class body's annotations: its code names the cell. Only a class with
+   annotations has one: a dataclass does, an `Enum` or a plain class of
+   values does not (probed on 3.14 and 3.15). Its first line is the first
+   decorator's, so the match takes the decorators' lines as the statement's
+   start.
+3. **A pin taken when the cell ran.** Answering the four objections to it:
+   - *Footprint:* nothing imports IPython. The hook is registered only when
+     `sys.modules` already holds IPython and `IPython.get_ipython()` returns
+     a shell: when `mushin._resume` is imported, and again when a record is
+     taken (a shell made later). Objects are read by type, as elsewhere:
+     `type(obj)`, `vars(obj).get("__module__")`, the qualname through the type
+     slot. Pins are keyed by `id()` with a weak reference checked on lookup,
+     so no metaclass `__eq__` or `__hash__` runs.
+   - *Import-time side effect:* two IPython event callbacks (`pre_run_cell`,
+     `post_run_cell`), each wrapped so it never raises (IPython prints a
+     callback's traceback after every cell otherwise). Their cost per cell is
+     a search of the raw text for `class` and a dict lookup per name it
+     finds; a parse only when a class object changed.
+   - *An untransformed cell:* the pin's text is `shell.transform_cell` of the
+     raw cell, the same text IPython compiles and keeps in `linecache`. The
+     pre-cell search runs on the raw text and may over-collect names, which
+     only costs a lookup.
+   - *Classes defined before `import mushin`:* not pinned; they go to step 4.
+     A notebook usually imports first and defines after, and even when it
+     does not, step 4 is exact unless that class's cell was edited before the
+     import.
+   Before a cell, the objects bound to every name a `class` statement in it
+   could bind (`class\s+NAME`); after it, each that changed and is a
+   notebook class whose qualname is that name is pinned to the cell's text.
+   A cell that raised before the statement leaves the object unchanged and
+   pins nothing; one that rebinds the name to another class (`C = make()`)
+   has another qualname and pins nothing.
+4. **The kept cells' `class` statements,** by syntactic qualname
+   (`f.<locals>.C`, `A.C`, an explicit `global`) and, on 3.13+, by first line
+   (`__firstlineno__`). One distinct text: exact. Several: which is in force
+   cannot be told (ipykernel names cells by content, so a reverted cell keeps
+   its old entry), so the digest is a per-process token with a per-object
+   counter: it differs from every earlier record and stays while the object
+   does. That is a recompute, never a wrong reuse.
+
+**Two refinements to step 3** (review of this plan, before any code):
+- *The record taken during the cell that defines the class* (a small
+  notebook's `class Config` and `run(...)` in one cell): `post_run_cell` has
+  not fired yet, so the new object is unpinned, and with two texts in the
+  session it would get a fresh token on every run. So the hook state keeps
+  the running cell's raw text and its snapshot, and a lookup during a cell
+  pins on demand: the name's object differs from the snapshot, so this cell
+  made it. `post_run_cell` does the same at the cell's end.
+- *Registered once per shell, `%autoreload` included:* reloading
+  `mushin._resume` re-runs its module body, and new callback objects would
+  not be recognized as the old ones. The callbacks and the pins live on the
+  shell (one attribute holding mushin's state), so a reloaded module finds
+  them and registers nothing twice.
+
+**An upgrade cost to state in the fragment and the PR:** a methodless
+class's own digest was a constant and becomes its text, under the same
+`"<name> (notebook)"` key, so a resume compares them and re-runs the cells
+once after upgrading, for a notebook task that reaches such a class. (#291
+and #293 only added file keys, which a resume does not compare.)
+
+**The token's cost against the bar.** After a restart, Run All gives one text,
+so the exact digest differs from the token one and the cells re-run once,
+though nothing changed: a spurious re-run after "a restart replaying the
+cells". It can only follow a session where a class's cell was edited and
+re-run while no pin was taken: before `import mushin`, for a class a factory
+makes (step 3 pins top-level names only), or in a frontend without IPython's
+events. Decision: accept it as a documented residual. The alternative, picking
+one of several texts, can reuse results the other text computed, a wrong
+result.
+
+**Reading.** The statement found by any step is a unit's site like a class
+found through its methods: its decorators, keywords and body are read for
+modules (`_unit_reading` and the floor). With several candidates, all are
+read.
+
+**Tests:**
+- simulated kernel (steps 2 and 4): a dataclass field default, an `Enum`
+  member, a plain class attribute, a class made in a factory, and a class
+  whose methods are all wrapped by a notebook decorator, each edited and re-run;
+- the ambiguous case recomputes, then reuses while the object stays;
+- a methodless class's body naming `pkg.sub` records it;
+- a real `InteractiveShell` in a subprocess (step 3): edit, revert, and an
+  unchanged re-run keep the record exact; a cell that raised before its
+  `class` statement pins nothing; a magic cell (`%%capture`) still pins;
+  the callbacks print nothing;
+- 3.13+: two texts at different first lines are told apart, a decorated
+  class's first line taken as its first decorator's (as step 2 does);
+- 3.14+: a dataclass, `slots=True` too (probed: the new class keeps both
+  `__annotate_func__` and `__firstlineno__`), is found with no pin;
+- the record taken inside the defining cell, and `%autoreload` of
+  `mushin._resume` (one pair of callbacks after it), in the subprocess
+  shell; a `raw_cell` of None is skipped;
+- the all-wrapped class's decorator without `functools.wraps` (with it,
+  `__wrapped__` already reaches the methods);
+- the cross-version digest (its cells hold a methodless dataclass) changes
+  once and reads alike on 3.11 to 3.15: steps 2 and 4 find the same node.
+Each rule mutation-checked by node id, baseline first; the cost per cell of
+the callbacks measured.
 
 ### Mistakes to avoid this time (from the earlier rounds)
 
@@ -1529,3 +1638,21 @@ Planned in its own PR, after this one merges.
   once, run new tests by node id with their counts, and make sure a test
   fails for the reason it names (not a second path, not walk order);
 - measurements compare the output itself and are repeated.
+
+**Results (PR 2).**
+- **Tests:** 279 in the module, all passing on 3.11 to 3.15 (the version
+  skips differ). The cross-version digest changed once (its cells hold a
+  methodless dataclass) and reads the same on all five, since step 2 (3.14+)
+  and step 4 (3.11 to 3.13) find the same node.
+- **Against main (3ca30cc):** the five new edit cases, the methodless body,
+  the ambiguous case and the shell test fail there.
+- **Mutations:** thirteen, by node id after a baseline, all caught. The ones
+  that exist only on 3.14+ (the annotate function, its first line) were
+  caught on 3.15. The first-line filter was at first exercised only by a
+  dataclass, which 3.14+ finds through its annotate function first, so its
+  mutation survived there; the test now uses an `Enum`, plain and decorated.
+- **Cost of the watch per cell** (an `InteractiveShell`, 300 cells each,
+  two runs): a cell without `class` 52 us either way; one with a `class`
+  statement 93-95 us against 65 us without the watch (the transform and the
+  pin).
+

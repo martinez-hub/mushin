@@ -1350,26 +1350,75 @@ def _cell_tree(lines):
 _CELL_IMPORTS: dict[str, tuple] = {}
 
 
+def _first_line(node) -> int:
+    """A ``class`` statement's first line: its first decorator's, or its own
+    (as the compiler's ``__firstlineno__`` and a body function's first line
+    count it)."""
+    return min([node.lineno, *(d.lineno for d in node.decorator_list)])
+
+
+def _class_nodes(tree) -> list:
+    """``(node, qualname)`` for each ``class`` statement in a cell's tree, its
+    qualname as the compiler makes it: ``A.C`` in a class, ``f.<locals>.C``
+    in a function, the bare name when the enclosing function or class
+    declares it ``global``."""
+    import ast
+
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def declared_global(node) -> frozenset:
+        names: set[str] = set()
+        stack = list(node.body)
+        while stack:
+            sub = stack.pop()
+            if type(sub) is ast.Global:
+                names.update(sub.names)
+            elif type(sub) not in defs and type(sub) is not ast.Lambda:
+                stack.extend(ast.iter_child_nodes(sub))
+        return frozenset(names)
+
+    out: list = []
+    stack = [(child, "", frozenset()) for child in ast.iter_child_nodes(tree)]
+    while stack:
+        node, prefix, globs = stack.pop()
+        kind = type(node)
+        if kind in defs:
+            qualname = node.name if node.name in globs else prefix + node.name
+            if kind is ast.ClassDef:
+                out.append((node, qualname))
+                inner = qualname + "."
+            else:
+                inner = qualname + ".<locals>."
+            inside = declared_global(node)
+            stack.extend((child, inner, inside) for child in node.body)
+        elif kind is not ast.Lambda:
+            stack.extend((child, prefix, globs) for child in ast.iter_child_nodes(node))
+    return out
+
+
 def _cell_imports(
     text: str,
-) -> tuple[tuple[str, ...], tuple[tuple[str, str, bool], ...]]:
-    """``(modules, bindings)`` for a cell's text. ``modules``: what its
-    absolute imports name, at any depth (``_import_pairs``). ``bindings``:
+) -> tuple[tuple[str, ...], tuple[tuple[str, str, bool], ...], tuple[str, ...]]:
+    """``(modules, bindings, classes)`` for a cell's text. ``classes``: the
+    qualnames of its ``class`` statements (``_class_nodes``). ``modules``:
+    what its absolute imports name, at any depth (``_import_pairs``).
+    ``bindings``:
     ``(name, dotted, lazy)`` for each import among the cell's own statements
     (not a function's or a class's, whose names are local) that binds
     ``name`` to a dotted module starting with it (``import pkg.sub`` binds
     ``pkg``, and so do ``import pkg.sub as pkg`` and ``from pkg import pkg``),
     ``lazy`` when it is written ``lazy import`` (3.15): such a statement's
-    proxy reads two ways (``_chain_bases``). A cell without the word
-    ``import`` is not parsed, and one that does not parse imports nothing
-    (it never ran)."""
+    proxy reads two ways (``_chain_bases``). A cell with neither the word
+    ``import`` nor ``class`` is not parsed, and one that does not parse
+    imports and defines nothing (it never ran)."""
     import ast
 
     modules: tuple[str, ...] = ()
     bindings: tuple[tuple[str, str, bool], ...] = ()
-    tree = _parse_cell(text) if "import" in text else None
+    tree = _parse_cell(text) if "import" in text or "class" in text else None
     if tree is None:
-        return modules, bindings
+        return modules, bindings, ()
+    classes = tuple(sorted({qualname for _, qualname in _class_nodes(tree)}))
     modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
     scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
     found: set[tuple[str, str, bool]] = set()
@@ -1396,19 +1445,15 @@ def _cell_imports(
             for name, dotted in pairs
             if dotted != name and dotted.partition(".")[0] == name
         )
-    return modules, tuple(sorted(found))
+    return modules, tuple(sorted(found)), classes
 
 
-def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
-    """What every cell the kernel keeps imports (``_cell_imports``, cached by
-    the cell's text): ``(modules, bindings)``, ``bindings`` mapping a name to
-    ``(dotted, lazy)`` for each import binding it to a dotted module starting
-    with it. A cell is a ``linecache`` entry ``_cell_lines`` would serve
-    (``_kept_cell``). Every kept cell counts,
-    an older version of a re-run cell too: a submodule's code runs only if
-    something imported it, and a cell's import is there however the task then
-    reaches the module (an argument, a call's result, a local name the syntax
-    cannot follow)."""
+def _scan_kept_cells() -> list[tuple[str, tuple]]:
+    """``(text, index)`` for every cell the kernel keeps: a ``linecache``
+    entry ``_cell_lines`` would serve (``_kept_cell``), with what
+    ``_cell_imports`` reads in it, cached by the text. The cache keeps what
+    this scan saw: a fixed bound would evict cells the next scan needs again,
+    and re-parse every one once a session passes it."""
     import linecache
 
     sources = [linecache.cache]
@@ -1423,8 +1468,7 @@ def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
                     texts.add("".join(entry[2]))
                 except TypeError:  # a line that is not text
                     continue
-    modules: set[str] = set()
-    bindings: dict[str, set[tuple[str, bool]]] = {}
+    out: list[tuple[str, tuple]] = []
     seen: dict[str, tuple] = {}
     for text in texts:
         key = _short_hash(text.encode("utf-8", "surrogatepass"))
@@ -1432,14 +1476,33 @@ def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
         if found is None:
             found = _cell_imports(text)
         seen[key] = found
+        out.append((text, found))
+    _CELL_IMPORTS.clear()
+    _CELL_IMPORTS.update(seen)
+    return out
+
+
+def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
+    """What every cell the kernel keeps imports (``_scan_kept_cells``):
+    ``(modules, bindings)``, ``bindings`` mapping a name to ``(dotted,
+    lazy)`` for each import binding it to a dotted module starting with it.
+    Every kept cell counts, an older version of a re-run cell too: a
+    submodule's code runs only if something imported it, and a cell's import
+    is there however the task then reaches the module (an argument, a call's
+    result, a local name the syntax cannot follow)."""
+    modules: set[str] = set()
+    bindings: dict[str, set[tuple[str, bool]]] = {}
+    for _, found in _scan_kept_cells():
         modules.update(found[0])
         for name, dotted, lazy in found[1]:
             bindings.setdefault(name, set()).add((dotted, lazy))
-    # Keep what this scan saw: a fixed bound would evict cells the next scan
-    # needs again, and re-parse every one once a session passes it.
-    _CELL_IMPORTS.clear()
-    _CELL_IMPORTS.update(seen)
     return modules, bindings
+
+
+def _kept_class_cells(qualname: str) -> list[str]:
+    """The text of every kept cell with a ``class`` statement of that
+    qualname (``_class_nodes``), in no particular order."""
+    return [text for text, found in _scan_kept_cells() if qualname in found[2]]
 
 
 def _lazy_bindings(bindings: dict, namespace: dict) -> dict[str, set[str]]:
@@ -2143,14 +2206,167 @@ def _method_functions(value) -> list:
     return out
 
 
-def _class_site(cls, methods) -> tuple | None:
-    """``(tree, node)``: the cell's syntax tree and the ``class`` statement in
-    it that defined ``cls``, found through a method defined in its body
-    (``inspect.getsource`` cannot find a class in a notebook): the innermost
-    one with its name spanning the method's line."""
-    import ast
+#: The attribute of an IPython shell holding mushin's cell watch (a dict,
+#: so a reloaded ``_resume`` finds the same one): ``pins`` maps ``id(cls)``
+#: to ``(weakref, lines)``, the text of the cell whose ``class`` statement
+#: made it; ``running`` is the cells running now (a magic's nested cell
+#: too), each ``(raw text, {name: object before the cell})`` or None.
+_CELL_WATCH = "_mushin_cell_watch"
+_CLASS_NAME = re.compile(r"\bclass\s+([^\W\d]\w*)")
 
-    for fn in methods:
+
+def _shell():
+    """The running IPython shell, or None; IPython is never imported here."""
+    import sys
+
+    ipython = sys.modules.get("IPython")
+    get = getattr(ipython, "get_ipython", None) if ipython is not None else None
+    return get() if callable(get) else None
+
+
+def _cell_watch(register: bool = True) -> dict | None:
+    """The shell's cell watch (``_CELL_WATCH``), registering its two event
+    callbacks the first time (``register``); None outside a shell. Best
+    effort: an IPython that refuses the callbacks leaves no watch."""
+    try:
+        shell = _shell()
+        if shell is None:
+            return None
+        state = getattr(shell, _CELL_WATCH, None)
+        if type(state) is dict:
+            return state
+        if not register:
+            return None
+        state = {"pins": {}, "running": [], "transform": shell.transform_cell}
+
+        def pre(info=None) -> None:
+            try:
+                running = state["running"]
+                if len(running) > 8:  # a cell whose end never fired
+                    running.clear()
+                raw = getattr(info, "raw_cell", None)
+                if type(raw) is not str or "class" not in raw:
+                    running.append(None)
+                    return
+                ns = shell.user_ns
+                names = set(_CLASS_NAME.findall(raw))
+                running.append((raw, {name: ns.get(name) for name in names}))
+            except Exception:  # noqa: BLE001 - a callback must never raise
+                pass
+
+        def post(result=None) -> None:
+            try:
+                running = state["running"]
+                entry = running.pop() if running else None
+                if entry is not None:
+                    _pin_classes(state, shell.user_ns, entry)
+            except Exception:  # noqa: BLE001 - a callback must never raise
+                pass
+
+        shell.events.register("pre_run_cell", pre)
+        shell.events.register("post_run_cell", post)
+        setattr(shell, _CELL_WATCH, state)
+        return state
+    except Exception:  # noqa: BLE001 - no watch: classes go to the kept cells
+        return None
+
+
+def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
+    """Pin each class the cell ``entry`` (``(raw, snapshot)``) bound to a name
+    its ``class`` statements could bind, and that is a new object since the
+    cell started, to the cell's text; ``only`` limits it to one class."""
+    import weakref
+
+    raw, snapshot = entry
+    made = []
+    for name, before in snapshot.items():
+        value = namespace.get(name)
+        if value is before or (only is not None and value is not only):
+            continue
+        if _notebook_class(value, namespace) is None:
+            continue
+        if type.__dict__["__qualname__"].__get__(value) != name:
+            continue  # a class made elsewhere and bound here (`C = make()`)
+        made.append(value)
+    if not made:
+        return
+    lines = state["transform"](raw).splitlines(True)
+    pins = state["pins"]
+    if len(pins) > 4096:  # drop the pins of classes that are gone
+        for key in [k for k, (ref, _) in pins.items() if ref() is None]:
+            del pins[key]
+    for cls in made:
+        pins[id(cls)] = (weakref.ref(cls), lines)
+
+
+def _pinned_cell(cls, namespace: dict) -> list | None:
+    """The text of the cell whose ``class`` statement made ``cls``, when the
+    shell's cell watch saw it run: pinned when it ended, or, for a record
+    taken inside that cell, pinned now (the name holds a new object since the
+    cell started)."""
+    state = _cell_watch(register=False)
+    if state is None:
+        return None
+    pin = state["pins"].get(id(cls))
+    if pin is not None and pin[0]() is cls:
+        return pin[1]
+    qualname = type.__dict__["__qualname__"].__get__(cls)
+    for entry in reversed(state["running"]):
+        if entry is not None and qualname in entry[1]:
+            _pin_classes(state, namespace, entry, only=cls)
+            pin = state["pins"].get(id(cls))
+            return pin[1] if pin is not None and pin[0]() is cls else None
+    return None
+
+
+#: A per-process token and a counter per class object, for a class whose
+#: statement cannot be told from several kept texts (``_ambiguous_own``).
+_PROCESS_TOKEN: list = []
+_CLASS_GENERATIONS: dict = {}
+_GENERATION_COUNTER = __import__("itertools").count()
+
+
+def _ambiguous_own(cls) -> str:
+    """A class's own digest when several kept texts could be its statement:
+    unlike any digest an earlier process or object wrote, and the same while
+    this object is the one bound (a recompute, never a wrong reuse)."""
+    import uuid
+    import weakref
+
+    if not _PROCESS_TOKEN:
+        _PROCESS_TOKEN.append(uuid.uuid4().hex)
+    hit = _CLASS_GENERATIONS.get(id(cls))
+    if hit is None or hit[0]() is not cls:
+        if len(_CLASS_GENERATIONS) > 4096:
+            for key in [k for k, (r, _) in _CLASS_GENERATIONS.items() if r() is None]:
+                del _CLASS_GENERATIONS[key]
+        hit = (weakref.ref(cls), next(_GENERATION_COUNTER))
+        _CLASS_GENERATIONS[id(cls)] = hit
+    return _short_hash(f"class\n?\n{_PROCESS_TOKEN[0]}\n{hit[1]}".encode())
+
+
+def _class_sites(cls, methods, namespace: dict) -> tuple[list, bool]:
+    """``(sites, ambiguous)``: the ``class`` statement that defined ``cls``,
+    as ``[(tree, [node])]`` (``inspect.getsource`` cannot find a class in a
+    notebook), from the first of these that answers:
+    - a function compiled in its body, whose code names the cell: a method,
+      or 3.14's ``__annotate_func__`` (a class with annotations); the
+      innermost statement of its name spanning the function's first line;
+    - the cell the shell's watch saw make it (``_pinned_cell``);
+    - the kept cells' statements of its qualname (on 3.13+, of its
+      ``__firstlineno__`` too): one distinct text is the statement; several
+      are all returned, ``ambiguous``, since which is in force cannot be told.
+    No site when none is kept (a ``%%time`` cell)."""
+    import ast
+    import types
+
+    name = type.__dict__["__name__"].__get__(cls)
+    qualname = type.__dict__["__qualname__"].__get__(cls)
+    body = list(methods)
+    annotate = vars(cls).get("__annotate_func__")
+    if type(annotate) is types.FunctionType:
+        body.append(annotate)
+    for fn in body:
         code = fn.__code__
         lines = _cell_lines(code.co_filename)
         tree = _cell_tree(lines) if lines is not None else None
@@ -2160,14 +2376,30 @@ def _class_site(cls, methods) -> tuple | None:
         for node in ast.walk(tree):
             if (
                 type(node) is ast.ClassDef
-                and node.name == cls.__name__
-                and node.lineno <= code.co_firstlineno <= (node.end_lineno or 0)
+                and node.name == name
+                and _first_line(node) <= code.co_firstlineno <= (node.end_lineno or 0)
                 and (best is None or node.lineno >= best.lineno)
             ):
                 best = node
         if best is not None:
-            return tree, best
-    return None
+            return [(tree, [best])], False
+    lines = _pinned_cell(cls, namespace)
+    tree = _cell_tree(lines) if lines is not None else None
+    if tree is not None:
+        nodes = [node for node, q in _class_nodes(tree) if q == qualname]
+        if nodes:
+            return [(tree, nodes)], False
+    first = vars(cls).get("__firstlineno__")
+    found: dict[str, tuple] = {}
+    for text in _kept_class_cells(qualname):
+        tree = _cell_tree(text.splitlines(True))
+        if tree is None:
+            continue
+        for node, q in _class_nodes(tree):
+            if q == qualname and (type(first) is not int or _first_line(node) == first):
+                found.setdefault(_canonical_dump(node), (tree, node))
+    sites = [(tree, [node]) for _, (tree, node) in sorted(found.items())]
+    return sites, len(sites) > 1
 
 
 def _cell_function(value, namespace):
@@ -2552,15 +2784,15 @@ def _notebook_entries(
             )
         return {}, [], []
 
-    def site_of(uid: int) -> tuple | None:
-        """``(tree, nodes)``: a unit's cell tree and its syntax nodes in it (a
-        function's definition, a class's ``class`` statement); None when its
-        cell is not kept."""
+    def sites_of(uid: int) -> tuple[list, bool]:
+        """``([(tree, nodes)], ambiguous)``: a unit's cell trees and its syntax
+        nodes in them (a function's definition, a class's ``class``
+        statement, see ``_class_sites``); none when its cell is not kept."""
         kind, obj, _, methods = units[uid]
         if kind == "function":
-            return _definition_site(obj.__code__)
-        found = _class_site(obj, methods)
-        return None if found is None else (found[0], [found[1]])
+            site = _definition_site(obj.__code__)
+            return ([] if site is None else [site]), False
+        return _class_sites(obj, methods, namespace)
 
     def own(kind: str, nodes) -> str:
         """A unit's own definition, without what it reaches."""
@@ -2572,10 +2804,14 @@ def _notebook_entries(
     # on the order the walk took. Without captures the edges form no cycle
     # (methods, bases and __wrapped__ only point down); components keep that
     # true if one ever appears.
-    unit_sites = {uid: site_of(uid) for uid in units}
+    unit_sites = {uid: sites_of(uid) for uid in units}
     owns = {
-        uid: own(units[uid][0], None if site is None else site[1])
-        for uid, site in unit_sites.items()
+        uid: (
+            _ambiguous_own(units[uid][1])
+            if ambiguous
+            else own(units[uid][0], sites[0][1] if sites else None)
+        )
+        for uid, (sites, ambiguous) in unit_sites.items()
     }
 
     # The project modules the reached definitions name: a cell's `import
@@ -2607,13 +2843,7 @@ def _notebook_entries(
     # a lazy proxy's other reading): main's had none of it, so it is followed
     # after every seed main had (``_record``).
     added: set[str] = set()
-    for uid, site in unit_sites.items():
-        if site is None:
-            continue
-        # Each unit alone (a method in its class's statement and on its own):
-        # the union does not depend on the order the walk took.
-        unit_modules, global_chains, cell_chains, rebound = _unit_reading(*site)
-        modules |= unit_modules
+    for uid, (sites, _) in unit_sites.items():
         # A name a function around the unit binds to something unknown is a
         # free variable of the unit: its closure holds the value.
         kind, obj = units[uid][0], units[uid][1]
@@ -2624,61 +2854,66 @@ def _notebook_entries(
             cells = obj.__closure__ or ()
             free = dict(zip(obj.__code__.co_freevars, cells, strict=False))
             defaults = _parameter_defaults(obj)
-        # The compiler's free variables decide (a walrus in a comprehension
-        # binds in the enclosing function, which the scopes read as the
-        # comprehension's): a chain on one asks the closure too.
-        asked = cell_chains | {c for c in global_chains if c[0] in free}
-        for chain in asked:
-            if chain[0] not in free:
-                continue
-            try:
-                value = free[chain[0]].cell_contents
-            except ValueError:  # an empty cell: nothing bound yet
-                continue
-            follow(modules, _chain_bases(chain[0], value), chain[1:])
-        # The namespace too, for a free variable as well: its closure can be
-        # empty now and filled during the run with what the syntax cannot
-        # tell (`nonlocal pkg; pkg = importlib.import_module("pkg")`), and
-        # main's record read the namespace's module of that name.
-        for chain in global_chains:
-            if chain[0] in namespace and not _kernel_name(chain[0]):
-                found = _chain_bases(chain[0], namespace[chain[0]])
-                follow(modules, found, chain[1:])
-                follow(added, lazy_extra(chain[0], found), chain[1:])
-        # The floor: what main's reading names counts too, resolved as main
-        # resolved it (the closure first, then the namespace), so this record
-        # never holds less than main's did.
-        floor_modules, floor_chains = _floor_reading(site[1])
-        modules |= floor_modules
-        for chain in floor_chains:
-            extra: tuple[str, ...] = ()
-            if chain[0] in free:
+        for site in sites:
+            # Each unit alone (a method in its class's statement and on its
+            # own): the union does not depend on the order the walk took.
+            unit_modules, global_chains, cell_chains, rebound = _unit_reading(*site)
+            modules |= unit_modules
+            # The compiler's free variables decide (a walrus in a comprehension
+            # binds in the enclosing function, which the scopes read as the
+            # comprehension's): a chain on one asks the closure too.
+            asked = cell_chains | {c for c in global_chains if c[0] in free}
+            for chain in asked:
+                if chain[0] not in free:
+                    continue
                 try:
-                    found = _chain_bases(chain[0], free[chain[0]].cell_contents)
+                    value = free[chain[0]].cell_contents
                 except ValueError:  # an empty cell: nothing bound yet
                     continue
-            elif chain[0] in namespace and not _kernel_name(chain[0]):
-                found = _chain_bases(chain[0], namespace[chain[0]])
-                extra = lazy_extra(chain[0], found)
-            else:
-                continue
-            follow(modules, found, chain[1:])
-            follow(added, extra, chain[1:])
-        # A chain on one of the unit's own parameters that has a default: the
-        # default is a value it can hold, which the syntax may not tell (`m=mod`
-        # in a factory), read by type as a closure cell is.
-        for chain in global_chains | floor_chains:
-            if chain[0] in defaults:
-                follow(added, _chain_bases(chain[0], defaults[chain[0]]), chain[1:])
-        # What a rebinding elsewhere in the tree can make a chain reach.
-        for target in rebound:
-            if target[0] == "module":
-                added.add(".".join(target[1]))
-                continue
-            name, rest = target[1][0], target[1][1:]
-            if name in namespace and not _kernel_name(name):
-                found = _chain_bases(name, namespace[name])
-                follow(added, (*found, *lazy_extra(name, found)), rest)
+                follow(modules, _chain_bases(chain[0], value), chain[1:])
+            # The namespace too, for a free variable as well: its closure can be
+            # empty now and filled during the run with what the syntax cannot
+            # tell (`nonlocal pkg; pkg = importlib.import_module("pkg")`), and
+            # main's record read the namespace's module of that name.
+            for chain in global_chains:
+                if chain[0] in namespace and not _kernel_name(chain[0]):
+                    found = _chain_bases(chain[0], namespace[chain[0]])
+                    follow(modules, found, chain[1:])
+                    follow(added, lazy_extra(chain[0], found), chain[1:])
+            # The floor: what main's reading names counts too, resolved as main
+            # resolved it (the closure first, then the namespace), so this record
+            # never holds less than main's did.
+            floor_modules, floor_chains = _floor_reading(site[1])
+            modules |= floor_modules
+            for chain in floor_chains:
+                extra: tuple[str, ...] = ()
+                if chain[0] in free:
+                    try:
+                        found = _chain_bases(chain[0], free[chain[0]].cell_contents)
+                    except ValueError:  # an empty cell: nothing bound yet
+                        continue
+                elif chain[0] in namespace and not _kernel_name(chain[0]):
+                    found = _chain_bases(chain[0], namespace[chain[0]])
+                    extra = lazy_extra(chain[0], found)
+                else:
+                    continue
+                follow(modules, found, chain[1:])
+                follow(added, extra, chain[1:])
+            # A chain on one of the unit's own parameters that has a default: the
+            # default is a value it can hold, which the syntax may not tell (`m=mod`
+            # in a factory), read by type as a closure cell is.
+            for chain in global_chains | floor_chains:
+                if chain[0] in defaults:
+                    follow(added, _chain_bases(chain[0], defaults[chain[0]]), chain[1:])
+            # What a rebinding elsewhere in the tree can make a chain reach.
+            for target in rebound:
+                if target[0] == "module":
+                    added.add(".".join(target[1]))
+                    continue
+                name, rest = target[1][0], target[1][1:]
+                if name in namespace and not _kernel_name(name):
+                    found = _chain_bases(name, namespace[name])
+                    follow(added, (*found, *lazy_extra(name, found)), rest)
     comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}
     for uid, ci in comp_of.items():
@@ -2758,6 +2993,7 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[s
     that fails gives no cell modules, each with its own warning, since an
     edit then goes unnoticed (a notebook metaclass's attribute hook that
     raises, say)."""
+    _cell_watch()  # a shell made after mushin was imported
     out: dict[str, str] = {}
     reached: set[str] = set()
     added: set[str] = set()
@@ -3330,3 +3566,8 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     return ResumeContext(
         dir=cell_dir, is_resume=matches, last_ckpt=last, attempt=attempt
     )
+
+
+# In a running IPython shell, watch its cells from this import on, so a class
+# statement run after it is pinned to its cell (``_class_sites``).
+_cell_watch()

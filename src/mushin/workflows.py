@@ -2526,8 +2526,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             attribute values beyond its text, possibly a module loaded other
             than by a cell's ``import`` statement (``importlib.import_module``,
             a plugin loader that fills a registry, an import in a ``%%time``
-            cell), possibly a class with no method of
-            its own and what it names beyond its bases, a ``_target_``
+            cell), a ``_target_``
             defined there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file), a
             top-level statement of the driver script that changes an object in
