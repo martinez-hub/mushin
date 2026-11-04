@@ -299,18 +299,22 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
     return {name: tuple(paths) for name, paths in by_name.items()}
 
 
-def _foreign_top(top: str) -> bool:
+def _foreign_top(top: str, loaded_only: bool = False) -> bool:
     """True when the top-level module ``top`` is foreign as a whole, so none
     of its submodules needs a lookup: mushin; one whose file an installed
     package or the standard library holds (``torch``, loaded or not: the file
     decides, so a checkout's ``code/`` stays the project's); or one with no
     file that the standard library has by name (``sys``). Any other top-level
     name with no file (a namespace package, one not found) is not: each of
-    its modules is judged by its own file."""
+    its modules is judged by its own file. ``loaded_only`` judges only a
+    loaded one (undecided otherwise), so a record of many files does no
+    ``find_spec`` per name it has not seen loaded."""
     import sys
 
     if top == "mushin":
         return True
+    if loaded_only and top not in sys.modules:
+        return False
     try:
         file = _find_file(top)
         if isinstance(file, str) and file:
@@ -716,7 +720,7 @@ def _file_entries(names) -> tuple[dict[str, str], bool]:
         if top not in foreign_tops:
             # An installed package (torch) is foreign as a whole: its
             # submodules need no lookup each.
-            foreign_tops[top] = _foreign_top(top)
+            foreign_tops[top] = _foreign_top(top, loaded_only=True)
         if foreign_tops[top]:
             continue
         # Importing `pkg.models` runs `pkg/__init__.py` first, so a module's
@@ -1171,7 +1175,12 @@ def _namespace_modules(namespace: dict) -> list[str]:
             module_name = _module_name_of(value)
             if module_name is not None:
                 name, lazy = module_name
-                if name is not None and lazy and key == name.partition(".")[0]:
+                if (
+                    name is not None
+                    and lazy
+                    and key == name.partition(".")[0]
+                    and name.rpartition(".")[2] != key  # `lazy from pkg import pkg`
+                ):
                     # `lazy import pkg.sub` binds `pkg` to the package, as
                     # `import pkg.sub` does: the package, before the proxy
                     # resolves and after alike.
@@ -1243,8 +1252,10 @@ _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
 
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
+#: A cell tree's scope index and its units' readings, one entry per tree
+#: (the tree kept with it, so its nodes' ids stay its own), bounded like the
+#: trees.
 _SCOPE_INDEXES: dict = {}
-_UNIT_READINGS: dict = {}
 
 
 def _kernel_name(name: str) -> bool:
@@ -1415,18 +1426,39 @@ def _resolve_chain(scope: _Scope, chain: tuple[str, ...]) -> set:
                     out.add(("cell", target[1], target[2] + rest))
                 else:
                     out.add((target[0], target[1] + rest))
+            if current.kind == "class":
+                # A class body reads a name it binds with LOAD_NAME, which
+                # falls back to the globals before the binding has run.
+                out.add(("global", chain))
             return out
     return {("global", chain)}
 
 
+#: The most targets one name keeps; past it the name is unknown (as on main,
+#: which read every local as unknown), so a long rebind chain stays cheap.
+_TARGETS_MAX = 64
+
+
 def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
     """Fill ``scope.bound``: every name Python makes local to it, minus its
-    ``global`` and ``nonlocal`` names. An import binds a module; an alias
-    (``m = pkg``, ``s = pkg.sub``, a parameter defaulting to ``pkg``, read
-    where the definition stands) binds what its value resolves to, to a
-    fixpoint; anything else (a parameter a caller passes, a loop variable, a
-    relative import) binds something unknown. The module's names are the
-    namespace's, so it binds none."""
+    ``global`` and ``nonlocal`` names.
+
+    - An import binds a module.
+    - An alias (``m = pkg``, ``s = pkg.sub``, a parameter defaulting to
+      ``pkg``, read where the definition stands) binds what its value
+      resolves to, and outside a class body its own cell too (a function
+      made inside reads it through its closure).
+    - Anything the syntax cannot tell (a parameter a caller passes, a plain
+      assignment, a loop, ``with``, ``except`` or ``match`` name) binds its
+      cell and the namespace's module of that name. A missed edit is the
+      cost of guessing wrong the other way; a recompute is this one's.
+    - A nested ``def`` or ``class`` name, and a relative import, bind only
+      their cell: whatever it holds, it is not the namespace's module.
+
+    Aliases resolve once each, in dependency order. One in a cycle (``x =
+    x.a``, ``a = x.l; x = a.r``) binds as unknown, and a name past
+    ``_TARGETS_MAX`` targets becomes unknown, so the cost stays linear. The
+    module's names are the namespace's, so it binds none."""
     import ast
 
     if scope.kind == "module":
@@ -1439,14 +1471,17 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
     skip = scope.globals | scope.nonlocals
     sid = id(scope)
 
-    def bind(name: str, target) -> None:
+    def bind(name: str, *targets) -> None:
         if name not in skip:
-            scope.bound.setdefault(name, set()).add(target)
+            scope.bound.setdefault(name, set()).update(targets)
+
+    def cell(name: str) -> tuple:
+        return ("cell", sid, (name,))
 
     def unknown(name: str) -> None:
-        bind(name, ("cell", sid, (name,)))
+        bind(name, cell(name), ("global", (name,)))
 
-    aliases: list = []  # (name, chain, the scope its value is read in)
+    aliases: list = []  # (name, chain), read in this scope
     if scope.kind == "function":
         args = scope.node.args
         positional = [*args.posonlyargs, *args.args]
@@ -1465,8 +1500,9 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
                 continue
             unknown(arg.arg)  # a caller can pass anything
             chain = _name_chain(defaults.get(arg.arg))
-            if chain is not None and standing is not None:
-                aliases.append((arg.arg, chain, standing))
+            if chain is not None:
+                # Read where the definition stands, whose names are final.
+                bind(arg.arg, *_resolve_chain(standing, chain))
     alias_names: set[int] = set()
     for node in scope.own:
         kind = type(node)
@@ -1475,7 +1511,7 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
             targets = node.targets if kind is ast.Assign else [node.target]
             for target in targets:
                 if chain is not None and type(target) is ast.Name:
-                    aliases.append((target.id, chain, scope))
+                    aliases.append((target.id, chain))
                     alias_names.add(id(target))
     for node in scope.own:
         kind = type(node)
@@ -1494,31 +1530,39 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
                 if node.level == 0 and node.module:
                     bind(name, ("module", (*node.module.split("."), alias.name)))
                 else:
-                    unknown(name)  # relative: the closure can tell
+                    bind(name, cell(name))  # relative: the closure can tell
         elif kind in (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef):
-            unknown(node.name)
+            bind(node.name, cell(node.name))
         elif kind is ast.ExceptHandler and node.name:
             unknown(node.name)
         elif kind.__name__ in ("MatchAs", "MatchStar") and node.name:
             unknown(node.name)
         elif kind.__name__ == "MatchMapping" and node.rest:
             unknown(node.rest)
-    for name, _, _ in aliases:
-        if name not in skip:
-            scope.bound.setdefault(name, set())
-    # An alias can name another; each pass only adds, so this ends.
-    for _ in range(len(aliases) + 1):
-        changed = False
-        for name, chain, where in aliases:
-            if name in skip:
-                continue
-            have = scope.bound[name]
-            new = _resolve_chain(where, chain) - have
-            if new:
-                have |= new
-                changed = True
-        if not changed:
-            break
+    named = {name for name, _ in aliases if name not in skip}
+    for name in named:
+        scope.bound.setdefault(name, set())
+        if scope.kind != "class":
+            bind(name, cell(name))
+    # Each alias depends on the alias its value starts from; resolve them
+    # dependencies first, and a cycle as unknown.
+    depends = {name: set() for name in named}
+    for name, chain in aliases:
+        if name in named and chain[0] in named:
+            depends[name].add(chain[0])
+    comp_of = _components({name: sorted(deps) for name, deps in depends.items()})
+    sizes: dict[int, int] = {}
+    for comp in comp_of.values():
+        sizes[comp] = sizes.get(comp, 0) + 1
+    for name, chain in sorted(
+        (a for a in aliases if a[0] in named), key=lambda a: comp_of[a[0]]
+    ):
+        if sizes[comp_of[name]] > 1 or name in depends[name]:
+            unknown(name)
+        else:
+            bind(name, *_resolve_chain(scope, chain))
+        if len(scope.bound[name]) > _TARGETS_MAX:
+            scope.bound[name] = {cell(name), ("global", (name,))}
 
 
 def _scope_index(tree) -> tuple[list, dict, dict]:
@@ -1528,12 +1572,20 @@ def _scope_index(tree) -> tuple[list, dict, dict]:
     id) the scope it stands in. Syntax only: nothing from
     a unit, a closure or the namespace is in it (a name bound to the
     namespace's value is a ``("global", ...)`` target, resolved later), so it
-    is cached per tree, with the tree kept so its nodes' ids stay its own."""
+    is cached per tree (``_index_entry``), with the tree kept so its nodes'
+    ids stay its own."""
+    return _index_entry(tree)[1]
+
+
+def _index_entry(tree) -> tuple:
+    """``(tree, index, readings)`` for a cell tree, built once: the index
+    ``_scope_index`` describes, and the units' readings ``_unit_reading``
+    fills, evicted together, bounded like the trees."""
     import ast
 
     hit = _SCOPE_INDEXES.get(id(tree))
     if hit is not None and hit[0] is tree:
-        return hit[1]
+        return hit
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
     comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
     module = _Scope("module", tree, ())
@@ -1580,9 +1632,11 @@ def _scope_index(tree) -> tuple[list, dict, dict]:
             pending.append((child, body))
     for scope in scopes:  # each after the scope it stands in
         _scope_bindings(scope, standing[id(scope)])
-    index = (scopes, opens, standing)
-    _cache_put(_SCOPE_INDEXES, id(tree), (tree, index))
-    return index
+    entry = (tree, (scopes, opens, standing), {})
+    while len(_SCOPE_INDEXES) >= _CELL_TREES_MAX:
+        _SCOPE_INDEXES.pop(next(iter(_SCOPE_INDEXES)))
+    _SCOPE_INDEXES[id(tree)] = entry
+    return entry
 
 
 def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset]:
@@ -1599,11 +1653,10 @@ def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset]:
     the reading is cached per (tree, definitions)."""
     import ast
 
-    key = (id(tree), tuple(id(root) for root in roots))
-    hit = _UNIT_READINGS.get(key)
-    if hit is not None and hit[0] is tree:
-        return hit[1]
-    scopes, opens, standing = _scope_index(tree)
+    _, (scopes, opens, standing), readings = _index_entry(tree)
+    key = tuple(id(root) for root in roots)
+    if key in readings:
+        return readings[key]
     within = {id(n) for root in roots for n in ast.walk(root)}
     inside = [scope for scope in scopes if id(scope.node) in within]
     inside_ids = {id(scope) for scope in inside}
@@ -1638,7 +1691,7 @@ def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset]:
                 elif target[1] not in inside_ids:
                     cell_chains.add(target[2])
     result = (frozenset(modules), frozenset(global_chains), frozenset(cell_chains))
-    _cache_put(_UNIT_READINGS, key, (tree, result))
+    readings[key] = result
     return result
 
 
@@ -1686,13 +1739,6 @@ def _chain_bases(name: str, value) -> tuple[str, ...]:
     if name != top:
         return (full,)
     return (top,) if full == top else (top, full)
-
-
-def _definition_nodes(code) -> list | None:
-    """The syntax nodes that define a function in its cell (see
-    ``_definition_site``), or None."""
-    site = _definition_site(code)
-    return None if site is None else site[1]
 
 
 def _definition_site(code) -> tuple | None:
@@ -1753,13 +1799,6 @@ def _method_functions(value) -> list:
         if type(f) is types.FunctionType and f.__code__.co_name != "__annotate__":
             out.append(f)
     return out
-
-
-def _class_node(cls, methods):
-    """The ``class`` statement that defined ``cls`` (see ``_class_site``), or
-    None."""
-    site = _class_site(cls, methods)
-    return None if site is None else site[1]
 
 
 def _class_site(cls, methods) -> tuple | None:

@@ -1790,8 +1790,19 @@ def sub_project(tmp_path, monkeypatch):
         sys.modules.pop(name)
 
 
-def _files(kernel, *names, **kwargs) -> set:
-    record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
+def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
+    """The record's file keys. Unless ``allow_failure``, a record whose
+    notebook entries could not be taken fails the test, so an assertion that
+    a file is absent cannot pass because the reading crashed. Other warnings
+    pass through."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
+    for w in caught:
+        warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+    if not allow_failure:
+        failed = [w for w in caught if "could not be recorded" in str(w.message)]
+        assert not failed, failed
     return {k for k in record["code"] if k.endswith(" (file)")}
 
 
@@ -2179,7 +2190,8 @@ def test_a_cut_or_failed_walk_names_no_modules(kernel, sub_project, monkeypatch)
         patch.setattr(resume, "_components", fail)
         patch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
         with pytest.warns(UserWarning, match="could not be recorded"):
-            assert f"{SUBPKG}.sub (file)" not in _files(kernel, "task")
+            files = _files(kernel, "task", allow_failure=True)
+        assert f"{SUBPKG}.sub (file)" not in files
 
 
 def test_a_resume_after_editing_a_submodule_named_through_its_package_reruns(
@@ -2287,9 +2299,17 @@ def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp
     ("task", "expected"),
     [
         (f"def task(a):\n    m = {SUBPKG}\n    return m.sub.f(a)\n", ".sub"),
-        (f"def task(a):\n    s = {SUBPKG}.sub\n    return s.f(a)\n", ".sub"),
+        (f"def task(a):\n    s = {SUBPKG}.a\n    return s.b.f(a)\n", ".a.b"),
         (f"def task(a):\n    m = {SUBPKG}\n    n = m\n    return n.a.b.f(a)\n", ".a.b"),
         (f"def task(a, lib={SUBPKG}):\n    return lib.sub.f(a)\n", ".sub"),
+        (f"def task(a, {SUBPKG}={SUBPKG}):\n    return {SUBPKG}.sub.f(a)\n", ".sub"),
+        # The closure holds `m`, not `lib`: the alias's own cell counts.
+        (
+            "def make(lib):\n    m = lib\n\n    def task(a):\n"
+            "        return m.sub.f(a)\n\n    return task\n\n\n"
+            f"task = make({SUBPKG})\n",
+            ".sub",
+        ),
         (
             f"def make():\n    import {SUBPKG}.a as s\n\n"
             "    def task(a, lib=s):\n        return lib.b.f(a)\n\n    return task\n\n\n"
@@ -2302,6 +2322,8 @@ def test_two_cache_dir_runs_with_a_lazy_submodule_reuse(kernel, sub_project, tmp
         "alias of a submodule",
         "alias of an alias",
         "default",
+        "default named like the module",
+        "alias in a factory",
         "factory default",
     ],
 )
@@ -2314,29 +2336,85 @@ def test_an_alias_of_the_package_is_followed(kernel, sub_project, task, expected
 @pytest.mark.parametrize(
     "task",
     [
-        f"def task(a, {SUBPKG}=None):\n    return {SUBPKG}.other.f(a) if {SUBPKG} else a\n",
         f"def task(a):\n    {SUBPKG} = a\n    return {SUBPKG}.other.f(1)\n",
-        f"def task(a):\n    for {SUBPKG} in a:\n        {SUBPKG}.other.f(1)\n",
-        f"def task(a):\n    with a as {SUBPKG}:\n        return {SUBPKG}.other.f(1)\n",
-        f"def task(a):\n    try:\n        pass\n    except Exception as {SUBPKG}:\n"
-        f"        return {SUBPKG}.other.f(1)\n",
-        f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    return {SUBPKG}.other\n",
         "def task(a):\n    model = a\n    return model.other.f(1)\n",
+        f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    return {SUBPKG}.other\n",
     ],
-    ids=["parameter", "assignment", "for", "with", "except", "def", "an alias's name"],
+    ids=["assigned another value", "an alias's name", "def"],
 )
-def test_a_local_shadowing_the_package_names_nothing(kernel, sub_project, task):
-    """Python makes the name local to the task, so the global module is never
-    what it holds (a recompute on every edit to that module otherwise)."""
+def test_a_local_bound_to_something_else_names_nothing(kernel, sub_project, task):
+    """The syntax tells the local holds something other than the namespace's
+    module (another name's value, a function), so the module is not
+    recorded through it."""
     kernel.run(f"import {SUBPKG}.other\nimport {SUBPKG} as model\n")
     kernel.run(task)
     assert f"{SUBPKG}.other (file)" not in _files(kernel, "task")
 
 
+def test_a_parameter_named_like_the_package_reads_it_too(kernel, sub_project):
+    """A caller can pass the module itself, so a parameter the syntax cannot
+    tell counts the namespace's module of that name: a recompute if it is
+    something else, never a missed edit."""
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(f"def helper({SUBPKG}, a):\n    return {SUBPKG}.sub.f(a)\n")
+    kernel.run(f"def task(a):\n    return helper({SUBPKG}, a)\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_class_body_reads_the_global_before_rebinding_it(kernel, sub_project):
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run(
+        f"class Model:\n    v = {SUBPKG}.sub.CONST\n\n"
+        f"    def {SUBPKG}(self):\n        pass\n\n"
+        "    def f(self, x):\n        return x\n"
+    )
+    kernel.run("def task(a):\n    return Model().f(a)\n")
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+def test_a_class_bodys_comprehension_reads_its_first_iterable_there(
+    kernel, sub_project
+):
+    kernel.run(f"import {SUBPKG}.a.b\nfrom {SUBPKG} import sub as utils\n")
+    kernel.run(
+        f"class Model:\n    from {SUBPKG} import a as utils\n\n"
+        "    vals = [x for x in [utils.b.f(1)]]\n\n"
+        "    def f(self, x):\n        return x\n"
+    )
+    kernel.run("def task(a):\n    return Model().f(a)\n")
+    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "".join(f"    node = node.{'left' if i % 2 else 'right'}\n" for i in range(40)),
+        "    a = x.l\n    a = x.r\n    x = a.l\n    x = a.r\n" * 10,
+    ],
+    ids=["rebinding itself", "a cycle"],
+)
+def test_rebinding_aliases_stay_cheap(kernel, sub_project, body):
+    """A local rebound from itself, or two locals rebound from each other,
+    bind as unknown: resolving them would multiply targets each pass."""
+    import time
+
+    param = "node" if "node" in body else "x"
+    kernel.run(f"import {SUBPKG}.sub\n")
+    # In the reached task's cell: the whole cell is read into scopes.
+    kernel.run(
+        f"def walk({param}):\n{body}    return 0\n\n\n"
+        f"def task(a):\n    return {SUBPKG}.sub.f(a)\n"
+    )
+    start = time.perf_counter()
+    files = _files(kernel, "task")
+    assert time.perf_counter() - start < 2
+    assert f"{SUBPKG}.sub (file)" in files
+
+
 def test_a_global_declaration_reads_the_namespace(kernel, sub_project):
     kernel.run(f"import {SUBPKG}.sub\n")
     kernel.run(
-        f"def task(a):\n    {SUBPKG} = None\n\n    def inner(x):\n"
+        f"def task(a):\n    {SUBPKG} = a\n\n    def inner(x):\n"
         f"        global {SUBPKG}\n        return {SUBPKG}.sub.f(x)\n\n"
         "    return inner(a)\n"
     )
@@ -2384,14 +2462,18 @@ def test_a_module_the_enclosing_definition_binds_is_followed(
 
 
 def test_a_class_bodys_comprehension_does_not_see_its_names(kernel, sub_project):
-    kernel.run(f"import {SUBPKG}.a.b\nfrom {SUBPKG} import a as utils\n")
+    """The comprehension reads `utils` from the globals (a value, not a
+    module), not from the class body, whose `utils` would name `pkg.a.b`."""
     kernel.run(
-        f"class Model:\n    from {SUBPKG} import sub as utils\n\n"
+        "import types\nutils = types.SimpleNamespace(b=types.SimpleNamespace(f=abs))\n"
+    )
+    kernel.run(
+        f"class Model:\n    from {SUBPKG} import a as utils\n\n"
         "    vals = [utils.b.f(x) for x in range(2)]\n\n"
         "    def f(self, x):\n        return x\n"
     )
     kernel.run("def task(a):\n    return Model().f(a)\n")
-    assert f"{SUBPKG}.a.b (file)" in _files(kernel, "task")
+    assert f"{SUBPKG}.a.b (file)" not in _files(kernel, "task")
 
 
 def test_the_cached_reading_holds_no_namespace_value(sub_project):
@@ -2437,3 +2519,18 @@ def test_a_function_made_inside_another_reaches_what_its_closure_holds(
         "    def task(a):\n        return s.f(a)\n\n    return task\n\n\ntask = make()\n"
     )
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+@lazy_imports
+def test_a_lazy_from_import_of_a_same_named_subpackage_records_it_alike(
+    kernel, sub_project
+):
+    """`lazy from pkg import pkg` binds `pkg` to the subpackage `pkg.pkg`: its
+    full name counts, before the proxy resolves and after."""
+    kernel.run(f"lazy from {SUBPKG} import {SUBPKG}\n")
+    kernel.run(f"def task(a):\n    return a if {SUBPKG} else 0\n")
+    before = project_fingerprints(kernel.ns["task"])["code"]
+    assert kernel.ns["task"](1) == 1  # resolves the proxy in the kernel
+    after = project_fingerprints(kernel.ns["task"])["code"]
+    assert f"{SUBPKG}.{SUBPKG} (file)" in before
+    assert before == after

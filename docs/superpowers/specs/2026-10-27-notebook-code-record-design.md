@@ -904,3 +904,79 @@ otherwise merge, with what is left recorded in #292.
   time, then 4.4-4.5 ms, recording 11 files; this branch 27-28 ms, then
   2.9-3.0 ms, recording the same 11. The per-tree cache pays for the scope
   index.
+
+### #293 review round 1 (2026-11-03): what records less than main, and a hang
+
+`/code-review` (12 findings) and the adversarial workflow (9 confirmed, 1
+refuted) reviewed 03f6ee2. Plan, written before any edit. The stopping rule
+allows this round because its fixes change code; after it, one more review,
+then merge.
+
+**Blocking (a hang, or recording less than main)**
+- **The alias fixpoint grows exponentially** (`node = node.left; node =
+  node.right` repeated), so a resume hangs and eats memory, even for a
+  function no task reaches. Aliases resolve once each, in dependency order.
+  An alias in a cycle (`x = x.a`, `a = x.l; x = a.r`) binds something unknown.
+  A name's targets are capped (64); past the cap the name is unknown.
+- **An alias in an enclosing function loses its own name.** `m = lib` in a
+  factory made the inner task's chain start at `lib`, while its closure
+  holds `m`. An alias (outside a class body) now also binds its own name's
+  cell, so the closure is asked for `m`.
+- **A class body's binding is not a shadow.** A class body reads a name with
+  `LOAD_NAME`, which falls back to the globals before the binding runs
+  (`pkg = pkg.sub.CONST`). A class-body binding's targets now count with the
+  namespace's.
+- **`lazy from pkg import pkg`** names a subpackage bound as its first
+  component, so `_namespace_modules` keeps the full name when the proxy's
+  last component is the bound name. It collapses to the package only
+  otherwise (`lazy import pkg.sub`).
+- **A parameter or local named like a module.** `def helper(pkg, a)` is
+  called with the module; main recorded its submodule by the name, and
+  shadowing dropped it. A binding the syntax cannot tell (a parameter, a
+  plain assignment, a loop or `with` or `except` name) now counts the
+  namespace's module of that name too. That brings Codex's over-recording
+  back (a recompute, never a missed edit), so it returns to #292. A nested
+  `def`/`class` name and a relative import still bind something known not
+  to be the namespace's.
+
+**Claims and tests**
+- The docs keep "a module passed in as an argument or returned by a call" as
+  a case that may not be compared; the fragment drops the shadowing claim,
+  and says the 3.15 reuse holds for a task that names `pkg` itself, not one
+  that reads `pkg.<attr>` (both readings of the proxy count before it
+  resolves, by design).
+- Tests: the cycle and the long rebind chain finish quickly; an alias in a
+  factory; a class body's read-before-bind; `lazy from pkg import pkg`; a
+  parameter named like the module and passed it; a default named like the
+  module; a comprehension's first iterable in a class body; the vacuous
+  alias-of-a-submodule case replaced. The tests' `_files` fails on the
+  record-failure warning unless a test expects it, so an assertion that a
+  file is absent cannot pass because the reading crashed.
+
+**Cleanups:** the scope index and its readings share one cache entry per tree,
+bounded like the trees (128). `_file_entries` keeps main's loaded-only check
+(no `find_spec` per record), and only the shipping filter looks unloaded
+names up. The dead `_definition_nodes` and `_class_node` wrappers go.
+
+**Into #292:** a parameter default naming a factory's unknown binding (the
+value is in `__defaults__`, never read), a class made in a factory from its
+parameters (a class has no closure), and Codex's shadowing case.
+
+**Results (round 2).**
+- **Tests:** 81 module tests: 71 run on 3.11, all 82 on 3.15 with the digest
+  test.
+- **Mutations:** forty, each caught by node id (the lazy and type-parameter
+  ones on 3.15). Removing the cycle rule and the cap together makes the suite
+  hang, which counts as caught.
+- **Five tests were vacuous at first, and each needed fixing:**
+  - The hang test put the rebinds in their own cell, which is never indexed,
+    so the test checked nothing. The rebinds now sit in the reached task's
+    cell.
+  - The `global` and class-body-fallback tests were masked by this round's
+    own rule that unknown bindings read the namespace too. They now use a
+    binding known not to be the namespace's (an alias of another name, a
+    `def`).
+  - The class-body comprehension test was masked by the same fallback. It now
+    uses a global that is not a module.
+- **Against round 1's code:** the factory-alias, parameter-named-like-a-module
+  and class-read-before-rebind tests fail on 03f6ee2 and pass here.
