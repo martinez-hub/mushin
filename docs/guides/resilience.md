@@ -125,8 +125,8 @@ In a notebook, what counts is the definitions the task's code reaches by name
 in the kernel when the run starts: each function and class defined in a cell,
 through decorators, a `partial`, a bound method or an instance. Re-run the
 edited cell, then resume, and the cells re-run with a warning naming it
-(`helper (notebook)`). No value is compared: not a number, a string, a dict
-config, nor what a default or a closure holds. A value is only safe to compare
+(`helper (notebook)`). No value is compared: not a number, a string or a dict
+config. A value is only safe to compare
 when every writer of it is known, and in a notebook a writer can sit anywhere
 a value can. So pass a value the results depend on (a model name, a scale) to
 the task as a swept parameter, or use a new `working_dir` after editing one. A
@@ -135,12 +135,14 @@ default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
 keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. Every
 project module that a cell the kernel has run imports counts too, whether or
-not the task names it, so an edit to it re-runs the cells. A module imported
-only by a name computed as the code runs (`importlib.import_module(name)`, a
-plugin loader) may not be compared, as in a script, nor may a class with no
-method of its own (a dataclass or an `Enum` of fields), or what it names
-beyond its bases. After editing such a module or class, use a new
-`working_dir`.
+not the task names it, so an edit to it re-runs the cells. `cache_dir=` keys
+on the same record, so importing another project module in a cell, or a
+restart after removing one's import, can make the cells compute again. A
+module loaded other than by an `import` statement (`importlib.import_module`,
+a plugin loader that fills a registry) may not be compared, as in a script,
+nor may a class with no method of its own (a dataclass or an `Enum` of
+fields), or what it names beyond its bases. After editing such a module or
+class, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

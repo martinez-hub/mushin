@@ -1222,11 +1222,13 @@ def _lazy_import_name(proxy) -> str | None:
 # Definitions are static. See
 # docs/superpowers/specs/2026-10-27-notebook-code-record-design.md.
 
-#: The keys the driver's notebook entries, and the modules the notebook code
-#: names, ship under in ``script_entries``: no script path can be either
-#: (those end in ``.py``).
+#: The keys the driver's notebook entries, the modules the notebook code
+#: names, and the modules its kept cells import ship under in
+#: ``script_entries``: no script path can be any of them (those end in
+#: ``.py``).
 NOTEBOOK_ENTRIES = "<notebook>"
 NOTEBOOK_MODULES = "<notebook modules>"
+NOTEBOOK_CELL_MODULES = "<notebook cell modules>"
 
 #: IPython's own names in a kernel's namespace (its input and output history
 #: and helpers): they change with every cell and are never the task's code.
@@ -1260,6 +1262,7 @@ def _kernel_name(name: str) -> bool:
 
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
+_CELL_SCAN_WARNED: list = []
 
 
 def _cell_entry(entry) -> bool:
@@ -1299,7 +1302,9 @@ def _parse_cell(text: str):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return compile(text, "<cell>", "exec", flags)
-    except (SyntaxError, ValueError, RecursionError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+        # (3.11's parser raises MemoryError past its depth guard.) The kernel
+        # could not compile such a cell either, so it never ran.
         return None
 
 
@@ -1323,9 +1328,9 @@ def _cell_tree(lines):
 
 
 #: What each kept cell imports, by its text: names only, no trees, so a
-#: session keeping many cells parses each once.
+#: session keeping many cells parses each once. It holds the cells the last
+#: scan saw, so it is bounded by what ``linecache`` keeps.
 _CELL_IMPORTS: dict[str, tuple] = {}
-_CELL_IMPORTS_MAX = 4096
 
 
 def _cell_imports(
@@ -1333,59 +1338,60 @@ def _cell_imports(
 ) -> tuple[tuple[str, ...], tuple[tuple[str, str, bool], ...]]:
     """``(modules, bindings)`` for a cell's text. ``modules``: what its
     absolute imports name, at any depth (``_import_pairs``). ``bindings``:
-    ``(name, dotted, lazy)`` for each import that binds ``name`` to a dotted
-    module starting with it (``import pkg.sub`` binds ``pkg``, and so do
-    ``import pkg.sub as pkg`` and ``from pkg import pkg``), ``lazy`` when it
-    is written ``lazy import`` (3.15): such a statement's proxy reads two ways
-    (``_chain_bases``). A cell without the word ``import`` is not parsed.
-    Cached by the text."""
+    ``(name, dotted, lazy)`` for each import among the cell's own statements
+    (not a function's or a class's, whose names are local) that binds
+    ``name`` to a dotted module starting with it (``import pkg.sub`` binds
+    ``pkg``, and so do ``import pkg.sub as pkg`` and ``from pkg import pkg``),
+    ``lazy`` when it is written ``lazy import`` (3.15): such a statement's
+    proxy reads two ways (``_chain_bases``). A cell without the word
+    ``import`` is not parsed, and one that does not parse imports nothing
+    (it never ran)."""
     import ast
 
-    key = _short_hash(text.encode("utf-8", "surrogatepass"))
-    hit = _CELL_IMPORTS.get(key)
-    if hit is not None:
-        return hit
     modules: tuple[str, ...] = ()
     bindings: tuple[tuple[str, str, bool], ...] = ()
     tree = _parse_cell(text) if "import" in text else None
-    if tree is not None:
-        modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
-        found: set[tuple[str, str, bool]] = set()
-        for node in ast.walk(tree):
-            if type(node) is ast.Import:
-                pairs = [
-                    (a.asname or a.name.partition(".")[0], a.name) for a in node.names
-                ]
-            elif type(node) is ast.ImportFrom and node.level == 0 and node.module:
-                pairs = [
-                    (a.asname or a.name, f"{node.module}.{a.name}")
-                    for a in node.names
-                    if a.name != "*"
-                ]
-            else:
-                continue
-            lazy = bool(getattr(node, "is_lazy", 0))
-            found.update(
-                (name, dotted, lazy)
-                for name, dotted in pairs
-                if dotted != name and dotted.partition(".")[0] == name
-            )
-        bindings = tuple(sorted(found))
-    while len(_CELL_IMPORTS) >= _CELL_IMPORTS_MAX:
-        _CELL_IMPORTS.pop(next(iter(_CELL_IMPORTS)))
-    _CELL_IMPORTS[key] = (modules, bindings)
-    return modules, bindings
+    if tree is None:
+        return modules, bindings
+    modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    found: set[tuple[str, str, bool]] = set()
+    stack = list(ast.iter_child_nodes(tree))
+    while stack:
+        node = stack.pop()
+        kind = type(node)
+        if kind in scopes:
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+        if kind is ast.Import:
+            pairs = [(a.asname or a.name.partition(".")[0], a.name) for a in node.names]
+        elif kind is ast.ImportFrom and node.level == 0 and node.module:
+            pairs = [
+                (a.asname or a.name, f"{node.module}.{a.name}")
+                for a in node.names
+                if a.name != "*"
+            ]
+        else:
+            continue
+        lazy = bool(getattr(node, "is_lazy", 0))
+        found.update(
+            (name, dotted, lazy)
+            for name, dotted in pairs
+            if dotted != name and dotted.partition(".")[0] == name
+        )
+    return modules, tuple(sorted(found))
 
 
 def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
-    """What every cell the kernel keeps imports (``_cell_imports``):
-    ``(modules, bindings)``, ``bindings`` mapping a name to ``(dotted,
-    lazy)`` for each import binding it to a dotted module starting with it. A cell is a ``linecache`` entry
-    ``_cell_lines`` would serve: one with no mtime, or one in IPython 7's own
-    cache. Every kept cell counts, an older version of a re-run cell too: a
-    submodule's code runs only if something imported it, and a cell's import
-    is there however the task then reaches the module (an argument, a call's
-    result, a local name the syntax cannot follow)."""
+    """What every cell the kernel keeps imports (``_cell_imports``, cached by
+    the cell's text): ``(modules, bindings)``, ``bindings`` mapping a name to
+    ``(dotted, lazy)`` for each import binding it to a dotted module starting
+    with it. A cell is a ``linecache`` entry ``_cell_lines`` would serve: one
+    with no mtime, or one in IPython 7's own cache. Every kept cell counts,
+    an older version of a re-run cell too: a submodule's code runs only if
+    something imported it, and a cell's import is there however the task then
+    reaches the module (an argument, a call's result, a local name the syntax
+    cannot follow)."""
     import linecache
 
     sources = [linecache.cache]
@@ -1402,11 +1408,20 @@ def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
                     continue
     modules: set[str] = set()
     bindings: dict[str, set[tuple[str, bool]]] = {}
+    seen: dict[str, tuple] = {}
     for text in texts:
-        found, bound = _cell_imports(text)
-        modules.update(found)
-        for name, dotted, lazy in bound:
+        key = _short_hash(text.encode("utf-8", "surrogatepass"))
+        found = _CELL_IMPORTS.get(key)
+        if found is None:
+            found = _cell_imports(text)
+        seen[key] = found
+        modules.update(found[0])
+        for name, dotted, lazy in found[1]:
             bindings.setdefault(name, set()).add((dotted, lazy))
+    # Keep what this scan saw: a fixed bound would evict cells the next scan
+    # needs again, and re-parse every one once a session passes it.
+    _CELL_IMPORTS.clear()
+    _CELL_IMPORTS.update(seen)
     return modules, bindings
 
 
@@ -2361,7 +2376,7 @@ def _notebook_entries(
     """``(entries, modules)``: the entries of a notebook's code the roots
     reach, and the modules their definitions name (see ``_unit_reading``) to follow
     as files, through the closure, the namespace or a parameter's default
-    value. ``cell_bindings`` (``_lazy_bindings``, on 3.15) adds the readings
+    value (``_notebook_record`` drops the foreign ones). ``cell_bindings`` (``_lazy_bindings``, on 3.15) adds the readings
     a lazy proxy had before it resolved. Entries are ``{"<name> (notebook)": digest}`` for each name
     their code looks up (and each root
     by its name) that stands for a function or class defined in a cell. A
@@ -2389,7 +2404,6 @@ def _notebook_entries(
         return _notebook_object(value, namespace)
 
     over = [False]
-    foreign_tops: dict[str, bool] = {}
     rebound = _notebook_writes(namespace, roots)
     if rebound is None:  # past the scan's bound: which writes it saw is unknown
         over[0] = True
@@ -2578,7 +2592,6 @@ def _notebook_entries(
             if chain[0] in defaults:
                 for base in _chain_bases(chain[0], defaults[chain[0]]):
                     modules.add(".".join((base, *chain[1:])))
-    modules = {m for m in modules if _maybe_project(m, foreign_tops)}
     comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}
     for uid, ci in comp_of.items():
@@ -2608,34 +2621,53 @@ def _notebook_entries(
     return entries, sorted(modules)
 
 
+def _error_kind(error: BaseException) -> str:
+    """An exception's type name, read from its slot: its message is the
+    notebook's own text, and `type(error).__name__` could run a notebook
+    metaclass's property."""
+    try:
+        return type.__dict__["__name__"].__get__(type(error))
+    except Exception:  # noqa: BLE001 - a name is not worth failing for
+        return "an error"
+
+
 def _warn_notebook_unrecorded(error: BaseException) -> None:
     """Warn, once per run (``driver_script_entries`` clears the flag, so a
     resume warns again), that a notebook's record could not be taken."""
     if _NOTEBOOK_FAILURE_WARNED:
         return
     _NOTEBOOK_FAILURE_WARNED.append(True)
-    # The type's name only, read from its slot: the message is the notebook's
-    # own text, and `type(error).__name__` could run a notebook metaclass's
-    # property.
-    try:
-        kind = type.__dict__["__name__"].__get__(type(error))
-    except Exception:  # noqa: BLE001 - a name is not worth failing for
-        kind = "an error"
     _best_effort_warning(
         "resume/cache_dir: the notebook code this task reaches could "
-        f"not be recorded ({kind}), so it is not compared; use a "
+        f"not be recorded ({_error_kind(error)}), so it is not compared; use a "
         "fresh working_dir after editing it."
     )
 
 
-def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str]]:
-    """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
-    root)])}``) and the project modules to follow: first those their reached
-    code names, then those the kernel's kept cells import
-    (``_kept_cell_reading``), which do not depend on the walk, so they count
-    when it passes its bound or fails. Best effort: a notebook whose entries
-    cannot be taken gives neither its entries nor its modules (as on main),
-    and a scan of the cells that fails gives no cell modules, each with a
+def _warn_cells_unread(error: BaseException) -> None:
+    """Warn, once per run like ``_warn_notebook_unrecorded``, that the
+    modules the kept cells import could not be read (the notebook's own
+    entries still count)."""
+    if _CELL_SCAN_WARNED:
+        return
+    _CELL_SCAN_WARNED.append(True)
+    _best_effort_warning(
+        "resume/cache_dir: the project modules the notebook's cells import "
+        f"could not be read ({_error_kind(error)}), so an edit to one may go "
+        "unnoticed; use a fresh working_dir after editing one."
+    )
+
+
+def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[str]]:
+    """``(entries, reached, cells)`` for ``notebooks`` (``{id: (namespace,
+    [(key, root)])}``): the notebook entries, the project modules their
+    reached code names, and those the kernel's kept cells import besides
+    (``_kept_cell_reading``). The cells' modules do not depend on the walk,
+    so they count when it passes its bound or fails; they are followed after
+    every other seed (``_record``), so a record cut by its file bound keeps
+    what main recorded. Best effort: a notebook whose entries cannot be taken
+    gives neither its entries nor its reached modules (as on main), and a
+    scan of the cells that fails gives no cell modules, each with its own
     warning, since an edit then goes unnoticed (a notebook metaclass's
     attribute hook that raises, say)."""
     out: dict[str, str] = {}
@@ -2644,11 +2676,9 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str]]:
     cell_bindings: dict = {}
     try:
         cell_modules, cell_bindings = _kept_cell_reading()
-        foreign_tops: dict[str, bool] = {}
-        cell_modules = {m for m in cell_modules if _maybe_project(m, foreign_tops)}
     except Exception as error:  # noqa: BLE001 - never fail the record
         cell_modules, cell_bindings = set(), {}
-        _warn_notebook_unrecorded(error)
+        _warn_cells_unread(error)
     for namespace, roots in notebooks.values():
         try:
             lazy = _lazy_bindings(cell_bindings, namespace)
@@ -2657,7 +2687,11 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str]]:
             reached.update(names)
         except Exception as error:  # noqa: BLE001 - never fail the record
             _warn_notebook_unrecorded(error)
-    return out, sorted(reached) + sorted(cell_modules - reached)
+    # One judgment per top-level name for both lists.
+    foreign_tops: dict[str, bool] = {}
+    reached = {m for m in reached if _maybe_project(m, foreign_tops)}
+    cells = {m for m in cell_modules - reached if _maybe_project(m, foreign_tops)}
+    return out, sorted(reached), sorted(cells)
 
 
 def _root_layers(root) -> list:
@@ -2797,7 +2831,8 @@ def driver_script_entries(roots) -> dict:
     """The entries of the driver scripts the roots are defined in, taken in
     the driver when a run starts: ``{file: (digest, imports, package)}``, and
     for roots defined in a notebook ``{NOTEBOOK_ENTRIES: {key: digest},
-    NOTEBOOK_MODULES: [module, ...]}`` (no script path can be those keys). A
+    NOTEBOOK_MODULES: [module, ...], NOTEBOOK_CELL_MODULES: [module, ...]}``
+    (``_notebook_record``; no script path can be those keys). A
     parallel worker runs the driver's pickled script functions, so the
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not
@@ -2808,6 +2843,7 @@ def driver_script_entries(roots) -> dict:
     # the warning filters change, which a sweep's run does.)
     _NOTEBOOK_TRUNCATION_WARNED.clear()
     _NOTEBOOK_FAILURE_WARNED.clear()
+    _CELL_SCAN_WARNED.clear()
     try:
         code: dict[str, str] = {}
         seeds: list[str] = []
@@ -2824,7 +2860,11 @@ def driver_script_entries(roots) -> dict:
         if notebooks:
             # A worker gets notebook code by value, without its cells' text:
             # the driver's entries are what its cells record.
-            out[NOTEBOOK_ENTRIES], out[NOTEBOOK_MODULES] = _notebook_record(notebooks)
+            (
+                out[NOTEBOOK_ENTRIES],
+                out[NOTEBOOK_MODULES],
+                out[NOTEBOOK_CELL_MODULES],
+            ) = _notebook_record(notebooks)
         return out
     except Exception:  # noqa: BLE001 - best effort: each cell takes its own
         return {}
@@ -2936,18 +2976,20 @@ def _record(roots, targets=(), scripts_given=None) -> dict:
     _script_entries(scripts, code, seeds, scripts_given or {})
     if notebooks:
         given = scripts_given or {}
-        notebook, modules = given.get(NOTEBOOK_ENTRIES), given.get(NOTEBOOK_MODULES)
+        notebook = given.get(NOTEBOOK_ENTRIES)
+        modules, cells = given.get(NOTEBOOK_MODULES), given.get(NOTEBOOK_CELL_MODULES)
         if type(notebook) is not dict:
-            notebook, modules = _notebook_record(notebooks)
-        elif type(modules) is not list:
-            # A driver from before modules were shipped (a runner pickled by
-            # 0.17.0) took none; its entries are still the ones that count.
-            modules = []
+            notebook, modules, cells = _notebook_record(notebooks)
+        # A driver from before a key was shipped (a runner pickled by an
+        # earlier version) took none; its entries still count.
+        modules = modules if type(modules) is list else []
+        cells = cells if type(cells) is list else []
         code.update(notebook)
         # First, so a record cut by _FILES_MAX starts from what the task's own
         # code names (depth first: the first one's imports come before the
-        # second one).
+        # second one); the cells' imports last, after every seed main had.
         seeds[:0] = modules
+        seeds.extend(cells)
     entries, cut = _file_entries(seeds)
     code.update(entries)
     if cut and not _TRUNCATION_WARNED:

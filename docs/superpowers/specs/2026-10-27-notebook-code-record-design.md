@@ -1246,6 +1246,89 @@ rule gains a sentence: every project module a cell imports counts.
   - the new defaults read masked an older rule's test (above). A new rule
     can mask an old one's tests, not only its own: re-run the old table.
 
+### #294 review round 1 (2026-11-04): plan
+
+`/code-review` (10) and the adversarial workflow (7 confirmed, 0 refuted)
+reviewed 55139dc; Codex had none. Plan, written before any edit. Stopping
+rule: these fixes change code, so one more round of both reviews, then merge
+unless that round finds something blocking.
+
+**Blocking (both reviews, reproduced against main):** the cells' modules
+went into the shipment beside the reached ones, and `_record` puts the
+shipment first. A cell importing one wide project module could then use up
+`_FILES_MAX` before the namespace's modules, which main records next, so an
+edit to one of those went unnoticed. My design note said "after the reached
+ones" and stopped there; main's next seeds were the namespace's, then the
+targets' and the scripts'. Fix: the cells' modules ship under their own key
+(`NOTEBOOK_CELL_MODULES`) and `_record` adds them after every other seed. A
+shipment without the key (an older driver) counts as none. Test: a wide
+cell-imported module and a namespace instance's module, with the bound
+lowered; the instance's module stays.
+
+**Tests that pinned less than they claimed (adversarial):**
+- the free-variable skip's exception (a name the unit also reads as a global,
+  `global m` in a nested function) had no case: a mutant skipping every free
+  variable passed and recorded less than main. Add it;
+- the declared-name bound test held under compounding too: pin the sizes
+  the alternating input gives, and add a case with more distinct chains than
+  the cap;
+- the 3.15 widening's own name (`lazy import pkg.pkg as pkg`) had no case.
+
+**Docs:**
+- "a name computed as the code runs" is wrong for `importlib.import_module`
+  with a literal, `__import__` and a magic: say "loaded other than by an
+  `import` statement", with the registry example back;
+- `run()`'s docstring: the edited sentence is garbled; and "no value is
+  compared (... what a default or a closure holds)" now reads against the
+  defaults read, so that clause goes there and in the guide (a function a
+  default or closure holds is listed as not compared already).
+
+**Minor code:**
+- a failing scan says the notebook code is not compared, which is false (the
+  entries stay), and shares the walk's once-per-run flag: it gets its own
+  message and flag;
+- `_parse_cell` does not catch `MemoryError` (3.11's parser depth guard), so
+  one such cell turned the scan off for the session. Catch it; a cell that
+  does not parse never ran, so it imported nothing, and that is cached;
+- the per-cell cache evicted first-in-first-out at 4096, so a session past
+  that re-parsed every cell on every record. The cache keeps exactly the
+  cells the last scan saw instead (bounded by `linecache` itself);
+- the 3.15 bindings came from imports at any depth; only a cell's
+  module-level statements bind a namespace name, so only those count;
+- one `foreign_tops` per record: `_notebook_entries` returns its modules
+  unfiltered and `_notebook_record` filters both lists once.
+
+**Not changed, with reasons:**
+- *The `cache_dir` key moves with what the cells import* (an `import
+  pkg.plotting` after a sweep, or a restart that drops an old cell's import).
+  That is the precision this PR gives up, already true of `from pkg import
+  plotting` on main; the guide says so now.
+- *`linecache` entries a loader served* (`get_source`, a zip import) also
+  have no mtime and are scanned: a recompute at most, rare.
+- *A declared alias past the cap is dropped:* the assigned chain itself is
+  still read (scope reading and floor), and the closure as before, so nothing
+  falls below main.
+- *`catch_warnings` is process-wide:* it runs only on a cache miss, and a
+  sweep's run changes the filters anyway.
+
+**Results (round 1 fixes).**
+- **Tests:** 252 in the module; on 3.11, 230 run; on 3.15, all 252 pass.
+  `make check`: 1605 passed.
+- **The cut:** with the bound lowered to 3, a cell importing a wide project
+  module no longer pushes the namespace's `SUBREL` out; with the cells put
+  back in front, the same test fails.
+- **Mutations:** twenty-eight now, by node id after a baseline. All are
+  caught but one: the free-variable condition widened to any name the unit
+  does not read as a global. The floor and the defaults read cover what that
+  drops, so the record is unchanged. The five 3.15 ones were caught on 3.15.
+  The foreign filter, moved into `_notebook_record`, is still caught by the
+  shipping test.
+- **One test of mine was order-dependent before it ran:** the scan-failure
+  test patched `_cell_imports`, but with the new cache an earlier test's
+  identical cell text would have been a hit, and the patch never called. It
+  now starts from an empty cache. A cached path can hide a patched function;
+  reset the cache in such a test.
+
 ### PR 2: classes with no method of their own
 
 Planned in its own PR, after this one merges.
