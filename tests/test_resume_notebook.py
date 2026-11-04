@@ -2618,3 +2618,15 @@ def test_a_project_namespace_package_named_like_a_stdlib_module_stays_the_projec
     finally:
         for mod in [m for m in sys.modules if m == name or m.startswith(f"{name}.")]:
             sys.modules.pop(mod)
+
+
+def test_capping_an_alias_keeps_what_its_import_binds(kernel, sub_project):
+    """Past the cap a name becomes unknown, but the module its own import
+    binds still counts (the namespace need not hold the name)."""
+    params = ", ".join(f"a{i}=None" for i in range(70))
+    branches = "".join(f"    if x == {i}:\n        m = a{i}\n" for i in range(70))
+    kernel.run(
+        f"def task(x, {params}):\n    import {SUBPKG} as m\n{branches}"
+        "    return m.sub.f(x)\n"
+    )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")

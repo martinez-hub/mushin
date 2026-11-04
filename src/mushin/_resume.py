@@ -1559,6 +1559,9 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
         scope.bound.setdefault(name, set())
         if scope.kind != "class":
             bind(name, cell(name))
+    # What each name holds before aliases add to it (an import, a default):
+    # the cap keeps these, so it never drops a module main recorded.
+    seeds = {name: set(scope.bound[name]) for name in named}
     # Each alias depends on the alias its value starts from; resolve them
     # dependencies first, and a cycle as unknown.
     depends = {name: set() for name in named}
@@ -1580,7 +1583,7 @@ def _scope_bindings(scope: _Scope, standing: _Scope | None) -> None:
             if any(target[0] == "cell" for target in resolved):
                 unknown(name)  # from something unknown: as main read it
         if len(scope.bound[name]) > _TARGETS_MAX:
-            scope.bound[name] = {cell(name), ("global", (name,))}
+            scope.bound[name] = seeds[name] | {cell(name), ("global", (name,))}
 
 
 def _index_entry(tree) -> tuple:
