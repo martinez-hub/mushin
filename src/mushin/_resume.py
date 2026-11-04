@@ -1656,6 +1656,83 @@ def _index_entry(tree) -> tuple:
     return entry
 
 
+def _floor_reading(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
+    """The reading main took before #293, kept as the floor: whatever it names
+    counts too, so the scope-aware reading (``_unit_reading``) only adds to
+    what main recorded and never misses what it caught.
+
+    ``(modules, chains)`` that definitions' syntax trees name: the modules
+    their absolute imports name (as ``_import_pairs`` reads them) and each
+    maximal attribute chain on a name, scope by scope with imports as the
+    only bindings; a chain on a name an import binds is a module through each
+    binding, a relative import's name names none, and the rest are for the
+    caller to resolve (the closure first, then the namespace)."""
+    import ast
+
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    modules: set[str] = set()
+    chains: set[tuple[str, ...]] = set()
+    # (the nodes evaluated in a scope, the bindings of the functions that
+    # enclose it, whether it is a class body)
+    pending: list = [(list(nodes), (), False)]
+    while pending:
+        roots, enclosing, is_class = pending.pop()
+        here: list = []
+        inner_scopes: list = []
+        stack = list(roots)
+        while stack:
+            node = stack.pop()
+            kind = type(node)
+            if kind in defs or kind is ast.Lambda:
+                stack.extend(_outer_parts(node))
+                body = [node.body] if kind is ast.Lambda else node.body
+                inner_scopes.append((body, kind is ast.ClassDef))
+                continue
+            here.append(node)
+            stack.extend(ast.iter_child_nodes(node))
+        bound: dict[str, set[str]] = {}  # "" for a relative import's name
+        inner = {id(n.value) for n in here if type(n) is ast.Attribute}
+        found: list[tuple[str, ...]] = []
+        for node in here:
+            kind = type(node)
+            if kind is ast.Import or kind is ast.ImportFrom:
+                modules.update(n for n, level in _import_pairs(node) if level == 0)
+                for alias in node.names:
+                    if kind is ast.Import:
+                        # `import a.b` binds `a`; `import a.b as c` binds `a.b`.
+                        name = alias.asname or alias.name.partition(".")[0]
+                        target = alias.name if alias.asname else name
+                    else:
+                        name = alias.asname or alias.name
+                        absolute = node.level == 0 and node.module
+                        target = f"{node.module}.{alias.name}" if absolute else ""
+                    bound.setdefault(name, set()).add(target)
+            elif kind is ast.Attribute and id(node) not in inner:
+                parts = []
+                current = node
+                while type(current) is ast.Attribute:
+                    parts.append(current.attr)
+                    current = current.value
+                if type(current) is ast.Name:
+                    found.append((current.id, *reversed(parts)))
+        for chain in found:
+            targets = bound.get(chain[0])
+            for scope in reversed(enclosing):
+                if targets is not None:
+                    break
+                targets = scope.get(chain[0])
+            if targets is None:
+                chains.add(chain)
+            else:
+                modules.update(".".join((t, *chain[1:])) for t in targets if t)
+        # A function's bindings reach the functions in it; a class body's do
+        # not.
+        visible = enclosing if is_class else (*enclosing, bound)
+        for body, body_is_class in inner_scopes:
+            pending.append((body, visible, body_is_class))
+    return modules, chains
+
+
 def _standing_nodes(root) -> list:
     """The nodes of a definition's outer parts, which run where it stands,
     as ``_index_entry`` puts them in that scope: a definition or
@@ -2291,6 +2368,23 @@ def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]
             if chain[0] in namespace and not _kernel_name(chain[0]):
                 for base in _chain_bases(chain[0], namespace[chain[0]]):
                     modules.add(".".join((base, *chain[1:])))
+        # The floor: what main's reading names counts too, resolved as main
+        # resolved it (the closure first, then the namespace), so this record
+        # never holds less than main's did.
+        floor_modules, floor_chains = _floor_reading(site[1])
+        modules |= floor_modules
+        for chain in floor_chains:
+            if chain[0] in free:
+                try:
+                    value = free[chain[0]].cell_contents
+                except ValueError:  # an empty cell: nothing bound yet
+                    continue
+            elif chain[0] in namespace and not _kernel_name(chain[0]):
+                value = namespace[chain[0]]
+            else:
+                continue
+            for base in _chain_bases(chain[0], value):
+                modules.add(".".join((base, *chain[1:])))
     modules = {m for m in modules if _maybe_project(m, foreign_tops)}
     comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}

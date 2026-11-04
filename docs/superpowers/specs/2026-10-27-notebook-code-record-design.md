@@ -1035,3 +1035,33 @@ direction) or goes back to main's rule. Plan, written before any edit:
     fails on 03f6ee2.
 - **Also:** the `global` test needed a binding the syntax tells is
   not a module, because this round's alias rule masked it.
+
+### Codex on a6708f0 (2026-11-04): main's reading becomes the floor
+
+Codex found two more shapes that recorded less than main: a nested
+initializer importing into a `nonlocal` name the task binds to a placeholder
+`def`, and a comprehension that rebinds the imported name to itself. That made
+four rounds in a row of the same class of finding, each patched case by case.
+So the class is closed instead. Main's reading (`_syntax_modules` at 77882c4)
+is kept unchanged as `_floor_reading`, and every unit's record also takes what
+it names, resolved as main resolved it (the closure first, then the
+namespace). The scope-aware reading can then only add; "never record less
+than main" holds by construction, not by review.
+
+The cost of the floor is precision beyond main: two tests asserted that the
+record holds less than main (a nested `def` named like the package, and a
+class-body comprehension not seeing the class's names), and both went, since
+over-recording is a recompute, not a wrong result. The floor's body is
+checked to be identical to main's (an AST comparison), and removing it fails
+the two Codex shapes, which pass on main.
+
+With the floor in place, the mutation table changes in a way it predicts.
+The rules added to match main survive their mutations, because main's
+reading now covers their cases: the declared imports, the free-variable
+closure, the alias of something unknown, unknown bindings reading the
+namespace, `global`/`nonlocal`, and the class-body fallback. They stay as
+written, but the floor is what guarantees those cases. The rules that add
+recall beyond main are still caught by their tests: aliases, defaults read
+where the definition stands, enclosing scopes, outer parts, bases, the
+shipment, and the cap (a hang without it). The rules that only exist on
+3.12+ or 3.15 were caught there.

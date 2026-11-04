@@ -2336,16 +2336,6 @@ def test_an_alias_of_the_package_is_followed(kernel, sub_project, task, expected
     assert f"{SUBPKG}{expected} (file)" in _files(kernel, "task")
 
 
-def test_a_nested_def_named_like_the_package_names_nothing(kernel, sub_project):
-    """The syntax tells the local holds a function, not the namespace's
-    module, so the module is not recorded through it."""
-    kernel.run(f"import {SUBPKG}.other\n")
-    kernel.run(
-        f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    return {SUBPKG}.other\n"
-    )
-    assert f"{SUBPKG}.other (file)" not in _files(kernel, "task")
-
-
 @pytest.mark.parametrize(
     "helper",
     [
@@ -2469,21 +2459,6 @@ def test_a_module_the_enclosing_definition_binds_is_followed(
     decorator and the default are evaluated where the definition stands."""
     _run_cells(kernel, cells)
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
-
-
-def test_a_class_bodys_comprehension_does_not_see_its_names(kernel, sub_project):
-    """The comprehension reads `utils` from the globals (a value, not a
-    module), not from the class body, whose `utils` would name `pkg.a.b`."""
-    kernel.run(
-        "import types\nutils = types.SimpleNamespace(b=types.SimpleNamespace(f=abs))\n"
-    )
-    kernel.run(
-        f"class Model:\n    from {SUBPKG} import a as utils\n\n"
-        "    vals = [utils.b.f(x) for x in range(2)]\n\n"
-        "    def f(self, x):\n        return x\n"
-    )
-    kernel.run("def task(a):\n    return Model().f(a)\n")
-    assert f"{SUBPKG}.a.b (file)" not in _files(kernel, "task")
 
 
 def test_the_cached_reading_holds_no_namespace_value(sub_project):
@@ -2644,4 +2619,38 @@ def test_an_alias_of_a_global_set_later_reads_the_namespaces_module(
         f"def task(a):\n    init()\n    {SUBPKG} = current\n"
         f"    return {SUBPKG}.sub.f(a)\n"
     )
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+BOUND = f"import {SUBPKG}.sub\n"  # the package bound in the namespace
+LOADED = f"def _warm():\n    import {SUBPKG}.sub\n\n\n_warm()\ndel _warm\n"
+
+
+@pytest.mark.parametrize(
+    ("setup", "task"),
+    [
+        # A nested initializer imports into a `nonlocal` name the task binds
+        # to a placeholder `def`.
+        (
+            BOUND,
+            f"def task(a):\n    def {SUBPKG}():\n        pass\n\n    def init():\n"
+            f"        nonlocal {SUBPKG}\n        import {SUBPKG}\n\n    init()\n"
+            f"    return {SUBPKG}.sub.f(a)\n",
+        ),
+        # A comprehension rebinds the imported name to itself, with no global
+        # of that name to fall back on.
+        (
+            LOADED,
+            f"def task(a):\n    import {SUBPKG}\n"
+            f"    return [{SUBPKG}.sub.f(a) for {SUBPKG} in [{SUBPKG}]][0]\n",
+        ),
+    ],
+    ids=["nonlocal import into a placeholder", "comprehension rebinding"],
+)
+def test_main_s_reading_is_the_floor(kernel, sub_project, setup, task):
+    """Shapes the scope model reads one way and main another (both found by
+    Codex): what main named still counts, so the record never holds less
+    than main's."""
+    kernel.run(setup)
+    kernel.run(task)
     assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
