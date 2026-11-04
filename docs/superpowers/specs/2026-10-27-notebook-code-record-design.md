@@ -298,3 +298,506 @@ The `run()` docstring, `project_fingerprints`'s docstring,
 `docs/guides/resilience.md`, `docs/guides/exploration-to-paper.md`,
 `src/mushin/agent_guide.md`, `changes/270.changed.md` (its notebook sentence
 amended, unreleased), and `changes/278.changed.md`.
+
+## Follow-up (2026-11-02): submodules a notebook reaches through a package
+
+Plan, written before any edit.
+
+**The gap** (found by `/code-review` on #283, reproduced on 3.15 and 3.11):
+`import pkg.sub` binds only `pkg` in the namespace, and `_namespace_modules`
+records a module value by its own name. So `pkg/sub.py` is not in the record,
+and after an edit and a restart a resume reuses every cell. It is a wrong
+result, on every Python. A file task is not affected: `_import_pairs` reads
+`import pkg.sub` from the syntax tree. `from pkg import sub` and
+`import pkg.sub as s` are not affected either: they bind the submodule
+itself. On 3.15 the lazy form (`lazy import pkg.sub`) records `pkg.sub` while
+unresolved and only `pkg` once resolved. That makes `cache_dir` miss on a
+second run in the same kernel (a residual of #283).
+
+**First design, replaced after review.** It walked the live module graph:
+a project package held by the namespace brought every submodule bound under
+it. `/code-review`, the adversarial workflow (4 lenses) and Codex on 9bc983d
+showed it fails this record's own bar:
+- the record depended on what happened to be loaded (an unrelated cell's
+  `import pkg.plotting` made an edit there re-run every cell, and changed the
+  `cache_dir` key between two runs);
+- names it found reached `_find_file`'s `getattr` on a `LazyLoader` module,
+  so taking the record executed it (and, if its import failed, swallowed the
+  error and left the module half-executed);
+- its package-level foreign check misjudged namespace packages both ways.
+The gap is syntactic (`import pkg.sub` is in the cell's text), so its fix
+inspected the wrong thing. That was my altitude error, against this design's
+own "inspect by type only".
+
+**Second design.** The dotted names the kernel's kept cells import with a
+plain `import pkg.sub` (no `as`), read from the cells' text, each kept only
+while `pkg` is bound in the namespace to a module, or on 3.15 to a lazy
+import. That brings `import pkg.sub` to parity with `from pkg import sub` and
+`import pkg.sub as s`, which bind the submodule and are recorded already.
+- Kept cells: `linecache` entries named like an IPython cell
+  (`<ipython-input-N-hash>`, or ipykernel's `ipykernel_<pid>/<n>.py`) with no
+  mtime, and IPython 7's `_ipython_cache`. A cell's statements at its top
+  level count, including inside `if`/`try`/`with`; a function's or class's
+  body does not, since its import binds a local.
+- No module object is read, so nothing is loaded and nothing that merely
+  happens to be loaded counts.
+- 3.15: `lazy import pkg.sub` is the same statement (`is_lazy=1`), and `pkg`
+  is bound to a proxy or, once resolved, to the package, so the record is
+  stable across resolution.
+
+**Separately: module attributes read hook-free.** The record read
+`__name__`, `__file__`, `__path__` and `__spec__` of modules with `getattr`,
+which runs an `importlib.util.LazyLoader` module's file. That is reachable on
+main without this PR: a cell binding such a module directly, or a file task
+importing one. One helper reads them from the module's own `__dict__`
+(`module_from_spec` puts them there before the loader swaps the class), at
+every site: `_is_foreign_module`, `_find_file`, `_file_entries`,
+`_loaded_digest`, `_namespace_modules`, and a class's module dict.
+
+**Residuals**
+- A parallel worker has no `linecache`, so under joblib the seeds are absent:
+  a missed edit, which the bar tolerates. Notebook records already differ
+  between serial and joblib, since cloudpickle ships only the globals the
+  task references. Shipping the seeds from the driver beside `"<notebook>"`
+  is the complete fix.
+- Every kept cell counts, including an older version of a re-run cell, so an
+  `import pkg.old` since deleted from the notebook is still a seed while
+  `pkg` is bound. A recompute, not a wrong result.
+- An import inside a notebook function's body binds a local, so the module it
+  names is not recorded (as before this PR).
+
+**Tests**
+- `import pkg.sub` and `import pkg.a.b` record every level; parity: `import
+  pkg.sub`, `import pkg.sub as s`, `from pkg import sub` (and on 3.15 `lazy
+  import pkg.sub`) all record `pkg.sub (file)`.
+- End to end: edit `pkg/sub.py`, restart, resume -> re-runs with new values.
+- Load state does not count: a submodule loaded by `importlib.import_module`
+  and not imported by a statement is not recorded; `pkg` rebound to a value
+  drops the seed.
+- 3.15: two `cache_dir` runs with `lazy import pkg.sub` in one kernel reuse.
+- A real `LazyLoader` module in `sys.modules`, bound directly in a cell: the
+  record keeps its file and does not load it (`_LazyModule` still, side effect
+  unfired); `_find_file` returns its file without loading it.
+- A standard-library dotted import records nothing.
+- Mutation-check each by node id.
+
+**Round 2 (2026-11-03): deferred to 0.17.1.** `/code-review` (11) and the
+adversarial workflow (7 confirmed, minor) reviewed 420d14c.
+- **The cell scan has unresolved design problems.**
+  - A parallel worker keeps no cells.
+  - The scan costs about 0.8 s per run once a session keeps 500 cells, since
+    the 128-tree cache thrashes.
+  - Its cell-name whitelist is narrower than how notebook definitions are
+    found (Databricks' `<command-N>`, `IPYKERNEL_CELL_NAME`).
+  - Compiling every import cell prints stray `SyntaxWarning`s.
+- **The hook-free reads opened new cases and missed sites.**
+  - `object.__getattribute__(m, "__dict__")` still runs a `__dict__` property
+    on the module's type, and apipkg's `ApiModule` (`import py`) has one that
+    loads everything, which main never triggered.
+  - A `ModuleType` subclass holding `__file__` on its class is no longer found.
+  - `isinstance` on a partial's bound argument reads `__class__`, which
+    `_LazyModule` intercepts.
+  - Two sites (`_file_entries`' top-level read, `_find_file`'s parent walk)
+    have no test.
+
+The hook-free commit came from a grep inventory added mid-PR, and round 2
+showed that inventory was incomplete, so it is not merged on its own either.
+
+**Plan for 0.17.1**, each part planned before code:
+- **Seeds:** take them from what the record already follows. That is the
+  bytecode of the reached code (`IMPORT_NAME`, and `LOAD_GLOBAL pkg` followed
+  by `LOAD_ATTR sub`), which travels with the task to workers and covers
+  imports inside function bodies. Alternatively, the driver ships its seeds
+  beside `"<notebook>"`. Either replaces the cell scan.
+- **Hook-free reads:**
+  - first, a complete inventory of every operation the record performs on a
+    module object or a value (attribute reads, `isinstance`, `issubclass` on
+    instances, `repr`, `hasattr`);
+  - then reads through `types.ModuleType.__dict__["__dict__"].__get__(module)`
+    for module instances, `type()` checks instead of `isinstance`, and a
+    class-dict fallback for plain values only.
+
+**0.17.0 documents both limits:**
+- `import pkg.sub` in a notebook counts only through `pkg`; write
+  `from pkg import sub`.
+- A module loaded through `importlib.util.LazyLoader` is imported when the
+  record reaches it.
+
+(0.17.0 shipped different advice from the last bullets: after editing a
+submodule reached that way, use a new `working_dir` (#288).)
+
+## Round 3 (2026-11-03): seeds from the reached bytecode
+
+Plan, written before any edit. It replaces the second design's cell scan. The
+hook-free reads are not part of it: they get their own PR, planned from a
+complete inventory first.
+
+**What is followed.** The notebook code the record already reaches (the
+`codes` of `_notebook_entries`: the roots, the cell functions their names look
+up, a reached class's methods, a wrapper's `__wrapped__`), and the code nested
+in each. In that bytecode:
+- A global read (`LOAD_GLOBAL`, `LOAD_NAME`, `LOAD_FROM_DICT_OR_GLOBALS`) of
+  `g` followed directly by attribute reads (`LOAD_ATTR`, and 3.11's
+  `LOAD_METHOD`) `a`, `b`: when the namespace binds `g` to a module named `m`,
+  the seed `m.a.b`. Only the whole chain is seeded, since `_file_entries`
+  follows a name's packages too: `m.a` is found when `m.a.b` is an attribute.
+  A name the walk does not follow (a dunder, one of IPython's, one a notebook
+  function rebinds) gives no seed, by the same test.
+- An absolute import (`IMPORT_NAME`, level 0) seeds its module and, with a
+  from-list, each `module.name` (not `*`). A relative import gives none. The
+  level and the from-list are the two constants loaded just before it; their
+  opcodes differ by version (`LOAD_SMALL_INT` from 3.14,
+  `LOAD_COMMON_CONSTANT` on 3.15), so their values are read, not the opcodes.
+- 3.15: a lazy proxy's repr names the same `n` for `lazy import pkg.sub`
+  (bound as `pkg`, resolving to `pkg`), `lazy import pkg.sub as s` and `lazy
+  from pkg import sub` (both resolving to `pkg.sub`). A chain on `g` takes as
+  its base `n`'s first component when `g` is that component, else `n`. That is
+  exact for every form but `lazy import a.b as a`, whose chains then miss a
+  deeper submodule; `n` itself is still seeded by `_namespace_modules`.
+
+**Why bytecode is safe here.** It only chooses what to follow; no digest reads
+it (as with `_code_names`). A probe on 3.11.14, 3.12.12, 3.13.12, 3.14.3 and
+3.15.0 gave the same chains and imports for 24 constructs (a call, an
+attribute, a store, a delete, a comprehension, a generator, a lambda, a nested
+function, `with`, `async with`, `await`, `try`/`except`, an f-string, a
+conditional expression, a class body with an annotation, a method). A suite
+test pins those sets, so every CI Python checks them.
+
+**What it reads.** No module attribute beyond what main reads: a chain's base
+is the `__name__` of a module in the namespace, which `_namespace_modules`
+already reads for every module there, and `_find_file` reads `__file__`,
+`__path__` and `__spec__` as for any other seed. Load state does not count: a
+seed is a name in the code, found by its file whether or not it is loaded.
+
+**Where it is taken.** In the driver, in the same walk as the notebook
+entries, and shipped beside them under a second key (`NOTEBOOK_MODULES`). A
+worker keeps no cells, but it has the same bytecode, so it records the same
+seeds; a cell given no shipment takes its own. A walk past its bound, or one
+that fails, gives no seeds, as it gives no entries: a cut walk's seeds would
+depend on its order.
+
+**Residuals**
+- A module reached only dynamically (`importlib.import_module(name)`,
+  `getattr(pkg, name)`), or through a chain a call or a subscript breaks
+  (`get().sub`, `mods[0].sub`), is not followed, as in a file task.
+- 3.15: a cell's `lazy import pkg.sub` whose task never names `pkg.sub`
+  records `pkg.sub` before the proxy resolves and only `pkg` after, so a
+  second `cache_dir` run in that kernel misses (as in 0.17.0).
+- `cache_dir` keys on every entry, so a notebook task whose record gains a
+  submodule misses the cache once after the upgrade.
+
+**Tests** (each new one mutation-checked by node id, with the counts checked):
+- the extraction on the probe's source gives the pinned chains and imports;
+- `import pkg.sub` with `pkg.sub.f`, `import pkg.sub as s`, and `from pkg
+  import sub` record `pkg.sub (file)`, and `import pkg.a.b` records every
+  level;
+- a cell helper the task calls reaches `pkg.sub`; a cell function the task
+  does not reach, naming `pkg.other`, adds nothing;
+- `import pkg.sub` and `from pkg import sub` inside the task's body are
+  recorded; a relative import is not (a top-level module of the same name
+  exists, so ignoring the level would record it);
+- load state: `pkg.other` loaded by a cell but not named in the reached code
+  is not recorded, and `pkg` bound to a non-module gives no chain seed;
+- end to end: edit `pkg/sub.py`, restart, resume, and the cells re-run with
+  the new values;
+- shipping: ship, rebind `pkg` in the kernel, then record with the shipment:
+  `pkg.sub (file)` is still there;
+- a walk past its bound, and a failed walk, give no `(file)` seed from a
+  chain;
+- 3.15: the three lazy forms record `pkg.sub (file)` before and after the
+  proxy resolves, and two `cache_dir` runs in one kernel reuse;
+- `os.path.join` and `np.linalg.norm` add no entry.
+
+**Cost**, measured before review: `project_fingerprints(task)` on a kernel
+keeping 500 cells, with a task reaching 50 cell functions that name 10
+submodules (3.11 on an Apple M1). Main: 31 ms the first time, 2.5 ms after (median of
+20), recording 1 file. The branch: 28 ms, then 2.9 ms, recording 11 (the
+package and the 10 submodules). The difference is the 10 files followed.
+
+**Docs:** remove the `import pkg.sub` limit from `docs/guides/resilience.md`,
+`src/mushin/agent_guide.md` and the `run()` docstring, and the docstring's
+"project modules its functions import inside their bodies". Every LazyLoader
+sentence stays. The fragment is `changes/284.fixed.md`; it notes the one-time
+`cache_dir` miss.
+
+## Round 4 (2026-11-03): seeds from the definitions' syntax trees
+
+`/code-review` (13 findings) and the adversarial workflow (8 confirmed, none
+refuted) reviewed round 3 (a6e7f86). Plan, written before any edit.
+
+**The altitude error.** Round 3 read bytecode because "a worker has it", but
+a worker never reads any: the driver ships the modules, and without cell text
+a worker's walk reaches no cell function anyway (`_cell_function` needs the
+text). Bytecode also misses code a cell runs outside a function: a class's
+bases and body, a decorator, a default. `class Model(pkg.sub.Base)` after
+`import pkg.sub` still recorded only `pkg`, which is the bug itself.
+
+**The design.** Read the modules from the syntax trees the digests already
+hash: `_definition_nodes` for a function (its decorators, defaults and
+annotations included) and `_class_node` for a class (its bases, keywords,
+decorators and body). In those nodes:
+- each maximal attribute chain on a name (`pkg.sub.f`), the name resolved
+  through an import inside the same definitions first (`import pkg`, then
+  `pkg.sub.f`), else through the namespace by the walk's name test and
+  `_chain_bases`;
+- each absolute import (`ast.Import`; `ast.ImportFrom` at level 0 with its
+  names, not `*`).
+
+The syntax tree reads the same on every supported Python (probed on
+3.11.14-3.15.0, with the round 3 constructs plus decorators, defaults,
+annotations, bases, a metaclass, a class body and `staticmethod(...)`), so no
+opcode differs by version. No parse is added: `own()` already gets these
+nodes, and both now come from one lookup per unit, so the digests are
+unchanged. It reads only reached definitions, not every kept cell, so the
+round 2 objections to the cell scan (all cells, a cell-name whitelist,
+`SyntaxWarning`s) do not apply.
+
+**From the reviews**, beyond the design:
+- A shipment counts per key (both reviews). An older driver's shipment (a
+  0.17.0 runner, unpickled by this version) has no `NOTEBOOK_MODULES`: its
+  entries still count, with no modules (that driver took none). A cell walks
+  for itself only when the entries are missing.
+- An ambiguous lazy proxy gets both bases (both reviews). `lazy from pkg
+  import pkg` and `lazy import pkg.pkg` both name `pkg.pkg` bound as `pkg`, so
+  when the binding is the proxy's first component and the proxy names more,
+  the bases are that component and the full name. Before the proxy resolves,
+  the record then holds what it holds after, plus whatever the other reading
+  names, which is nothing unless both readings are files.
+- The notebook-named modules go first in the seeds, so a record cut by
+  `_FILES_MAX` keeps the files the task's own code names.
+- One helper says which module a value stands for (`_namespace_modules` and
+  `_chain_bases` both use it), and one says which names are IPython's or
+  dunders (`_notebook_writes` and the walk both use it), so the planned
+  hook-free reads change one place.
+- The fragment says what changed and no more: on 3.15 a second `cache_dir`
+  run reuses when the task names `pkg.sub`, and cells recorded by 0.17.0 keep
+  their record (a resume keeps a reused cell's prior record).
+- `project_fingerprints`'s docstring names the modules the notebook code
+  names.
+
+**Not changed:** shipping only project modules (`/code-review`'s
+efficiency finding). `_file_entries` already skips a loaded foreign package
+per top-level name, and the measured cost is within noise.
+
+**Residuals**
+- A name used both as a module global and as a local of the same name (a
+  parameter `np`) is read as the module: a recompute when that file changes,
+  never a missed edit.
+- Reached only dynamically (`importlib.import_module(name)`, `getattr(pkg,
+  name)`), or through a chain a call or a subscript breaks (`get().sub`), is
+  not followed, as in a file task.
+- 3.15: `lazy import pkg.sub` with a task that never names `pkg.sub` records
+  `pkg.sub` before the proxy resolves and only `pkg` after.
+
+**Tests** (round 3's, adapted, plus):
+- a class base, a class attribute, a `staticmethod(...)` in a class body, a
+  decorator and a default, each `pkg.sub.X` after `import pkg.sub`, record
+  `pkg.sub (file)`;
+- `import pkg` inside the task's body, then `pkg.sub.f(a)`;
+- a module bound under another name (`import pkg as sp`, then
+  `sp.sub.f(a)`), and on 3.15 a proxy bound under another name;
+- 3.15: `lazy from pkg import pkg` records the same before and after it
+  resolves;
+- an old shipment (no `NOTEBOOK_MODULES`) in a worker with no cell text keeps
+  the driver's notebook entries;
+- a record cut by `_FILES_MAX` keeps the submodule the task names;
+- the extraction on the probe's source gives the pinned names.
+Each new rule mutation-checked by node id; the cost measured again.
+
+**Results.** 33 new tests (26 run on 3.11, all 33 on 3.15). Thirteen
+mutations, one per rule (namespace chains, import-bound chains, the level, both
+lazy bases, the aliased proxy, the truncation guard, the per-key shipment, the
+shipment used, the seed order, a value starting a chain, a rebound name, inner
+attributes, a relative import's names), each caught by node id. Cost, three
+runs each on the 500-cell kernel: main 27-37 ms the first time, 2.7-2.9 ms
+after, recording 1 file; this branch 29-33 ms, then 4.6-5.0 ms, recording 11.
+The 2 ms is the reached definitions' walk and the 10 files; a record is taken
+once per run per process, so it is not cached.
+
+Two of my measurements in this round were wrong before they were right: a
+cross-version check through bare interpreters compared five identical
+tracebacks (mushin was not importable there), and an earlier timing run
+differed by 2x from the next. Compare the output itself, and repeat a timing.
+
+## Round 5 (2026-11-03): scopes, methodless classes, installed packages
+
+`/code-review` (10 findings) and the adversarial workflow (5 confirmed, 1
+refuted: the LazyLoader import, which main shows too and the docs state)
+reviewed round 4 (8a1afb8). Plan, written before any edit.
+
+**Scopes** (both reviews; the worst finding). One flat map of import
+bindings per unit let an import in one scope steer chains in another. A
+nested function's `from email import utils` turned the task's own
+`utils.b.f` into `email.utils.b.f`, so the project submodule was dropped: a
+missed edit. `_syntax_modules` now walks scope by scope:
+- a function's decorators, defaults and annotations, and a class's
+  decorators, bases and keywords, are read in the enclosing scope;
+- a function or lambda body is its own scope and sees its enclosing
+  functions' bindings; a class body is its own scope, and its bindings are
+  not visible to the functions inside it;
+- a name can have several bindings in one scope (`if`/`else`, `try`/`except
+  ImportError`), and a chain on it resolves through each;
+- a name with no binding in its scope or an enclosing function's is the
+  namespace's.
+The import names come from `_import_pairs` (the file record's reader), so the
+two cannot drift; the binding map stays local. A definition node walked once
+in a record is not walked again (a class's statement holds its methods' defs,
+and each method is a unit too).
+
+**Methodless classes** (both reviews). A class with no method of its own (a
+dataclass or `Enum` of fields, `class Model(pkg.sub.Base): K = 3`) has no
+statement to read, so its bases named nothing. For each reached class, each
+base that is not a notebook class now adds its module, read as
+`_notebook_class` reads it (`vars(base).get("__module__")`, no new kind of
+read). Notebook bases are units already, so a methodless notebook base's own
+bases count. What such a class's body names (`K = pkg.sub.CONST`) is still not
+followed: the docs say so ("may", with the new-`working_dir` advice).
+
+**Rebound names** (`/code-review`). The walk skips a name a notebook function
+rebinds because the definition it holds can be gone by the next run. A chain
+does not need that: a reload helper (`global pkg; pkg = importlib.reload(pkg)`)
+keeps a module there, and skipping it drops the submodule. Chains skip only
+the kernel's own names. A rebinding to something else changes the record
+next run: a recompute, not a missed edit.
+
+**Installed packages** (`/code-review`). The driver now drops a module whose
+top-level name resolves to a foreign file before shipping (the rule
+`_file_entries` applies to a loaded top-level package, by its file, once per
+top-level name), so `np.linalg.norm` is neither shipped nor looked up in each
+cell. A top-level name with no file (a namespace package) is kept for
+`_file_entries` to decide, which avoids round 1's misjudged namespace packages.
+
+**Unchanged, with reasons**
+- Two bases for an ambiguous lazy proxy (`/code-review` asked again): when
+  both readings are files (`pkg/utils/utils.py`, `lazy import pkg.utils`),
+  the record before the proxy resolves holds one more file than after, so a
+  second `cache_dir` run misses. One base would instead miss an edit for
+  `lazy from pkg import pkg`. The fragment drops its 3.15 sentence rather
+  than claim more.
+- A closure factory's import (`def make(): import pkg.sub as s; def
+  task(a): return s.f(a)`) is not followed: the reached unit is `task`, and
+  the enclosing function's body is not its definition. Main recorded nothing
+  there either, and closures are a documented limit.
+
+**Tests** (each mutation-checked by node id):
+- an import in a nested function, and one in the body read against a
+  default, do not change what the task's own chain names;
+- two bindings of one name in one function both count;
+- a class body's import is not what its method's name means;
+- a methodless class's base, and a methodless notebook base's base, record
+  the base's module;
+- a reload helper rebinding the package keeps the submodule;
+- the driver ships no installed package's names, and keeps a project
+  namespace package's;
+- `from pkg import a as A`, then `A.b.f`, records `pkg.a.b`;
+- the pinned extraction, with `from pkg import x as y` added.
+
+**Docs:** the methodless-class caveat at the three sites; the stale bytecode
+comment in the tests; the fragment without the 3.15 sentence, naming bases,
+decorators and defaults.
+
+**Results.** 42 new tests (35 run on 3.11, all 42 on 3.15). Twenty-one
+mutations, one per rule of rounds 4 and 5, each caught by node id. Two
+survived at first, and each needed a different fix. The nested-scope mutation
+was ineffective as written (a nested `def` is a statement of the task's own
+body), so it was rewritten. The one-binding mutation exposed a test that
+passed by walk order, so the swapped case was added. Cost (three runs each,
+500-cell kernel): main 23-24 ms first, 2.3-2.4 ms after, 1 file; this branch
+26-33 ms, then 4.3-4.4 ms, 11 files.
+
+## Round 6 (2026-11-03): each unit read on its own
+
+The adversarial workflow reviewed round 5 (ba25e95): 4 confirmed. Plan,
+written before any edit.
+- **Walk order** (important, my regression). Round 5 shared one set of walked
+  definitions across units, to save reading a method twice (a
+  `/code-review` efficiency finding). When a closure was reached before the
+  factory that encloses it, the closure was read alone (its `s.deep.f`
+  unresolved), and the factory's read then skipped it, so the factory's
+  `import pkg.sub as s` never applied: renaming a variable could drop
+  `pkg.sub.deep`. Each unit is read on its own again, and the result is the
+  union of the readings, whatever the order. A method is read twice
+  (alone, and in its class); the cost stays within the measured range.
+- **Docs** (important). A class with no method of its own has no statement
+  to read, so its decorators and keywords (`metaclass=`) are not followed
+  either, only its bases (by type). The caveat names the statement, not just
+  the body, and the fragment says "a function's decorator".
+- **Tests** (minor): an enclosing function's import reaching a nested
+  function and a lambda (the `visible` rule had no positive case), and the
+  pinned extraction gains a class decorator, a keyword-only default, a lambda
+  default and a return annotation.
+
+Lesson: the efficiency fix coupled units that were independent, and that
+broke "the record does not depend on walk order". Test an optimization
+against the invariants it can break, not only the cost it saves.
+
+`/code-review` on round 5 (13 findings; its walk-order finding is the one
+above). Added to this round, planned before the edit:
+- **Closures** (it probed a decorator's wrapper and a factory's task): a unit
+  created inside another function never sees that function's imports, since
+  its definition is the inner `def` only. A chain on one of the unit's free
+  variables now resolves through its closure cell, by type as
+  `_chain_bases` reads any value (a module, or a lazy import). That also
+  covers round 5's closure-factory residual.
+- **Type parameters** (3.12+): `def f[T: pkg.sub.Base]` and `class C[T: ...]`
+  bounds and defaults are read where the definition stands.
+- **Standard-library modules with no file** (`sys`, `time`, `math`,
+  `_thread`) count as foreign before shipping, by name, as
+  `_is_foreign_module` judges them; a top-level name that is a file still
+  decides by its file.
+- **Docs:** a class with no method of its own is not compared at all (its
+  text hashes as unknown, as on main), so the caveat says so; and a submodule
+  reached only through something the code does not name (a registry it
+  fills when imported, `importlib.import_module`) may not be compared, a
+  hedged sentence with the new-`working_dir` advice.
+- **Wording:** only imports count as local bindings (a parameter or an
+  assignment shadowing a module global is read as the module: a recompute,
+  never a missed edit), and the docstring says that. Putting the notebook's
+  modules first starts a cut record from them; it does not keep every one,
+  since `_file_entries` is depth-first, and the comment says that.
+- **Cleanup:** the dead `from m import *` branch (a syntax error inside a
+  definition) goes, and the one-use name test is inlined back.
+Not changed: caching the reads and shipping only module prefixes (the cost
+is measured), and finding a methodless class's statement (that is the cell
+scan rounds 1 and 2 rejected).
+
+**Results.** 53 new tests (45 run on 3.11, 52 on 3.15; one needs 3.12+).
+Thirty mutations, each caught by node id (the lazy and type-parameter ones on
+3.15). One survived for a reason worth keeping: with each unit read alone, a
+class body's bindings leaking into its methods can only add files (each
+method is read alone too), so its test now checks that no extra file is
+recorded. The walk-order test fails on round 5's code (ba25e95) and passes
+here.
+Cost (three runs each, 500-cell kernel): main 23-26 ms first, 2.3-2.4 ms
+after; this branch 25-34 ms, then 4.3-4.4 ms (reading each method twice
+added nothing measurable).
+
+## Round 6 review and the merge (2026-11-03)
+
+`/code-review` (12) and the adversarial workflow (6, all minor) reviewed
+round 6 (ff31ae9). Nothing records less than main: every miss they found,
+main misses too. The maintainer chose to touch up docs and tests and merge,
+with the rest as a follow-up issue rather than a seventh round.
+
+**A correction.** Rounds 3 and 4 said no module attribute is read beyond
+what main reads. That stopped being true in round 6: a closure-held module's
+`__name__` is read, and `_find_file` reads the `__file__` of a top-level module
+that only an import inside a definition names. Either can run an
+`importlib.util.LazyLoader` module's file. The LazyLoader caveat in the docs
+("reading the code a task reaches can import" one) covers both.
+
+**Touch-up:** a general hedged caveat at the three doc sites (a submodule
+reached through its package may still not be compared in some cases, with
+examples, and the new-`working_dir` advice), and three test pins: `import a.b`
+in a body binds `a`, a closure cell wins over a global of the same name, and
+the innermost enclosing binding wins.
+
+**Follow-up (not in this PR):**
+- a package held in a local name or a bare-name default (`m = pkg`, `lib=pkg`);
+- a class made inside a factory, and a factory's or class body's import named
+  only in an inner definition's decorator or default;
+- a comprehension in a class body read in the class's scope;
+- 3.15 recomputes: a proxy read two ways when both readings are files, a proxy
+  the task resolves through another attribute, and closure cells the run
+  rebinds;
+- caching the per-unit reading, and one copy of the foreign-top rule.

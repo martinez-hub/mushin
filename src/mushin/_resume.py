@@ -1148,17 +1148,14 @@ def _namespace_modules(namespace: dict) -> list[str]:
     as the name it will import (``_file_entries`` adds the packages)."""
     import types
 
-    lazy = getattr(types, "LazyImportType", None)  # 3.15+
     names = set()
     for value in list(namespace.values()):
         kind = type(value)
         try:
-            if kind is lazy:
-                name = _lazy_import_name(value)
-                if name is not None:
-                    names.add(name)
-            elif issubclass(kind, types.ModuleType):
-                names.add(value.__name__)
+            module_name = _module_name_of(value)
+            if module_name is not None:
+                if module_name[0] is not None:
+                    names.add(module_name[0])
             elif kind is types.FunctionType or issubclass(kind, type):
                 module = value.__module__
                 if isinstance(module, str):
@@ -1202,9 +1199,11 @@ def _lazy_import_name(proxy) -> str | None:
 # Definitions are static. See
 # docs/superpowers/specs/2026-10-27-notebook-code-record-design.md.
 
-#: The key the driver's notebook entries ship under in ``script_entries``: no
-#: script path can be it (those end in ``.py``).
+#: The keys the driver's notebook entries, and the modules the notebook code
+#: names, ship under in ``script_entries``: no script path can be either
+#: (those end in ``.py``).
 NOTEBOOK_ENTRIES = "<notebook>"
+NOTEBOOK_MODULES = "<notebook modules>"
 
 #: IPython's own names in a kernel's namespace (its input and output history
 #: and helpers): they change with every cell and are never the task's code.
@@ -1222,6 +1221,16 @@ _GLOBAL_WRITES = frozenset({"STORE_GLOBAL", "DELETE_GLOBAL"})
 
 _CELL_TREES: dict[str, object] = {}
 _CODE_NAMES: dict = {}
+
+
+def _kernel_name(name: str) -> bool:
+    """A name a kernel's namespace holds that is never the task's code: a
+    dunder, or one of IPython's (``_IPYTHON_NAME``)."""
+    return bool(
+        (name.startswith("__") and name.endswith("__")) or _IPYTHON_NAME.fullmatch(name)
+    )
+
+
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
 
@@ -1297,6 +1306,160 @@ def _code_names(code) -> tuple[frozenset, frozenset]:
     result = (frozenset(reads), frozenset(writes))
     _cache_put(_CODE_NAMES, code, result)
     return result
+
+
+def _outer_parts(node) -> list:
+    """What a definition evaluates where it stands, in the enclosing scope:
+    a function's decorators, defaults and annotations, a lambda's defaults,
+    a class's decorators, bases and keywords, and the bounds and defaults of
+    either's type parameters (3.12+, ``def f[T: pkg.sub.Base]``)."""
+    import ast
+
+    typed = [
+        part
+        for param in getattr(node, "type_params", ())
+        for part in (
+            getattr(param, "bound", None),
+            getattr(param, "default_value", None),
+        )
+        if part is not None
+    ]
+    if type(node) is ast.ClassDef:
+        keywords = [k.value for k in node.keywords]
+        return [*node.decorator_list, *node.bases, *keywords, *typed]
+    args = node.args
+    parts = [*args.defaults, *(d for d in args.kw_defaults if d is not None)]
+    if type(node) is ast.Lambda:
+        return parts
+    params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    parts += [p.annotation for p in params if p is not None and p.annotation]
+    returns = [node.returns] if node.returns else []
+    return [*node.decorator_list, *parts, *returns, *typed]
+
+
+def _syntax_modules(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
+    """``(modules, chains)`` that definitions' syntax trees name: the modules
+    their absolute imports name (as ``_import_pairs`` reads them: ``from pkg
+    import sub`` names ``pkg`` and ``pkg.sub``, which may be an attribute),
+    and each maximal attribute chain on a name (``pkg.sub.f`` is ``("pkg",
+    "sub", "f")``). Scope by scope, as Python resolves names, with imports as
+    the only bindings: a chain on a name an import binds in its scope, or in
+    an enclosing function's (``import pkg`` in a function, then
+    ``pkg.sub.f``), is a module through each such binding; a relative
+    import's name names none; the rest are for the caller to resolve (a
+    parameter or an assignment shadowing a module global is read as the
+    module: a recompute, never a missed edit). A definition's decorators,
+    defaults, annotations, bases and keywords are read in the enclosing
+    scope, and a class body's bindings are not visible to the functions in
+    it. Each call reads its nodes alone, so what one unit names does not
+    depend on which units were read before it. The trees are the ones a
+    digest hashes, and they read alike on every supported Python."""
+    import ast
+
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    modules: set[str] = set()
+    chains: set[tuple[str, ...]] = set()
+    # (the nodes evaluated in a scope, the bindings of the functions that
+    # enclose it, whether it is a class body)
+    pending: list = [(list(nodes), (), False)]
+    while pending:
+        roots, enclosing, is_class = pending.pop()
+        here: list = []
+        inner_scopes: list = []
+        stack = list(roots)
+        while stack:
+            node = stack.pop()
+            kind = type(node)
+            if kind in defs or kind is ast.Lambda:
+                stack.extend(_outer_parts(node))
+                body = [node.body] if kind is ast.Lambda else node.body
+                inner_scopes.append((body, kind is ast.ClassDef))
+                continue
+            here.append(node)
+            stack.extend(ast.iter_child_nodes(node))
+        bound: dict[str, set[str]] = {}  # "" for a relative import's name
+        inner = {id(n.value) for n in here if type(n) is ast.Attribute}
+        found: list[tuple[str, ...]] = []
+        for node in here:
+            kind = type(node)
+            if kind is ast.Import or kind is ast.ImportFrom:
+                modules.update(n for n, level in _import_pairs(node) if level == 0)
+                for alias in node.names:
+                    if kind is ast.Import:
+                        # `import a.b` binds `a`; `import a.b as c` binds `a.b`.
+                        name = alias.asname or alias.name.partition(".")[0]
+                        target = alias.name if alias.asname else name
+                    else:
+                        name = alias.asname or alias.name
+                        absolute = node.level == 0 and node.module
+                        target = f"{node.module}.{alias.name}" if absolute else ""
+                    bound.setdefault(name, set()).add(target)
+            elif kind is ast.Attribute and id(node) not in inner:
+                parts = []
+                current = node
+                while type(current) is ast.Attribute:
+                    parts.append(current.attr)
+                    current = current.value
+                if type(current) is ast.Name:
+                    found.append((current.id, *reversed(parts)))
+        for chain in found:
+            targets = bound.get(chain[0])
+            for scope in reversed(enclosing):
+                if targets is not None:
+                    break
+                targets = scope.get(chain[0])
+            if targets is None:
+                chains.add(chain)
+            else:
+                modules.update(".".join((t, *chain[1:])) for t in targets if t)
+        # A function's bindings reach the functions in it; a class body's do
+        # not.
+        visible = enclosing if is_class else (*enclosing, bound)
+        for body, body_is_class in inner_scopes:
+            pending.append((body, visible, body_is_class))
+    return modules, chains
+
+
+def _module_name_of(value) -> tuple[str | None, bool] | None:
+    """For a module, or on 3.15 a lazy import (PEP 810) of one, ``(its name,
+    whether it is lazy)``; the name is None when none can be read. None for
+    any other value. A module's ``__name__`` is read; a lazy proxy is not
+    asked for anything (``_lazy_import_name``). Raises what a module's
+    attribute hook raises."""
+    import types
+
+    kind = type(value)
+    if kind is getattr(types, "LazyImportType", None):  # 3.15+
+        return _lazy_import_name(value), True
+    if issubclass(kind, types.ModuleType):
+        name = value.__name__
+        return (name if isinstance(name, str) else None), False
+    return None
+
+
+def _chain_bases(name: str, value) -> tuple[str, ...]:
+    """The modules an attribute chain on the global ``name`` can start from,
+    when the namespace binds it to ``value``: a module's name. On 3.15 a lazy
+    proxy names ``pkg.sub`` for ``lazy import pkg.sub``, which binds ``pkg``
+    to the package, and alike for ``lazy import pkg.sub as s`` and ``lazy
+    from pkg import sub``, which bind the submodule. Bound as its first
+    component, it stands for either the package or the full name (``lazy
+    from pkg import pkg``), so both are bases: a reading that names no file
+    costs a lookup, and one that is missed is a missed edit. Otherwise the
+    full name. None of it for any other value."""
+    try:
+        found = _module_name_of(value)
+    except Exception:  # noqa: BLE001 - a value that resists inspection
+        return ()
+    if found is None or found[0] is None:
+        return ()
+    full, lazy = found
+    if not lazy:
+        return (full,)
+    top = full.partition(".")[0]
+    if name != top:
+        return (full,)
+    return (top,) if full == top else (top, full)
 
 
 def _definition_nodes(code) -> list | None:
@@ -1491,11 +1654,7 @@ def _notebook_writes(namespace: dict, roots) -> frozenset | None:
     level = [
         value
         for name, value in list(namespace.items())
-        if type(name) is str
-        and not (
-            (name.startswith("__") and name.endswith("__"))
-            or _IPYTHON_NAME.fullmatch(name)
-        )
+        if type(name) is str and not _kernel_name(name)
     ] + [root for _, root in roots]
     depth = 0
     while level and depth <= _WRITE_SCAN_DEPTH:
@@ -1626,9 +1785,38 @@ def _components(children: dict) -> dict:
     return comp_of
 
 
-def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
-    """The entries of a notebook's code the roots reach: ``{"<name>
-    (notebook)": digest}`` for each name their code looks up (and each root
+def _maybe_project(name: str, foreign_tops: dict) -> bool:
+    """False when ``name``'s top-level module is mushin, resolves to a file
+    an installed package or the standard library holds (``numpy``), as
+    ``_file_entries`` judges a loaded top-level package, or has no file and is
+    the standard library's by name (``sys``), as ``_is_foreign_module``
+    does; once per top-level name. Any other top-level name with no file (a
+    namespace package, one that is not found) is kept for ``_file_entries``
+    to decide."""
+    import sys
+
+    top = name.partition(".")[0]
+    if top not in foreign_tops:
+        try:
+            file = _find_file(top)
+            if isinstance(file, str) and file:
+                # The file decides: a checkout's `code/` is the project's.
+                foreign = _foreign_by_path(file, top)
+            else:  # a built-in module (`sys`), or one with no file
+                foreign = top in sys.stdlib_module_names or (
+                    top in sys.builtin_module_names
+                )
+            foreign_tops[top] = top == "mushin" or foreign
+        except Exception:  # noqa: BLE001 - undecided here: _file_entries decides
+            foreign_tops[top] = False
+    return not foreign_tops[top]
+
+
+def _notebook_entries(namespace: dict, roots) -> tuple[dict[str, str], list[str]]:
+    """``(entries, modules)``: the entries of a notebook's code the roots
+    reach, and the modules their definitions name (see ``_syntax_modules``) to follow
+    as files. Entries are ``{"<name> (notebook)": digest}`` for each name
+    their code looks up (and each root
     by its name) that stands for a function or class defined in a cell. A
     function is its definition's syntax tree; a class its ``class``
     statement; an instance, a bound method's instance, its class. A digest
@@ -1641,16 +1829,18 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
     notebook's functions rebinds (``global helper; helper = fast``, see
     ``_notebook_writes``) is not followed: what it holds when the run starts
     can be gone by the next. A record past its
-    object bound has no notebook entries (with a warning): which objects a
-    cut walk took depends on its order. Objects are inspected by type, and
-    only a function's own ``__dict__`` is read, so a lazy proxy is never
-    resolved."""
+    object bound has no notebook entries and no modules (with a warning):
+    which objects a cut walk took depends on its order. Objects are
+    inspected by type, and only a function's own ``__dict__`` and a module's
+    ``__name__`` (which ``_namespace_modules`` reads too) are read, so a
+    lazy proxy is never resolved."""
     import types
 
     def resolve(value):
         return _notebook_object(value, namespace)
 
     over = [False]
+    foreign_tops: dict[str, bool] = {}
     rebound = _notebook_writes(namespace, roots)
     if rebound is None:  # past the scan's bound: which writes it saw is unknown
         over[0] = True
@@ -1658,6 +1848,7 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
 
     # uid -> [kind, object, children, methods]
     units: dict[int, list] = {}
+    base_modules: set[str] = set()
     codes: list = []
 
     def visit(obj) -> int | None:
@@ -1676,10 +1867,19 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         else:
             methods = _class_methods(obj, namespace)
             unit[0], unit[3] = "class", methods  # each method adds its code
-            targets = [
-                *methods,
-                *(_notebook_class(b, namespace) for b in obj.__bases__),
-            ]
+            bases = [(b, _notebook_class(b, namespace)) for b in obj.__bases__]
+            targets = [*methods, *(nb for _, nb in bases)]
+            for base, notebook_base in bases:
+                if notebook_base is None:
+                    # A base from a module: its module, by type, as
+                    # _notebook_class reads it. A class with no method of its
+                    # own has no statement to read its bases from.
+                    try:
+                        module = vars(base).get("__module__")
+                    except TypeError:
+                        module = None
+                    if isinstance(module, str):
+                        base_modules.add(module)
         for target in targets:
             uid = visit(target) if target is not None else None
             if uid is not None:
@@ -1704,11 +1904,7 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
             if name in followed or name not in namespace:
                 continue
             followed.add(name)
-            if (
-                (name.startswith("__") and name.endswith("__"))
-                or _IPYTHON_NAME.fullmatch(name)
-                or name in rebound
-            ):
+            if _kernel_name(name) or name in rebound:
                 continue
             found = resolve(namespace[name])
             if found is not None:
@@ -1722,17 +1918,20 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
                 "than the record covers, so it is not compared; use a fresh "
                 "working_dir after editing it."
             )
-        return {}
+        return {}, []
 
-    def own(uid: int) -> str:
-        """A unit's own definition, without what it reaches."""
+    def nodes_of(uid: int) -> list | None:
+        """A unit's syntax nodes: a function's definition, a class's
+        ``class`` statement; None when its cell is not kept."""
         kind, obj, _, methods = units[uid]
         if kind == "function":
-            nodes = _definition_nodes(obj.__code__)
-            text = "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
-        else:
-            node = _class_node(obj, methods)
-            text = "?" if node is None else _canonical_dump(node)
+            return _definition_nodes(obj.__code__)
+        node = _class_node(obj, methods)
+        return None if node is None else [node]
+
+    def own(kind: str, nodes) -> str:
+        """A unit's own definition, without what it reaches."""
+        text = "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
         return _short_hash(f"{kind}\n{text}".encode())
 
     # A component hashes its members' own definitions and the digests of the
@@ -1740,7 +1939,47 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
     # on the order the walk took. Without captures the edges form no cycle
     # (methods, bases and __wrapped__ only point down); components keep that
     # true if one ever appears.
-    owns = {uid: own(uid) for uid in units}
+    unit_nodes = {uid: nodes_of(uid) for uid in units}
+    owns = {uid: own(units[uid][0], unit_nodes[uid]) for uid in units}
+
+    # The project modules the reached definitions name: a cell's `import
+    # pkg.sub` binds only `pkg`, so `pkg.sub.f` in a definition (its body, a
+    # decorator, a base class) is what reaches the submodule, and an import
+    # inside a function binds a local. By name, from the text the digests
+    # hash, so what happens to be loaded does not count.
+    # A chain skips only the kernel's own names: a name a notebook function
+    # rebinds (a reload helper) still holds a module, and skipping it would
+    # drop the submodule.
+    modules: set[str] = set(base_modules)
+    for uid, nodes in unit_nodes.items():
+        if nodes is None:
+            continue
+        # Each unit alone (a method in its class's statement and on its own):
+        # the union does not depend on the order the walk took.
+        imported, chains = _syntax_modules(nodes)
+        modules |= imported
+        # A unit made inside another function (a decorator's wrapper, a
+        # factory's function) reaches that function's imports through its
+        # closure: its definition is the inner `def` only.
+        kind, obj = units[uid][0], units[uid][1]
+        free = {}
+        if kind == "function":
+            # A function's closure has one cell per free variable.
+            cells = obj.__closure__ or ()
+            free = dict(zip(obj.__code__.co_freevars, cells, strict=False))
+        for chain in chains:
+            if chain[0] in free:
+                try:
+                    value = free[chain[0]].cell_contents
+                except ValueError:  # an empty cell: nothing bound yet
+                    continue
+            elif chain[0] in namespace and not _kernel_name(chain[0]):
+                value = namespace[chain[0]]
+            else:
+                continue
+            for base in _chain_bases(chain[0], value):
+                modules.add(".".join((base, *chain[1:])))
+    modules = {m for m in modules if _maybe_project(m, foreign_tops)}
     comp_of = _components({uid: unit[2] for uid, unit in units.items()})
     members: dict[int, list[int]] = {}
     for uid, ci in comp_of.items():
@@ -1767,19 +2006,23 @@ def _notebook_entries(namespace: dict, roots) -> dict[str, str]:
         key = f"{name} (notebook)"
         if key not in entries:
             entries[key] = digest(id(obj))
-    return entries
+    return entries, sorted(modules)
 
 
-def _notebook_record(notebooks: dict) -> dict[str, str]:
+def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str]]:
     """The notebook entries for ``notebooks`` (``{id: (namespace, [(key,
-    root)])}``), best effort: a notebook whose entries cannot be taken gives
-    none (as on main), with a warning, since an edit then goes unnoticed (a
-    notebook metaclass's attribute hook that raises, say). Once per run:
-    ``driver_script_entries`` clears the flag, so a resume warns again."""
+    root)])}``) and the project modules their code names, best effort: a
+    notebook whose entries cannot be taken gives neither (as on main), with
+    a warning, since an edit then goes unnoticed (a notebook metaclass's
+    attribute hook that raises, say). Once per run: ``driver_script_entries``
+    clears the flag, so a resume warns again."""
     out: dict[str, str] = {}
+    modules: set[str] = set()
     for namespace, roots in notebooks.values():
         try:
-            out.update(_notebook_entries(namespace, roots))
+            entries, names = _notebook_entries(namespace, roots)
+            out.update(entries)
+            modules.update(names)
         except Exception as error:  # noqa: BLE001 - never fail the record
             if not _NOTEBOOK_FAILURE_WARNED:
                 _NOTEBOOK_FAILURE_WARNED.append(True)
@@ -1795,7 +2038,7 @@ def _notebook_record(notebooks: dict) -> dict[str, str]:
                     f"not be recorded ({kind}), so it is not compared; use a "
                     "fresh working_dir after editing it."
                 )
-    return out
+    return out, sorted(modules)
 
 
 def _root_layers(root) -> list:
@@ -1934,8 +2177,8 @@ def _script_entry(file: str, namespace: dict, names, objects) -> tuple[str, list
 def driver_script_entries(roots) -> dict:
     """The entries of the driver scripts the roots are defined in, taken in
     the driver when a run starts: ``{file: (digest, imports, package)}``, and
-    for roots defined in a notebook ``{NOTEBOOK_ENTRIES: {key: digest}}``
-    (no script path can be that key). A
+    for roots defined in a notebook ``{NOTEBOOK_ENTRIES: {key: digest},
+    NOTEBOOK_MODULES: [module, ...]}`` (no script path can be those keys). A
     parallel worker runs the driver's pickled script functions, so the
     driver's view of the script is the one that runs; the runner ships these
     to every cell, so an edit to the script while the sweep runs is not
@@ -1962,7 +2205,7 @@ def driver_script_entries(roots) -> dict:
         if notebooks:
             # A worker gets notebook code by value, without its cells' text:
             # the driver's entries are what its cells record.
-            out[NOTEBOOK_ENTRIES] = _notebook_record(notebooks)
+            out[NOTEBOOK_ENTRIES], out[NOTEBOOK_MODULES] = _notebook_record(notebooks)
         return out
     except Exception:  # noqa: BLE001 - best effort: each cell takes its own
         return {}
@@ -2073,8 +2316,19 @@ def _record(roots, targets=(), scripts_given=None) -> dict:
         _target_entries(target, seeds, scripts)
     _script_entries(scripts, code, seeds, scripts_given or {})
     if notebooks:
-        shipped = (scripts_given or {}).get(NOTEBOOK_ENTRIES)
-        code.update(shipped if type(shipped) is dict else _notebook_record(notebooks))
+        given = scripts_given or {}
+        notebook, modules = given.get(NOTEBOOK_ENTRIES), given.get(NOTEBOOK_MODULES)
+        if type(notebook) is not dict:
+            notebook, modules = _notebook_record(notebooks)
+        elif type(modules) is not list:
+            # A driver from before modules were shipped (a runner pickled by
+            # 0.17.0) took none; its entries are still the ones that count.
+            modules = []
+        code.update(notebook)
+        # First, so a record cut by _FILES_MAX starts from what the task's own
+        # code names (depth first: the first one's imports come before the
+        # second one).
+        seeds[:0] = modules
     entries, cut = _file_entries(seeds)
     code.update(entries)
     if cut and not _TRUNCATION_WARNED:
@@ -2111,8 +2365,11 @@ def project_fingerprints(fn, *more, scripts=None) -> dict | None:
     A root defined where there is no file (a notebook) gives ``"<name>
     (notebook)"`` for each function or class defined in its cells that its
     code reaches by name, by its definition (see ``_notebook_entries``), and
-    the project modules of the objects its namespace holds; the driver takes
-    these when the run starts and ships them in ``scripts``.
+    the project modules of the objects its namespace holds and those its
+    reached definitions name (``pkg.sub.f`` after ``import pkg.sub``, an
+    import inside a function; see ``_syntax_modules``); the driver takes the
+    notebook entries and those modules when the run starts and ships them in
+    ``scripts``.
 
     Not covered: the standard library, mushin, installed packages other than
     editable ones (a dependency upgrade is provenance's job), data files, the
