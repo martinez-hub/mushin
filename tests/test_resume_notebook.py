@@ -3605,6 +3605,32 @@ run(
     "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
 )
 twice += [shell.user_ns["_A"], shell.user_ns["_B"]]
+# A `global Config` factory, called from a cell that mentions `class Config`
+# in a comment, then in a string: neither cell states the class. A name a
+# function rebinds is not followed, so the task reaches it as an instance's.
+factory = (
+    "def build():\\n    global Config\\n\\n    class Config:\\n        LR = {}\\n\\n"
+    "    return Config()\\n"
+)
+run("def task8(a):\\n    return a * cfg.LR\\n")
+mentions = {}
+for kind, call in (
+    ("comment", "cfg = build()  # rebuild class Config\\n"),
+    ("string", "_S = 'class Config'; cfg = build()\\n"),
+):
+    run(factory.format(0.11))
+    run(call)
+    before = _fp(shell.user_ns["task8"])["code"]["cfg (notebook)"]
+    run(factory.format(0.12))
+    run(call)
+    mentions[kind] = [before, _fp(shell.user_ns["task8"])["code"]["cfg (notebook)"]]
+run("del build, cfg")  # `own()` follows `Config` again
+# A `%time` line magic's class, with one older kept text: not that text's.
+run("class Solo2:\\n    X = 1\\n")
+run("def task7(a):\\n    return a * Solo2.X\\n")
+solo2 = _fp(shell.user_ns["task7"])["code"]["Solo2 (notebook)"]
+run("%time class Solo2: X = 2\\n")
+solo2_timed = _fp(shell.user_ns["task7"])["code"]["Solo2 (notebook)"]
 mark = len(out.getvalue())  # the callbacks' own output, before any record
 run(
     "class M(type):\\n    def __getattribute__(cls, n):\\n"
@@ -3634,7 +3660,8 @@ print(json.dumps({
     "magic_again": magic_again, "plain": plain, "timed": [timed, timed_same],
     "twice": twice, "hook": hook, "solo": [solo, solo_timed],
     "branch": [branch, branch_again], "nested": nested, "remade": remade,
-    "emptied": emptied, "toggled": toggled,
+    "emptied": emptied, "toggled": toggled, "mentions": mentions,
+    "line_timed": [solo2, solo2_timed],
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3660,13 +3687,17 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["raised"] == got["first"]  # the statement never ran
     # A magic's nested cell pins the class to its body: exact, and stable.
     assert got["magic"] == got["magic_again"] == got["plain"]
-    # A `%%time` cell's text is not kept: never an older kept text's digest.
     # A `%%time` cell's class has no site, as on main: the same digest after
     # an unchanged re-run, and never an older kept text's.
     timed, timed_same = got["timed"]
     assert timed == timed_same
     assert timed not in (got["first"], got["edited"], got["magic"])
     assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
+    assert got["line_timed"][0] != got["line_timed"][1]  # so for `%time`
+    # A comment or a string that mentions `class Config` states nothing: the
+    # class its factory made is read from the factory, and an edit is seen.
+    for kind, (before, after) in got["mentions"].items():
+        assert before != after, kind
     assert got["branch"][0] == got["branch"][1]  # an if's branches: one runs
     n1, n2, n3 = got["nested"]  # a nested class, pinned: a revert is exact
     assert n1 != n2 and n3 == n1
@@ -4067,6 +4098,8 @@ def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
     shell = _FakeShell()
     monkeypatch.setattr(resume, "_shell", lambda: shell)
     state = resume._cell_watch()
+    outer = types.SimpleNamespace(raw_cell="get_ipython().run_cell(CELL)\n")
+    shell.events.callbacks["pre_run_cell"](outer)  # still running after
     raw = "class Config:\n    LR = 0.1\n"
     info = types.SimpleNamespace(raw_cell=raw)
     shell.events.callbacks["pre_run_cell"](info)
@@ -4076,5 +4109,5 @@ def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
     else:
         result = types.SimpleNamespace(info=types.SimpleNamespace(raw_cell=raw))
     shell.events.callbacks["post_run_cell"](result)
-    assert state["running"] == []
+    assert state["running"] == [(outer, None)]
     assert id(shell.user_ns["Config"]) in state["pins"]

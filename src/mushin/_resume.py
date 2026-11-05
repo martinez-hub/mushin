@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import hashlib
+import itertools
 import json
 import re
 from dataclasses import dataclass
@@ -1362,7 +1363,7 @@ def _class_nodes(tree) -> list:
     tree: its qualname as the compiler makes it (``A.C`` in a class,
     ``f.<locals>.C`` in a function, the bare name when the enclosing function
     or class declares it ``global``); its path from the cell's top, one
-    ``(parent id, parent type, field, index)`` per step (``_exclusive``); and
+    ``(parent type, field, index)`` per step (``_exclusive``); and
     whether it is one of the cell's own statements, outside any function's
     or class's body (``top``)."""
     import ast
@@ -1387,7 +1388,7 @@ def _class_nodes(tree) -> list:
             items = value if type(value) is list else [value]
             for index, child in enumerate(items):
                 if isinstance(child, ast.AST):
-                    step = (id(node), kind, field, index)
+                    step = (kind, field, index)
                     out.append((child, prefix, globs, (*path, step), top))
         return out
 
@@ -1405,7 +1406,7 @@ def _class_nodes(tree) -> list:
                 inner = qualname + ".<locals>."
             inside = declared_global(node)
             for i, child in enumerate(node.body):
-                step = (id(node), kind.__name__, "body", i)
+                step = (kind.__name__, "body", i)
                 stack.append((child, inner, inside, (*path, step), False))
         elif kind is not ast.Lambda:
             stack.extend(children(node, prefix, globs, path, top))
@@ -1417,16 +1418,15 @@ def _exclusive(one: tuple, other: tuple) -> bool:
     them can run: an ``if``'s body against its ``orelse`` (an ``elif`` chain
     is nested ``orelse``s), or two cases of a ``match``. Any other parting
     (one block, a ``try``'s body and a handler, a statement after an ``if``)
-    can run both."""
+    can run both. Both paths start at one root, so at their first different
+    step they leave the same parent."""
     for a, b in zip(one, other, strict=False):
         if a == b:
             continue
-        if a[0] != b[0]:
-            return False
-        if a[1] == "If":
-            return a[2] != b[2]
-        if a[1] == "Match":
-            return a[2] == b[2] == "cases" and a[3] != b[3]
+        if a[0] == "If":
+            return a[1] != b[1]
+        if a[0] == "Match":
+            return a[1] == b[1] == "cases" and a[2] != b[2]
         return False
     return False
 
@@ -1486,9 +1486,9 @@ def _cell_imports(
 
 
 def _scan_kept_cells() -> list[tuple[str, tuple]]:
-    """``(text, index)`` for every cell the kernel keeps: a ``linecache``
-    entry ``_cell_lines`` would serve (``_kept_cell``), with what
-    ``_cell_imports`` reads in it, cached by the text. The cache keeps what
+    """``(text, (modules, bindings, classes))`` for every cell the kernel
+    keeps: a ``linecache`` entry ``_cell_lines`` would serve (``_kept_cell``),
+    with what ``_cell_imports`` reads in it, cached by the text. The cache keeps what
     this scan saw: a fixed bound would evict cells the next scan needs again,
     and re-parse every one once a session passes it."""
     import linecache
@@ -2255,9 +2255,17 @@ def _method_functions(value) -> list:
 #: so a reloaded ``_resume`` finds the same one): ``pins`` maps ``id(cls)``
 #: to ``(weakref, lines)``, the text of the cell whose ``class`` statement
 #: made it; ``running`` is the cells running now (a magic's nested cell
-#: too), each ``(raw text, {name: object before the cell})`` or None.
+#: too), each ``(info, (raw text, {name: object before the cell}))``, or
+#: ``(info, None)`` for a cell with no ``class`` statement.
 _CELL_WATCH = "_mushin_cell_watch"
-_CLASS_NAME = re.compile(r"\bclass(?:\s|\\\r?\n)+([^\W\d]\w*)")
+#: A ``class NAME`` where a statement can start: a line's start after its
+#: indentation, or after a line magic (``%time class C: ...``). A comment or
+#: a string that mentions a class is not a statement; snapshotted, it would
+#: pin a class a factory made (``global Config``) to a cell that never states
+#: it, and that class would get no site.
+_CLASS_NAME = re.compile(
+    r"^[ \t\f]*(?:%[^\n#]*?[ \t])?class(?:\s|\\\r?\n)+([^\W\d]\w*)", re.MULTILINE
+)
 
 
 def _shell():
@@ -2272,7 +2280,8 @@ def _shell():
 def _cell_watch(register: bool = True) -> dict | None:
     """The shell's cell watch (``_CELL_WATCH``), registering its two event
     callbacks the first time (``register``); None outside a shell. Best
-    effort: an IPython that refuses the callbacks leaves no watch."""
+    effort: an IPython that refuses the callbacks leaves a watch without
+    them, which pins nothing, and no later call registers again."""
     try:
         shell = _shell()
         if shell is None:
@@ -2442,7 +2451,7 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
 #: two of its cell's own statements that both run (``_ambiguous_own``).
 _PROCESS_TOKEN: list = []
 _CLASS_GENERATIONS: dict = {}
-_GENERATION_COUNTER = __import__("itertools").count()
+_GENERATION_COUNTER = itertools.count()
 
 
 def _ambiguous_own(cls) -> str:

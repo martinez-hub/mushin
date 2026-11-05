@@ -1918,3 +1918,77 @@ the nested pins, the head match, the post fallbacks and the registration
 order add information; the 3.11/3.12 rule for statements is the one guess
 left, and its failure modes are the documented residual.
 
+
+### #295 review round 5 (2026-11-04): plan
+
+Both reviews ran on 26f6243. The adversarial run confirmed two minor
+findings; `/code-review` gave ten, one of them blocking and outside the
+documented residual.
+
+**Blocking: the snapshot's regex reads comments and strings.** `pre`
+snapshots every name that `\bclass\s+NAME` matches anywhere in the raw
+cell. So `build(3)  # rebuild class Config`, where `build` declares
+`global Config` and states the class, pins the new class to the calling
+cell. That cell's text holds no statement, the class gets no site and a
+constant digest, and an edit to the factory's class body is missed, on
+every Python. Without the pin, the kept texts hold the factory's
+statement, and the edit is seen.
+
+*Fix:* match `class` only where a statement can start: at a line's start
+after indentation (`[ \t\f]*`), or after a line magic on that line
+(`%time class C: ...`, which the old regex caught and which must stay
+pinned: unpinned, an older kept text of `C` would stand in for it, and a
+resume would reuse that text's results). The same regex serves
+`_cell_imports`' parse trigger. A real statement always starts a logical
+line, so the trigger loses nothing, and a comment no longer costs a parse.
+*Residual, accepted (spec only):* a line of a multi-line string that starts
+with `class NAME`, in a cell that also calls a `global NAME` factory.
+
+**Minor (adversarial):**
+- the no-result post test has one running entry, so `found = 0` passes it:
+  add an older outer entry and assert it is still running afterwards;
+- the `_cell_watch` docstring says a refused registration "leaves no
+  watch"; since round 4 it leaves a watch without callbacks, which pins
+  nothing, and a later call does not register again.
+
+**Cleanups (`/code-review`):**
+- the `_CELL_WATCH` comment describes `running` entries as
+  `(raw, snapshot)` or None; they are `(info, (raw, snapshot) or None)`;
+- the `_scan_kept_cells` docstring calls its pairs `(text, index)`; they
+  are `(text, (modules, bindings, classes))`;
+- `_exclusive`'s `a[0] != b[0]` cannot be true: two paths from one root
+  that agree up to a step reach the same parent, so the step's first field
+  is redundant. Drop it and `id(node)` from the steps;
+- `import itertools` at the top instead of `__import__`.
+
+**Kept as they are:** `_pinned_cell` keeps scanning every running entry
+(newest first). Looking at the newest only would miss a record taken in a
+nested cell (`get_ipython().run_cell(...)`) after its outer cell stated
+the class. The rest of `/code-review`'s list is the documented residual
+(`global` in a function body on 3.11/3.12), accepted cost (a second
+`transform_cell`, registration at import, efficiency), or a follow-up:
+binding `__build_class__` in the notebook namespace's builtins would pin
+every `class` statement exactly, on all versions, but it touches the
+user's builtins and belongs in its own issue.
+
+**Tests:**
+- in the shell script, a `global Config` factory called from a cell whose
+  comment says `class Config`, then from one whose string does: an edit to
+  the factory's body changes the digest;
+- in the shell script, a `%time class Config: ...` line magic after older
+  kept statements: its digest is none of theirs;
+- the no-result case with an outer entry, as above.
+
+**Mutations:** the old `\b` regex (the comment and string cases fail);
+the line-start regex without the magic branch (the `%time` case fails);
+`found = 0` in post (the no-result case fails).
+
+**Results (#295 round 5 fixes).** The test of a factory had to reach the
+class through an instance (`cfg = build()`): a name a notebook function
+rebinds is not followed at all, so the first draft's `Config (notebook)`
+key was never there. 302 tests in the module, passing on 3.11 to 3.15; the
+whole suite 1647 passed (in three parts); the docs build and the 165 docs
+tests pass. Four mutations, all caught by node id, each on its own
+assertion: the old `\b` regex (the comment and the string case each keep a
+constant digest), the regex without the magic branch (the `%time` case),
+`found = 0` in post, and a raw-text fallback that takes the oldest entry.
