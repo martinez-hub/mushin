@@ -102,6 +102,43 @@ TASK = "def task(a):\n    return helper(a)\n"
 # the code a later call of `task` runs, so the record must change; a NOT_EDIT
 # does not, so it must not.
 NOTEBOOK_EDITS = {
+    # A class with no method of its own: its statement is found through the
+    # kept cells (and, on 3.14+, a dataclass's `__annotate_func__`).
+    "a method-less dataclass's default": (
+        [
+            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
+            "def task(a):\n    return a * Cfg().lr\n",
+        ],
+        ["@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n"],
+    ),
+    "an Enum member": (
+        [
+            "import enum\n\n\nclass Color(enum.Enum):\n    RED = 1\n",
+            "def task(a):\n    return a + Color.RED.value\n",
+        ],
+        ["class Color(enum.Enum):\n    RED = 2\n"],
+    ),
+    "a method-less class's attribute": (
+        ["class Config:\n    LR = 0.1\n", "def task(a):\n    return a * Config.LR\n"],
+        ["class Config:\n    LR = 0.2\n"],
+    ),
+    "a method-less class a factory makes": (
+        [
+            "def make():\n    class C:\n        K = 2\n\n    return C\n\n\nC = make()\n",
+            "def task(a):\n    return a * C.K\n",
+        ],
+        ["def make():\n    class C:\n        K = 3\n\n    return C\n\n\nC = make()\n"],
+    ),
+    # Every method wrapped by a notebook decorator that keeps no `__wrapped__`:
+    # the wrapper's code is the decorator's cell, so no method locates it.
+    "a class whose every method a notebook decorator wraps": (
+        [
+            "def deco(fn):\n    def wrapper(*a):\n        return fn(*a)\n\n    return wrapper\n",
+            "class Model:\n    @deco\n    def f(self, x):\n        return x * 2\n",
+            "def task(a):\n    return Model().f(a)\n",
+        ],
+        ["class Model:\n    @deco\n    def f(self, x):\n        return x * 3\n"],
+    ),
     "a helper's body": (
         ["def helper(x):\n    return x * 2\n", TASK],
         ["def helper(x):\n    return x * 3\n"],
@@ -449,12 +486,13 @@ NOTEBOOK_NOT_EDITS = {
             "class Model:\n    K = SCALE\n\n    def f(self, x):\n        return x * self.K\n",
         ],
     ),
-    "a method-less dataclass's default (documented: not compared)": (
+    "a method-less class's cell run again unchanged": (
         [
-            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.1\n",
-            "def task(a):\n    return a * Cfg().lr\n",
+            "import enum\n\n\nclass Color(enum.Enum):\n    RED = 1\n",
+            "class Config:\n    LR = 0.1\n",
+            "def task(a):\n    return a * Config.LR + Color.RED.value\n",
         ],
-        ["@dataclasses.dataclass\nclass Cfg:\n    lr: float = 0.2\n"],
+        ["class Config:\n    LR = 0.1\n", "class Color(enum.Enum):\n    RED = 1\n"],
     ),
     "a callable reached only through a container (documented)": (
         [
@@ -1330,7 +1368,7 @@ def lazy_project(tmp_path, monkeypatch):
     import importlib
 
     monkeypatch.setattr(
-        mushin._resume, "_kept_cell_reading", lambda: (set(), {}), raising=False
+        mushin._resume, "_kept_cell_reading", lambda *scan: (set(), {}), raising=False
     )
 
     root = tmp_path / "proj"
@@ -1461,7 +1499,7 @@ CROSS_VERSION_CELLS = [
     "def task(a):\n    return model.f(a) * Cfg().lr + scaled(a) + cached(a) + FLAG"
     " + len(NOTE) + len(walrus(a)) + shadow(a)\n",
 ]
-CROSS_VERSION_DIGEST = "a765645c7f2d03eb"
+CROSS_VERSION_DIGEST = "4fdf8a6535b53657"
 
 
 def test_the_record_reads_alike_on_every_supported_python(kernel):
@@ -1780,7 +1818,7 @@ def sub_project(tmp_path, monkeypatch):
     import importlib
 
     monkeypatch.setattr(
-        mushin._resume, "_kept_cell_reading", lambda: (set(), {}), raising=False
+        mushin._resume, "_kept_cell_reading", lambda *scan: (set(), {}), raising=False
     )
 
     root = tmp_path / "subproj"
@@ -1890,9 +1928,10 @@ HELPER_TASK = "def task(a):\n    return helper(a)\n"
         ],
         [f"@{SUBPKG}.sub.deco\ndef helper(x):\n    return x\n"],
         [f"def helper(x, g={SUBPKG}.sub.f):\n    return g(x)\n"],
-        # A class with no method of its own has no statement to read: its
-        # bases count by type, and a notebook base's bases too.
+        # A class with no method of its own: its statement is found through
+        # the kept cells, and its bases count by type too.
         [f"class Model({SUBPKG}.sub.Base):\n    K = 3\n"],
+        [f"class Model:\n    K = {SUBPKG}.sub.CONST\n"],
         [
             f"class Mid({SUBPKG}.sub.Base):\n    K = 3\n",
             "class Model(Mid):\n    def f(self, x):\n        return x\n",
@@ -1905,6 +1944,7 @@ HELPER_TASK = "def task(a):\n    return helper(a)\n"
         "decorator",
         "default",
         "methodless base",
+        "methodless body",
         "methodless notebook base",
     ],
 )
@@ -3382,3 +3422,1316 @@ def test_a_free_variables_namespace_read_is_one_of_mains_seeds(
         warnings.simplefilter("ignore")  # the later pass is cut
         files = _files(kernel, "task")
     assert f"{SUBPKG}.sub (file)" in files, files
+
+
+# --- classes with no method of their own (#292) ----------------------------------
+
+
+def _own(kernel, name: str = "Config") -> str:
+    return _record(kernel, "task")[f"{name} (notebook)"]
+
+
+def test_an_ambiguous_class_recomputes_once_then_reuses(kernel):
+    """Two kept texts of a factory's class, which nothing tells apart: the
+    digest is new, then the same while the object stays, and new again once
+    the cell runs again (a new object)."""
+    factory = (
+        "def make():\n    class C:\n        K = {}\n\n    return C\n\n\nC = make()\n"
+    )
+    _run_cells(kernel, [factory.format(2), "def task(a):\n    return a * C.K\n"])
+    exact = _own(kernel, "C")
+    kernel.run(factory.format(3))
+    first = _own(kernel, "C")
+    assert first != exact
+    assert _own(kernel, "C") == first
+    kernel.run(factory.format(3))
+    assert _own(kernel, "C") != first
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+@pytest.mark.parametrize("decorated", [False, True], ids=["plain", "decorated"])
+def test_a_class_s_first_line_tells_its_texts_apart(kernel, decorated):
+    """3.13+: a reverted cell's class is found exactly by its first line (a
+    decorated class's first decorator's), so the record is the first one
+    again. An `Enum` has no annotations, so no `__annotate_func__` finds it."""
+    deco = "@enum.unique\n" if decorated else ""
+    v1 = f"import enum\n\n\n{deco}class Color(enum.Enum):\n    RED = 1\n"
+    v2 = f"{deco}class Color(enum.Enum):\n    RED = 2\n"
+    _run_cells(kernel, [v1, "def task(a):\n    return a + Color.RED.value\n"])
+    first = _own(kernel, "Color")
+    kernel.run(v2)
+    assert _own(kernel, "Color") != first
+    kernel.run(v1)
+    assert _own(kernel, "Color") == first
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="__annotate_func__ is 3.14+")
+@pytest.mark.parametrize("slots", [False, True], ids=["dataclass", "slots"])
+def test_a_class_with_annotations_is_found_through_its_annotate_function(kernel, slots):
+    """3.14+: the compiler's `__annotate_func__` names the cell, so two texts
+    on the same line are told apart (a `slots=True` dataclass, a new class,
+    keeps it)."""
+    head = f"@dataclasses.dataclass(slots={slots})\nclass Cfg:\n    lr: float = "
+    _run_cells(
+        kernel,
+        [
+            "import dataclasses\n",
+            head + "0.1\n",
+            "def task(a):\n    return a * Cfg().lr\n",
+        ],
+    )
+    first = _own(kernel, "Cfg")
+    kernel.run(head + "0.2\n")
+    assert _own(kernel, "Cfg") != first
+    kernel.run(head + "0.1\n")
+    assert _own(kernel, "Cfg") == first
+
+
+CELL_WATCH_SCRIPT = """
+import importlib
+import io
+import json
+import sys
+import weakref
+from contextlib import redirect_stderr, redirect_stdout
+
+from IPython.core.interactiveshell import InteractiveShell
+
+shell = InteractiveShell.instance()
+out, err = io.StringIO(), io.StringIO()
+
+
+def run(cell):
+    with redirect_stdout(out), redirect_stderr(err):
+        shell.run_cell(cell, store_history=True)
+
+
+def own():
+    from mushin._resume import project_fingerprints
+
+    return project_fingerprints(shell.user_ns["task"])["code"]["Config (notebook)"]
+
+
+run("class Early:\\n    X = 1\\n")  # before the watch starts
+run("class Early3:\\n    X = 1\\n\\n\\nsaved3 = Early3\\ndel Early3\\n")
+early_inst = "class EarlyI:\\n    X = 1\\n\\n\\nei = EarlyI()\\ndel EarlyI\\n"
+run(early_inst)  # held only by an instance, before the watch
+run("class Pre7:\\n    X = 1\\n\\n\\nreg7 = [Pre7]\\ndel Pre7\\nreg7[0]\\n")
+shown_before = shell.execution_count - 1  # its output is `_<n>` from here on
+run("import mushin._resume")  # the watch starts here
+v1 = "class Config:\\n    LR = 0.1\\n"
+run(v1)
+run("def task(a):\\n    return a * Config.LR\\n")
+first = own()
+run("class Config:\\n    LR = 0.2\\n")
+edited = own()
+run(v1)  # reverted: the same text as the first cell
+reverted = own()
+run("raise ValueError('before the statement')\\nclass Config:\\n    LR = 0.3\\n")
+raised = own()
+run("%%capture\\nclass Config:\\n    LR = 0.4\\n")
+magic = own()
+run("%%capture\\nclass Config:\\n    LR = 0.4\\n")
+magic_again = own()
+run("class Config:\\n    LR = 0.4\\n")
+plain = own()
+run("%%time\\nclass Config:\\n    LR = 0.6\\n")
+timed = own()
+timed_again = own()  # the same object: the same digest
+run("%%time\\nclass Config:\\n    LR = 0.6\\n")  # unchanged
+timed_same = own()
+ifelse = (
+    "FLAG = True\\n\\nif FLAG:\\n\\n    class Config:\\n        LR = 1\\n\\n"
+    "else:\\n\\n    class Config:\\n        LR = 2\\n"
+)
+run(ifelse)
+branch = own()
+run(ifelse)
+branch_again = own()
+# A nested class, pinned with the class whose body made it.
+outer = "class Outer:\\n    class Inner:\\n        X = {}\\n\\n\\nInner = Outer.Inner\\n"
+run(outer.format(1))
+run("def task3(a):\\n    return a * Inner.X\\n")
+from mushin._resume import project_fingerprints as _fp3
+
+
+def inner():
+    return _fp3(shell.user_ns["task3"])["code"]["Inner (notebook)"]
+
+
+nested = [inner()]
+run(outer.format(2))
+nested.append(inner())
+run(outer.format(1))
+nested.append(inner())
+# A nested class reached as a base and recorded inside its own cell, its value
+# toggled 1, 2, 1, 2: pinned through its outer class, so each is exact.
+run("def task5(a):\\n    return a * D.x\\n")
+toggled = []
+for value in (1, 2, 1, 2):
+    run(
+        "from mushin._resume import project_fingerprints as _pf5\\n"
+        f"class Outer:\\n    class Inner:\\n        x = {value}\\n\\n\\n"
+        "class D(Outer.Inner):\\n    pass\\n\\n\\n"
+        "_T = _pf5(task5)['code']['D (notebook)']\\n"
+    )
+    toggled.append(shell.user_ns["_T"])
+# A class `type()` remakes after a watched statement: not that statement's.
+run("class Mk:\\n    X = 1\\n")
+run("def task4(a):\\n    return a * Mk.X\\n")
+remade = [_fp3(shell.user_ns["task4"])["code"]["Mk (notebook)"]]
+run("Mk = type('Mk', (), {'X': 2})\\n")
+remade.append(_fp3(shell.user_ns["task4"])["code"]["Mk (notebook)"])
+# An empty nested cell before the statement fires post without pre.
+empty = (
+    "get_ipython().run_cell('')\\n"
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.9\\n\\n"
+    "_C = _pf(task)['code']['Config (notebook)']\\n"
+)
+run(empty)
+emptied = [shell.user_ns["_C"], own()]
+run(empty)
+emptied += [shell.user_ns["_C"], own()]
+# A class with one kept text, then a `%%time` cell remaking it: the kept text
+# is not this class's statement.
+run("class Solo:\\n    X = 1\\n")
+run("def task2(a):\\n    return a * Solo.X\\n")
+from mushin._resume import project_fingerprints as _fp
+solo = _fp(shell.user_ns["task2"])["code"]["Solo (notebook)"]
+run("%%time\\nclass Solo:\\n    X = 2\\n")
+solo_timed = _fp(shell.user_ns["task2"])["code"]["Solo (notebook)"]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.7\\n\\n_A = _pf(task)['code']['Config (notebook)']\\n"
+    "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
+)
+twice = [shell.user_ns["_A"], shell.user_ns["_B"]]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.7\\n\\n_A = _pf(task)['code']['Config (notebook)']\\n"
+    "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
+)
+twice += [shell.user_ns["_A"], shell.user_ns["_B"]]
+# A `global` factory, called from a cell that only mentions its class: in a
+# comment, a string, a multi-line string, a string on a `%time` line, a `%`
+# continuation. The cell states no such class, so whether the factory made it
+# cannot be told: ambiguous, so an edit to the factory is never missed. A name
+# a function rebinds is not followed, so the task reaches it as an instance's.
+factory = (
+    "def build():\\n    global {0}\\n\\n    class {0}:\\n        LR = {1}\\n\\n"
+    "    return {0}()\\n"
+)
+run("def task8(a):\\n    return a * cfg.LR\\n")
+
+
+def built():
+    return _fp(shell.user_ns["task8"])["code"]["cfg (notebook)"]
+
+
+mentions = {}
+for kind, name, call in (
+    ("comment", "Built1", "cfg = build()  # rebuild class Built1\\n"),
+    ("string", "Built2", "_S = 'class Built2'; cfg = build()\\n"),
+    ("docstring", "Built3", "_S = '''\\nclass Built3:\\n'''\\ncfg = build()\\n"),
+    ("magic line", "Built4", "%time cfg = build(); _S = 'a class Built4'\\n"),
+    ("continuation", "Built5", "cfg = build()\\n_S = ('%s'\\n      % 'the class Built5')\\n"),
+):
+    run(factory.format(name, 0.11))
+    run(call)
+    before = built()
+    run(call)  # unchanged
+    rerun = built()
+    run(factory.format(name, 0.12))
+    run(call)
+    mentions[kind] = [before, rerun, built()]
+run("del build, cfg")  # `own()` follows `Config` again
+# A class remade from text that is not kept, after one kept statement: never
+# that statement's digest. A `%time` line magic, its automagic form, an `exec`.
+remakes = {}
+for kind, name, remake in (
+    ("%time", "Solo2", "%time class Solo2: X = 2\\n"),
+    ("automagic", "Solo3", "time class Solo3: X = 2\\n"),
+    ("exec", "Solo4", "exec('class Solo4: X = 2')\\n"),
+):
+    run(f"class {name}:\\n    X = 1\\n")
+    run(f"def task7(a):\\n    return a * {name}.X\\n")
+    kept = _fp(shell.user_ns["task7"])["code"][f"{name} (notebook)"]
+    run(remake)
+    remakes[kind] = [kept, _fp(shell.user_ns["task7"])["code"][f"{name} (notebook)"]]
+# A class whose cell assigns its `__module__`, which deletes 3.13+'s
+# `__firstlineno__`: still its statement's, so an edit and a revert are exact.
+moved = "class Moved:\\n    X = {}\\n\\n\\nMoved.__module__ = __name__\\n"
+run("def task9(a):\\n    return a * Moved.X\\n")
+module_set = []
+for value in (1, 2, 1):
+    run(moved.format(value))
+    module_set.append(_fp(shell.user_ns["task9"])["code"]["Moved (notebook)"])
+# A kept class whose comment line above ends in the word `class`: still
+# pinned (the snapshot reads the namespace, not the text), so exact.
+run("def task10(a):\\n    return a * Rev.X\\n")
+commented = []
+for value in (1, 2, 1):
+    run(f"# the Rev class\\nclass Rev:\\n    X = {value}\\n")
+    commented.append(_fp(shell.user_ns["task10"])["code"]["Rev (notebook)"])
+# A nested class remade from text that is not kept, after one kept version:
+# never the kept nested statement's digest (it is no factory's).
+nested_remakes = {}
+for kind, outer, remake in (
+    ("%%time", "Box", "%%time\\nclass Box:\\n    class Cfg:\\n        X = 2\\n\\n\\ncfg = Box.Cfg()\\n"),
+    ("exec", "Box2", "exec('class Box2:\\\\n    class Cfg:\\\\n        X = 2\\\\n')\\ncfg = Box2.Cfg()\\n"),
+):
+    run(f"class {outer}:\\n    class Cfg:\\n        X = 1\\n\\n\\ncfg = {outer}.Cfg()\\n")
+    run("def task11(a):\\n    return a * cfg.X\\n")
+    kept = _fp(shell.user_ns["task11"])["code"]["cfg (notebook)"]
+    run(remake)
+    nested_remakes[kind] = [kept, _fp(shell.user_ns["task11"])["code"]["cfg (notebook)"]]
+run("del cfg")
+# A record taken in a nested cell that only mentions the class its outer
+# cell just stated: pinned to the outer cell, so an edit and a revert are
+# exact.
+run("def task12(a):\\n    return a * Nest.X\\n")
+in_nested = []
+for value in (1, 2, 1):
+    run(
+        "from mushin._resume import project_fingerprints as _pf\\n"
+        f"class Nest:\\n    X = {value}\\n\\n\\n"
+        "get_ipython().run_cell(\\"_N = _pf(task12)['code']['Nest (notebook)']  # class Nest\\")\\n"
+    )
+    in_nested.append(shell.user_ns["_N"])
+# A class a later cell derives from a kept statement: that cell states
+# none, so the class is ambiguous, and an edit to the statement is seen.
+derived = {}
+for kind, name, derive in (
+    ("slots dataclass", "Der1", "import dataclasses\\nDer1 = dataclasses.dataclass(slots=True)(Der1)\\n"),
+    ("type copy", "Der2", "Der2 = type(Der2)(Der2.__name__, Der2.__bases__, dict(Der2.__dict__))\\n"),
+    ("exec of In", "Der3", "exec(In[-2])\\n"),
+):
+    run(f"def task15(a):\\n    return a * {name}().X\\n")
+    derived[kind] = []
+    for value in (1, 2):
+        run(f"class {name}:\\n    X: int = {value}\\n")
+        run(derive)
+        derived[kind].append(_fp(shell.user_ns["task15"])["code"][f"{name} (notebook)"])
+# A one-line cell whose first name an object with a raising `__class__`
+# hook binds, remaking a class by `exec`: the watch's transform reads no
+# namespace, so no hook runs, and the class is pinned (never the kept text).
+run(
+    "class Proxy:\\n    def __getattribute__(self, n):\\n        if n == '__class__':\\n"
+    "            print('proxy-class-read')\\n            raise RuntimeError(n)\\n"
+    "        return object.__getattribute__(self, n)\\n"
+)
+run("class Plain9:\\n    X = 1\\n")
+run("def task16(a):\\n    return a * Plain9.X\\n")
+proxy = [_fp(shell.user_ns["task16"])["code"]["Plain9 (notebook)"]]
+proxy_mark = len(out.getvalue())
+run("pp9 = Proxy(); exec('class Plain9:\\\\n    X = 2\\\\n')\\n")
+proxy.append(_fp(shell.user_ns["task16"])["code"]["Plain9 (notebook)"])
+proxy.append("proxy-class-read" in out.getvalue()[proxy_mark:])
+run("del pp9")
+# A class saved under an alias before the watch started, restored after it:
+# the namespace held it when that cell started, so the cell did not make it,
+# and its kept statement is read, as after an unchanged re-run.
+run("def task17(a):\\n    return a * Early3.X\\n")
+run("Early3 = saved3")
+restored = [_fp(shell.user_ns["task17"])["code"]["Early3 (notebook)"]]
+run("class Early3:\\n    X = 1\\n")
+restored.append(_fp(shell.user_ns["task17"])["code"]["Early3 (notebook)"])
+# A class made under the watch from text that is not kept, left only under
+# an alias, then restored: pinned by object to the cell that made it, so
+# ambiguous, never the older kept statement's digest.
+aliased = {}
+for kind, name, make in (
+    ("exec", "Ali1", "exec('class Ali1:\\\\n    X = 2\\\\n')\\nsaved_Ali1 = Ali1\\ndel Ali1\\n"),
+    ("%%time", "Ali2", "%%time\\nclass Ali2:\\n    X = 2\\n\\n\\nsaved_Ali2 = Ali2\\ndel Ali2\\n"),
+):
+    run(f"class {name}:\\n    X = 1\\n")
+    run(f"def task18(a):\\n    return a * {name}.X\\n")
+    kept = _fp(shell.user_ns["task18"])["code"][f"{name} (notebook)"]
+    run(make)
+    run(f"{name} = saved_{name}\\n")
+    aliased[kind] = [kept, _fp(shell.user_ns["task18"])["code"][f"{name} (notebook)"]]
+# A class only an instance holds, recorded inside a cell that states its
+# name at the same first line before running the statement: the cell that
+# made it is found through the instance, so it is read from that cell
+# exactly (an unchanged re-run keeps the digest, an edit changes it), never
+# from the record cell's statement.
+run("def task19(a):\\n    return a * Inst.LR\\n")
+run("from mushin._resume import project_fingerprints as _pf\\n")
+record_cell = "_I = _pf(task19)['code']['Inst (notebook)']\\nclass Inst:\\n    LR = 0.5\\n"
+instance_only = []
+for value in (0.1, 0.1, 0.2):
+    run(f"x = 0\\nclass Inst:\\n    LR = {value}\\n\\n\\nInst = Inst()\\n")
+    run(record_cell)
+    instance_only.append(shell.user_ns["_I"])
+# A nested class whose outer class a cell keeps only under an alias, recorded
+# inside that cell: its outer class is bound (by `savedA`), so both are
+# pinned there, and the kept nested statement never stands in.
+run("class OutA:\\n    class Inner:\\n        X = 1\\n\\n\\ncfg2 = OutA.Inner()\\n")
+run("def task20(a):\\n    return a * cfg2.X\\n")
+alias_nested = [_fp(shell.user_ns["task20"])["code"]["cfg2 (notebook)"]]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "exec('class OutA:\\\\n    class Inner:\\\\n        X = 2\\\\n')\\n"
+    "savedA = OutA\\ndel OutA\\ncfg2 = savedA.Inner()\\n"
+    "_J = _pf(task20)['code']['cfg2 (notebook)']\\n"
+)
+alias_nested.append(shell.user_ns["_J"])
+run("del cfg2")
+# A class held only by an instance (or reached as a base), remade from text
+# that is not kept: the record reaches it, so the cell that made it is found,
+# and it is ambiguous, never the kept statement's digest. Recorded inside the
+# remaking cell and after it.
+reached = {}
+for kind, name, remake in (
+    ("%%time singleton", "Inr1", "%%time\\nclass Inr1:\\n    LR = 0.2\\n\\n\\nInr1 = Inr1()\\nobj_Inr1 = Inr1\\n"),
+    ("exec singleton", "Inr2", "exec('class Inr2:\\\\n    LR = 0.2\\\\n')\\nInr2 = Inr2()\\nobj_Inr2 = Inr2\\n"),
+    ("exec, then del", "Inr3", "exec('class Inr3:\\\\n    LR = 0.2\\\\n')\\nobj_Inr3 = Inr3()\\ndel Inr3\\n"),
+    ("nested, outer deleted", "Inr4", "exec('class Inr4:\\\\n    class Cfg:\\\\n        LR = 0.2\\\\n')\\nobj_Inr4 = Inr4.Cfg()\\ndel Inr4\\n"),
+):
+    if kind.startswith("nested"):
+        run(f"class {name}:\\n    class Cfg:\\n        LR = 0.1\\n\\n\\nobj_{name} = {name}.Cfg()\\n")
+    else:
+        run(f"class {name}:\\n    LR = 0.1\\n\\n\\nobj_{name} = {name}()\\n")
+    run(f"def task21(a):\\n    return a * obj_{name}.LR\\n")
+    key = f"obj_{name} (notebook)"
+    kept = _fp(shell.user_ns["task21"])["code"][key]
+    run(remake + f"_R = _pf(task21)['code']['{key}']\\n")  # `_pf`: an earlier cell's
+    reached[kind] = [kept, shell.user_ns["_R"], _fp(shell.user_ns["task21"])["code"][key]]
+    run(f"del obj_{name}\\n")
+# A function's local class (`make.<locals>.Loc`), bound by a cell that calls
+# the factory: not that cell's, so it is read from the factory's cell, and an
+# unchanged re-run of the call keeps the digest.
+run("def make_loc():\\n    class Loc:\\n        K = 1\\n\\n    return Loc\\n")
+run("Loc = make_loc()\\n")
+run("def task23(a):\\n    return a * Loc.K\\n")
+local = [_fp(shell.user_ns["task23"])["code"]["Loc (notebook)"]]
+run("Loc = make_loc()\\n")
+local.append(_fp(shell.user_ns["task23"])["code"]["Loc (notebook)"])
+# A class a notebook decorator wraps (`functools.wraps(cls)(make)`), remade
+# by `%%time` and by `exec`: the record follows the wrapper's `__wrapped__`,
+# and so does the watch, so it is ambiguous, never the kept statement's.
+run(
+    "import functools\\n\\n\\ndef register(cls):\\n    def make():\\n"
+    "        return cls()\\n\\n    return functools.wraps(cls)(make)\\n"
+)
+run("@register\\nclass Wr:\\n    LR = 0.1\\n")
+run("def task24(a):\\n    return a * Wr().LR\\n")
+wrapped = [_fp(shell.user_ns["task24"])["code"]["Wr (notebook)"]]
+run("%%time\\n@register\\nclass Wr:\\n    LR = 0.2\\n")
+wrapped.append(_fp(shell.user_ns["task24"])["code"]["Wr (notebook)"])
+run("exec('@register\\\\nclass Wr:\\\\n    LR = 0.3\\\\n')\\n")
+wrapped.append(_fp(shell.user_ns["task24"])["code"]["Wr (notebook)"])
+# A record in a nested cell that restates one of two classes its outer cell
+# stated: the nested cell claims the class it made before the outer cell's
+# pin can, so the class is read from the nested cell's statement, exactly.
+run("def task25(a):\\n    return a * Nx.K * Ny.K\\n")
+run(
+    "class Ny:\\n    K = 1\\n\\n\\nclass Nx:\\n    K = 1\\n\\n\\n"
+    "get_ipython().run_cell(\\"class Ny:\\\\n    K = 2\\\\n\\\\n\\\\n"
+    "_N2 = _pf(task25)['code']['Ny (notebook)']\\\\n\\")\\n"
+)
+restated = [shell.user_ns["_N2"]]
+run("class Ny:\\n    K = 2\\n")
+restated.append(_fp(shell.user_ns["task25"])["code"]["Ny (notebook)"])
+# The class made before the watch and held only by an instance: in every
+# snapshot, so no later cell takes it, and its kept statement is read, as
+# after an unchanged re-run of its cell.
+run("def task26(a):\\n    return a * ei.X\\n")
+early_i = [_fp(shell.user_ns["task26"])["code"]["ei (notebook)"]]
+run(early_inst)
+early_i.append(_fp(shell.user_ns["task26"])["code"]["ei (notebook)"])
+# An old class displayed (IPython binds `_` and `_N` to it) by a cell that
+# also restates it: shown, not made, so that cell's statement is never read
+# for it.
+run("class Dsp:\\n    LR = 0.1\\n\\n\\nregistry = {'old': Dsp}\\ndel Dsp\\n")
+run("class Dsp:\\n    LR = 0.2\\n\\n\\nregistry['old']\\n")
+run("old_dsp = registry['old']\\n")
+run("def task27(a):\\n    return a * old_dsp.LR * Dsp.LR\\n")
+shown = _fp(shell.user_ns["task27"])["code"]
+displayed = [shown["old_dsp (notebook)"], shown["Dsp (notebook)"]]
+# A class held only in a list and displayed by the cell that made it, then
+# subclassed under its name by a later cell: IPython's history held it when
+# that cell started, so the later cell is not taken for its maker, and an
+# edit to it is never missed (round 13 skipped history in the snapshot too).
+run("class A13:\\n    Y = 10\\n\\n\\nreg13 = [A13]\\ndel A13\\nreg13[0]\\n")
+run("class A13(reg13[0]):\\n    X = 2\\n")
+run("def task29(a):\\n    return a * A13.Y\\n")
+shown_base = [_fp(shell.user_ns["task29"])["code"]["A13 (notebook)"]]
+run("class A13:\\n    Y = 20\\n\\n\\nreg13 = [A13]\\ndel A13\\nreg13[0]\\n")
+run("class A13(reg13[0]):\\n    X = 2\\n")
+shown_base.append(_fp(shell.user_ns["task29"])["code"]["A13 (notebook)"])
+# A class `%%time` made, kept in a list and shown as the cell's result, then
+# named by a later cell: history alone reached it at the `%%time` cell, so
+# it is pinned there with no text (ambiguous), and an edit is never missed.
+run("class K5:\\n    X = 1\\n")
+shown_made = []
+for value in (3, 7):
+    run(f"%%time\\nclass K5:\\n    X = {value}\\n\\n\\nreg5 = [K5]\\ndel K5\\nreg5[0]\\n")
+    run("k5 = _\\n")
+    run("def task30(a):\\n    return a * k5.X\\n")
+    shown_made.append(_fp(shell.user_ns["task30"])["code"]["k5 (notebook)"])
+# An old class only shown by one cell, then bound by a cell that restates it.
+shown_then_bound = []
+for value in (1, 5):
+    run(f"class K6:\\n    X = {value}\\n\\n\\nreg6 = {{'k': K6}}\\ndel K6\\n")
+    run("reg6['k']\\n")
+    run("class K6:\\n    X = 2\\n\\n\\nhold6 = _\\n")
+    run("def task31(a):\\n    return a * hold6.X\\n")
+    shown_then_bound.append(_fp(shell.user_ns["task31"])["code"]["hold6 (notebook)"])
+# A class shown before the watch started (`_<n>` holds it), then named by a
+# cell that states it again, unchanged: every snapshot holds it, so no cell
+# is taken for its maker (none pins it with no text), and its kept
+# statements, all one text, are read exactly.
+run(f"class Pre7:\\n    X = 1\\n\\n\\nhold7 = _{shown_before}\\n")
+run("def task32(a):\\n    return a * hold7.X * Pre7.X\\n")
+pre_shown = _fp(shell.user_ns["task32"])["code"]
+pre_shown = [pre_shown["hold7 (notebook)"], pre_shown["Pre7 (notebook)"]]
+# Three nested cells; the outer class sorts first, so the record reaches the
+# middle and the inner cells' class through cells it passes over: each cell
+# claims its own class, newest first.
+shell.user_ns["INNER3"] = (
+    "class C3:\\n    K = 3\\n\\n\\n_T3 = _pf(task28)['code']['C3 (notebook)']\\n"
+)
+shell.user_ns["MIDDLE3"] = "class C3:\\n    K = 2\\n\\n\\nget_ipython().run_cell(INNER3)\\n"
+run("def task28(a):\\n    return a * B3.K * C3.K\\n")
+run("class B3:\\n    K = 1\\n\\n\\nget_ipython().run_cell(MIDDLE3)\\n")
+three = [shell.user_ns["_T3"]]
+run("class C3:\\n    K = 3\\n")
+three.append(_fp(shell.user_ns["task28"])["code"]["C3 (notebook)"])
+# An outer cell binds an old class to `_` as a loop's throwaway name, then a
+# nested cell names it: the class was alive before both cells, so neither
+# is taken for its maker, and the outer cell's statement is never read.
+loop_named = []
+for value in (1, 5, 1):
+    run(f"class Lpd:\\n    LR = {value}\\n\\n\\nregl = {{'old': Lpd}}\\ndel Lpd\\n")
+    run(
+        "class Lpd:\\n    LR = 2\\n\\n\\nfor _ in regl.values():\\n    pass\\n\\n\\n"
+        "get_ipython().run_cell(\\"old_lpd = regl['old']\\")\\n"
+    )
+    run("def task33(a):\\n    return a * old_lpd.LR\\n")
+    loop_named.append(_fp(shell.user_ns["task33"])["code"]["old_lpd (notebook)"])
+# A function from an earlier cell makes a class under `global`, called in a
+# later cell: made during the calling cell, which states none of it.
+run("def build_g():\\n    global Gcls\\n\\n    class Gcls:\\n        X = 1\\n\\n    return Gcls()\\n")
+run("def task34(a):\\n    return a * g_obj.X\\n")
+global_made = []
+for _ in range(2):
+    run("g_obj = build_g()\\n")
+    global_made.append(_fp(shell.user_ns["task34"])["code"]["g_obj (notebook)"])
+run("del build_g, g_obj\\n")
+# A class kept only in a container, subclassed under its own name by a later
+# cell that states that name: the base was made by its own cell, so it is
+# read from there, and an edit to it is seen.
+held_base = []
+for value in (1, 5, 1):
+    run(f"class Hb:\\n    X = {value}\\n\\n\\nregh = {{'k': Hb}}\\ndel Hb\\n")
+    run("class Hb(regh['k']):\\n    Y = 2\\n")
+    run("def task35(a):\\n    return a * Hb.X\\n")
+    held_base.append(_fp(shell.user_ns["task35"])["code"]["Hb (notebook)"])
+# The watch holds its snapshots weakly: a class replaced by a later cell is
+# freed by a `gc.collect()` in a cell after that.
+run("def task36(a):\\n    return a * len(Leak.BUF)\\n")
+run(
+    "class Leak:\\n    BUF = bytearray(1000)\\n\\n\\n"
+    "_L = _pf(task36)['code']['Leak (notebook)']\\n"
+)
+_fp(shell.user_ns["task36"])  # recorded inside its cell and after it
+leak_ref = weakref.ref(shell.user_ns["Leak"])
+run("class Leak:\\n    BUF = b''\\n")
+run("import gc\\n\\n\\ngc.collect()\\n")
+leaked = leak_ref() is not None
+# A base remade by `exec` and deleted, reached through a derived class.
+run("class Bse:\\n    X = 1\\n")
+run("class Der(Bse):\\n    pass\\n")
+run("def task22(a):\\n    return a * Der.X\\n")
+based = [_fp(shell.user_ns["task22"])["code"]["Der (notebook)"]]
+run("exec('class Bse:\\\\n    X = 2\\\\n')\\nclass Der(Bse):\\n    pass\\n\\n\\ndel Bse\\n")
+based.append(_fp(shell.user_ns["task22"])["code"]["Der (notebook)"])
+# A class made before the watch started: every later cell saw it when it
+# started, so none is taken for its cell; its kept statement is read, as
+# after an unchanged re-run under the watch.
+run("def task13(a):\\n    return a * Early.X\\n")
+run("Early\\n")  # displayed (`_`, `_N`): the namespace held it, so not new
+early = [_fp(shell.user_ns["task13"])["code"]["Early (notebook)"]]
+run("class Early:\\n    X = 1\\n")
+early.append(_fp(shell.user_ns["task13"])["code"]["Early (notebook)"])
+mark = len(out.getvalue())  # the callbacks' own output, before any record
+run(
+    "class M(type):\\n    def __getattribute__(cls, n):\\n"
+    "        if n == '__dict__':\\n            print('hook ran')\\n"
+    "        return super().__getattribute__(n)\\n\\n"
+    "    def __subclasses__(cls):\\n        print('hook ran')\\n"
+    "        return type.__subclasses__(cls)\\n"
+)
+run("class Hooked(metaclass=M):\\n    X = 1\\n")
+run(v1)
+hook = "hook ran" in out.getvalue()[mark:]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.5\\n\\n"
+    "_INSIDE = _pf(task)['code']['Config (notebook)']\\n"
+)
+inside = shell.user_ns["_INSIDE"]
+after_cell = own()
+callbacks = len(shell.events.callbacks["post_run_cell"])
+importlib.reload(sys.modules["mushin._resume"])
+run("import mushin._resume")
+reloaded = len(shell.events.callbacks["post_run_cell"])
+run(v1)
+after_reload = own()
+print(json.dumps({
+    "first": first, "edited": edited, "reverted": reverted, "raised": raised,
+    "magic": magic, "inside": inside, "after_cell": after_cell,
+    "callbacks": [callbacks, reloaded], "after_reload": after_reload,
+    "magic_again": magic_again, "plain": plain, "timed": [timed, timed_again, timed_same],
+    "twice": twice, "hook": hook, "solo": [solo, solo_timed],
+    "branch": [branch, branch_again], "nested": nested, "remade": remade,
+    "emptied": emptied, "toggled": toggled, "mentions": mentions,
+    "remakes": remakes, "module_set": module_set, "commented": commented,
+    "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
+    "derived": derived, "proxy": proxy, "restored": restored, "aliased": aliased,
+    "instance_only": instance_only, "alias_nested": alias_nested,
+    "reached": reached, "based": based, "local": local, "wrapped": wrapped,
+    "restated": restated, "early_i": early_i, "displayed": displayed,
+    "three": three, "shown_base": shown_base, "shown_made": shown_made,
+    "shown_then_bound": shown_then_bound, "pre_shown": pre_shown,
+    "loop_named": loop_named, "global_made": global_made, "held_base": held_base,
+    "leaked": leaked,
+    "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
+               if "callback" in line.lower()],
+}))
+"""
+
+
+def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
+    """A real shell: the watch pins a class statement to its cell as it runs,
+    so an edit, a revert, a cell that raised before its statement, a magic's
+    cell, a record taken inside the defining cell and a reload of mushin all
+    give the exact statement (several texts on one line would otherwise read
+    as ambiguous). A class remade from text that is not kept (`%%time`,
+    `%time`, `exec`) is never taken for an older kept text, and a factory's
+    class, called from a cell that only mentions it, is ambiguous (it
+    re-runs)."""
+    pytest.importorskip("IPython")
+    script = tmp_path / "watch.py"
+    script.write_text(CELL_WATCH_SCRIPT)
+    done = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, check=True
+    )
+    got = json.loads(done.stdout.strip().splitlines()[-1])
+    assert got["edited"] != got["first"]
+    assert got["reverted"] == got["first"]
+    assert got["raised"] == got["first"]  # the statement never ran
+    # A magic's nested cell pins the class to its body: exact, and stable.
+    assert got["magic"] == got["magic_again"] == got["plain"]
+    # A `%%time` cell's class is ambiguous: its object keeps its digest, a
+    # re-run of the cell (a new object) recomputes, and an older kept text's
+    # digest never stands in.
+    timed, timed_again, timed_same = got["timed"]
+    assert timed == timed_again != timed_same
+    assert timed not in (got["first"], got["edited"], got["magic"])
+    assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
+    for kind, (kept, remade) in got["remakes"].items():
+        assert kept != remade, kind  # so for `%time`, automagic and `exec`
+    # A cell that only mentions a factory's class states none: the factory's
+    # statement is not read, as whether it made the class cannot be told:
+    # ambiguous, so an edit to the factory is never missed.
+    for kind, digests in got["mentions"].items():  # an unchanged re-run too
+        assert len(set(digests)) == 3, kind
+    for kind, (kept, remade) in got["nested_remakes"].items():
+        assert kept != remade, kind
+    assert got["early"][0] == got["early"][1]  # never pinned to a later cell
+    for kind, (v1, v2) in got["derived"].items():
+        assert v1 != v2, kind
+    kept, remade, hook_ran = got["proxy"]
+    assert kept != remade and not hook_ran
+    assert got["restored"][0] == got["restored"][1]  # its statement, read
+    for kind, (kept, restored) in got["aliased"].items():
+        assert kept != restored, kind
+    first, again, edited = got["instance_only"]
+    assert first == again != edited  # read from its own cell, exactly
+    assert got["alias_nested"][0] != got["alias_nested"][1]  # no stand-in
+    for kind, (kept, inside, after) in got["reached"].items():
+        assert kept not in (inside, after), kind
+    assert got["based"][0] != got["based"][1]  # its base, remade, is seen
+    assert got["local"][0] == got["local"][1]  # a local class: its factory's
+    assert got["wrapped"][0] not in got["wrapped"][1:]  # through `__wrapped__`
+    assert got["restated"][0] == got["restated"][1]  # the nested cell's own
+    assert got["early_i"][0] == got["early_i"][1]  # in every snapshot
+    assert got["displayed"][0] != got["displayed"][1]  # not the restated one's
+    assert got["three"][0] == got["three"][1]  # the inner cell's own
+    assert got["shown_base"][0] != got["shown_base"][1]  # its edit, seen
+    assert got["shown_made"][0] != got["shown_made"][1]  # pinned with no text
+    assert got["shown_then_bound"][0] != got["shown_then_bound"][1]
+    assert got["pre_shown"][0] == got["pre_shown"][1]  # read exactly, as stated
+    assert got["global_made"][0] != got["global_made"][1]  # ambiguous: re-runs
+    for kind in ("loop_named", "held_base"):  # read exactly: an edit, a revert
+        v1, v5, v1_again = got[kind]
+        assert v1 != v5 and v1_again == v1, kind
+    assert not got["leaked"]  # the watch keeps no superseded class alive
+    for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
+        v1, v2, v1_again = got[kind]
+        assert v1 != v2 and v1_again == v1, kind
+    m1, m2, m3 = got["module_set"]  # `__module__` assigned: still exact
+    assert m1 != m2 and m3 == m1
+    assert got["branch"][0] == got["branch"][1]  # an if's branches: one runs
+    n1, n2, n3 = got["nested"]  # a nested class, pinned: a revert is exact
+    assert n1 != n2 and n3 == n1
+    # type() made it: the watch pins it to its cell, which states none, so
+    # the older statement never stands in for it, on every Python.
+    assert got["remade"][0] != got["remade"][1]
+    toggled = got["toggled"]  # a nested class recorded inside its own cell
+    assert toggled[0] != toggled[1] and toggled[2:] == toggled[:2]
+    inside, after, inside_again, after_again = got["emptied"]
+    assert inside == after == inside_again == after_again
+    a, b, a_again, b_again = got["twice"]  # two statements in one cell
+    assert a != b and a_again != b_again
+    if sys.version_info >= (3, 13):  # the first line tells them apart
+        assert (a, b) == (a_again, b_again)
+    # The callbacks ran no notebook metaclass hook (taking a record still can:
+    # a documented residual).
+    assert not got["hook"]
+    assert got["inside"] == got["after_cell"]
+    assert got["callbacks"][0] == got["callbacks"][1]  # not registered twice
+    assert got["after_reload"] == got["first"]
+    assert got["errors"] == []
+
+
+def test_a_factory_with_the_class_in_two_branches_is_exact(kernel, monkeypatch):
+    """One text holds both branches' statements: they count together (which
+    one runs is a value), so the digest is the same in a new process."""
+    import itertools
+
+    import mushin._resume as resume
+
+    cells = [
+        "def make(kind):\n    if kind == 'a':\n\n        class C:\n            K = 1\n\n"
+        "    else:\n\n        class C:\n            K = 2\n\n    return C\n\n\n"
+        "C = make('a')\n",
+        "def task(a):\n    return a * C.K\n",
+    ]
+    _run_cells(kernel, cells)
+    first = _own(kernel, "C")
+    monkeypatch.setattr(resume, "_PROCESS_TOKEN", [])
+    monkeypatch.setattr(resume, "_CLASS_GENERATIONS", {})
+    monkeypatch.setattr(resume, "_GENERATION_COUNTER", itertools.count())
+    again = Kernel("mushin_t_kernel_again")
+    try:
+        _run_cells(again, cells)
+        assert _own(again, "C") == first
+    finally:
+        again.close()
+
+
+def test_an_ambiguous_class_s_digest_differs_in_another_process(kernel, monkeypatch):
+    """The token is the process's: the same sequence in a new process gives
+    another digest, so it never matches what an earlier one recorded."""
+    import itertools
+
+    import mushin._resume as resume
+
+    factory = (
+        "def make():\n    class C:\n        K = {}\n\n    return C\n\n\nC = make()\n"
+    )
+    cells = [factory.format(2), "def task(a):\n    return a * C.K\n", factory.format(3)]
+    monkeypatch.setattr(resume, "_GENERATION_COUNTER", itertools.count())
+    _run_cells(kernel, cells)
+    first = _own(kernel, "C")
+    kernel.close()
+    monkeypatch.setattr(resume, "_PROCESS_TOKEN", [])
+    monkeypatch.setattr(resume, "_CLASS_GENERATIONS", {})
+    monkeypatch.setattr(resume, "_GENERATION_COUNTER", itertools.count())
+    again = Kernel("mushin_t_kernel_again")
+    try:
+        _run_cells(again, cells)
+        assert _own(again, "C") != first
+    finally:
+        again.close()
+
+
+def test_identical_class_texts_read_every_cell_they_stand_in(kernel, sub_project):
+    """Two factories hold the same class statement, around different imports:
+    both are read, so the record does not depend on which the scan met first."""
+    for sub, name in (("a.b", "make_one"), ("sub", "make_two")):
+        kernel.run(
+            f"def {name}():\n    import {SUBPKG}.{sub} as m\n\n    class C:\n"
+            "        y = m.f\n\n    return C\n"
+        )
+    kernel.run(
+        "def make():\n    class C:\n        y = 1\n\n    return C\n\n\nC = make()\n"
+    )
+    kernel.run("def task(a):\n    return a * C.y\n")
+    # The class bound is `make.<locals>.C`; the two texts above are other
+    # qualnames, so only `make`'s statement counts.
+    files = _files(kernel, "task")
+    assert f"{SUBPKG}.a.b (file)" not in files
+    kernel.run(
+        f"def make():\n    import {SUBPKG}.a.b as m\n\n    class C:\n"
+        "        y = m.f\n\n    return C\n\n\nC = make()\n"
+    )
+    kernel.run(
+        f"def make():\n    import {SUBPKG}.sub as m\n\n    class C:\n"
+        "        y = m.f\n\n    return C\n\n\nC = make()\n"
+    )
+    files = _files(kernel, "task")
+    assert {f"{SUBPKG}.a.b (file)", f"{SUBPKG}.sub (file)"} <= files, files
+
+
+@pytest.mark.parametrize(
+    "annotated",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 14), reason="__annotate_func__ is 3.14+"
+            ),
+        ),
+    ],
+    ids=["plain", "annotated"],
+)
+def test_a_method_less_class_s_reading_is_followed_after_main_s_seeds(
+    kernel, sub_project, monkeypatch, annotated
+):
+    """Main read nothing of a class with no method: what its body names goes
+    to the later pass, so it cannot push the namespace's module out."""
+    import mushin._resume as resume
+
+    (sub_project / SUBPKG / "wide.py").write_text(f"import {SUBWIDE}\nX = 1\n")
+    monkeypatch.setattr(resume, "_FILES_MAX", 3)
+    monkeypatch.setattr(resume, "_LATER_TRUNCATION_WARNED", [])
+    kernel.run(
+        f"import importlib\nimport {SUBPKG}\nfrom {SUBREL} import f\n"
+        f"importlib.import_module('{SUBPKG}.wide')\n"
+    )
+    kernel.run(
+        f"class Config:\n    K{': int' if annotated else ''} = {SUBPKG}.wide.X\n"
+    )
+    if annotated:
+        assert "__annotate_func__" in vars(kernel.ns["Config"])
+    kernel.run("def task(a):\n    return f(a) + Config.K\n")
+    with pytest.warns(UserWarning, match="reach more files"):
+        files = _files(kernel, "task")
+    assert f"{SUBREL} (file)" in files, files
+
+
+def test_a_failing_scan_keeps_the_entries_with_a_method_less_class(
+    kernel, cell_imports, monkeypatch
+):
+    """The class index comes from the same guarded scan: when it fails, the
+    class is ambiguous and every other entry still counts."""
+    import mushin._resume as resume
+
+    def fail(text):
+        raise RuntimeError("the cell's own text")
+
+    monkeypatch.setattr(resume, "_cell_imports", fail)
+    monkeypatch.setattr(resume, "_CELL_IMPORTS", {})
+    monkeypatch.setattr(resume, "_CELL_SCAN_WARNED", [])
+    monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    _run_cells(
+        kernel,
+        [
+            "class Config:\n    LR = 0.1\n",
+            "def helper(x):\n    return x\n",
+            "def task(a):\n    return helper(a) * Config.LR\n",
+        ],
+    )
+    with pytest.warns(UserWarning, match="cells import could not be read"):
+        record = project_fingerprints(kernel.ns["task"])
+    assert {"helper (notebook)", "Config (notebook)"} <= set(record["code"])
+    kernel.run("class Config:\n    LR = 0.2\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        edited = project_fingerprints(kernel.ns["task"])["code"]
+    assert edited["Config (notebook)"] != record["code"]["Config (notebook)"]
+    assert edited["helper (notebook)"] == record["code"]["helper (notebook)"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+def test_a_class_no_statement_made_is_not_an_older_statement(kernel):
+    """3.13+: `make_dataclass` makes a class without `__firstlineno__`, so the
+    kept `class Config` statement is not taken for it."""
+    _run_cells(
+        kernel,
+        ["class Config:\n    LR = 0.1\n", "def task(a):\n    return a * Config.LR\n"],
+    )
+    statement = _own(kernel)
+    kernel.run(
+        "import dataclasses\n\nConfig = dataclasses.make_dataclass("
+        "'Config', [('LR', float, 0.2)])\n"
+    )
+    assert _own(kernel) != statement
+
+
+def test_two_statements_one_after_the_other_are_not_one_class(kernel):
+    """A cell defines the class twice, with a record between: the two objects
+    must not share a digest (on 3.11/3.12 they are ambiguous; on 3.13+ the
+    first line tells them apart)."""
+    kernel.run("def task(a):\n    return a * Config.LR\n")
+    kernel.run(
+        "from mushin._resume import project_fingerprints as _pf\n\n\n"
+        "class Config:\n    LR = 0.7\n\n\n"
+        "_A = _pf(task)['code']['Config (notebook)']\n\n\n"
+        "class Config:\n    LR = 0.8\n\n\n"
+        "_B = _pf(task)['code']['Config (notebook)']\n"
+    )
+    assert kernel.ns["_A"] != kernel.ns["_B"]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\n"
+        "else:\n\n    class Config:\n        LR = 2\n",
+        "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\n"
+        "elif FLAG == 1:\n\n    class Config:\n        LR = 1\n",
+        "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n"
+        "            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n",
+    ],
+    ids=["if", "elif", "match"],
+)
+def test_a_class_in_two_branches_of_an_if_is_stable(kernel, cell):
+    """Only one branch runs, and which is a value: the cell's statements
+    count together, so an unchanged re-run keeps the digest."""
+    _run_cells(kernel, [cell, "def task(a):\n    return a * Config.LR\n"])
+    first = _own(kernel)
+    kernel.run(cell)
+    assert _own(kernel) == first
+
+
+def test_a_continued_class_statement_is_found(kernel):
+    """`class \\` and the name on the next line: still a statement."""
+    _run_cells(
+        kernel,
+        ["class \\\nCfg2:\n    LR = 0.1\n", "def task(a):\n    return a * Cfg2.LR\n"],
+    )
+    first = _own(kernel, "Cfg2")
+    kernel.run("class \\\nCfg2:\n    LR = 0.2\n")
+    assert _own(kernel, "Cfg2") != first
+
+
+def test_a_forked_process_gets_its_own_token(kernel, monkeypatch):
+    """A forked child inherits the module's state: the token is per process
+    id, so its ambiguous digests are its own."""
+    import os
+
+    factory = (
+        "def make():\n    class C:\n        K = {}\n\n    return C\n\n\nC = make()\n"
+    )
+    _run_cells(
+        kernel,
+        [factory.format(2), "def task(a):\n    return a * C.K\n", factory.format(3)],
+    )
+    parent = _own(kernel, "C")
+    real = os.getpid()
+    monkeypatch.setattr(os, "getpid", lambda: real + 1)
+    assert _own(kernel, "C") != parent
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "import dataclasses\n\n\n@dataclasses.dataclass\nclass Config:\n    LR: float = {}\n",
+        "import enum\n\n\nclass Config(enum.Enum):\n    LR = {}\n",
+        "class Config:\n    LR = {}\n",
+        "def make():\n    class Config:\n        LR = {}\n\n    return Config\n\n\nConfig = make()\n",
+    ],
+    ids=["dataclass", "Enum", "plain", "factory"],
+)
+def test_a_method_less_class_s_statement_is_read_exactly(cell):
+    """One kept text: the digest is its statement's, so two kernels running
+    the same text agree and another text differs (a token would differ in
+    both)."""
+    task = "def task(a):\n    return a\n\n\nCONFIG = Config\n"
+    digests = []
+    for value in (1, 1, 2):
+        k = Kernel("mushin_t_kernel_exact")
+        try:
+            _run_cells(
+                k,
+                [
+                    cell.format(value),
+                    task.replace("return a", "return a * 0 + len([CONFIG])"),
+                ],
+            )
+            digests.append(_record(k, "task")["CONFIG (notebook)"])
+        finally:
+            k.close()
+    assert digests[0] == digests[1] != digests[2]
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "if True:\n\n    class Config:\n        LR = 0.8\n",
+        "try:\n\n    class Config:\n        LR = 0.8\n\nexcept ValueError:\n    pass\n",
+    ],
+    ids=["a later if", "a try"],
+)
+def test_two_statements_that_both_run_are_not_one_class(kernel, between):
+    """A top-level statement and a later one in another block both run: a
+    record between them must not reuse the first one's results."""
+    kernel.run("def task(a):\n    return a * Config.LR\n")
+    kernel.run(
+        "from mushin._resume import project_fingerprints as _pf\n\n\n"
+        "class Config:\n    LR = 0.7\n\n\n"
+        "_A = _pf(task)['code']['Config (notebook)']\n"
+        f"{between}\n"
+        "_B = _pf(task)['code']['Config (notebook)']\n"
+    )
+    assert kernel.ns["_A"] != kernel.ns["_B"]
+
+
+def test_a_factory_stating_its_class_twice_is_stable(kernel):
+    """Inside a function's body two statements run as one step: an unchanged
+    re-run of the factory keeps the digest."""
+    factory = (
+        "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n"
+        "    return C\n\n\nC = make()\n"
+    )
+    _run_cells(kernel, [factory, "def task(a):\n    return a * C.K\n"])
+    first = _own(kernel, "C")
+    kernel.run(factory)
+    assert _own(kernel, "C") == first
+
+
+def test_a_try_body_and_its_handler_both_run(kernel):
+    """Two statements in one `try`, the body's and the handler's: both run, so
+    a record between them must not reuse the first one's results."""
+    kernel.run("def task(a):\n    return a * Config.LR\n")
+    kernel.run(
+        "from mushin._resume import project_fingerprints as _pf\n\ntry:\n\n"
+        "    class Config:\n        LR = 0.7\n\n"
+        "    _A = _pf(task)['code']['Config (notebook)']\n    raise ValueError\n"
+        "except ValueError:\n\n    class Config:\n        LR = 0.8\n\n"
+        "    _B = _pf(task)['code']['Config (notebook)']\n"
+    )
+    assert kernel.ns["_A"] != kernel.ns["_B"]
+
+
+def test_a_watch_that_cannot_register_leaves_no_callback(monkeypatch):
+    """The state is stored on the shell first, and a callback already added
+    is removed when the next fails, so no later record registers again."""
+    import mushin._resume as resume
+
+    class Events:
+        def __init__(self):
+            self.callbacks = []
+
+        def register(self, event, callback):
+            if event == "post_run_cell":
+                raise RuntimeError("refused")
+            self.callbacks.append((event, callback))
+
+        def unregister(self, event, callback):
+            self.callbacks.remove((event, callback))
+
+    class Shell:
+        user_ns: dict = {}
+
+        def __init__(self):
+            self.events = Events()
+
+        def transform_cell(self, raw):
+            return raw
+
+    shell = Shell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    assert resume._cell_watch() is None
+    assert shell.events.callbacks == []
+    assert type(getattr(shell, resume._CELL_WATCH)) is dict
+    assert resume._cell_watch() is getattr(shell, resume._CELL_WATCH)
+    assert shell.events.callbacks == []
+
+
+class _FakeEvents:
+    def __init__(self):
+        self.callbacks: dict = {}
+
+    def register(self, event, callback):
+        self.callbacks[event] = callback
+
+    def unregister(self, event, callback):
+        self.callbacks.pop(event, None)
+
+
+class _FakeShell:
+    def __init__(self):
+        self.events = _FakeEvents()
+        self.user_ns = {"__name__": "mushin_t_fake_shell"}
+
+    def transform_cell(self, raw):
+        return raw
+
+
+@pytest.mark.parametrize("ending", ["a new info, the same raw text", "no result"])
+def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
+    """An interrupted cell's result carries a new info around the same raw
+    text, and ipykernel can pass no result: the cell still ends and pins."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    outer = types.SimpleNamespace(raw_cell="get_ipython().run_cell(CELL)\n")
+    shell.events.callbacks["pre_run_cell"](outer)  # still running after
+    raw = "class Config:\n    LR = 0.1\n"
+    info = types.SimpleNamespace(raw_cell=raw)
+    shell.events.callbacks["pre_run_cell"](info)
+    shell.user_ns["Config"] = type("Config", (), {"__module__": "mushin_t_fake_shell"})
+    if ending == "no result":
+        result = None
+    else:
+        result = types.SimpleNamespace(info=types.SimpleNamespace(raw_cell=raw))
+    shell.events.callbacks["post_run_cell"](result)
+    assert [running for running, _ in state["running"]] == [outer]
+    assert id(shell.user_ns["Config"]) in state["pins"]
+
+
+def test_a_class_whose_module_is_assigned_is_still_read(kernel):
+    """Assigning a class's `__module__` deletes its `__firstlineno__` on 3.13+;
+    a `class` statement still made it, so an edit is seen."""
+    cell = "class Config:\n    LR = {}\n\n\nConfig.__module__ = __name__\n"
+    _run_cells(kernel, [cell.format(1), "def task(a):\n    return a * Config.LR\n"])
+    first = _own(kernel)
+    kernel.run(cell.format(2))
+    assert _own(kernel) != first
+
+
+def test_a_class_pinned_to_a_cell_stating_none_is_ambiguous(monkeypatch):
+    """A class pinned to a cell that states none of it (`exec`, `%%time`, a
+    copy) is ambiguous whatever the kept cells hold: no kept statement stands
+    in for it. Unpinned, a kept statement is read, and no scan is
+    ambiguous."""
+    import weakref
+
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    exec("class Config:\n    LR = 0.1\n", shell.user_ns)
+    cls = shell.user_ns["Config"]
+    state["pins"][id(cls)] = (weakref.ref(cls), ["exec(SOURCE)\n"])
+    no_scan = lambda qualname: None  # noqa: E731
+    kept = lambda qualname: ["class Config:\n    LR = 0.1\n"]  # noqa: E731
+    for texts in (no_scan, kept):
+        assert resume._class_sites(cls, [], shell.user_ns, texts) == ([], True, True)
+    del state["pins"][id(cls)]
+    assert resume._class_sites(cls, [], shell.user_ns, no_scan) == ([], True, True)
+    sites, ambiguous, _ = resume._class_sites(cls, [], shell.user_ns, kept)
+    assert sites and not ambiguous
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__static_attributes__ is 3.13+")
+def test_a_class_type_makes_has_no_site_without_the_watch(kernel):
+    """With no watch (a class made before `import mushin`), 3.13+ still tells a
+    class `type()` made from one a statement made: no older kept statement
+    stands in for it."""
+    _run_cells(
+        kernel, ["class Mk:\n    X = 1\n", "def task(a):\n    return a * Mk.X\n"]
+    )
+    kept = _own(kernel, "Mk")
+    kernel.run("Mk = type('Mk', (), {'X': 2})\n")
+    assert _own(kernel, "Mk") != kept
+
+
+def test_a_cell_binding_many_classes_still_pins_a_nested_one(monkeypatch):
+    """The nested walk has its own budget: a cell binding 70 classes
+    (`%run models.py`) still pins the class one of their bodies made."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    source = "".join(f"class C{i}:\n    X = {i}\n\n\n" for i in range(70))
+    exec(source + "class Outer:\n    class Inner:\n        X = 1\n", shell.user_ns)
+    resume._pin_classes(state, shell.user_ns, ("%run models.py\n", {}))
+    assert id(shell.user_ns["Outer"].Inner) in state["pins"]
+
+
+def test_a_kept_text_with_carriage_returns_is_read():
+    """`compile` takes a bare `\\r` as a line end, so the parse trigger does."""
+    import mushin._resume as resume
+
+    assert resume._cell_imports("x = 1\rclass A:\r    X = 1\r")[2] == ("A",)
+
+
+def test_a_cell_binding_many_classes_pins_every_nested_one(monkeypatch):
+    """The nested walk has no budget: each step is a longer qualname and each
+    class is taken once, so 300 models with a nested `Meta` each (`%run
+    models.py`) all have their `Meta` pinned."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    source = "".join(
+        f"class M{i}:\n    class Meta:\n        X = {i}\n\n\n" for i in range(300)
+    )
+    exec(source, shell.user_ns)
+    resume._pin_classes(state, shell.user_ns, ("%run models.py\n", {}))
+    metas = [shell.user_ns[f"M{i}"].Meta for i in range(300)]
+    assert all(id(meta) in state["pins"] for meta in metas)
+
+
+def test_a_running_cell_with_no_text_stops_the_on_demand_pin(monkeypatch):
+    """A record inside a nested cell whose text is unknown does not pin the
+    class to the cell around it, whose statement of it is older."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    resume._cell_watch()
+    pre = shell.events.callbacks["pre_run_cell"]
+    pre(types.SimpleNamespace(raw_cell="class Config:\n    LR = 0.5\n"))
+    pre(types.SimpleNamespace(raw_cell=None))  # its text is unknown
+    exec("class Config:\n    LR = 0.9\n", shell.user_ns)
+    assert resume._pinned_cell(shell.user_ns["Config"], shell.user_ns) == (False, None)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
+    """IPython keeps a cell as its `splitlines()` lines, so a form feed adds a
+    line `compile` never counted, and no kept statement sits at the class's
+    first line: ambiguous, so an edit is seen (a constant would miss it)."""
+    _run_cells(kernel, ["def task(a):\n    return a * Config.LR\n"])
+    digests = []
+    for value in (0.1, 0.2):
+        kernel.run(f"x = 1\f\nclass Config:\n    LR = {value}\n")
+        name = kernel.names[-1]
+        size, mtime, lines, filename = linecache.cache[name]
+        kept = [line + "\n" for line in "".join(lines).splitlines()]  # as IPython
+        linecache.cache[name] = (size, mtime, kept, filename)
+        digests.append(_own(kernel))
+    assert digests[0] != digests[1]
+
+
+def test_the_watch_finds_every_live_notebook_class():
+    """`_live_classes` finds every class whose module is the notebook's,
+    however it is held (a name, an instance, a list, only as a base or a
+    nested class) and none of a library's, without running a metaclass's
+    own `__subclasses__`. Its own kernel name, so no other test's class
+    (dead but not yet collected) can stand in."""
+    import gc
+
+    import mushin._resume as resume
+
+    k = Kernel("mushin_t_kernel_live")
+    try:
+        k.run(
+            "import collections\n\n\nclass Named:\n    pass\n\n\n"
+            "class Held:\n    pass\n\n\nheld = Held()\n\n\n"
+            "class InList:\n    pass\n\n\nkept = [InList]\n\n\n"
+            "class Base:\n    pass\n\n\nclass Kid(Base):\n    pass\n\n\n"
+            "class Out:\n    class In:\n        pass\n\n\nout_in = Out.In\n\n\n"
+            "class Meta(type):\n    def __subclasses__(cls):\n"
+            "        raise RuntimeError('hook ran')\n\n\n"
+            "class WithMeta(metaclass=Meta):\n    pass\n\n\n"
+            "del Held, InList, Base, Out\ncounter = collections.Counter()\n"
+        )
+        ns = k.ns
+        expected = [
+            ns["Named"],
+            type(ns["held"]),
+            ns["kept"][0],
+            ns["Kid"].__bases__[0],
+            ns["Kid"],
+            ns["out_in"],
+            ns["Meta"],
+            ns["WithMeta"],
+        ]
+        gc.collect()
+        live = resume._live_classes(ns["__name__"])
+        assert set(live) == {id(cls) for cls in expected}
+    finally:
+        k.close()
+
+
+def test_a_snapshot_tells_a_reused_id_and_an_older_watch_s_snapshot(monkeypatch):
+    """`_alive_at` takes a class as alive at a cell's start only if its id's
+    weak reference still gives that class: a reused id (another class, or a
+    dead one) is not, so the cell pins it. A snapshot an older `_resume`
+    wrote before a reload holds the class itself: compared, never called."""
+    import gc
+    import weakref
+
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    exec(
+        "class Config:\n    LR = 0.1\n\n    def __init__(self):\n"
+        "        raise RuntimeError('called')\n",
+        shell.user_ns,
+    )
+    cls = shell.user_ns["Config"]
+    other = type("Other", (), {})
+    gone = type("Gone", (), {})
+    dead = weakref.ref(gone)
+    del gone
+    gc.collect()  # a class sits in reference cycles: only the collector frees it
+    assert dead() is None
+    for ref in (weakref.ref(other), dead):
+        assert not resume._alive_at({id(cls): ref}, cls)
+    assert resume._alive_at({id(cls): weakref.ref(cls)}, cls)
+    assert resume._alive_at({id(cls): cls}, cls)  # not called: no error
+    resume._pin_classes(state, shell.user_ns, ("exec(SOURCE)\n", {id(cls): dead}))
+    assert resume._live_pin(state, cls) == ["exec(SOURCE)\n"]
+    # A dead pin at a listed class's id is a reused id: not a lost cell.
+    exec("class Kept:\n    X = 1\n", shell.user_ns)
+    kept = shell.user_ns["Kept"]
+    state["pins"][id(kept)] = (dead, ["exec(SOURCE)\n"])
+    assert resume._listed(kept)
+    assert resume._pinned_cell(kept, shell.user_ns) == (False, None)
+
+
+def test_a_class_a_finalizer_brings_back_is_ambiguous(monkeypatch):
+    """Before 3.15 the collector clears a class's weak references before a
+    finalizer (`__del__`) brings an instance, and so the class, back: its
+    pin is dead and no base lists it. Its cell is lost, so it is ambiguous,
+    never read from an older kept statement (a dead pin alone is a reused
+    id). 3.15 keeps them, and the class its pin."""
+    import gc
+    import weakref
+
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    ns = shell.user_ns
+    exec(
+        "pool = []\n\n\nclass Pooled:\n    def __del__(self):\n        pool.append(self)\n",
+        ns,
+    )
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        exec("class C(Pooled):\n    X = 1\n", ns)
+        cls = ns["C"]
+        state["pins"][id(cls)] = (weakref.ref(cls), ["exec(SOURCE)\n"])
+        exec("c = C()\nc.me = c\ndel c\n\n\nclass C(Pooled):\n    X = 3\n", ns)
+        pin = state["pins"][id(cls)][0]
+        del cls
+        gc.collect()
+        back = type(ns["pool"][0])
+    finally:
+        if enabled:
+            gc.enable()
+    ns["Back"] = back
+    exec("class E(Back):\n    Y = 1\n", ns)  # made on it: no walk reaches it
+    made_on = ns["E"]
+    assert back.X == 1
+    if pin() is None:  # before 3.15: its weak references were cleared
+        assert not resume._listed(back)
+        assert resume._pinned_cell(back, ns) == (True, [])
+        assert resume._pinned_cell(made_on, ns) == (True, [])
+        exec("class F(E):\n    Z = 1\n", ns)  # two levels down: the lineage
+        assert resume._pinned_cell(ns["F"], ns) == (True, [])
+    else:  # 3.15 keeps them, and the class its pin
+        assert resume._pinned_cell(back, ns) == (True, ["exec(SOURCE)\n"])
+    assert resume._listed(ns["C"])  # a class alive as usual is listed

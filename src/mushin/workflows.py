@@ -2506,7 +2506,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             bound method or an instance) and by every project module its
             cells import, so re-running an edited cell and resuming re-runs
             the cells; with ``cache_dir``, importing another project module
-            in a cell can make them compute again. No value is compared (a
+            in a cell can make them compute again. A class whose ``class``
+            statement cannot be told from another kept version of its cell
+            (or, on 3.11/3.12, from another statement of it its cell runs)
+            can make a resume re-run them, and ``cache_dir`` compute them,
+            when its cell runs again or after a restart. A class that a cell
+            run after ``import mushin`` makes without stating it (in a
+            ``%%time`` cell, by ``exec``, ``%run`` or a ``global`` factory, or
+            a copy such as ``dataclass(slots=True)(C)``) is not read, but
+            re-runs them whenever that cell runs again and after a restart. A
+            resume on another Python version can also re-run the cells of a
+            class stated more than once in its cell. No value is compared (a
             number, a string, a dict config): pass one as a swept parameter,
             or use a new ``working_dir`` after editing it. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name
@@ -2526,10 +2536,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             attribute values beyond its text, possibly a module loaded other
             than by a cell's ``import`` statement (``importlib.import_module``,
             a plugin loader that fills a registry, an import in a ``%%time``
-            cell), possibly a class with no method of
-            its own and what it names beyond its bases, a ``_target_``
-            defined there, code whose text the kernel does not keep (a ``%%time``
-            cell, ``exec``, a ``%run`` file), a
+            cell), possibly a class no ``class`` statement makes (``type(...)``,
+            ``make_dataclass``) or one of which a cell holds more than one
+            version (two ``class`` statements run, or a statement and a class
+            bound from elsewhere), a ``_target_`` defined in the notebook,
+            code whose text the kernel does not keep (a ``%%time`` cell,
+            ``exec``, a ``%run`` file; a class it makes re-runs instead),
+            possibly a cell holding a form feed, a vertical tab or another
+            character that ends a line for ``str.splitlines`` (not a newline
+            or a carriage return), what an IPython input transformer changes
+            in a cell, possibly a class a background thread or a callback
+            makes while a cell runs (taken for that cell's), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

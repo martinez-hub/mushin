@@ -169,10 +169,25 @@ rules:
   them when the run starts; no value does (a number, a model name, a dict
   config), so pass values as swept parameters. For such a task, every
   project module a cell imports counts too, so with `cache_dir=`, importing
-  another one in a cell can make the cells compute again. A module loaded
-  other than by a cell's `import` statement (`importlib.import_module`, a
-  plugin loader, an import in a `%%time` cell) may not be compared, nor may
-  a class with no method of its own: after editing one, use a new
+  another one in a cell can make the cells compute again. Re-running a
+  class's cell when mushin cannot tell its version apart from another kept
+  one (a class a function makes, or on 3.11/3.12 a cell stating it twice)
+  can make a resume re-run the cells too. A class that a cell run after
+  `import mushin` makes without stating it (in a `%%time` cell, by `exec`,
+  `%run` or a `global` factory, or a copy such as
+  `dataclass(slots=True)(C)`) is not read, but re-runs the cells whenever
+  that cell runs again and after a restart. A resume on another Python
+  version can also re-run the cells of a class stated more than once in its
+  cell. A module loaded other than by a cell's `import` statement
+  (`importlib.import_module`, a plugin loader, an import in a `%%time` cell)
+  may not be compared, nor may a class no `class` statement makes
+  (`type(...)`, `make_dataclass`), or a class of which one cell holds more
+  than one version (two `class` statements run, or a statement and a class
+  bound from elsewhere), nor a cell holding a form feed, a vertical tab or
+  another character that ends a line for `str.splitlines` (not a newline or
+  a carriage return), nor what an IPython input transformer changes in a
+  cell, and a class a background thread or a callback makes while a cell
+  runs may be taken for that cell's: after editing one, use a new
   `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
