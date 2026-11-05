@@ -1807,3 +1807,62 @@ ignored, branches taken for siblings, the token without the process id, the
 pattern without a continuation, the annotate path's reading put with main's,
 and a failed scan's class not ambiguous.
 
+### #295 review round 3 (2026-11-04): plan
+
+`/code-review` (9) and the adversarial workflow (4 confirmed) reviewed
+d49dd89. Plan, written before any edit.
+
+**Blocking, both sides of one rule.** Round 2 made two different
+statements of a class in one block ambiguous on 3.11/3.12.
+- Too narrow (`/code-review`): a top-level `class Config` and a later `if
+  True: class Config` are in two blocks and both run; so do a `try` body's
+  and its `except` body's.
+- Too wide, and my regression (adversarial, through a real resume): inside
+  a function's or a class's body, two statements run as one step, so no
+  record stands between them and which object comes out is a value. A
+  factory stating its class twice re-ran the cells after every unchanged
+  re-run.
+The rule: two different statements are ambiguous (3.11/3.12) only when both
+stand in the cell's own statements, not in a function's or a class's body,
+and do not exclude each other. Only an `if`'s body and its `orelse` (an
+`elif` chain is nested `orelse`s) and two cases of a `match` exclude each
+other. `_class_nodes` returns each statement's path from the cell's top and
+whether it stands at module scope (the bare qualname of a `global`
+declared in a function does not make it so).
+
+**Minor:**
+- tests the reviews showed pass without the code they name: the `if`/`else`
+  case in the real shell (the pinned path, where round 2's fix was), and a
+  methodless class read exactly (two kernels with the same single text give
+  one digest, another text another; the edit tests passed through the token);
+- the post-cell callback no longer parses: the pin keeps the transformed
+  lines, and the record reads them;
+- `class_texts` is required, so "not given" cannot read as "the scan
+  failed";
+- a nested class (`Outer.Inner`) is pinned with the class whose body made
+  it;
+- with the watch on, a kept text the watch saw make another object of the
+  qualname is not taken for an unpinned one (`make_dataclass` replacing a
+  watched `class Config`, on 3.11/3.12);
+- `post_run_cell` pops its own `pre_run_cell`'s entry (matched by the
+  execution info): IPython fires post without pre for an empty cell;
+- docs and comments: the token's re-run also comes from a cell stating the
+  class twice, one statement after the other (3.11/3.12), and the run()
+  docstring adds "or after a restart".
+
+**Not changed:** the duplicated id-weakref pruning and the per-text walk of
+`_class_nodes` (cleanup and cost only).
+
+**Stopping rule:** a fourth round of both reviews on this delta; merge if it
+finds nothing blocking.
+
+**Results (#295 round 3 fixes).** 298 tests in the module, passing on 3.11
+to 3.15; the whole suite 1643 passed (in three parts), and the docs build
+and docs tests pass. Seven mutations for this round, all caught by node id:
+an `if`'s branches not exclusive, any parting exclusive, a body's statements
+judged like the cell's own, nested classes not pinned, the watch's texts not
+skipped, the post callback popping the top entry, and a `match`'s cases not
+exclusive. One test of mine failed at first for the wrong reason: the empty
+nested cell's case used `_pf` before the script defined it, so the cell
+raised; it now imports it itself.
+

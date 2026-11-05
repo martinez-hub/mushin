@@ -3532,6 +3532,47 @@ run("%%time\\nclass Config:\\n    LR = 0.6\\n")
 timed = own()
 run("%%time\\nclass Config:\\n    LR = 0.6\\n")  # unchanged
 timed_same = own()
+ifelse = (
+    "FLAG = True\\n\\nif FLAG:\\n\\n    class Config:\\n        LR = 1\\n\\n"
+    "else:\\n\\n    class Config:\\n        LR = 2\\n"
+)
+run(ifelse)
+branch = own()
+run(ifelse)
+branch_again = own()
+# A nested class, pinned with the class whose body made it.
+outer = "class Outer:\\n    class Inner:\\n        X = {}\\n\\n\\nInner = Outer.Inner\\n"
+run(outer.format(1))
+run("def task3(a):\\n    return a * Inner.X\\n")
+from mushin._resume import project_fingerprints as _fp3
+
+
+def inner():
+    return _fp3(shell.user_ns["task3"])["code"]["Inner (notebook)"]
+
+
+nested = [inner()]
+run(outer.format(2))
+nested.append(inner())
+run(outer.format(1))
+nested.append(inner())
+# A class `type()` remakes after a watched statement: not that statement's.
+run("class Mk:\\n    X = 1\\n")
+run("def task4(a):\\n    return a * Mk.X\\n")
+remade = [_fp3(shell.user_ns["task4"])["code"]["Mk (notebook)"]]
+run("Mk = type('Mk', (), {'X': 2})\\n")
+remade.append(_fp3(shell.user_ns["task4"])["code"]["Mk (notebook)"])
+# An empty nested cell before the statement fires post without pre.
+empty = (
+    "get_ipython().run_cell('')\\n"
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.9\\n\\n"
+    "_C = _pf(task)['code']['Config (notebook)']\\n"
+)
+run(empty)
+emptied = [shell.user_ns["_C"], own()]
+run(empty)
+emptied += [shell.user_ns["_C"], own()]
 # A class with one kept text, then a `%%time` cell remaking it: the kept text
 # is not this class's statement.
 run("class Solo:\\n    X = 1\\n")
@@ -3580,6 +3621,8 @@ print(json.dumps({
     "callbacks": [callbacks, reloaded], "after_reload": after_reload,
     "magic_again": magic_again, "plain": plain, "timed": [timed, timed_same],
     "twice": twice, "hook": hook, "solo": [solo, solo_timed],
+    "branch": [branch, branch_again], "nested": nested, "remade": remade,
+    "emptied": emptied,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3612,6 +3655,12 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert timed == timed_same
     assert timed not in (got["first"], got["edited"], got["magic"])
     assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
+    assert got["branch"][0] == got["branch"][1]  # an if's branches: one runs
+    n1, n2, n3 = got["nested"]  # a nested class, pinned: a revert is exact
+    assert n1 != n2 and n3 == n1
+    assert got["remade"][0] != got["remade"][1]  # type() made it, not the cell
+    inside, after, inside_again, after_again = got["emptied"]
+    assert inside == after == inside_again == after_again
     a, b, a_again, b_again = got["twice"]  # two statements in one cell
     assert a != b and a_again != b_again
     if sys.version_info >= (3, 13):  # the first line tells them apart
@@ -3807,13 +3856,21 @@ def test_two_statements_one_after_the_other_are_not_one_class(kernel):
     assert kernel.ns["_A"] != kernel.ns["_B"]
 
 
-def test_a_class_in_two_branches_of_an_if_is_stable(kernel):
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\n"
+        "else:\n\n    class Config:\n        LR = 2\n",
+        "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\n"
+        "elif FLAG == 1:\n\n    class Config:\n        LR = 1\n",
+        "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n"
+        "            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n",
+    ],
+    ids=["if", "elif", "match"],
+)
+def test_a_class_in_two_branches_of_an_if_is_stable(kernel, cell):
     """Only one branch runs, and which is a value: the cell's statements
     count together, so an unchanged re-run keeps the digest."""
-    cell = (
-        "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\n"
-        "else:\n\n    class Config:\n        LR = 2\n"
-    )
     _run_cells(kernel, [cell, "def task(a):\n    return a * Config.LR\n"])
     first = _own(kernel)
     kernel.run(cell)
@@ -3847,3 +3904,70 @@ def test_a_forked_process_gets_its_own_token(kernel, monkeypatch):
     real = os.getpid()
     monkeypatch.setattr(os, "getpid", lambda: real + 1)
     assert _own(kernel, "C") != parent
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "import dataclasses\n\n\n@dataclasses.dataclass\nclass Config:\n    LR: float = {}\n",
+        "import enum\n\n\nclass Config(enum.Enum):\n    LR = {}\n",
+        "class Config:\n    LR = {}\n",
+        "def make():\n    class Config:\n        LR = {}\n\n    return Config\n\n\nConfig = make()\n",
+    ],
+    ids=["dataclass", "Enum", "plain", "factory"],
+)
+def test_a_method_less_class_s_statement_is_read_exactly(cell):
+    """One kept text: the digest is its statement's, so two kernels running
+    the same text agree and another text differs (a token would differ in
+    both)."""
+    task = "def task(a):\n    return a\n\n\nCONFIG = Config\n"
+    digests = []
+    for value in (1, 1, 2):
+        k = Kernel("mushin_t_kernel_exact")
+        try:
+            _run_cells(
+                k,
+                [
+                    cell.format(value),
+                    task.replace("return a", "return a * 0 + len([CONFIG])"),
+                ],
+            )
+            digests.append(_record(k, "task")["CONFIG (notebook)"])
+        finally:
+            k.close()
+    assert digests[0] == digests[1] != digests[2]
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "if True:\n\n    class Config:\n        LR = 0.8\n",
+        "try:\n\n    class Config:\n        LR = 0.8\n\nexcept ValueError:\n    pass\n",
+    ],
+    ids=["a later if", "a try"],
+)
+def test_two_statements_that_both_run_are_not_one_class(kernel, between):
+    """A top-level statement and a later one in another block both run: a
+    record between them must not reuse the first one's results."""
+    kernel.run("def task(a):\n    return a * Config.LR\n")
+    kernel.run(
+        "from mushin._resume import project_fingerprints as _pf\n\n\n"
+        "class Config:\n    LR = 0.7\n\n\n"
+        "_A = _pf(task)['code']['Config (notebook)']\n"
+        f"{between}\n"
+        "_B = _pf(task)['code']['Config (notebook)']\n"
+    )
+    assert kernel.ns["_A"] != kernel.ns["_B"]
+
+
+def test_a_factory_stating_its_class_twice_is_stable(kernel):
+    """Inside a function's body two statements run as one step: an unchanged
+    re-run of the factory keeps the digest."""
+    factory = (
+        "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n"
+        "    return C\n\n\nC = make()\n"
+    )
+    _run_cells(kernel, [factory, "def task(a):\n    return a * C.K\n"])
+    first = _own(kernel, "C")
+    kernel.run(factory)
+    assert _own(kernel, "C") == first

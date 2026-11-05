@@ -1358,12 +1358,13 @@ def _first_line(node) -> int:
 
 
 def _class_nodes(tree) -> list:
-    """``(node, qualname, block)`` for each ``class`` statement in a cell's
+    """``(node, qualname, path, top)`` for each ``class`` statement in a cell's
     tree: its qualname as the compiler makes it (``A.C`` in a class,
     ``f.<locals>.C`` in a function, the bare name when the enclosing function
-    or class declares it ``global``), and the statement list it is in (two
-    statements in one block run one after the other; in two branches of an
-    ``if`` or a ``try``, only one does)."""
+    or class declares it ``global``); its path from the cell's top, one
+    ``(parent id, parent type, field, index)`` per step (``_exclusive``); and
+    whether it is one of the cell's own statements, outside any function's
+    or class's body (``top``)."""
     import ast
 
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -1379,34 +1380,55 @@ def _class_nodes(tree) -> list:
                 stack.extend(ast.iter_child_nodes(sub))
         return frozenset(names)
 
-    def children(node, prefix, globs) -> list:
+    def children(node, prefix, globs, path, top) -> list:
         out = []
+        kind = type(node).__name__
         for field, value in ast.iter_fields(node):
             items = value if type(value) is list else [value]
-            for child in items:
+            for index, child in enumerate(items):
                 if isinstance(child, ast.AST):
-                    out.append((child, prefix, globs, (id(node), field)))
+                    step = (id(node), kind, field, index)
+                    out.append((child, prefix, globs, (*path, step), top))
         return out
 
     found: list = []
-    stack = children(tree, "", frozenset())
+    stack = children(tree, "", frozenset(), (), True)
     while stack:
-        node, prefix, globs, block = stack.pop()
+        node, prefix, globs, path, top = stack.pop()
         kind = type(node)
         if kind in defs:
             qualname = node.name if node.name in globs else prefix + node.name
             if kind is ast.ClassDef:
-                found.append((node, qualname, block))
+                found.append((node, qualname, path, top))
                 inner = qualname + "."
             else:
                 inner = qualname + ".<locals>."
             inside = declared_global(node)
-            stack.extend(
-                (child, inner, inside, (id(node), "body")) for child in node.body
-            )
+            for i, child in enumerate(node.body):
+                step = (id(node), kind.__name__, "body", i)
+                stack.append((child, inner, inside, (*path, step), False))
         elif kind is not ast.Lambda:
-            stack.extend(children(node, prefix, globs))
+            stack.extend(children(node, prefix, globs, path, top))
     return found
+
+
+def _exclusive(one: tuple, other: tuple) -> bool:
+    """Whether two statements' paths (``_class_nodes``) part where only one of
+    them can run: an ``if``'s body against its ``orelse`` (an ``elif`` chain
+    is nested ``orelse``s), or two cases of a ``match``. Any other parting
+    (one block, a ``try``'s body and a handler, a statement after an ``if``)
+    can run both."""
+    for a, b in zip(one, other, strict=False):
+        if a == b:
+            continue
+        if a[0] != b[0]:
+            return False
+        if a[1] == "If":
+            return a[2] != b[2]
+        if a[1] == "Match":
+            return a[2] == b[2] == "cases" and a[3] != b[3]
+        return False
+    return False
 
 
 def _cell_imports(
@@ -1433,7 +1455,7 @@ def _cell_imports(
     tree = _parse_cell(text) if wanted else None
     if tree is None:
         return modules, bindings, ()
-    classes = tuple(sorted({qualname for _, qualname, _ in _class_nodes(tree)}))
+    classes = tuple(sorted({qualname for _, qualname, _, _ in _class_nodes(tree)}))
     modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
     scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
     found: set[tuple[str, str, bool]] = set()
@@ -2260,29 +2282,40 @@ def _cell_watch(register: bool = True) -> dict | None:
             return state
         if not register:
             return None
-        state = {"pins": {}, "running": [], "transform": shell.transform_cell}
+        state = {
+            "pins": {},
+            "made": {},
+            "running": [],
+            "transform": shell.transform_cell,
+        }
 
         def pre(info=None) -> None:
             try:
                 running = state["running"]
-                if len(running) > 8:  # a cell whose end never fired
+                if len(running) > 8:  # cells whose end never fired
                     running.clear()
                 raw = getattr(info, "raw_cell", None)
                 if type(raw) is not str or _CLASS_NAME.search(raw) is None:
-                    running.append(None)
+                    running.append((info, None))
                     return
                 ns = shell.user_ns
                 names = set(_CLASS_NAME.findall(raw))
-                running.append((raw, {name: ns.get(name) for name in names}))
+                running.append((info, (raw, {name: ns.get(name) for name in names})))
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
 
         def post(result=None) -> None:
+            # IPython fires post without pre for an empty cell (a magic's
+            # empty body): end only the cell whose info this result carries.
             try:
+                info = getattr(result, "info", None)
                 running = state["running"]
-                entry = running.pop() if running else None
-                if entry is not None:
-                    _pin_classes(state, shell.user_ns, entry)
+                for i in range(len(running) - 1, -1, -1):
+                    if running[i][0] is info:
+                        entry = running.pop(i)[1]
+                        if entry is not None:
+                            _pin_classes(state, shell.user_ns, entry)
+                        break
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
 
@@ -2297,13 +2330,24 @@ def _cell_watch(register: bool = True) -> dict | None:
 def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     """Pin each class the cell ``entry`` (``(raw, snapshot)``) bound to a name
     its ``class`` statements could bind, and that is a new object since the
-    cell started, to the cell's text; ``only`` limits it to one class. The
-    first pin wins: a magic's nested cell (``%%capture``) ends before the
-    magic's own cell, and only its text holds the statement. A cell whose
-    text holds no statement of the class (``%%time``, ``exec``) pins it as
-    unreadable (None), so no older kept text is taken for it. Classes are
-    read through the type's own slots: no notebook metaclass hook runs."""
+    cell started, to the cell's transformed text, with the classes its body
+    made (``Outer.Inner``); ``only`` limits it to one class. The first pin
+    wins: a magic's nested cell (``%%capture``) ends before the magic's own
+    cell, and only its text holds the statement. Nothing is parsed here; a
+    record reads the text (``_class_sites``), and a text holding no statement
+    of the class (``%%time``, ``exec``) gives it no site. Classes are read
+    through the type's own slots: no notebook metaclass hook runs."""
     import weakref
+
+    def qualname(cls) -> str:
+        return type.__dict__["__qualname__"].__get__(cls)
+
+    def own_dict(cls):
+        return type.__dict__["__dict__"].__get__(cls)
+
+    def unpinned(cls) -> bool:
+        old = pins.get(id(cls))
+        return old is None or old[0]() is not cls
 
     raw, snapshot = entry
     pins = state["pins"]
@@ -2314,26 +2358,37 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
             continue
         if not issubclass(type(value), type):
             continue
-        module = type.__dict__["__dict__"].__get__(value).get("__module__")
+        module = own_dict(value).get("__module__")
         if type(module) is not str or module != namespace.get("__name__"):
             continue
-        if type.__dict__["__qualname__"].__get__(value) != name:
+        if qualname(value) != name or not unpinned(value):
             continue  # a class made elsewhere and bound here (`C = make()`)
-        old = pins.get(id(value))
-        if old is not None and old[0]() is value:
-            continue
         made.append(value)
+    # The classes their bodies made, a few levels down.
+    pending = list(made)
+    while pending and len(made) < 64:
+        outer = pending.pop()
+        prefix = qualname(outer) + "."
+        for value in list(own_dict(outer).values()):
+            if (
+                issubclass(type(value), type)
+                and qualname(value).startswith(prefix)
+                and unpinned(value)
+                and all(value is not m for m in made)
+            ):
+                made.append(value)
+                pending.append(value)
     if not made:
         return
     lines = state["transform"](raw).splitlines(True)
-    tree = _cell_tree(lines)
-    stated = {q for _, q, _ in _class_nodes(tree)} if tree is not None else set()
+    key = _short_hash("".join(lines).encode("utf-8", "surrogatepass"))
     if len(pins) > 4096:  # drop the pins of classes that are gone
-        for key in [k for k, (ref, _) in pins.items() if ref() is None]:
-            del pins[key]
+        for gone in [k for k, (ref, _) in pins.items() if ref() is None]:
+            del pins[gone]
+    made_by = state["made"]
     for cls in made:
-        qualname = type.__dict__["__qualname__"].__get__(cls)
-        pins[id(cls)] = (weakref.ref(cls), lines if qualname in stated else None)
+        pins[id(cls)] = (weakref.ref(cls), lines)
+        made_by.setdefault(qualname(cls), set()).add(key)
 
 
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
@@ -2348,7 +2403,7 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     pin = state["pins"].get(id(cls))
     if pin is None or pin[0]() is not cls:
         qualname = type.__dict__["__qualname__"].__get__(cls)
-        for entry in reversed(state["running"]):
+        for _, entry in reversed(state["running"]):
             if entry is not None and qualname in entry[1]:
                 _pin_classes(state, namespace, entry, only=cls)
                 break
@@ -2359,7 +2414,8 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
 
 
 #: A per-process token and a counter per class object, for a class whose
-#: statement cannot be told from several kept texts (``_ambiguous_own``).
+#: statement cannot be told from several kept texts, or (3.11/3.12) from
+#: two of its cell's own statements that both run (``_ambiguous_own``).
 _PROCESS_TOKEN: list = []
 _CLASS_GENERATIONS: dict = {}
 _GENERATION_COUNTER = __import__("itertools").count()
@@ -2386,9 +2442,7 @@ def _ambiguous_own(cls) -> str:
     return _short_hash(f"class\n?\n{_PROCESS_TOKEN[0][1]}\n{hit[1]}".encode())
 
 
-def _class_sites(
-    cls, methods, namespace: dict, class_texts=None
-) -> tuple[list, bool, bool]:
+def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool, bool]:
     """``(sites, ambiguous, later)``: the ``class`` statement that defined
     ``cls``, as ``[(tree, nodes)]`` (``inspect.getsource`` cannot find a class
     in a notebook), from the first of these that answers:
@@ -2401,10 +2455,15 @@ def _class_sites(
       (``class_texts(qualname)``, None when the cells could not be scanned).
     In a text, every statement of the qualname counts (an ``if``'s two
     branches: which one runs is a value), but on 3.13+ only those at the
-    class's ``__firstlineno__`` (the first decorator's line); two different
-    ones in one block, one after the other, which 3.11 and 3.12 cannot tell
-    apart, are ambiguous. Several kept texts with different statements are
-    ambiguous (which is in force cannot be told) and all of them are read.
+    class's ``__firstlineno__`` (the first decorator's line). Two different
+    ones among the cell's own statements that can both run (``_exclusive``),
+    which 3.11 and 3.12 cannot tell apart, are ambiguous: a record can stand
+    between them. Inside a function's or a class's body, they run as one step,
+    and which object comes out is a value. Several kept texts with different
+    statements are ambiguous (which is in force cannot be told) and all of
+    them are read. With the shell's watch on, a kept text it saw make another
+    object of the qualname is not this one's (``make_dataclass`` replacing a
+    watched ``class Config``).
     ``later``: found otherwise than through a method, so main's record had
     no reading of it (``_notebook_entries`` follows it after main's seeds).
     No site when none is kept, or (3.13+) for a class no ``class`` statement
@@ -2451,18 +2510,20 @@ def _class_sites(
 
     def statements(tree) -> tuple[list, bool]:
         """The text's statements of the qualname (on 3.13+, at its first
-        line), sorted; and whether two different ones share a block, so one
-        could be in force at a record taken between them."""
+        line), sorted; and whether two different ones of the cell's own can
+        both run, so either could be in force at a record taken between."""
         found = [
-            (node, block)
-            for node, q, block in _class_nodes(tree)
+            (node, path, top)
+            for node, q, path, top in _class_nodes(tree)
             if q == qualname and (first is None or _first_line(node) == first)
         ]
-        blocks: dict = {}
-        for node, block in found:
-            blocks.setdefault(block, set()).add(dump(node))
-        siblings = any(len(texts) > 1 for texts in blocks.values())
-        return sorted((node for node, _ in found), key=dump), siblings
+        both = any(
+            dump(a) != dump(b) and not _exclusive(pa, pb)
+            for i, (a, pa, ta) in enumerate(found)
+            for b, pb, tb in found[i + 1 :]
+            if ta and tb
+        )
+        return sorted((node for node, _, _ in found), key=dump), both
 
     pinned, lines = _pinned_cell(cls, namespace)
     if pinned:
@@ -2471,12 +2532,16 @@ def _class_sites(
         tree = _cell_tree(lines) if lines is not None else None
         nodes, siblings = statements(tree) if tree is not None else ([], False)
         return ([(tree, nodes)] if nodes else []), siblings, True
-    texts = class_texts(qualname) if class_texts is not None else None
+    texts = class_texts(qualname)
     if texts is None:
         return [], True, True
+    state = _cell_watch(register=False)
+    seen = state["made"].get(qualname, ()) if state is not None else ()
     groups: dict[str, list] = {}
     ambiguous = False
     for text in texts:
+        if seen and _short_hash(text.encode("utf-8", "surrogatepass")) in seen:
+            continue  # the watch saw this text make another object
         tree = _cell_tree(text.splitlines(True))
         nodes, siblings = statements(tree) if tree is not None else ([], False)
         if nodes:
@@ -2753,7 +2818,7 @@ def _parameter_defaults(fn) -> dict:
 
 
 def _notebook_entries(
-    namespace: dict, roots, cell_bindings: dict | None = None, class_texts=None
+    namespace: dict, roots, cell_bindings: dict, class_texts
 ) -> tuple[dict[str, str], list[str], list[str]]:
     """``(entries, modules, added)``: the entries of a notebook's code the
     roots reach; the modules their definitions name (see ``_unit_reading``),
@@ -2783,8 +2848,6 @@ def _notebook_entries(
     ``__name__`` (which ``_namespace_modules`` reads too) are read, so a
     lazy proxy is never resolved."""
     import types
-
-    cell_bindings = cell_bindings or {}
 
     def resolve(value):
         return _notebook_object(value, namespace)

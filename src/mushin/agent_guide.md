@@ -171,7 +171,8 @@ rules:
   project module a cell imports counts too, so with `cache_dir=`, importing
   another one in a cell can make the cells compute again. Re-running a
   class's cell when mushin cannot tell its version apart from another kept
-  one (a class a function makes) can make a resume re-run the cells too. A
+  one (a class a function makes, or on 3.11/3.12 a cell stating it twice)
+  can make a resume re-run the cells too. A
   module loaded other than by a cell's `import` statement
   (`importlib.import_module`, a plugin loader, an import in a `%%time` cell)
   may not be compared, nor may a class no `class` statement makes
