@@ -4730,6 +4730,8 @@ def test_a_class_a_finalizer_brings_back_is_ambiguous(monkeypatch):
         assert not resume._listed(back)
         assert resume._pinned_cell(back, ns) == (True, [])
         assert resume._pinned_cell(made_on, ns) == (True, [])
+        exec("class F(E):\n    Z = 1\n", ns)  # two levels down: the lineage
+        assert resume._pinned_cell(ns["F"], ns) == (True, [])
     else:  # 3.15 keeps them, and the class its pin
         assert resume._pinned_cell(back, ns) == (True, ["exec(SOURCE)\n"])
     assert resume._listed(ns["C"])  # a class alive as usual is listed

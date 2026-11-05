@@ -2309,9 +2309,10 @@ def _alive_at(snapshot: dict, cls) -> bool:
 
 def _listed(cls) -> bool:
     """Whether a base still lists ``cls`` among its subclasses (``type``'s
-    own slots, so no hook runs). Before 3.15, a class the collector freed
-    and a finalizer brought back is not: its weak references were cleared
-    first. 3.15 keeps them (and the class its pin)."""
+    own slots, so no hook runs). A class the collector freed but that lives
+    on is not: one a finalizer brought back before 3.15 (its weak references
+    are cleared first; 3.15 keeps them, and the class its pin), or one
+    ``gc.DEBUG_SAVEALL`` keeps in ``gc.garbage``, on every version."""
     subclasses = type.__dict__["__subclasses__"]
     bases = type.__dict__["__bases__"].__get__(cls)
     return any(sub is cls for base in bases for sub in subclasses(base))
@@ -2495,11 +2496,11 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     if lines is None:
         mro = type.__dict__["__mro__"].__get__(cls)
         if not all(_listed(k) for k in mro[:-1]):
-            # A class in its lineage that no base lists was collected and
-            # brought back by a finalizer (`__del__`), which before 3.15
-            # clears its weak references first: its pin, and the liveness
-            # walk's way to it and to every class made on it, are gone. Its
-            # cell is lost: ambiguous.
+            # A class in its lineage that no base lists was collected but
+            # lives on (a finalizer brought it back, or `gc.DEBUG_SAVEALL`
+            # kept it): its pin, and the liveness walk's way to it and to
+            # every class made on it, are gone. Its cell is lost: ambiguous.
+            # Checked on the whole lineage, so the version does not matter.
             return True, []
     return lines is not None, lines
 
@@ -2544,7 +2545,8 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
       kept (``%%time``, an ``exec`` string, ``%run``) or from a kept
       statement (a ``global`` factory, a copy such as
       ``dataclass(slots=True)(C)``, ``exec(In[n])``), which cannot be told:
-      ambiguous;
+      ambiguous. So is a class whose cell is lost (``_pinned_cell`` gives
+      it no text): never read from the kept texts;
     - the kept cells' texts with a statement of its qualname
       (``class_texts(qualname)``, None when the cells could not be scanned).
     In a text, every statement of the qualname counts (an ``if``'s two

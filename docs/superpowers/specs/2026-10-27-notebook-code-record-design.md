@@ -3099,3 +3099,17 @@ All caught.
 **Results (#295 round 18).** 313 tests in the module, passing on 3.11 to
 3.15; the whole suite 1656 passed (in three parts); the docs build and the
 165 docs tests pass.
+
+**The reviews of round 18 (e440e24...bc44e93) found nothing blocking.**
+`/code-review` scanned 13,755 live classes with torch, numpy, pandas,
+xarray, Lightning and IPython loaded: none has an unlisted class in its
+MRO, so the lineage check never fires for an ordinary class. Both reviews
+found one test gap: a mutant that checks only the direct bases survived,
+because the test's case was one level deep. A class two levels down now
+catches it. Also: `gc.DEBUG_SAVEALL` keeps collected classes alive and
+unlisted on every version, so the comments no longer say "only a
+finalizer, only before 3.15" (the check does not depend on the version),
+and `_class_sites` notes the lost-cell meaning of an empty pin.
+*Accepted (cost):* a class made by a plain statement on a brought-back
+class, or reached through another base, is ambiguous where an exact read
+was possible.
