@@ -3060,3 +3060,42 @@ case cannot arise. The test now branches on what it observes, not on the
 version: pinned in both, with no text when the references were cleared.
 313 tests in the module, passing on 3.11 to 3.15; the whole suite 1656
 passed (in three parts); the docs build and the 165 docs tests pass.
+
+### #295 round 18 (2026-11-05): a lost cell is a lineage, not a pin
+
+Both reviews of round 17 (5a6586f...e440e24) found no regression.
+`/code-review` found one case under rule (2), behind a finalizer
+resurrection: a class made *on* a class a finalizer brought back is out of
+the liveness walk's reach (the walk descends from `object` through each
+class's live subclass list, and the brought-back class is unlisted). It is
+never pinned, and the kept texts stood in. It also found that the dead-pin
+gate could lapse once the pins were pruned, and could be read after the
+walk pruned it. The adversarial run found only test gaps: the `_alive_at`
+test's "dead" reference was alive (a class is in reference cycles, freed
+only by the collector), and no test told a reused id from a lost cell.
+
+**Fix (the altitude both suggested):** no dead-pin gate. A class still
+unpinned after the walk, with any class in its lineage (its MRO, `object`
+aside) that no base lists, has lost its cell: ambiguous. On CPython only a
+class a finalizer brought back is unlisted, so a class alive as usual, at a
+reused id or not, is never affected (the `local` case). Pruned pins, a
+class made on a brought-back one, and a brought-back class that was never
+pinned are all covered.
+
+**Tests:**
+- a really dead reference in the `_alive_at` test;
+- a listed class with a dead pin at its id (a reused id: not a lost cell);
+- the brought-back test now uses the pin's own reference as its oracle,
+  not `_listed`, and adds a class made on the brought-back one.
+
+**Mutants:**
+- a dead reference counted as alive;
+- the dead-pin gate back;
+- the class checked without its lineage;
+- no lost-cell check.
+
+All caught.
+
+**Results (#295 round 18).** 313 tests in the module, passing on 3.11 to
+3.15; the whole suite 1656 passed (in three parts); the docs build and the
+165 docs tests pass.

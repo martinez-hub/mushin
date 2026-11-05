@@ -4655,6 +4655,7 @@ def test_a_snapshot_tells_a_reused_id_and_an_older_watch_s_snapshot(monkeypatch)
     weak reference still gives that class: a reused id (another class, or a
     dead one) is not, so the cell pins it. A snapshot an older `_resume`
     wrote before a reload holds the class itself: compared, never called."""
+    import gc
     import weakref
 
     import mushin._resume as resume
@@ -4669,15 +4670,23 @@ def test_a_snapshot_tells_a_reused_id_and_an_older_watch_s_snapshot(monkeypatch)
     )
     cls = shell.user_ns["Config"]
     other = type("Other", (), {})
-    dead = weakref.ref(type("Gone", (), {}))
+    gone = type("Gone", (), {})
+    dead = weakref.ref(gone)
+    del gone
+    gc.collect()  # a class sits in reference cycles: only the collector frees it
+    assert dead() is None
     for ref in (weakref.ref(other), dead):
         assert not resume._alive_at({id(cls): ref}, cls)
     assert resume._alive_at({id(cls): weakref.ref(cls)}, cls)
     assert resume._alive_at({id(cls): cls}, cls)  # not called: no error
-    resume._pin_classes(
-        state, shell.user_ns, ("exec(SOURCE)\n", {id(cls): weakref.ref(other)})
-    )
+    resume._pin_classes(state, shell.user_ns, ("exec(SOURCE)\n", {id(cls): dead}))
     assert resume._live_pin(state, cls) == ["exec(SOURCE)\n"]
+    # A dead pin at a listed class's id is a reused id: not a lost cell.
+    exec("class Kept:\n    X = 1\n", shell.user_ns)
+    kept = shell.user_ns["Kept"]
+    state["pins"][id(kept)] = (dead, ["exec(SOURCE)\n"])
+    assert resume._listed(kept)
+    assert resume._pinned_cell(kept, shell.user_ns) == (False, None)
 
 
 def test_a_class_a_finalizer_brings_back_is_ambiguous(monkeypatch):
@@ -4706,17 +4715,21 @@ def test_a_class_a_finalizer_brings_back_is_ambiguous(monkeypatch):
         cls = ns["C"]
         state["pins"][id(cls)] = (weakref.ref(cls), ["exec(SOURCE)\n"])
         exec("c = C()\nc.me = c\ndel c\n\n\nclass C(Pooled):\n    X = 3\n", ns)
+        pin = state["pins"][id(cls)][0]
         del cls
         gc.collect()
         back = type(ns["pool"][0])
     finally:
         if enabled:
             gc.enable()
+    ns["Back"] = back
+    exec("class E(Back):\n    Y = 1\n", ns)  # made on it: no walk reaches it
+    made_on = ns["E"]
     assert back.X == 1
-    if resume._listed(back):
-        # 3.15+ keeps the weak references of what a finalizer brings back:
-        # the class keeps its pin.
-        assert resume._pinned_cell(back, ns) == (True, ["exec(SOURCE)\n"])
-    else:
+    if pin() is None:  # before 3.15: its weak references were cleared
+        assert not resume._listed(back)
         assert resume._pinned_cell(back, ns) == (True, [])
+        assert resume._pinned_cell(made_on, ns) == (True, [])
+    else:  # 3.15 keeps them, and the class its pin
+        assert resume._pinned_cell(back, ns) == (True, ["exec(SOURCE)\n"])
     assert resume._listed(ns["C"])  # a class alive as usual is listed

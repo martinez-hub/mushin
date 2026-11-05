@@ -2298,8 +2298,9 @@ def _live_classes(notebook) -> dict:
 def _alive_at(snapshot: dict, cls) -> bool:
     """Whether ``cls`` was alive when the cell whose ``snapshot`` it is
     started: its id's weak reference still gives this class. A snapshot an
-    older ``_resume`` wrote before a reload holds the class itself, which is
-    compared, never called (calling a class would run its notebook code)."""
+    older ``_resume`` of this watch wrote before a reload (its ``pre`` stays
+    registered) holds the class itself, which is compared, never called:
+    calling a class would run its notebook code."""
     ref = snapshot.get(id(cls))
     if type(ref) is not _weakref.ref:
         return ref is cls
@@ -2308,8 +2309,9 @@ def _alive_at(snapshot: dict, cls) -> bool:
 
 def _listed(cls) -> bool:
     """Whether a base still lists ``cls`` among its subclasses (``type``'s
-    own slots, so no hook runs). A class the collector freed and a
-    finalizer brought back is not: its weak references were cleared."""
+    own slots, so no hook runs). Before 3.15, a class the collector freed
+    and a finalizer brought back is not: its weak references were cleared
+    first. 3.15 keeps them (and the class its pin)."""
     subclasses = type.__dict__["__subclasses__"]
     bases = type.__dict__["__bases__"].__get__(cls)
     return any(sub is cls for base in bases for sub in subclasses(base))
@@ -2467,7 +2469,9 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     A cell started after the class was made (a nested ``run_cell``) is
     passed over; once the cell that made it is found, the cells passed over
     have their own classes pinned first, newest first. One whose text is
-    unknown may have made it, so the walk stops there."""
+    unknown may have made it, so the walk stops there. ``(True, [])`` is a
+    class whose cell is lost (one in its lineage was brought back by a
+    finalizer): pinned to no text, so ambiguous."""
     state = _cell_watch(register=False)
     if state is None:
         return False, None
@@ -2489,12 +2493,13 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
             break
         lines = _live_pin(state, cls)
     if lines is None:
-        old = state["pins"].get(id(cls))
-        if old is not None and old[0]() is None and not _listed(cls):
-            # A dead pin at this id, and no base lists the class: it was
-            # collected and brought back by a finalizer (`__del__`), which
-            # clears its weak references first. Its cell is lost: ambiguous.
-            # (A dead pin alone is a reused id: another class lived there.)
+        mro = type.__dict__["__mro__"].__get__(cls)
+        if not all(_listed(k) for k in mro[:-1]):
+            # A class in its lineage that no base lists was collected and
+            # brought back by a finalizer (`__del__`), which before 3.15
+            # clears its weak references first: its pin, and the liveness
+            # walk's way to it and to every class made on it, are gone. Its
+            # cell is lost: ambiguous.
             return True, []
     return lines is not None, lines
 
