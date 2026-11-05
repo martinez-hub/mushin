@@ -3898,6 +3898,36 @@ run("class B3:\\n    K = 1\\n\\n\\nget_ipython().run_cell(MIDDLE3)\\n")
 three = [shell.user_ns["_T3"]]
 run("class C3:\\n    K = 3\\n")
 three.append(_fp(shell.user_ns["task28"])["code"]["C3 (notebook)"])
+# An outer cell binds an old class to `_` as a loop's throwaway name, then a
+# nested cell names it: the class was alive before both cells, so neither
+# is taken for its maker, and the outer cell's statement is never read.
+loop_named = []
+for value in (1, 5):
+    run(f"class Lpd:\\n    LR = {value}\\n\\n\\nregl = {{'old': Lpd}}\\ndel Lpd\\n")
+    run(
+        "class Lpd:\\n    LR = 2\\n\\n\\nfor _ in regl.values():\\n    pass\\n\\n\\n"
+        "get_ipython().run_cell(\\"old_lpd = regl['old']\\")\\n"
+    )
+    run("def task33(a):\\n    return a * old_lpd.LR\\n")
+    loop_named.append(_fp(shell.user_ns["task33"])["code"]["old_lpd (notebook)"])
+# A function from an earlier cell makes a class under `global`, called in a
+# later cell: made during the calling cell, which states none of it.
+run("def build_g():\\n    global Gcls\\n\\n    class Gcls:\\n        X = 1\\n\\n    return Gcls()\\n")
+run("def task34(a):\\n    return a * g_obj.X\\n")
+global_made = []
+for _ in range(2):
+    run("g_obj = build_g()\\n")
+    global_made.append(_fp(shell.user_ns["task34"])["code"]["g_obj (notebook)"])
+run("del build_g, g_obj\\n")
+# A class kept only in a container, subclassed under its own name by a later
+# cell that states that name: the base was made by its own cell, so it is
+# read from there, and an edit to it is seen.
+held_base = []
+for value in (1, 5):
+    run(f"class Hb:\\n    X = {value}\\n\\n\\nregh = {{'k': Hb}}\\ndel Hb\\n")
+    run("class Hb(regh['k']):\\n    Y = 2\\n")
+    run("def task35(a):\\n    return a * Hb.X\\n")
+    held_base.append(_fp(shell.user_ns["task35"])["code"]["Hb (notebook)"])
 # A base remade by `exec` and deleted, reached through a derived class.
 run("class Bse:\\n    X = 1\\n")
 run("class Der(Bse):\\n    pass\\n")
@@ -3917,7 +3947,9 @@ mark = len(out.getvalue())  # the callbacks' own output, before any record
 run(
     "class M(type):\\n    def __getattribute__(cls, n):\\n"
     "        if n == '__dict__':\\n            print('hook ran')\\n"
-    "        return super().__getattribute__(n)\\n"
+    "        return super().__getattribute__(n)\\n\\n"
+    "    def __subclasses__(cls):\\n        print('hook ran')\\n"
+    "        return type.__subclasses__(cls)\\n"
 )
 run("class Hooked(metaclass=M):\\n    X = 1\\n")
 run(v1)
@@ -3951,6 +3983,7 @@ print(json.dumps({
     "restated": restated, "early_i": early_i, "displayed": displayed,
     "three": three, "shown_base": shown_base, "shown_made": shown_made,
     "shown_then_bound": shown_then_bound, "pre_shown": pre_shown,
+    "loop_named": loop_named, "global_made": global_made, "held_base": held_base,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -4018,6 +4051,9 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["shown_made"][0] != got["shown_made"][1]  # pinned with no text
     assert got["shown_then_bound"][0] != got["shown_then_bound"][1]
     assert got["pre_shown"][0] == got["pre_shown"][1]  # read exactly, as stated
+    assert got["loop_named"][0] != got["loop_named"][1]  # its edit, seen
+    assert got["global_made"][0] != got["global_made"][1]  # ambiguous: re-runs
+    assert got["held_base"][0] != got["held_base"][1]  # the base's own cell
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4557,126 +4593,25 @@ def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
     assert digests[0] != digests[1]
 
 
-def test_the_watch_reaches_what_the_record_reaches(kernel):
-    """`_cell_classes` follows the record's walk: a class a name binds, an
-    instance's class, a bound method's owner (a classmethod's class too), a
-    cell function's `__wrapped__`, a method's `__wrapped__`, and notebook
-    bases and nested classes; a library's class is not one."""
+def test_the_watch_finds_every_live_notebook_class(kernel):
+    """`_live_classes` finds every class whose module is the notebook's,
+    however it is held (a name, an instance, a list, only as a base or a
+    nested class) and none of a library's, without running a metaclass's
+    own `__subclasses__`."""
     import mushin._resume as resume
 
     kernel.run(
-        "import collections\nimport functools\n\n\nclass Base:\n"
-        "    def go(self):\n        return 1\n\n    @classmethod\n"
-        "    def make(cls):\n        return cls()\n"
+        "import collections\n\n\nclass Named:\n    pass\n\n\n"
+        "class Held:\n    pass\n\n\nheld = Held()\n\n\n"
+        "class InList:\n    pass\n\n\nkept = [InList]\n\n\n"
+        "class Base:\n    pass\n\n\nclass Kid(Base):\n    pass\n\n\n"
+        "class Out:\n    class In:\n        pass\n\n\n"
+        "class Meta(type):\n    def __subclasses__(cls):\n"
+        "        raise RuntimeError('hook ran')\n\n\n"
+        "class WithMeta(metaclass=Meta):\n    pass\n\n\n"
+        "del Held, InList, Base, Out\ncounter = collections.Counter()\n"
     )
-    kernel.run("class Named(Base):\n    class Inner:\n        pass\n")
-    kernel.run("class Held:\n    pass\n\n\nheld = Held()\n")
-    kernel.run("class Owner(Base):\n    pass\n\n\nbound = Owner().go\n")
-    kernel.run("class Viacm(Base):\n    pass\n\n\ncm = Viacm.make\n")
-    kernel.run(
-        "class Wrapped:\n    pass\n\n\ndef _make():\n    return Wrapped()\n\n\n"
-        "maker = functools.wraps(Wrapped)(_make)\n"
-    )
-    kernel.run(
-        "class InMethod:\n    pass\n\n\nclass HasMethod:\n"
-        "    def _m(self):\n        return 1\n\n"
-        "    m = functools.wraps(InMethod)(_m)\n\n\nhm = HasMethod()\n"
-    )
-    kernel.run(
-        "del Held, Owner, Viacm, Wrapped, InMethod, HasMethod, Base\n"
-        "counter = collections.Counter()\n"
-    )
-    reached = {
-        type.__dict__["__qualname__"].__get__(cls)
-        for cls in resume._cell_classes(kernel.ns).values()
-    }
-    assert reached == {
-        "Base",
-        "Named",
-        "Named.Inner",
-        "Held",
-        "Owner",
-        "Viacm",
-        "Wrapped",
-        "HasMethod",
-        "InMethod",
-    }
-
-
-def test_the_watch_reaches_every_class_the_record_visits(kernel, monkeypatch):
-    """Parity: every class the record visits from a task's names is within
-    the watch's reach (`_cell_classes`), whatever path leads to it, so no
-    class the watch cannot see is read from an older kept statement."""
-    import mushin._resume as resume
-
-    cells = [
-        "import functools\n\n\ndef register(cls):\n    def make():\n"
-        "        return cls()\n\n    return functools.wraps(cls)(make)\n",
-        "class Plain:\n    X = 1\n",
-        "class Held:\n    X = 1\n\n\nheld = Held()\ndel Held\n",
-        "@register\nclass Wrapped:\n    X = 1\n",
-        "class ByInstance:\n    X = 1\n\n\n"
-        "w_inst = functools.wraps(ByInstance())(lambda: 0)\ndel ByInstance\n",
-        "class InPartial:\n    X = 1\n\n\np_wrap = functools.partial(register(InPartial))\n"
-        "del InPartial\n",
-        "class Base:\n    def go(self):\n        return 1\n\n    @classmethod\n"
-        "    def make(cls):\n        return cls()\n",
-        "class Owned(Base):\n    X = 1\n\n\nbm = Owned().go\ndel Owned\n",
-        "class ViaCm(Base):\n    X = 1\n\n\ncm = ViaCm.make\ndel ViaCm\n",
-        "class Meta(type):\n    K = 1\n\n\nclass Lib(metaclass=Meta):\n"
-        "    __module__ = 'somelib'\n\n\ndel Meta\n",
-        "class Gone:\n    X = 1\n\n\nclass Kid(Gone):\n    pass\n\n\ndel Gone\n",
-        "class Out:\n    class In:\n        X = 1\n\n\ninner = Out.In()\ndel Out\n",
-        "class Target:\n    X = 1\n\n\nclass HasM:\n    def _m(self):\n        return 1\n\n"
-        "    m = functools.wraps(Target)(_m)\n\n\nhm = HasM()\ndel Target, HasM\n",
-        "class S(str):\n    pass\n\n\nclass KeyCls:\n    X = 1\n\n\n"
-        "globals()[S('kobj')] = KeyCls()\ndel KeyCls\n",
-        "class ModCls:\n    X = 1\n\n\nModCls.__module__ = S(__name__)\n"
-        "mobj = ModCls()\ndel ModCls\n",
-        "def task(a):\n    return [Plain, held, Wrapped, w_inst, p_wrap, bm, cm, Lib,"
-        " Kid, inner, hm, kobj, mobj]\n",
-    ]
-    _run_cells(kernel, cells)
-    visited = []
-    real = resume._class_sites
-
-    def spy(cls, *args, **kwargs):
-        visited.append(cls)
-        return real(cls, *args, **kwargs)
-
-    monkeypatch.setattr(resume, "_class_sites", spy)
-    resume.project_fingerprints(kernel.ns["task"])
-    reach = resume._cell_classes(kernel.ns)
-    names = {type.__dict__["__qualname__"].__get__(cls) for cls in visited}
-    assert {"Plain", "Held", "Wrapped", "ByInstance", "InPartial", "Owned"} <= names
-    assert {"ViaCm", "Meta", "Gone", "Kid", "Out.In", "HasM", "KeyCls"} <= names
-    assert "ModCls" in names
-    missed = [
-        type.__dict__["__qualname__"].__get__(cls)
-        for cls in visited
-        if id(cls) not in reach
-        and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
-    ]
-    assert missed == []
-
-
-def test_a_self_wrapped_function_ends_the_watch_s_walk(kernel):
-    """`functools.wraps(fn)(fn)` makes a function its own `__wrapped__`: the
-    walk takes each function once, so it ends (in the callbacks, a loop
-    would hang every cell). Run in a thread, so a regression fails here."""
-    import threading
-
-    import mushin._resume as resume
-
-    kernel.run(
-        "import functools\n\n\ndef keep(fn):\n    return functools.wraps(fn)(fn)\n"
-    )
-    kernel.run("@keep\ndef helper(x):\n    return x\n")
-    assert kernel.ns["helper"].__wrapped__ is kernel.ns["helper"]
-    done: list = []
-    walk = threading.Thread(
-        target=lambda: done.append(resume._cell_classes(kernel.ns)), daemon=True
-    )
-    walk.start()
-    walk.join(10)
-    assert done
+    live = resume._live_classes(kernel.ns["__name__"])
+    names = {type.__dict__["__qualname__"].__get__(cls) for cls in live.values()}
+    assert {"Named", "Held", "InList", "Base", "Kid", "Out", "Out.In"} <= names
+    assert {"Meta", "WithMeta"} <= names and "Counter" not in names

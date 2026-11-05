@@ -159,8 +159,10 @@ one cell holds more than one version of it (two `class` statements of it run,
 or a statement and a class bound from elsewhere). Nor may a cell holding a
 form feed, a vertical tab or another character that ends a line for
 Python's `str.splitlines` (not a newline or a carriage return) be compared,
-nor what an IPython input transformer changes in a cell. After editing such a module
-or class, use a new `working_dir`.
+nor what an IPython input transformer changes in a cell, and a class a
+background thread or a callback makes while a cell runs may be taken for one
+that cell made. After editing such a module or class, use a new
+`working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

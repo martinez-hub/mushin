@@ -186,7 +186,8 @@ rules:
   bound from elsewhere), nor a cell holding a form feed, a vertical tab or
   another character that ends a line for `str.splitlines` (not a newline or
   a carriage return), nor what an IPython input transformer changes in a
-  cell: after editing one, use a new `working_dir`. Taking
+  cell, and a class a background thread makes while a cell runs may be
+  taken for that cell's: after editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed

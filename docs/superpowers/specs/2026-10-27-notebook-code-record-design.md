@@ -2891,3 +2891,91 @@ are each caught through pytest by node id, with the bytecode cache
 cleared. The round-13 head fails the shown-base and shown-then-bound cases.
 313 tests in the module, passing on 3.11 to 3.15; the whole suite 1656
 passed (in three parts); the docs build and the 165 docs tests pass.
+
+### #295 round 15 (2026-11-05): made means alive at the end, not at the start
+
+Both reviews of round 14 (e5f91b6...7ec564f) found a regression in nested
+cells: an outer cell binds an old class to a kernel name partway through
+(the plainest form is `for _ in registry.values(): pass`), then starts a
+nested cell that names it. The nested cell's snapshot already held it
+through history, so it did not pin it, and the outer cell pinned it with
+its own text and read its own statement for it. The adversarial run's
+patch (pin the running parent when a nested cell starts) would be one more
+reach rule. `/code-review` named the cause: rounds 11 to 14 approximated
+"made during this cell" by reachability (named, then history, then
+passed-over cells), and each round's special case interacted with the
+next. *Mistake, the third of its kind:* text, then the namespace, then
+reach were each a proxy for the fact. The fact is liveness.
+
+**Design.** A cell's snapshot is every live notebook class, found from
+`object` through `type.__dict__["__subclasses__"]` (the type's own slot, so
+no metaclass hook runs), with the module compared through `str`'s slot.
+The objects are held, so no id is reused while the cell runs. At the end,
+every notebook class alive now and not in the snapshot was made during the
+cell, and is pinned to its text (first pin wins; a `<locals>` class is
+skipped and read from its factory's cell). The record inside running cells
+keeps its walk: cells whose snapshot holds the class are passed over, and
+pinned first, newest first. Everything else stays: the static transform, a
+pinned cell stating none of the class making it ambiguous, the kept texts
+for a class made before the watch, the 3.13+ rules. `_cell_reach`,
+`_cell_classes`, the history rules, the kernel-name logic and the reach and
+parity tests go: the pin no longer depends on what the record reaches.
+
+**The existing shell cases under liveness, by hand (expected before
+running):**
+- *More exact, still passing:* a class kept only in a container is pinned
+  to the cell that made it (`shown_base`'s base, `Early`-style list cases).
+  A shown class is never pinned to the cell that shows it (`displayed`,
+  `shown_then_bound`: the old class keeps its making cell's pin, so it is
+  exact and still differs from the restating cell's).
+- `shown_made` (`%%time` made it): pinned to the `%%time` cell, which
+  states none of it: ambiguous, as before.
+- `pre_shown`, `Early`, `early_i`, `restored`: made before the watch, alive
+  at every snapshot, never pinned: read from the kept texts, as before.
+- *The instance, alias, factory, derived, nested and remake cases:* each
+  class is pinned to the cell that ran its creation, as before.
+
+**Accepted, decided now:**
+- *Threads:* a class a background thread or a widget callback makes while
+  a cell runs is credited to that cell. That is wrong only if the cell
+  states the same qualname. One "may" clause goes into the limits.
+- *Cost:* two walks per cell, about 5.5 ms each with torch, Lightning,
+  numpy, pandas and xarray loaded (12,664 live classes). The one-walk
+  version (reuse the previous end's set) would credit classes made between
+  cells to the next cell; a follow-up.
+
+**Kill criterion:** if an existing shell case regresses under liveness (an
+exact read becomes ambiguous, or any read is wrong), stop and rethink
+before patching. Liveness is meant to need no special cases.
+
+**Tests to add:**
+- the `for _ in registry.values(): pass` case with a nested cell naming the
+  class (the regression);
+- a function from an earlier cell that makes a class under `global`, called
+  in a later cell (pinned to the caller, ambiguous);
+- a container-held class subclassed under its own name: was accepted, now
+  exact, so the base's edit is seen.
+
+**Mutants:**
+- an empty snapshot (`Early` and `pre_shown`);
+- the `<locals>` skip removed (`local`);
+- the passed-over cells not pinned first (`restated`);
+- the walk through `cls.__subclasses__()` instead of the slot: a metaclass
+  that overrides it, and the existing check that no hook ran.
+
+**Stopping rule for round 15's reviews:** a regression from 7ec564f blocks;
+a pre-existing wrong read or stand-in through ordinary shapes blocks. A
+case that needs a thread, `silent=True`, a `str`-subclass key, a metaclass
+hook, or cost is accepted.
+
+**Results (#295 round 15).** The kill criterion held: every existing shell
+case passed under liveness on the first run, with no special case added.
+The three new cases: the loop-variable case and the container-held base
+fail on 7ec564f and pass now; the `global` factory call is ambiguous on
+both. The reach and parity tests went with `_cell_reach`; a liveness test
+replaces them, and the shell's no-hook check now also covers a metaclass's
+own `__subclasses__`. Mutants, with the bytecode cache cleared: an empty
+snapshot, the `<locals>` skip removed, the passed-over cells not pinned
+first, and the walk through the attribute instead of the slot; all
+caught. 311 tests in the module, passing on 3.11 to 3.15; the whole suite
+1654 passed (in three parts); the docs build and the 165 docs tests pass.

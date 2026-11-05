@@ -2255,9 +2255,9 @@ def _method_functions(value) -> list:
 #: so a reloaded ``_resume`` finds the same one): ``pins`` maps ``id(cls)``
 #: to ``(weakref, lines)``, the transformed text of the cell that bound it;
 #: ``running`` is the cells running now (a magic's nested cell too), each
-#: ``(info, (raw text, {id(class): class}))`` with every class the record
-#: could reach when the cell started (``_cell_classes``), or
-#: ``(info, None)`` when the cell's text is unknown.
+#: ``(info, (raw text, {id(class): class}))`` with every notebook class
+#: alive when the cell started (``_live_classes``), or ``(info, None)``
+#: when the cell's text is unknown.
 _CELL_WATCH = "_mushin_cell_watch"
 #: A ``class`` keyword at a line's start, after its indentation: where every
 #: ``class`` statement of a kept cell's text starts (it is Python, magics
@@ -2266,105 +2266,30 @@ _CELL_WATCH = "_mushin_cell_watch"
 _CLASS_LINE = re.compile(r"(?:^|[\r\n])[ \t\f]*class\b")
 
 
-def _cell_reach(namespace: dict) -> tuple[dict, set]:
-    """``{id(cls): cls}`` for every notebook class the record can reach from
-    the namespace's names, following its walk (``_notebook_entries``): a
-    value as ``_notebook_object`` resolves it (a class or its metaclass, an
-    instance's class, a bound method's owner or its class, a cell function
-    through its wrappers, ``_cell_function``); a cell function's
-    ``__wrapped__``, again;
-    a class's notebook bases and its methods (``_method_functions``), with
-    their ``__wrapped__``; and the classes a class's body made
-    (``Outer.Inner``). Names are read as ``str``s, values by type, functions
-    through their own ``__dict__`` and classes through the type's own slots,
-    so no notebook hook runs; the items are copied once, as a callback
-    thread can add names. Returned as ``(classes, named)``: ``classes``
-    follows kernel names (IPython's history ``_``, ``_N``, and dunders) too,
-    and ``named`` holds the ids reached without them, as the record reaches
-    them (it skips kernel names)."""
-    import types
-
-    notebook = namespace.get("__name__")
+def _live_classes(notebook) -> dict:
+    """``{id(cls): cls}`` for every live class whose ``__module__`` is the
+    notebook's (``notebook``, its namespace's ``__name__``). Every class is a
+    subclass of ``object``, so a walk from it through ``type``'s own
+    ``__subclasses__`` finds them all, whatever holds them (a name, an
+    instance, a list, nothing but a base) and whether or not the record
+    reaches them. The slot is called directly and each module is read from
+    the class's own dict and compared through ``str``'s slot, so no
+    notebook hook runs (a metaclass's own ``__subclasses__`` neither)."""
+    subclasses = type.__dict__["__subclasses__"]
+    own_dict = type.__dict__["__dict__"]
     found: dict = {}
-    checked: set = set()
-    functions: set = set()
-    pending: list = []
-    calls: list = []
-
-    def take(value) -> None:
-        if id(value) in checked or not issubclass(type(value), type):
-            return
-        checked.add(id(value))
-        module = type.__dict__["__dict__"].__get__(value).get("__module__")
-        # Compared through `str`'s own slot, as a `str` subclass can be one.
-        if issubclass(type(module), str) and str.__eq__(module, notebook) is True:
-            found[id(value)] = value
-            pending.append(value)
-
-    def take_function(value) -> bool:
-        """Queue the cell function ``value`` stands for; False if none."""
-        function = _cell_function(value, namespace)
-        if function is None:
-            return False
-        if id(function) not in functions:  # a wrapper can wrap itself
-            functions.add(id(function))
-            calls.append(function)
-        return True
-
-    def follow(value) -> None:
-        if type(value) is types.MethodType:
-            owner = value.__self__
-            take(owner)
-            take(type(owner))
-        elif issubclass(type(value), type):
-            take(value)
-            take(type(value))  # a foreign class's notebook metaclass
-        elif not take_function(value):
-            take(type(value))
-
-    def close() -> None:
-        while pending or calls:
-            walk()
-
-    def walk() -> None:
-        if calls:
-            # A notebook decorator's wrapper: the record follows what it wraps.
-            follow(calls.pop().__dict__.get("__wrapped__"))
-            return
-        cls = pending.pop()
-        for base in type.__dict__["__bases__"].__get__(cls):
-            take(base)
-        prefix = type.__dict__["__qualname__"].__get__(cls) + "."
-        for value in list(type.__dict__["__dict__"].__get__(cls).values()):
-            if issubclass(type(value), type):
-                inner = type.__dict__["__qualname__"].__get__(value)
-                if inner.startswith(prefix):
-                    take(value)
-            else:
-                for method in _method_functions(value):
-                    take_function(method)
-
-    # A `str` subclass as a key too, read through `str`'s own slot. The names
-    # the record follows first, then the kernel names it skips.
-    items = [(n, v) for n, v in list(namespace.items()) if issubclass(type(n), str)]
-    kernel = [_kernel_name(str.__str__(n)) for n, _ in items]
-    for (_, value), skipped in zip(items, kernel, strict=True):
-        if not skipped:
-            follow(value)
-    close()
-    named = set(found)
-    for (_, value), skipped in zip(items, kernel, strict=True):
-        if skipped:
-            follow(value)
-    close()
-    return found, named
-
-
-def _cell_classes(namespace: dict) -> dict:
-    """``{id(cls): cls}`` for every notebook class the record can reach from
-    the namespace's names (``_cell_reach``, without kernel names)."""
-    found, named = _cell_reach(namespace)
-    return {key: cls for key, cls in found.items() if key in named}
+    seen = {id(object)}
+    stack = [object]
+    while stack:
+        for sub in subclasses(stack.pop()):
+            if id(sub) in seen:
+                continue
+            seen.add(id(sub))
+            stack.append(sub)
+            module = own_dict.__get__(sub).get("__module__")
+            if issubclass(type(module), str) and str.__eq__(module, notebook) is True:
+                found[id(sub)] = sub
+    return found
 
 
 def _live_pin(state: dict, cls):
@@ -2413,12 +2338,12 @@ def _cell_watch(register: bool = True) -> dict | None:
                 try:
                     raw = getattr(info, "raw_cell", None)
                     if type(raw) is str:
-                        # Every class the record could reach, whatever the
-                        # text says: a cell's text cannot tell a statement
-                        # from a mention, and `exec`, `%run` or a factory
-                        # makes one with no `class` in it. Held by identity,
-                        # so no id is reused while the cell runs.
-                        entry = (raw, _cell_reach(shell.user_ns)[0])
+                        # Every notebook class alive now, whatever the text
+                        # says or holds it: one alive at the end and not now
+                        # was made by the cell. Held by identity, so no id
+                        # is reused while the cell runs.
+                        notebook = shell.user_ns.get("__name__")
+                        entry = (raw, _live_classes(notebook))
                 except Exception:  # noqa: BLE001 - the cell still ends at post
                     entry = None
                 running.append((info, entry))
@@ -2476,29 +2401,26 @@ def _cell_watch(register: bool = True) -> dict | None:
         return None
 
 
-def _pin_classes(state: dict, namespace: dict, entry, reach=None) -> None:
+def _pin_classes(state: dict, namespace: dict, entry, live=None) -> None:
     """Pin each class the cell ``entry`` (``(raw, classes)``) made to the
-    cell's transformed text: every class the record can reach now
-    (``_cell_classes``) that it could not when the cell started, unless its
-    qualname is a function's local one (``make.<locals>.C``, read from the
-    function's cell). By the object, whatever holds it: a name, an alias
-    (``saved = Config; del Config``), an instance (``Config = Config()``), a
-    derived class. The first pin wins: a magic's nested cell (``%%capture``)
-    ends before the magic's own cell, and only its text holds the statement.
-    Nothing is parsed here; a record reads the text (``_class_sites``), and a
-    class whose text holds no statement of it (``%%time``, ``exec``, a
-    factory's call, a copy) is ambiguous. A class newly in reach only
-    through IPython's history (the cell's displayed result) was shown by the
-    cell, which may not have made it: it is pinned with no text, so it is
-    ambiguous. ``reach`` is ``_cell_reach``'s, when the caller has it."""
+    cell's transformed text: every notebook class alive now that was not
+    when the cell started (``_live_classes``), however it is held, unless
+    its qualname is a function's local one (``make.<locals>.C``, read from
+    the function's cell). The first pin wins: a magic's nested cell
+    (``%%capture``) ends before the magic's own cell, and only its text
+    holds the statement. Nothing is parsed here; a record reads the text
+    (``_class_sites``), and a class whose text holds no statement of it
+    (``%%time``, ``exec``, a factory's call, a copy) is ambiguous. ``live``
+    is ``_live_classes``', when the caller has it."""
     import weakref
 
     raw, before = entry
     pins = state["pins"]
-    found, named = _cell_reach(namespace) if reach is None else reach
+    if live is None:
+        live = _live_classes(namespace.get("__name__"))
     made = [
-        (cls, key in named)
-        for key, cls in found.items()
+        cls
+        for key, cls in live.items()
         if key not in before
         and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
         and _live_pin(state, cls) is None
@@ -2509,8 +2431,8 @@ def _pin_classes(state: dict, namespace: dict, entry, reach=None) -> None:
     if len(pins) > 4096:  # drop the pins of classes that are gone
         for gone in [k for k, (ref, _) in pins.items() if ref() is None]:
             del pins[gone]
-    for cls, by_name in made:
-        pins[id(cls)] = (weakref.ref(cls), lines if by_name else [])
+    for cls in made:
+        pins[id(cls)] = (weakref.ref(cls), lines)
 
 
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
@@ -2518,10 +2440,10 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     bound ``cls`` run, and that cell's transformed text (one may hold no
     statement of the class: ``%%time``, ``exec``, a factory's call; see
     ``_class_sites``). Pinned when the cell ended, or, for a record taken
-    inside running cells, now: the newest running cell whose start could not
-    reach the class has what it made so far pinned (``_pin_classes``). A cell
-    started after the class was made (a nested ``run_cell``) could, and is
-    passed over; once a cell that could not is found, the cells passed over
+    inside running cells, now: the newest running cell the class was not
+    alive at the start of has what it made so far pinned (``_pin_classes``).
+    A cell started after the class was made (a nested ``run_cell``) is
+    passed over; once the cell that made it is found, the cells passed over
     have their own classes pinned first, newest first. One whose text is
     unknown may have made it, so the walk stops there."""
     state = _cell_watch(register=False)
@@ -2538,10 +2460,10 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
                 continue
             # The cells passed over claim their own classes first, newest
             # first, so this one's pin takes only what it made itself.
-            reach = _cell_reach(namespace)
+            live = _live_classes(namespace.get("__name__"))
             for inner in passed:
-                _pin_classes(state, namespace, inner, reach)
-            _pin_classes(state, namespace, entry, reach)
+                _pin_classes(state, namespace, inner, live)
+            _pin_classes(state, namespace, entry, live)
             break
         lines = _live_pin(state, cls)
     return lines is not None, lines
@@ -2583,7 +2505,7 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     - a method, whose code names the cell: the innermost statement of its
       name spanning the method's first line;
     - 3.14's ``__annotate_func__`` (a class with annotations), the same way;
-    - the cell the shell's watch saw bind it (``_pinned_cell``). When that
+    - the cell the shell's watch saw make it (``_pinned_cell``). When that
       cell states no such class, code it ran made it, from text that is not
       kept (``%%time``, an ``exec`` string, ``%run``) or from a kept
       statement (a ``global`` factory, a copy such as
