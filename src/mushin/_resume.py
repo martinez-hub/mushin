@@ -1358,10 +1358,12 @@ def _first_line(node) -> int:
 
 
 def _class_nodes(tree) -> list:
-    """``(node, qualname)`` for each ``class`` statement in a cell's tree, its
-    qualname as the compiler makes it: ``A.C`` in a class, ``f.<locals>.C``
-    in a function, the bare name when the enclosing function or class
-    declares it ``global``."""
+    """``(node, qualname, block)`` for each ``class`` statement in a cell's
+    tree: its qualname as the compiler makes it (``A.C`` in a class,
+    ``f.<locals>.C`` in a function, the bare name when the enclosing function
+    or class declares it ``global``), and the statement list it is in (two
+    statements in one block run one after the other; in two branches of an
+    ``if`` or a ``try``, only one does)."""
     import ast
 
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -1377,23 +1379,34 @@ def _class_nodes(tree) -> list:
                 stack.extend(ast.iter_child_nodes(sub))
         return frozenset(names)
 
-    out: list = []
-    stack = [(child, "", frozenset()) for child in ast.iter_child_nodes(tree)]
+    def children(node, prefix, globs) -> list:
+        out = []
+        for field, value in ast.iter_fields(node):
+            items = value if type(value) is list else [value]
+            for child in items:
+                if isinstance(child, ast.AST):
+                    out.append((child, prefix, globs, (id(node), field)))
+        return out
+
+    found: list = []
+    stack = children(tree, "", frozenset())
     while stack:
-        node, prefix, globs = stack.pop()
+        node, prefix, globs, block = stack.pop()
         kind = type(node)
         if kind in defs:
             qualname = node.name if node.name in globs else prefix + node.name
             if kind is ast.ClassDef:
-                out.append((node, qualname))
+                found.append((node, qualname, block))
                 inner = qualname + "."
             else:
                 inner = qualname + ".<locals>."
             inside = declared_global(node)
-            stack.extend((child, inner, inside) for child in node.body)
+            stack.extend(
+                (child, inner, inside, (id(node), "body")) for child in node.body
+            )
         elif kind is not ast.Lambda:
-            stack.extend((child, prefix, globs) for child in ast.iter_child_nodes(node))
-    return out
+            stack.extend(children(node, prefix, globs))
+    return found
 
 
 def _cell_imports(
@@ -1409,8 +1422,9 @@ def _cell_imports(
     ``pkg``, and so do ``import pkg.sub as pkg`` and ``from pkg import pkg``),
     ``lazy`` when it is written ``lazy import`` (3.15): such a statement's
     proxy reads two ways (``_chain_bases``). A cell with neither the word
-    ``import`` nor ``class`` is not parsed, and one that does not parse
-    imports and defines nothing (it never ran)."""
+    ``import`` nor a ``class NAME`` statement (``_CLASS_NAME``) is not
+    parsed, and one that does not parse imports and defines nothing (it never
+    ran)."""
     import ast
 
     modules: tuple[str, ...] = ()
@@ -1419,7 +1433,7 @@ def _cell_imports(
     tree = _parse_cell(text) if wanted else None
     if tree is None:
         return modules, bindings, ()
-    classes = tuple(sorted({qualname for _, qualname in _class_nodes(tree)}))
+    classes = tuple(sorted({qualname for _, qualname, _ in _class_nodes(tree)}))
     modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
     scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
     found: set[tuple[str, str, bool]] = set()
@@ -1483,8 +1497,11 @@ def _scan_kept_cells() -> list[tuple[str, tuple]]:
     return out
 
 
-def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
-    """What every cell the kernel keeps imports (``_scan_kept_cells``):
+def _kept_cell_reading(
+    scan=None,
+) -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
+    """What every cell the kernel keeps imports (``scan``, or
+    ``_scan_kept_cells``):
     ``(modules, bindings)``, ``bindings`` mapping a name to ``(dotted,
     lazy)`` for each import binding it to a dotted module starting with it.
     Every kept cell counts, an older version of a re-run cell too: a
@@ -1493,18 +1510,19 @@ def _kept_cell_reading() -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
     result, a local name the syntax cannot follow)."""
     modules: set[str] = set()
     bindings: dict[str, set[tuple[str, bool]]] = {}
-    for _, found in _scan_kept_cells():
+    for _, found in _scan_kept_cells() if scan is None else scan:
         modules.update(found[0])
         for name, dotted, lazy in found[1]:
             bindings.setdefault(name, set()).add((dotted, lazy))
     return modules, bindings
 
 
-def _kept_class_index() -> dict[str, list[str]]:
+def _kept_class_index(scan) -> dict[str, list[str]]:
     """``{qualname: [text, ...]}`` for the ``class`` statements in the cells
-    the kernel keeps (``_scan_kept_cells``), each text once per qualname."""
+    the kernel keeps (a ``_scan_kept_cells`` result), each text once per
+    qualname."""
     index: dict[str, list[str]] = {}
-    for text, found in _scan_kept_cells():
+    for text, found in scan:
         for qualname in found[2]:
             index.setdefault(qualname, []).append(text)
     return index
@@ -2217,7 +2235,7 @@ def _method_functions(value) -> list:
 #: made it; ``running`` is the cells running now (a magic's nested cell
 #: too), each ``(raw text, {name: object before the cell})`` or None.
 _CELL_WATCH = "_mushin_cell_watch"
-_CLASS_NAME = re.compile(r"\bclass\s+([^\W\d]\w*)")
+_CLASS_NAME = re.compile(r"\bclass(?:\s|\\\r?\n)+([^\W\d]\w*)")
 
 
 def _shell():
@@ -2309,7 +2327,7 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
         return
     lines = state["transform"](raw).splitlines(True)
     tree = _cell_tree(lines)
-    stated = {q for _, q in _class_nodes(tree)} if tree is not None else set()
+    stated = {q for _, q, _ in _class_nodes(tree)} if tree is not None else set()
     if len(pins) > 4096:  # drop the pins of classes that are gone
         for key in [k for k, (ref, _) in pins.items() if ref() is None]:
             del pins[key]
@@ -2351,11 +2369,13 @@ def _ambiguous_own(cls) -> str:
     """A class's own digest when several kept texts could be its statement:
     unlike any digest an earlier process or object wrote, and the same while
     this object is the one bound (a recompute, never a wrong reuse)."""
+    import os
     import uuid
     import weakref
 
-    if not _PROCESS_TOKEN:
-        _PROCESS_TOKEN.append(uuid.uuid4().hex)
+    if not _PROCESS_TOKEN or _PROCESS_TOKEN[0][0] != os.getpid():
+        # A forked child inherits the list: a new one per process id.
+        _PROCESS_TOKEN[:] = [(os.getpid(), uuid.uuid4().hex)]
     hit = _CLASS_GENERATIONS.get(id(cls))
     if hit is None or hit[0]() is not cls:
         if len(_CLASS_GENERATIONS) > 4096:
@@ -2363,7 +2383,7 @@ def _ambiguous_own(cls) -> str:
                 del _CLASS_GENERATIONS[key]
         hit = (weakref.ref(cls), next(_GENERATION_COUNTER))
         _CLASS_GENERATIONS[id(cls)] = hit
-    return _short_hash(f"class\n?\n{_PROCESS_TOKEN[0]}\n{hit[1]}".encode())
+    return _short_hash(f"class\n?\n{_PROCESS_TOKEN[0][1]}\n{hit[1]}".encode())
 
 
 def _class_sites(
@@ -2376,14 +2396,14 @@ def _class_sites(
       name spanning the method's first line;
     - 3.14's ``__annotate_func__`` (a class with annotations), the same way;
     - the cell the shell's watch saw make it (``_pinned_cell``); one it could
-      not read (``%%time``, ``exec``) is ambiguous;
+      not read (``%%time``, ``exec``) gives no site, as on main;
     - the kept cells' texts with a statement of its qualname
       (``class_texts(qualname)``, None when the cells could not be scanned).
-    In a text, every statement of the qualname counts (a factory's two
+    In a text, every statement of the qualname counts (an ``if``'s two
     branches: which one runs is a value), but on 3.13+ only those at the
     class's ``__firstlineno__`` (the first decorator's line); two different
-    top-level ones in a pinned text, which 3.11 and 3.12 cannot tell apart,
-    are ambiguous. Several kept texts with different statements are
+    ones in one block, one after the other, which 3.11 and 3.12 cannot tell
+    apart, are ambiguous. Several kept texts with different statements are
     ambiguous (which is in force cannot be told) and all of them are read.
     ``later``: found otherwise than through a method, so main's record had
     no reading of it (``_notebook_entries`` follows it after main's seeds).
@@ -2422,37 +2442,48 @@ def _class_sites(
         first = None
         if sys.version_info >= (3, 13):
             return [], False, True  # no `class` statement made it
+    dumps: dict[int, str] = {}
 
-    def statements(tree) -> list:
+    def dump(node) -> str:
+        if id(node) not in dumps:
+            dumps[id(node)] = _canonical_dump(node)
+        return dumps[id(node)]
+
+    def statements(tree) -> tuple[list, bool]:
+        """The text's statements of the qualname (on 3.13+, at its first
+        line), sorted; and whether two different ones share a block, so one
+        could be in force at a record taken between them."""
         found = [
-            node
-            for node, q in _class_nodes(tree)
+            (node, block)
+            for node, q, block in _class_nodes(tree)
             if q == qualname and (first is None or _first_line(node) == first)
         ]
-        return sorted(found, key=_canonical_dump)
+        blocks: dict = {}
+        for node, block in found:
+            blocks.setdefault(block, set()).add(dump(node))
+        siblings = any(len(texts) > 1 for texts in blocks.values())
+        return sorted((node for node, _ in found), key=dump), siblings
 
     pinned, lines = _pinned_cell(cls, namespace)
     if pinned:
+        # A cell the watch could not read (`%%time`, `exec`): no site, as on
+        # main, and no older kept text stands in for it.
         tree = _cell_tree(lines) if lines is not None else None
-        nodes = statements(tree) if tree is not None else []
-        if not nodes:
-            return [], True, True
-        distinct = {_canonical_dump(node) for node in nodes}
-        # Two different statements a cell runs one after the other (not a
-        # function's branches) cannot be told apart without a first line.
-        return [(tree, nodes)], len(distinct) > 1 and "<locals>" not in qualname, True
+        nodes, siblings = statements(tree) if tree is not None else ([], False)
+        return ([(tree, nodes)] if nodes else []), siblings, True
     texts = class_texts(qualname) if class_texts is not None else None
     if texts is None:
         return [], True, True
     groups: dict[str, list] = {}
+    ambiguous = False
     for text in texts:
         tree = _cell_tree(text.splitlines(True))
-        nodes = statements(tree) if tree is not None else []
+        nodes, siblings = statements(tree) if tree is not None else ([], False)
         if nodes:
-            key = "|".join(_canonical_dump(node) for node in nodes)
-            groups.setdefault(key, []).append((tree, nodes))
+            ambiguous |= siblings
+            groups.setdefault("|".join(map(dump, nodes)), []).append((tree, nodes))
     sites = [site for key in sorted(groups) for site in groups[key]]
-    return sites, len(groups) > 1, True
+    return sites, ambiguous or len(groups) > 1, True
 
 
 def _cell_function(value, namespace):
@@ -2790,8 +2821,8 @@ def _notebook_entries(
             for base, notebook_base in bases:
                 if notebook_base is None:
                     # A base from a module: its module, by type, as
-                    # _notebook_class reads it. A class with no method of its
-                    # own has no statement to read its bases from.
+                    # _notebook_class reads it, whether or not the class's
+                    # statement is found (_class_sites).
                     try:
                         module = vars(base).get("__module__")
                     except TypeError:
@@ -3059,23 +3090,21 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[s
     added: set[str] = set()
     cell_modules: set[str] = set()
     cell_bindings: dict = {}
+    scan = None
     try:
-        cell_modules, cell_bindings = _kept_cell_reading()
+        scan = _scan_kept_cells()
+        cell_modules, cell_bindings = _kept_cell_reading(scan)
     except Exception as error:  # noqa: BLE001 - never fail the record
         cell_modules, cell_bindings = set(), {}
         _warn_cells_unread(error)
-    # The kept cells' `class` statements, read once and only if a class with
-    # no method of its own needs them; None when they cannot be (its warning
-    # is the scan's, and such a class is then ambiguous).
+    # The kept cells' `class` statements, from the same scan, indexed only if
+    # a class with no method of its own needs them; None when the scan
+    # failed (its warning is given above, and such a class is ambiguous).
     index: list = []
 
     def class_texts(qualname: str) -> list[str] | None:
         if not index:
-            try:
-                index.append(_kept_class_index())
-            except Exception as error:  # noqa: BLE001 - never fail the record
-                index.append(None)
-                _warn_cells_unread(error)
+            index.append(None if scan is None else _kept_class_index(scan))
         return None if index[0] is None else index[0].get(qualname, [])
 
     for namespace, roots in notebooks.values():

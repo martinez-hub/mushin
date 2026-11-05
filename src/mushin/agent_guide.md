@@ -169,12 +169,14 @@ rules:
   them when the run starts; no value does (a number, a model name, a dict
   config), so pass values as swept parameters. For such a task, every
   project module a cell imports counts too, so with `cache_dir=`, importing
-  another one in a cell can make the cells compute again, as can re-running
-  a class's cell when mushin cannot tell its version apart from another kept
-  one (a class a function makes). A module loaded
-  other than by a cell's `import` statement (`importlib.import_module`, a
-  plugin loader, an import in a `%%time` cell) may not be compared: after
-  editing one, use a new `working_dir`. Taking
+  another one in a cell can make the cells compute again. Re-running a
+  class's cell when mushin cannot tell its version apart from another kept
+  one (a class a function makes) can make a resume re-run the cells too. A
+  module loaded other than by a cell's `import` statement
+  (`importlib.import_module`, a plugin loader, an import in a `%%time` cell)
+  may not be compared, nor may a class no `class` statement makes
+  (`type(...)`, `make_dataclass`): after editing one, use a new
+  `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed

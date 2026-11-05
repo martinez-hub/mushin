@@ -1368,7 +1368,7 @@ def lazy_project(tmp_path, monkeypatch):
     import importlib
 
     monkeypatch.setattr(
-        mushin._resume, "_kept_cell_reading", lambda: (set(), {}), raising=False
+        mushin._resume, "_kept_cell_reading", lambda *scan: (set(), {}), raising=False
     )
 
     root = tmp_path / "proj"
@@ -1818,7 +1818,7 @@ def sub_project(tmp_path, monkeypatch):
     import importlib
 
     monkeypatch.setattr(
-        mushin._resume, "_kept_cell_reading", lambda: (set(), {}), raising=False
+        mushin._resume, "_kept_cell_reading", lambda *scan: (set(), {}), raising=False
     )
 
     root = tmp_path / "subproj"
@@ -3530,6 +3530,7 @@ run("class Config:\\n    LR = 0.4\\n")
 plain = own()
 run("%%time\\nclass Config:\\n    LR = 0.6\\n")
 timed = own()
+run("%%time\\nclass Config:\\n    LR = 0.6\\n")  # unchanged
 timed_same = own()
 # A class with one kept text, then a `%%time` cell remaking it: the kept text
 # is not this class's statement.
@@ -3545,6 +3546,12 @@ run(
     "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
 )
 twice = [shell.user_ns["_A"], shell.user_ns["_B"]]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "class Config:\\n    LR = 0.7\\n\\n_A = _pf(task)['code']['Config (notebook)']\\n"
+    "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
+)
+twice += [shell.user_ns["_A"], shell.user_ns["_B"]]
 mark = len(out.getvalue())  # the callbacks' own output, before any record
 run(
     "class M(type):\\n    def __getattribute__(cls, n):\\n"
@@ -3599,11 +3606,16 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     # A magic's nested cell pins the class to its body: exact, and stable.
     assert got["magic"] == got["magic_again"] == got["plain"]
     # A `%%time` cell's text is not kept: never an older kept text's digest.
+    # A `%%time` cell's class has no site, as on main: the same digest after
+    # an unchanged re-run, and never an older kept text's.
     timed, timed_same = got["timed"]
     assert timed == timed_same
     assert timed not in (got["first"], got["edited"], got["magic"])
     assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
-    assert got["twice"][0] != got["twice"][1]  # two statements in one cell
+    a, b, a_again, b_again = got["twice"]  # two statements in one cell
+    assert a != b and a_again != b_again
+    if sys.version_info >= (3, 13):  # the first line tells them apart
+        assert (a, b) == (a_again, b_again)
     # The callbacks ran no notebook metaclass hook (taking a record still can:
     # a documented residual).
     assert not got["hook"]
@@ -3693,8 +3705,21 @@ def test_identical_class_texts_read_every_cell_they_stand_in(kernel, sub_project
     assert {f"{SUBPKG}.a.b (file)", f"{SUBPKG}.sub (file)"} <= files, files
 
 
+@pytest.mark.parametrize(
+    "annotated",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 14), reason="__annotate_func__ is 3.14+"
+            ),
+        ),
+    ],
+    ids=["plain", "annotated"],
+)
 def test_a_method_less_class_s_reading_is_followed_after_main_s_seeds(
-    kernel, sub_project, monkeypatch
+    kernel, sub_project, monkeypatch, annotated
 ):
     """Main read nothing of a class with no method: what its body names goes
     to the later pass, so it cannot push the namespace's module out."""
@@ -3707,7 +3732,11 @@ def test_a_method_less_class_s_reading_is_followed_after_main_s_seeds(
         f"import importlib\nimport {SUBPKG}\nfrom {SUBREL} import f\n"
         f"importlib.import_module('{SUBPKG}.wide')\n"
     )
-    kernel.run(f"class Config:\n    K = {SUBPKG}.wide.X\n")
+    kernel.run(
+        f"class Config:\n    K{': int' if annotated else ''} = {SUBPKG}.wide.X\n"
+    )
+    if annotated:
+        assert "__annotate_func__" in vars(kernel.ns["Config"])
     kernel.run("def task(a):\n    return f(a) + Config.K\n")
     with pytest.warns(UserWarning, match="reach more files"):
         files = _files(kernel, "task")
@@ -3739,6 +3768,12 @@ def test_a_failing_scan_keeps_the_entries_with_a_method_less_class(
     with pytest.warns(UserWarning, match="cells import could not be read"):
         record = project_fingerprints(kernel.ns["task"])
     assert {"helper (notebook)", "Config (notebook)"} <= set(record["code"])
+    kernel.run("class Config:\n    LR = 0.2\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        edited = project_fingerprints(kernel.ns["task"])["code"]
+    assert edited["Config (notebook)"] != record["code"]["Config (notebook)"]
+    assert edited["helper (notebook)"] == record["code"]["helper (notebook)"]
 
 
 @pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
@@ -3755,3 +3790,60 @@ def test_a_class_no_statement_made_is_not_an_older_statement(kernel):
         "'Config', [('LR', float, 0.2)])\n"
     )
     assert _own(kernel) != statement
+
+
+def test_two_statements_one_after_the_other_are_not_one_class(kernel):
+    """A cell defines the class twice, with a record between: the two objects
+    must not share a digest (on 3.11/3.12 they are ambiguous; on 3.13+ the
+    first line tells them apart)."""
+    kernel.run("def task(a):\n    return a * Config.LR\n")
+    kernel.run(
+        "from mushin._resume import project_fingerprints as _pf\n\n\n"
+        "class Config:\n    LR = 0.7\n\n\n"
+        "_A = _pf(task)['code']['Config (notebook)']\n\n\n"
+        "class Config:\n    LR = 0.8\n\n\n"
+        "_B = _pf(task)['code']['Config (notebook)']\n"
+    )
+    assert kernel.ns["_A"] != kernel.ns["_B"]
+
+
+def test_a_class_in_two_branches_of_an_if_is_stable(kernel):
+    """Only one branch runs, and which is a value: the cell's statements
+    count together, so an unchanged re-run keeps the digest."""
+    cell = (
+        "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\n"
+        "else:\n\n    class Config:\n        LR = 2\n"
+    )
+    _run_cells(kernel, [cell, "def task(a):\n    return a * Config.LR\n"])
+    first = _own(kernel)
+    kernel.run(cell)
+    assert _own(kernel) == first
+
+
+def test_a_continued_class_statement_is_found(kernel):
+    """`class \\` and the name on the next line: still a statement."""
+    _run_cells(
+        kernel,
+        ["class \\\nCfg2:\n    LR = 0.1\n", "def task(a):\n    return a * Cfg2.LR\n"],
+    )
+    first = _own(kernel, "Cfg2")
+    kernel.run("class \\\nCfg2:\n    LR = 0.2\n")
+    assert _own(kernel, "Cfg2") != first
+
+
+def test_a_forked_process_gets_its_own_token(kernel, monkeypatch):
+    """A forked child inherits the module's state: the token is per process
+    id, so its ambiguous digests are its own."""
+    import os
+
+    factory = (
+        "def make():\n    class C:\n        K = {}\n\n    return C\n\n\nC = make()\n"
+    )
+    _run_cells(
+        kernel,
+        [factory.format(2), "def task(a):\n    return a * C.K\n", factory.format(3)],
+    )
+    parent = _own(kernel, "C")
+    real = os.getpid()
+    monkeypatch.setattr(os, "getpid", lambda: real + 1)
+    assert _own(kernel, "C") != parent

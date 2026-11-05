@@ -133,16 +133,18 @@ the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
 default, a name one of the notebook's functions rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
-keep (a `%%time` cell, `exec`, a `%run` file) are not compared either. For
+keep (a `%%time` cell, `exec`, a `%run` file) are not compared either, and a
+class no `class` statement makes (`type(...)`, `namedtuple(...)`,
+`make_dataclass`) may not be. For
 such a task, every project module that a cell whose text the kernel keeps
 imports counts too, whether or not the task names it, so an edit to it
 re-runs the cells.
 `cache_dir=` keys on the same record, so importing another project module in
 a cell, or a restart after removing one's import, can make the cells compute
-again. So can a class whose `class` statement cannot be told from another kept
+again. A class whose `class` statement cannot be told from another kept
 version of its cell (one a function makes, or one edited before `import
-mushin`): its cells can compute again when its cell runs again, or after a
-restart. A module loaded other than by an `import` statement of such a cell
+mushin`) can also make a resume re-run the cells, and `cache_dir=` compute
+them again, when its cell runs again or after a restart. A module loaded other than by an `import` statement of such a cell
 (`importlib.import_module`, a plugin loader that fills a registry, an import
 in a `%%time` cell) may not be compared, as in a script: after editing such a
 module, use a new `working_dir`.

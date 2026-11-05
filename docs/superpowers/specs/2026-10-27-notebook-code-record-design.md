@@ -1744,3 +1744,66 @@ it finds nothing blocking.
   record can run a metaclass hook: a documented residual). It now reads only
   what the callbacks printed.
 
+### #295 review round 2 (2026-11-04): plan
+
+`/code-review` (10) and the adversarial workflow (7 confirmed) reviewed
+93764ca. Plan, written before any edit.
+
+**Blocking:**
+- *A class an unreadable cell made got a new token on every re-run*
+  (adversarial, reproduced through a resume): round 1 made an unreadable pin
+  (`%%time`, `exec`) ambiguous, so an unchanged re-run or a restart re-ran
+  the cells, though the docs say such code is not compared. It now has no
+  site and is not ambiguous: main's constant digest. The pin still keeps an
+  older kept text from standing in for it.
+- *Two statements of the class in one text* (`/code-review`): on 3.11/3.12,
+  with no first line, the kept-cells path grouped them, so a cell defining
+  the class twice gave both objects one digest (a record between them would
+  reuse the first one's results). Ambiguous is right for two statements one
+  after the other in the same block, where a record can stand between them;
+  for statements in different branches (`if`/`else`, `try`/`except`), only
+  one runs, which one is a value, and grouping them keeps the digest stable
+  (the adversarial review found the token there re-running every unchanged
+  cell). `_class_nodes` says which block each statement is in, and both the
+  pinned and the kept-cells path use it, replacing the `<locals>` check that
+  never fired on the pinned path.
+
+**Minor:**
+- the token carries the process id, so forked children never share one;
+- one scan per record for the imports and the class index;
+- each node's dump computed once in `_class_sites`;
+- the `class NAME` pattern allows a backslash continuation (`class \`);
+- a stale comment in `visit()`, and the `_cell_imports` docstring;
+- docs: the token's re-run named for `resume=True` too, not only
+  `cache_dir`; a class no `class` statement makes (`type(...)`,
+  `namedtuple(...)`, `make_dataclass`) is not compared, with may wording;
+- tests: the `%%time` cell re-run unchanged, the annotate path (3.14+) under
+  the cut, the failing scan's ambiguity checked by an edit, the two
+  statements exact and stable on 3.13+, siblings vs branches on 3.11/3.12.
+
+**Not changed, with reasons:**
+- *what a statement-found class's body names* (a wrapped method's helper,
+  the decorator, `staticmethod(scale)`) is not followed as notebook code: a
+  function reached only through a closure or a class attribute's value is a
+  documented residual on main too; this PR compares the class's own text;
+- *a class remade by `exec` or an unwatched cell, with one older kept text*:
+  without the watch nothing tells the object from the text, as on main for
+  code whose text the kernel does not keep (documented);
+- *a `type()`-made class on 3.11/3.12* can take an older kept statement of
+  its name: no worse than main's constant, and the docs now say such a class
+  is not compared;
+- *`transform_cell` run again*: a stateful input transformer could differ;
+  IPython's compiled filename is internal.
+
+**Stopping rule:** a third round of both reviews; merge if it finds nothing
+blocking.
+
+**Results (#295 round 2 fixes).** 289 tests in the module, passing on 3.11
+to 3.15; the whole suite 1634 passed (run in three parts, as the machine was
+short of memory), the docs build and the docs tests pass. Seven mutations
+for this round, all caught by node id (the annotate path's on 3.15, since it
+exists only on 3.14+): an unreadable pin made ambiguous again, siblings
+ignored, branches taken for siblings, the token without the process id, the
+pattern without a continuation, the annotate path's reading put with main's,
+and a failed scan's class not ambiguous.
+
