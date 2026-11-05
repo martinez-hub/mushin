@@ -3610,9 +3610,9 @@ run(
 twice += [shell.user_ns["_A"], shell.user_ns["_B"]]
 # A `global` factory, called from a cell that only mentions its class: in a
 # comment, a string, a multi-line string, a string on a `%time` line, a `%`
-# continuation. The cell states no such class, so the factory's statement is
-# read, exactly: each class's name is stated by its factory alone. A name a
-# function rebinds is not followed, so the task reaches it as an instance's.
+# continuation. The cell states no such class, so whether the factory made it
+# cannot be told: ambiguous, so an edit to the factory is never missed. A name
+# a function rebinds is not followed, so the task reaches it as an instance's.
 factory = (
     "def build():\\n    global {0}\\n\\n    class {0}:\\n        LR = {1}\\n\\n"
     "    return {0}()\\n"
@@ -3732,10 +3732,25 @@ run("Early3 = saved3")
 restored = [_fp(shell.user_ns["task17"])["code"]["Early3 (notebook)"]]
 run("class Early3:\\n    X = 1\\n")
 restored.append(_fp(shell.user_ns["task17"])["code"]["Early3 (notebook)"])
+# A class made under the watch from text that is not kept, left only under
+# an alias, then restored: pinned by object to the cell that made it, so
+# ambiguous, never the older kept statement's digest.
+aliased = {}
+for kind, name, make in (
+    ("exec", "Ali1", "exec('class Ali1:\\\\n    X = 2\\\\n')\\nsaved_Ali1 = Ali1\\ndel Ali1\\n"),
+    ("%%time", "Ali2", "%%time\\nclass Ali2:\\n    X = 2\\n\\n\\nsaved_Ali2 = Ali2\\ndel Ali2\\n"),
+):
+    run(f"class {name}:\\n    X = 1\\n")
+    run(f"def task18(a):\\n    return a * {name}.X\\n")
+    kept = _fp(shell.user_ns["task18"])["code"][f"{name} (notebook)"]
+    run(make)
+    run(f"{name} = saved_{name}\\n")
+    aliased[kind] = [kept, _fp(shell.user_ns["task18"])["code"][f"{name} (notebook)"]]
 # A class made before the watch started: every later cell saw it when it
 # started, so none is taken for its cell; its kept statement is read, as
 # after an unchanged re-run under the watch.
 run("def task13(a):\\n    return a * Early.X\\n")
+run("Early\\n")  # displayed (`_`, `_N`): the namespace held it, so not new
 early = [_fp(shell.user_ns["task13"])["code"]["Early (notebook)"]]
 run("class Early:\\n    X = 1\\n")
 early.append(_fp(shell.user_ns["task13"])["code"]["Early (notebook)"])
@@ -3771,7 +3786,7 @@ print(json.dumps({
     "emptied": emptied, "toggled": toggled, "mentions": mentions,
     "remakes": remakes, "module_set": module_set, "commented": commented,
     "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
-    "derived": derived, "proxy": proxy, "restored": restored,
+    "derived": derived, "proxy": proxy, "restored": restored, "aliased": aliased,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3785,8 +3800,8 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     give the exact statement (several texts on one line would otherwise read
     as ambiguous). A class remade from text that is not kept (`%%time`,
     `%time`, `exec`) is never taken for an older kept text, and a factory's
-    class, called from a cell that only mentions it, is read from the
-    factory."""
+    class, called from a cell that only mentions it, is ambiguous (it
+    re-runs)."""
     pytest.importorskip("IPython")
     script = tmp_path / "watch.py"
     script.write_text(CELL_WATCH_SCRIPT)
@@ -3811,8 +3826,8 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     # A cell that only mentions a factory's class states none: the factory's
     # statement is not read, as whether it made the class cannot be told:
     # ambiguous, so an edit to the factory is never missed.
-    for kind, (before, _, after) in got["mentions"].items():
-        assert before != after, kind
+    for kind, digests in got["mentions"].items():  # an unchanged re-run too
+        assert len(set(digests)) == 3, kind
     for kind, (kept, remade) in got["nested_remakes"].items():
         assert kept != remade, kind
     assert got["early"][0] == got["early"][1]  # never pinned to a later cell
@@ -3821,6 +3836,8 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     kept, remade, hook_ran = got["proxy"]
     assert kept != remade and not hook_ran
     assert got["restored"][0] == got["restored"][1]  # its statement, read
+    for kind, (kept, restored) in got["aliased"].items():
+        assert kept != restored, kind
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4308,3 +4325,53 @@ def test_a_kept_text_with_carriage_returns_is_read():
     import mushin._resume as resume
 
     assert resume._cell_imports("x = 1\rclass A:\r    X = 1\r")[2] == ("A",)
+
+
+def test_a_cell_binding_many_classes_pins_every_nested_one(monkeypatch):
+    """The nested walk has no budget: each step is a longer qualname and each
+    class is taken once, so 300 models with a nested `Meta` each (`%run
+    models.py`) all have their `Meta` pinned."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    source = "".join(
+        f"class M{i}:\n    class Meta:\n        X = {i}\n\n\n" for i in range(300)
+    )
+    exec(source, shell.user_ns)
+    resume._pin_classes(state, shell.user_ns, ("%run models.py\n", {}))
+    metas = [shell.user_ns[f"M{i}"].Meta for i in range(300)]
+    assert all(id(meta) in state["pins"] for meta in metas)
+
+
+def test_a_running_cell_with_no_text_stops_the_on_demand_pin(monkeypatch):
+    """A record inside a nested cell whose text is unknown does not pin the
+    class to the cell around it, whose statement of it is older."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    resume._cell_watch()
+    pre = shell.events.callbacks["pre_run_cell"]
+    pre(types.SimpleNamespace(raw_cell="class Config:\n    LR = 0.5\n"))
+    pre(types.SimpleNamespace(raw_cell=None))  # its text is unknown
+    exec("class Config:\n    LR = 0.9\n", shell.user_ns)
+    assert resume._pinned_cell(shell.user_ns["Config"], shell.user_ns) == (False, None)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
+    """IPython keeps a cell as its `splitlines()` lines, so a form feed adds a
+    line `compile` never counted, and no kept statement sits at the class's
+    first line: ambiguous, so an edit is seen (a constant would miss it)."""
+    _run_cells(kernel, ["def task(a):\n    return a * Config.LR\n"])
+    digests = []
+    for value in (0.1, 0.2):
+        kernel.run(f"x = 1\f\nclass Config:\n    LR = {value}\n")
+        name = kernel.names[-1]
+        size, mtime, lines, filename = linecache.cache[name]
+        kept = [line + "\n" for line in "".join(lines).splitlines()]  # as IPython
+        linecache.cache[name] = (size, mtime, kept, filename)
+        digests.append(_own(kernel))
+    assert digests[0] != digests[1]

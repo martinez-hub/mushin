@@ -2311,9 +2311,9 @@ says "not compared", as documented.
 - 6: the nested walk gets its own budget.
 - 7: the line-start regex accepts `\r`, `\r\n` and `\n`.
 - 8, 9, 10: comments, the fragment, the docstring.
-- 11: the snapshot holds weak references; a class gone by the cell's end is
-  not the one it held. (Not `id`s: a freed class's address is reused, and
-  the next class at it would read as unchanged.)
+- 11: superseded below: the snapshot holds the classes themselves, keyed
+  by `id`, while the cell runs (holding them is what keeps an id from being
+  reused); see "Kept as they are" and Codex's finding.
 - 12: the on-demand pin looks the class up by its qualname.
 - 13: one helper decides what a class binding is, for both.
 - Tests: the three derivations in a separate cell (an edit and its revert
@@ -2406,3 +2406,97 @@ rerun with `PYTHONDONTWRITEBYTECODE=1` and the cache cleared before each
 run; the results above are from that run. Earlier rounds' runners did not
 clear it. Their mutants were written one at a time against a restored
 source, which makes a reuse unlikely, but not impossible.
+
+### #295 round 9 (2026-11-05): pin by object; the last stand-ins
+
+The reviews of the round-8 delta (be85372...91f2709) ran with the stopping
+rule in their briefs.
+
+**Blocking (adversarial, reproduced end to end):** a class made under the
+watch from text that is not kept (`exec`, `%%time`) and left only under an
+alias (`saved = Config; del Config`) is never pinned: the pin wanted the
+binding name to be the qualname. Restored (`Config = saved`), it is not
+new to that cell either, so the older kept `class Config` gives it an exact
+digest, and `cache_dir=` returned the old results. Round 7's name-keyed
+snapshot had caught it, by the accident of reading the restore as new.
+*Fix:* pin a new class by object. Any `str` name binding a class no name
+held at the cell's start counts, when its qualname has no dot (a top-level
+statement's, or `global`'s; `make.<locals>.C` is still skipped) and its
+module is the notebook's; each class once. The on-demand pin passes the
+class itself, with no lookup by name (which also removes `/code-review`'s
+hash-collision note on that lookup).
+
+**Blocking by the rule (`/code-review`, candidates, checked here):**
+1. A cell that states one version of a class and binds another (`C =
+   REG['C']`, a copy after an `if False:` statement) has its own statement
+   read as exact. Nothing in a class with no methods tells these apart, so
+   the documented limit widens: one cell holding more than one version of a
+   class (two statements run, or a statement and a class bound from
+   elsewhere).
+2. The static transform skips `input_transformers_post`, which every round
+   before 8 applied (inside `transform_cell`). *Not changed, documented
+   here:* applying them would run an extension's code again in the
+   callback, the hook class round 8 removed, and a stateful transformer
+   would see each cell twice. The pinned text is the static transform of the
+   raw cell, so an edit to the cell still changes its digest; on 3.13+ a
+   transformer that adds lines shifts the first line, and the class is then
+   ambiguous (safe).
+3. The nested walk's budget is checked between classes, not within one,
+   and leaves the rest unpinned (no kept statement: a constant digest). The
+   walk is a tree (each step a longer qualname, each class once), so it has
+   no budget now, and an id set keeps it linear.
+4. IPython keeps a cell as `splitlines()` lines, so a form feed (or `\v`,
+   `\x1c`-`\x1e`, `\x85`, ` `, ` `) adds a line that `compile`
+   never counted; on 3.13+ no kept statement then sits at `__firstlineno__`,
+   and the class got a constant digest. Kept statements of the qualname, but
+   none at its first line, are now ambiguous.
+5. The on-demand pin passed over a running cell whose text is unknown and
+   could pin to the cell around it; it now stops there.
+
+**Minor:** the docs listed `%%time`/`exec`/`%run` code as not compared next
+to the new re-run sentence (the sentence now says such a class is not read
+but re-runs); the round-8 spec bullet on weak references contradicted the
+paragraphs after it; the shell test's docstring and a script comment still
+said a factory's class is read from the factory; the mention cases dropped
+the check that an unchanged re-run recomputes.
+
+**Accepted:** the `\r` test stays (a kept text from another source can hold
+one; a test with no effect in IPython costs nothing); strong references
+during a cell (round 8). **Refuted, the design:** a `namedtuple` or
+functional `Enum` re-runs its cells after a restart on 3.11/3.12 (pinned to
+a cell stating none of it).
+
+**Tests:** the alias restore after `exec` and after `%%time` (not the kept
+statement's digest); a class with 300 nested classes (every one pinned); a
+form-feed cell on 3.13+ without the watch (ambiguous, not constant); a
+running cell with no text before the one that bound the class (not pinned);
+a post transformer that rewrites a class's body (the pinned text is the
+rewritten one).
+
+**Mutations:** the pin by name again (the alias cases fail); the nested
+budget back (the 300 case); no ambiguity for kept statements off the first
+line (the form feed, on 3.14); passing over a textless entry (its test).
+
+**Decided with the advisor:** IPython's history names (`_`, `_N`) are not
+excluded from the pin by object. A class the namespace already held under
+some name is in the snapshot, so a display cell does not take it. A new
+class that only a history name holds is pinned to a cell that states none
+of it, which makes it ambiguous, and the first pin still wins. The
+dedupe on a second name is a cost guard: pins are keyed by id, so a mutant
+without it changes nothing observable (an equivalent mutant, not run).
+*Stop after this round* if both reviews report only kept-text edges or
+costs: no path is left where a class takes another text's digest, and the
+exact fix for the rest is the `__build_class__` follow-up.
+
+**Results (#295 round 9).** 310 tests in the module, passing on 3.11 to
+3.15 (the logs kept); the whole suite 1653 passed (in three parts); the
+docs build and the 165 docs tests pass. Mutants, with the bytecode cache
+cleared before each: the pin by name (the `exec` alias restore), the
+nested budget (the 300 models), passing over a textless running cell (its
+test), and on 3.14 no ambiguity off the first line (the form feed); all
+caught. The nested-budget mutant first *survived*: the test held 300
+classes nested in one class, which a single pass of the inner loop takes
+whatever the budget, so it could not see the reviewer's case (many classes
+with one nested class each). The test now has that shape. Each new test
+also fails on 91f2709's source (`PYTHONPATH` at an archive of it), the
+form-feed one on 3.14.

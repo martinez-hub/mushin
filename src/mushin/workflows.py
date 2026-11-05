@@ -2513,8 +2513,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             when its cell runs again or after a restart. A class a cell binds
             without stating it (one a ``%%time`` cell, ``exec``, ``%run`` or a
             ``global`` factory makes, or a copy such as
-            ``dataclass(slots=True)(C)``) re-runs them whenever that cell runs
-            again and after a restart. A resume on another
+            ``dataclass(slots=True)(C)``) is not read, but re-runs them
+            whenever that cell runs again and after a restart. A resume on another
             Python version can also re-run the cells of a class stated more
             than once in its cell. No value is compared (a
             number, a string, a dict config): pass one as a swept parameter,
@@ -2537,10 +2537,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             than by a cell's ``import`` statement (``importlib.import_module``,
             a plugin loader that fills a registry, an import in a ``%%time``
             cell), possibly a class no ``class`` statement makes (``type(...)``,
-            ``make_dataclass``) or one of which a cell runs more than one
-            ``class`` statement (two in the cell, in a loop, or in a function
-            it calls), a ``_target_`` defined in the notebook, code whose text the kernel does not keep (a ``%%time``
-            cell, ``exec``, a ``%run`` file), a
+            ``make_dataclass``) or one of which a cell holds more than one
+            version (two ``class`` statements run, or a statement and a class
+            bound from elsewhere), a ``_target_`` defined in the notebook,
+            code whose text the kernel does not keep (a ``%%time`` cell,
+            ``exec``, a ``%run`` file; a class it binds re-runs instead), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

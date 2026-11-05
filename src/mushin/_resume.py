@@ -2385,9 +2385,12 @@ def _cell_watch(register: bool = True) -> dict | None:
 def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     """Pin each class the cell ``entry`` (``(raw, classes)``) bound, to the
     cell's transformed text, with the classes its body made
-    (``Outer.Inner``): every name that now holds a class no name held when
-    the cell started, whose qualname is that name and whose module is the
-    notebook's. ``only`` limits it to one class. The first pin wins: a
+    (``Outer.Inner``): every class some name now holds that no name held when
+    the cell started, whose qualname has no dot (a top-level or ``global``
+    statement's, not a function's local class) and whose module is the
+    notebook's. By the object, not the name: a class left only under an alias
+    (``saved = Config; del Config``) is still the cell's. ``only`` limits it
+    to one class, new since the cell started. The first pin wins: a
     magic's nested cell (``%%capture``) ends before the magic's own cell, and
     only its text holds the statement. Nothing is parsed here; a record reads
     the text (``_class_sites``), and a class whose text holds no statement of
@@ -2408,38 +2411,39 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
 
     raw, before = entry
     pins = state["pins"]
-    made = []
-    if only is not None:  # a pin needs the qualname as its name
-        name = qualname(only)
-        bindings = [(name, only)] if namespace.get(name) is only else []
-    else:
-        bindings = list(namespace.items())
+    notebook = namespace.get("__name__")
+    made: list = []
+    made_ids: set = set()
+    bindings = [("", only)] if only is not None else list(namespace.items())
     for name, value in bindings:
         if not _class_binding(name, value) or id(value) in before:
             continue  # not a class, or one the namespace held at the start
+        if id(value) in made_ids:
+            continue  # bound under a second name
         module = own_dict(value).get("__module__")
-        if type(module) is not str or module != namespace.get("__name__"):
+        if type(module) is not str or module != notebook:
             continue
-        if qualname(value) != name or not unpinned(value):
-            continue  # a class made elsewhere and bound here (`C = make()`)
+        if "." in qualname(value) or not unpinned(value):
+            continue  # a function's local class (`C = make()`), or pinned
         made.append(value)
-    # The classes their bodies made, a few levels down, on their own budget:
-    # a cell can bind many classes (`%run models.py`).
+        made_ids.add(id(value))
+    # The classes their bodies made: each step a longer qualname, each class
+    # once, so the walk ends without a budget (`%run models.py` can bind
+    # hundreds).
     pending = list(made)
-    nested = 0
-    while pending and nested < 256:
+    while pending:
         outer = pending.pop()
         prefix = qualname(outer) + "."
         for value in list(own_dict(outer).values()):
             if (
                 issubclass(type(value), type)
+                and id(value) not in made_ids
                 and qualname(value).startswith(prefix)
                 and unpinned(value)
-                and all(value is not m for m in made)
             ):
                 made.append(value)
+                made_ids.add(id(value))
                 pending.append(value)
-                nested += 1
     if not made:
         return
     lines = state["transform"](raw).splitlines(True)
@@ -2469,8 +2473,12 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
         outer = cls if head == qualname else namespace.get(head)
         if issubclass(type(outer), type):
             for _, entry in reversed(state["running"]):
+                if entry is None:
+                    # A cell whose text is unknown may have made it: no pin
+                    # to the cell around it, whose statement could be older.
+                    break
                 # A class made since the cell started is not in its snapshot.
-                if entry is not None and id(outer) not in entry[1]:
+                if id(outer) not in entry[1]:
                     _pin_classes(state, namespace, entry, only=outer)
                     break
         pin = state["pins"].get(id(cls))
@@ -2535,6 +2543,7 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     them are read.
     ``later``: found otherwise than through a method, so main's record had
     no reading of it (``_notebook_entries`` follows it after main's seeds).
+    Kept statements of the qualname, none at the first line, are ambiguous.
     No site when none is kept, or (3.13+) for a class no ``class`` statement
     made (``type()``, ``make_dataclass``: no ``__static_attributes__``): its
     digest never changes, so it is not compared."""
@@ -2622,6 +2631,12 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
         if nodes:
             ambiguous |= siblings
             groups.setdefault("|".join(map(dump, nodes)), []).append((tree, nodes))
+    if texts and not groups:
+        # Kept statements of the qualname, none at the class's first line
+        # (3.13+): IPython keeps a cell as `splitlines()` lines, so a form
+        # feed adds a line `compile` never counted. Which made it cannot be
+        # told: ambiguous, not a constant digest that misses its edits.
+        return [], True, True
     sites = [site for key in sorted(groups) for site in groups[key]]
     return sites, ambiguous or len(groups) > 1, True
 

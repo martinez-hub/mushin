@@ -174,15 +174,15 @@ rules:
   one (a class a function makes, or on 3.11/3.12 a cell stating it twice)
   can make a resume re-run the cells too. A class a cell binds without stating
   it (one a `%%time` cell, `exec`, `%run` or a `global` factory makes, or a
-  copy such as `dataclass(slots=True)(C)`) re-runs the cells whenever that
-  cell runs again and after a restart. A resume on another Python version
+  copy such as `dataclass(slots=True)(C)`) is not read, but re-runs the cells
+  whenever that cell runs again and after a restart. A resume on another Python version
   can also re-run the cells of a class stated more than once in its cell. A
   module loaded other than by a cell's `import` statement
   (`importlib.import_module`, a plugin loader, an import in a `%%time` cell)
   may not be compared, nor may a class no `class` statement makes
-  (`type(...)`, `make_dataclass`), or a class of which one cell runs more
-  than one `class` statement (two in the cell, in a loop, or in a
-  function it calls): after editing one, use a new `working_dir`. Taking
+  (`type(...)`, `make_dataclass`), or a class of which one cell holds more
+  than one version (two `class` statements run, or a statement and a class
+  bound from elsewhere): after editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed
