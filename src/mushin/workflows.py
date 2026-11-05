@@ -2510,8 +2510,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             statement cannot be told from another kept version of its cell
             (or, on 3.11/3.12, from another statement of it its cell runs)
             can make a resume re-run them, and ``cache_dir`` compute them,
-            when its cell runs again or after a restart. No value is
-            compared (a
+            when its cell runs again or after a restart. A resume on another
+            Python version can also re-run the cells of a class stated more
+            than once in its cell. No value is compared (a
             number, a string, a dict config): pass one as a swept parameter,
             or use a new ``working_dir`` after editing it. A re-run
             warns, naming the file (``helpers (file)``) or the notebook name

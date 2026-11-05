@@ -1992,3 +1992,123 @@ tests pass. Four mutations, all caught by node id, each on its own
 assertion: the old `\b` regex (the comment and the string case each keep a
 constant digest), the regex without the magic branch (the `%time` case),
 `found = 0` in post, and a raw-text fallback that takes the oldest entry.
+
+### #295 round 6 (2026-11-04): two Codex findings left open
+
+Rereading Codex's inline comments while the final reviews ran turned up two
+findings from rounds 2 and 3 that no round's plan recorded. (Its nested
+`Outer.Inner` finding was the one round 4 fixed.) *Mistake:* the rounds
+planned from `/code-review` and the adversarial run and never listed
+Codex's inline comments. From now on, every round's plan lists them too.
+
+**1. On 3.13+, assigning `__module__` deletes `__firstlineno__`** (Codex on
+d52238c, P2; checked on 3.13, 3.14 and 3.15). A methodless class followed
+by `Config.__module__ = __name__` reaches the rule "no `__firstlineno__`:
+no `class` statement made it" and gets no site, so its edits are missed.
+That is a silent reuse on 3.13+, outside the documented residuals.
+`__static_attributes__`, which the compiler also sets in a class body,
+survives the assignment. No class that `type()`, `make_dataclass`,
+`types.new_class`, the functional `Enum` or `NamedTuple` makes has
+either attribute; a `slots=True` dataclass keeps both.
+
+*Fix:* on 3.13+, the absence of `__static_attributes__` decides "no
+`class` statement made it". A class that has it but no `__firstlineno__`
+(its `__module__` was assigned) is read without the first-line filter, as
+on 3.11/3.12: every statement of its qualname, with the same ambiguity
+rule. The pin and the kept texts are unchanged.
+
+*Tests:*
+- in the shell script, a class with `__module__` assigned in its own cell,
+  edited and reverted: pinned, so the revert is exact on every Python;
+- a kernel test (no watch) on 3.13+: the edit is seen.
+
+*Mutation:* the old `__firstlineno__` rule; both tests fail on 3.13+.
+
+**2. A class stated in both branches of an `if` digests differently across
+versions** (Codex on d49dd89, P2). On 3.11/3.12 both statements are read;
+on 3.13+ only the one at `__firstlineno__`. Records are compared across
+Python versions, so a resume on another minor re-runs those cells.
+That errs toward recomputing. Making 3.13+ read what 3.11/3.12 reads
+would mean a second rule for picking statements on 3.13+, which is the
+kind of change rounds 1 to 4 kept getting wrong. *Accepted and documented:*
+one clause in the resilience guide, the agent guide and the `run()`
+docstring, next to the other re-run cases. The same holds for any cell
+stating a methodless class more than once, and for the 3.14 annotation
+path.
+
+**3. Codex on 844d027 (P2): a multi-line string's `class Config:` line.**
+A triple-quoted example with a line starting `class Config:`, in a cell that
+calls a `global Config` factory, still snapshots `Config`. Reproduced by
+Codex on 3.14. This is the residual round 5 accepted; Codex calls it a
+stale reuse, and it is one.
+
+*And a regression from round 5, found while weighing this:* the line-start
+regex no longer snapshots `exec("class Config: LR = 2")` on one line. That
+class is then unpinned, and an older kept `class Config` stands in for it,
+on 3.11/3.12 and, when the lines match, on 3.13+. Round 4's design said
+"no older kept text stands in" for `%%time` and `exec`; round 5 broke it
+for `exec`. *Mistake:* round 5 changed what the snapshot catches without
+listing what relied on it catching more (the `exec` and `make_dataclass`
+pins). The lesson [[plan-fixes-by-invariant]] again: list the members of
+the invariant ("a cell that makes the class from text that is not kept is
+pinned") before narrowing the rule.
+
+*The regex cannot settle this.* A mention of the class's text (a comment, an
+example string) and code that is not kept (`exec`, a magic's body) look the
+same in a cell's text. A narrower regex trades one silent reuse for the
+other. So the regex goes back to round 4's `\bclass NAME` anywhere (the
+protective direction), and the pinned branch decides:
+
+- the pinned cell states the class: its statements, as now;
+- it does not: the class came from code the cell runs. If a kept cell
+  holds a statement of the qualname inside a function's body (the only way a
+  bare qualname gets there is `global NAME`, a factory), read the kept
+  texts' statements of that kind only, with the usual groups and ambiguity;
+- no such factory statement: no site, as now (`%%time`, `exec`,
+  `make_dataclass` in a cell mentioning the class).
+
+*Residual, accepted (spec only):* a class one cell makes from text that is
+not kept, while a kept function also states it with `global`: on 3.11/3.12
+the factory's statement stands in (3.13+'s first line usually tells them
+apart).
+
+*The final adversarial run on 844d027 confirmed two findings, both this
+class:* the one-line `exec` above plus automagic `time class C: ...` (the
+`%time` statement without `%`, on by default), reproduced end to end with
+`cache_dir=` returning the old class's results; and the round-5 `%` branch
+still matching a string on a magic line or a `% 'the class Config'`
+continuation. Its suggested fix is the rule above. A third finding was
+refuted but had a point: the mention tests passed through the ambiguity
+token, since many cells in the script state `Config`, so they did not show
+that the factory's statement is read.
+
+*Tests:*
+- the mention cases each use a class name only their factory states
+  (comment, one-line string, multi-line string, a string on a `%time` line,
+  a `%` continuation): an unchanged re-run of the call keeps the digest (the
+  factory's statement is read, exactly), and an edit to the factory changes
+  it;
+- a one-line `exec` and an automagic `time class` of a class with one older
+  kept text: not that text's digest;
+- the `%%time` and `%time` cases keep their assertions;
+- the `__module__` cases of item 1.
+
+*Mutations:* no fallback (the mention cases fail); a fallback that reads
+every statement (the `%%time` and `Solo` cases fail); the round-5 regex (the
+`exec` and automagic cases fail); on 3.14, the `__firstlineno__` rule (the
+`__module__` cases fail) and no 3.13+ rule (the `type()` case fails).
+
+**Results (#295 round 6 fixes).** Codex's nested `Outer.Inner` case was
+re-run against round 5's head before closing it: exact on 3.11 and 3.14.
+The `__module__` case reproduced on 3.14 first (one constant digest for
+every edit). 303 tests in the module, passing on 3.11 to 3.15; the whole
+suite 1648 passed (in three parts); the docs build and the 165 docs tests
+pass. Seven mutations, all caught by node id, each on its own assertion:
+no fallback (every mention case keeps a constant digest), a fallback
+reading every statement (the `%%time` re-run), the round-5 regex (the
+automagic and the `exec` cases, checked one by one), and on 3.14 the old
+`__firstlineno__` rule (the shell and the kernel `__module__` tests) and no
+3.13+ rule (the `type()` case). One full-module run on 3.14 had one failure
+that two reruns, one with the failure summary saved, did not repeat; the
+first run's output was not kept, so the test is unknown (like the 3.13
+flake in round 2). CI's 3.14 legs are the check.

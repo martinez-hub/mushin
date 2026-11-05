@@ -2258,14 +2258,12 @@ def _method_functions(value) -> list:
 #: too), each ``(info, (raw text, {name: object before the cell}))``, or
 #: ``(info, None)`` for a cell with no ``class`` statement.
 _CELL_WATCH = "_mushin_cell_watch"
-#: A ``class NAME`` where a statement can start: a line's start after its
-#: indentation, or after a line magic (``%time class C: ...``). A comment or
-#: a string that mentions a class is not a statement; snapshotted, it would
-#: pin a class a factory made (``global Config``) to a cell that never states
-#: it, and that class would get no site.
-_CLASS_NAME = re.compile(
-    r"^[ \t\f]*(?:%[^\n#]*?[ \t])?class(?:\s|\\\r?\n)+([^\W\d]\w*)", re.MULTILINE
-)
+#: A ``class NAME`` anywhere in a cell's text: a statement, a magic's body,
+#: an ``exec``'s text, or a mere mention (a comment, an example string),
+#: which the text cannot tell from the others. A class such a cell makes from
+#: text that is not kept is pinned to it, so no older kept statement stands in
+#: for it (``_class_sites``).
+_CLASS_NAME = re.compile(r"\bclass(?:\s|\\\r?\n)+([^\W\d]\w*)")
 
 
 def _shell():
@@ -2366,8 +2364,9 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     made (``Outer.Inner``); ``only`` limits it to one class. The first pin
     wins: a magic's nested cell (``%%capture``) ends before the magic's own
     cell, and only its text holds the statement. Nothing is parsed here; a
-    record reads the text (``_class_sites``), and a text holding no statement
-    of the class (``%%time``, ``exec``) gives it no site. Classes are read
+    record reads the text (``_class_sites``); a text holding no statement of
+    the class (``%%time``, ``exec``, a factory's call) gives it no site,
+    unless a kept function states it under ``global``. Classes are read
     through the type's own slots: no notebook metaclass hook runs."""
     import weakref
 
@@ -2423,8 +2422,8 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     """``(pinned, lines)``: whether the shell's cell watch saw the cell whose
     ``class`` statement made ``cls`` run, and that cell's transformed text
-    (one holding no statement of the class, ``%%time`` or ``exec``, gives no
-    site when ``_class_sites`` reads it). Pinned when the cell ended, or, for
+    (one may hold no statement of the class: ``%%time``, ``exec``, a
+    factory's call; see ``_class_sites``). Pinned when the cell ended, or, for
     a record taken inside that cell, now: the name holds a new object since
     the cell started; a nested class (``Outer.Inner``) through its outer
     class, whose bare name the cell's snapshot holds."""
@@ -2482,13 +2481,17 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     - a method, whose code names the cell: the innermost statement of its
       name spanning the method's first line;
     - 3.14's ``__annotate_func__`` (a class with annotations), the same way;
-    - the cell the shell's watch saw make it (``_pinned_cell``); one it could
-      not read (``%%time``, ``exec``) gives no site, as on main;
+    - the cell the shell's watch saw make it (``_pinned_cell``). When that
+      cell states no such class, code it ran made it: a function a kept cell
+      defines, stating it under ``global`` (a factory), whose statements are
+      read as below and alone; or text that is not kept (``%%time``,
+      ``exec``), which gives no site, as on main;
     - the kept cells' texts with a statement of its qualname
       (``class_texts(qualname)``, None when the cells could not be scanned).
     In a text, every statement of the qualname counts (an ``if``'s two
     branches: which one runs is a value), but on 3.13+ only those at the
-    class's ``__firstlineno__`` (the first decorator's line). Two different
+    class's ``__firstlineno__`` (the first decorator's line), when it has
+    one: assigning a class's ``__module__`` deletes it. Two different
     ones among the cell's own statements that can both run (``_exclusive``),
     which 3.11 and 3.12 cannot tell apart, are ambiguous: a record can stand
     between them. Inside a function's or a class's body, they run as one step,
@@ -2498,7 +2501,7 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     ``later``: found otherwise than through a method, so main's record had
     no reading of it (``_notebook_entries`` follows it after main's seeds).
     No site when none is kept, or (3.13+) for a class no ``class`` statement
-    made (``type()``, ``make_dataclass``: no ``__firstlineno__``)."""
+    made (``type()``, ``make_dataclass``: no ``__static_attributes__``)."""
     import ast
     import sys
     import types
@@ -2527,11 +2530,17 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
                 best = node
         if best is not None:
             return [(tree, [best])], False, later
+    # A class body's compile sets both names on 3.13+. Assigning `__module__`
+    # deletes `__firstlineno__` (a line in another module means nothing) but
+    # keeps `__static_attributes__`, so only the latter tells whether a
+    # `class` statement made the class; without a first line, the statements
+    # are read as on 3.11/3.12.
+    if sys.version_info >= (3, 13):
+        if type(own_dict.get("__static_attributes__")) is not tuple:
+            return [], False, True  # no `class` statement made it
     first = own_dict.get("__firstlineno__")
     if type(first) is not int:
         first = None
-        if sys.version_info >= (3, 13):
-            return [], False, True  # no `class` statement made it
     dumps: dict[int, str] = {}
 
     def dump(node) -> str:
@@ -2539,14 +2548,17 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
             dumps[id(node)] = _canonical_dump(node)
         return dumps[id(node)]
 
-    def statements(tree) -> tuple[list, bool]:
+    def statements(tree, inner: bool = False) -> tuple[list, bool]:
         """The text's statements of the qualname (on 3.13+, at its first
-        line), sorted; and whether two different ones of the cell's own can
-        both run, so either could be in force at a record taken between."""
+        line; when ``inner``, only those in a function's or a class's body),
+        sorted; and whether two different ones of the cell's own can both
+        run, so either could be in force at a record taken between."""
         found = [
             (node, path, top)
             for node, q, path, top in _class_nodes(tree)
-            if q == qualname and (first is None or _first_line(node) == first)
+            if q == qualname
+            and (first is None or _first_line(node) == first)
+            and not (inner and top)
         ]
         both = any(
             dump(a) != dump(b) and not _exclusive(pa, pb)
@@ -2557,12 +2569,17 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
         return sorted((node for node, _, _ in found), key=dump), both
 
     pinned, lines = _pinned_cell(cls, namespace)
+    inner = False
     if pinned:
-        # A cell holding no statement of the class (`%%time`, `exec`): no
-        # site, as on main, and no older kept text stands in for it.
         tree = _cell_tree(lines)
         nodes, siblings = statements(tree) if tree is not None else ([], False)
-        return ([(tree, nodes)] if nodes else []), siblings, True
+        if nodes:
+            return [(tree, nodes)], siblings, True
+        # The cell states no such class, so code it ran made it. A factory's
+        # statement (in a function's body, under `global`) may stand in; an
+        # older top-level one is another version's, and `%%time` or `exec`
+        # text is not kept: then no site, as on main.
+        inner = True
     texts = class_texts(qualname)
     if texts is None:
         return [], True, True
@@ -2570,7 +2587,7 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     ambiguous = False
     for text in texts:
         tree = _cell_tree(text.splitlines(True))
-        nodes, siblings = statements(tree) if tree is not None else ([], False)
+        nodes, siblings = statements(tree, inner) if tree is not None else ([], False)
         if nodes:
             ambiguous |= siblings
             groups.setdefault("|".join(map(dump, nodes)), []).append((tree, nodes))

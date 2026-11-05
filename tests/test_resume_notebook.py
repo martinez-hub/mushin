@@ -3605,32 +3605,60 @@ run(
     "class Config:\\n    LR = 0.8\\n\\n_B = _pf(task)['code']['Config (notebook)']\\n"
 )
 twice += [shell.user_ns["_A"], shell.user_ns["_B"]]
-# A `global Config` factory, called from a cell that mentions `class Config`
-# in a comment, then in a string: neither cell states the class. A name a
+# A `global` factory, called from a cell that only mentions its class: in a
+# comment, a string, a multi-line string, a string on a `%time` line, a `%`
+# continuation. The cell states no such class, so the factory's statement is
+# read, exactly: each class's name is stated by its factory alone. A name a
 # function rebinds is not followed, so the task reaches it as an instance's.
 factory = (
-    "def build():\\n    global Config\\n\\n    class Config:\\n        LR = {}\\n\\n"
-    "    return Config()\\n"
+    "def build():\\n    global {0}\\n\\n    class {0}:\\n        LR = {1}\\n\\n"
+    "    return {0}()\\n"
 )
 run("def task8(a):\\n    return a * cfg.LR\\n")
+
+
+def built():
+    return _fp(shell.user_ns["task8"])["code"]["cfg (notebook)"]
+
+
 mentions = {}
-for kind, call in (
-    ("comment", "cfg = build()  # rebuild class Config\\n"),
-    ("string", "_S = 'class Config'; cfg = build()\\n"),
+for kind, name, call in (
+    ("comment", "Built1", "cfg = build()  # rebuild class Built1\\n"),
+    ("string", "Built2", "_S = 'class Built2'; cfg = build()\\n"),
+    ("docstring", "Built3", "_S = '''\\nclass Built3:\\n'''\\ncfg = build()\\n"),
+    ("magic line", "Built4", "%time cfg = build(); _S = 'a class Built4'\\n"),
+    ("continuation", "Built5", "cfg = build()\\n_S = ('%s'\\n      % 'the class Built5')\\n"),
 ):
-    run(factory.format(0.11))
+    run(factory.format(name, 0.11))
     run(call)
-    before = _fp(shell.user_ns["task8"])["code"]["cfg (notebook)"]
-    run(factory.format(0.12))
+    before = built()
+    run(call)  # unchanged
+    rerun = built()
+    run(factory.format(name, 0.12))
     run(call)
-    mentions[kind] = [before, _fp(shell.user_ns["task8"])["code"]["cfg (notebook)"]]
+    mentions[kind] = [before, rerun, built()]
 run("del build, cfg")  # `own()` follows `Config` again
-# A `%time` line magic's class, with one older kept text: not that text's.
-run("class Solo2:\\n    X = 1\\n")
-run("def task7(a):\\n    return a * Solo2.X\\n")
-solo2 = _fp(shell.user_ns["task7"])["code"]["Solo2 (notebook)"]
-run("%time class Solo2: X = 2\\n")
-solo2_timed = _fp(shell.user_ns["task7"])["code"]["Solo2 (notebook)"]
+# A class remade from text that is not kept, after one kept statement: never
+# that statement's digest. A `%time` line magic, its automagic form, an `exec`.
+remakes = {}
+for kind, name, remake in (
+    ("%time", "Solo2", "%time class Solo2: X = 2\\n"),
+    ("automagic", "Solo3", "time class Solo3: X = 2\\n"),
+    ("exec", "Solo4", "exec('class Solo4: X = 2')\\n"),
+):
+    run(f"class {name}:\\n    X = 1\\n")
+    run(f"def task7(a):\\n    return a * {name}.X\\n")
+    kept = _fp(shell.user_ns["task7"])["code"][f"{name} (notebook)"]
+    run(remake)
+    remakes[kind] = [kept, _fp(shell.user_ns["task7"])["code"][f"{name} (notebook)"]]
+# A class whose cell assigns its `__module__`, which deletes 3.13+'s
+# `__firstlineno__`: still its statement's, so an edit and a revert are exact.
+moved = "class Moved:\\n    X = {}\\n\\n\\nMoved.__module__ = __name__\\n"
+run("def task9(a):\\n    return a * Moved.X\\n")
+module_set = []
+for value in (1, 2, 1):
+    run(moved.format(value))
+    module_set.append(_fp(shell.user_ns["task9"])["code"]["Moved (notebook)"])
 mark = len(out.getvalue())  # the callbacks' own output, before any record
 run(
     "class M(type):\\n    def __getattribute__(cls, n):\\n"
@@ -3661,7 +3689,7 @@ print(json.dumps({
     "twice": twice, "hook": hook, "solo": [solo, solo_timed],
     "branch": [branch, branch_again], "nested": nested, "remade": remade,
     "emptied": emptied, "toggled": toggled, "mentions": mentions,
-    "line_timed": [solo2, solo2_timed],
+    "remakes": remakes, "module_set": module_set,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3673,8 +3701,10 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     so an edit, a revert, a cell that raised before its statement, a magic's
     cell, a record taken inside the defining cell and a reload of mushin all
     give the exact statement (several texts on one line would otherwise read
-    as ambiguous). A `%%time` cell's class, whose text is not kept, is never
-    taken for an older kept text."""
+    as ambiguous). A class remade from text that is not kept (`%%time`,
+    `%time`, `exec`) is never taken for an older kept text, and a factory's
+    class, called from a cell that only mentions it, is read from the
+    factory."""
     pytest.importorskip("IPython")
     script = tmp_path / "watch.py"
     script.write_text(CELL_WATCH_SCRIPT)
@@ -3693,11 +3723,14 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert timed == timed_same
     assert timed not in (got["first"], got["edited"], got["magic"])
     assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
-    assert got["line_timed"][0] != got["line_timed"][1]  # so for `%time`
-    # A comment or a string that mentions `class Config` states nothing: the
-    # class its factory made is read from the factory, and an edit is seen.
-    for kind, (before, after) in got["mentions"].items():
-        assert before != after, kind
+    for kind, (kept, remade) in got["remakes"].items():
+        assert kept != remade, kind  # so for `%time`, automagic and `exec`
+    # A cell that only mentions a factory's class states none: the factory's
+    # statement is read, exactly, and its edit is seen.
+    for kind, (before, rerun, after) in got["mentions"].items():
+        assert before == rerun != after, kind
+    m1, m2, m3 = got["module_set"]  # `__module__` assigned: still exact
+    assert m1 != m2 and m3 == m1
     assert got["branch"][0] == got["branch"][1]  # an if's branches: one runs
     n1, n2, n3 = got["nested"]  # a nested class, pinned: a revert is exact
     assert n1 != n2 and n3 == n1
@@ -4111,3 +4144,13 @@ def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
     shell.events.callbacks["post_run_cell"](result)
     assert state["running"] == [(outer, None)]
     assert id(shell.user_ns["Config"]) in state["pins"]
+
+
+def test_a_class_whose_module_is_assigned_is_still_read(kernel):
+    """Assigning a class's `__module__` deletes its `__firstlineno__` on 3.13+;
+    a `class` statement still made it, so an edit is seen."""
+    cell = "class Config:\n    LR = {}\n\n\nConfig.__module__ = __name__\n"
+    _run_cells(kernel, [cell.format(1), "def task(a):\n    return a * Config.LR\n"])
+    first = _own(kernel)
+    kernel.run(cell.format(2))
+    assert _own(kernel) != first
