@@ -2297,9 +2297,22 @@ def _live_classes(notebook) -> dict:
 
 def _alive_at(snapshot: dict, cls) -> bool:
     """Whether ``cls`` was alive when the cell whose ``snapshot`` it is
-    started: its id's weak reference still gives this class."""
+    started: its id's weak reference still gives this class. A snapshot an
+    older ``_resume`` wrote before a reload holds the class itself, which is
+    compared, never called (calling a class would run its notebook code)."""
     ref = snapshot.get(id(cls))
-    return ref is not None and ref() is cls
+    if type(ref) is not _weakref.ref:
+        return ref is cls
+    return ref() is cls
+
+
+def _listed(cls) -> bool:
+    """Whether a base still lists ``cls`` among its subclasses (``type``'s
+    own slots, so no hook runs). A class the collector freed and a
+    finalizer brought back is not: its weak references were cleared."""
+    subclasses = type.__dict__["__subclasses__"]
+    bases = type.__dict__["__bases__"].__get__(cls)
+    return any(sub is cls for base in bases for sub in subclasses(base))
 
 
 def _live_pin(state: dict, cls):
@@ -2423,15 +2436,13 @@ def _pin_classes(state: dict, namespace: dict, entry, live=None) -> None:
     (``_class_sites``), and a class whose text holds no statement of it
     (``%%time``, ``exec``, a factory's call, a copy) is ambiguous. ``live``
     is ``_live_classes``', when the caller has it."""
-    import weakref
-
     raw, before = entry
     pins = state["pins"]
     if live is None:
         live = _live_classes(namespace.get("__name__"))
     made = [
         cls
-        for key, cls in live.items()
+        for cls in live.values()
         if not _alive_at(before, cls)
         and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
         and _live_pin(state, cls) is None
@@ -2443,7 +2454,7 @@ def _pin_classes(state: dict, namespace: dict, entry, live=None) -> None:
         for gone in [k for k, (ref, _) in pins.items() if ref() is None]:
             del pins[gone]
     for cls in made:
-        pins[id(cls)] = (weakref.ref(cls), lines)
+        pins[id(cls)] = (_weakref.ref(cls), lines)
 
 
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
@@ -2477,6 +2488,14 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
             _pin_classes(state, namespace, entry, live)
             break
         lines = _live_pin(state, cls)
+    if lines is None:
+        old = state["pins"].get(id(cls))
+        if old is not None and old[0]() is None and not _listed(cls):
+            # A dead pin at this id, and no base lists the class: it was
+            # collected and brought back by a finalizer (`__del__`), which
+            # clears its weak references first. Its cell is lost: ambiguous.
+            # (A dead pin alone is a reused id: another class lived there.)
+            return True, []
     return lines is not None, lines
 
 
@@ -2494,7 +2513,6 @@ def _ambiguous_own(cls) -> str:
     this object is the one bound (a recompute, never a wrong reuse)."""
     import os
     import uuid
-    import weakref
 
     if not _PROCESS_TOKEN or _PROCESS_TOKEN[0][0] != os.getpid():
         # A forked child inherits the list: a new one per process id.
@@ -2504,7 +2522,7 @@ def _ambiguous_own(cls) -> str:
         if len(_CLASS_GENERATIONS) > 4096:
             for key in [k for k, (r, _) in _CLASS_GENERATIONS.items() if r() is None]:
                 del _CLASS_GENERATIONS[key]
-        hit = (weakref.ref(cls), next(_GENERATION_COUNTER))
+        hit = (_weakref.ref(cls), next(_GENERATION_COUNTER))
         _CLASS_GENERATIONS[id(cls)] = hit
     return _short_hash(f"class\n?\n{_PROCESS_TOKEN[0][1]}\n{hit[1]}".encode())
 

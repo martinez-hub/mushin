@@ -3015,3 +3015,48 @@ that holds the snapshot strongly behind the same interface is caught.
 311 tests in the module, passing on 3.11 to 3.15; the whole suite 1654
 passed (in three parts); the docs build, the 165 docs tests and the lazy
 import tests pass.
+
+### #295 round 17 (2026-11-05): a class a finalizer brings back, and reloads
+
+`/code-review` on round 16 (128fd22...5a6586f) found nothing blocking. The
+adversarial run found one worse answer than 128fd22 (rule (1)): with weak
+snapshots, an in-cell `gc.collect()` can collect a superseded class whose
+instance a finalizer (`__del__`) then brings back. CPython clears every
+weak reference to the class first, so its pin and its base's
+`__subclasses__` entry are gone, and the kept texts stood in for it (an
+`exec`-made methodless class). The same happens on 128fd22 when the
+collection falls between cells; round 16 made an in-cell collection reach
+it.
+
+**Fixes:**
+- *A class brought back:* a dead pin at the class's id while no base lists
+  the class means it was collected and brought back, so it is ambiguous.
+  The first form of this check used the dead pin alone and failed the
+  `local` shell case: a `<locals>` class (never pinned) at the address of a
+  freed pinned class has a dead pin at its id. The base listing tells that
+  reused id from a class that was brought back;
+- *a reload:* the watch's state survives a reload of `_resume`, and an
+  older module's `pre` writes strong snapshots, which `_alive_at` would
+  have called, running each class's `__init__` in a callback. A value that
+  is not a weak reference is compared by identity;
+- *tests:* a deterministic `_alive_at` test (a reused id, a dead reference,
+  an older snapshot's class), a real finalizer resurrection with the
+  collector disabled, and the leak case now taken through a record first;
+- *cleanups:* one `weakref` import, the unused key, the agent guide's long
+  line.
+
+**Mutants:** no reload guard (the class is called), no identity check, no
+resurrection check, and the dead pin alone (the `local` case); all caught.
+
+**Accepted:** a superseded class that was never pinned (one made before
+the watch) and is brought back by a finalizer is read from the kept texts,
+as without a watch.
+
+**Results (#295 round 17).** The first matrix run failed the resurrection
+test on 3.15 only. 3.15 no longer clears the weak references of an object
+a finalizer brings back (probed: the pin's reference stays alive and the
+base still lists the class), so on 3.15 the class keeps its pin and the
+case cannot arise. The test now branches on what it observes, not on the
+version: pinned in both, with no text when the references were cleared.
+313 tests in the module, passing on 3.11 to 3.15; the whole suite 1656
+passed (in three parts); the docs build and the 165 docs tests pass.

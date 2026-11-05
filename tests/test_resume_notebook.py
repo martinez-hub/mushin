@@ -3931,7 +3931,12 @@ for value in (1, 5, 1):
     held_base.append(_fp(shell.user_ns["task35"])["code"]["Hb (notebook)"])
 # The watch holds its snapshots weakly: a class replaced by a later cell is
 # freed by a `gc.collect()` in a cell after that.
-run("class Leak:\\n    BUF = bytearray(1000)\\n")
+run("def task36(a):\\n    return a * len(Leak.BUF)\\n")
+run(
+    "class Leak:\\n    BUF = bytearray(1000)\\n\\n\\n"
+    "_L = _pf(task36)['code']['Leak (notebook)']\\n"
+)
+_fp(shell.user_ns["task36"])  # recorded inside its cell and after it
 leak_ref = weakref.ref(shell.user_ns["Leak"])
 run("class Leak:\\n    BUF = b''\\n")
 run("import gc\\n\\n\\ngc.collect()\\n")
@@ -4643,3 +4648,75 @@ def test_the_watch_finds_every_live_notebook_class():
         assert set(live) == {id(cls) for cls in expected}
     finally:
         k.close()
+
+
+def test_a_snapshot_tells_a_reused_id_and_an_older_watch_s_snapshot(monkeypatch):
+    """`_alive_at` takes a class as alive at a cell's start only if its id's
+    weak reference still gives that class: a reused id (another class, or a
+    dead one) is not, so the cell pins it. A snapshot an older `_resume`
+    wrote before a reload holds the class itself: compared, never called."""
+    import weakref
+
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    exec(
+        "class Config:\n    LR = 0.1\n\n    def __init__(self):\n"
+        "        raise RuntimeError('called')\n",
+        shell.user_ns,
+    )
+    cls = shell.user_ns["Config"]
+    other = type("Other", (), {})
+    dead = weakref.ref(type("Gone", (), {}))
+    for ref in (weakref.ref(other), dead):
+        assert not resume._alive_at({id(cls): ref}, cls)
+    assert resume._alive_at({id(cls): weakref.ref(cls)}, cls)
+    assert resume._alive_at({id(cls): cls}, cls)  # not called: no error
+    resume._pin_classes(
+        state, shell.user_ns, ("exec(SOURCE)\n", {id(cls): weakref.ref(other)})
+    )
+    assert resume._live_pin(state, cls) == ["exec(SOURCE)\n"]
+
+
+def test_a_class_a_finalizer_brings_back_is_ambiguous(monkeypatch):
+    """Before 3.15 the collector clears a class's weak references before a
+    finalizer (`__del__`) brings an instance, and so the class, back: its
+    pin is dead and no base lists it. Its cell is lost, so it is ambiguous,
+    never read from an older kept statement (a dead pin alone is a reused
+    id). 3.15 keeps them, and the class its pin."""
+    import gc
+    import weakref
+
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    ns = shell.user_ns
+    exec(
+        "pool = []\n\n\nclass Pooled:\n    def __del__(self):\n        pool.append(self)\n",
+        ns,
+    )
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        exec("class C(Pooled):\n    X = 1\n", ns)
+        cls = ns["C"]
+        state["pins"][id(cls)] = (weakref.ref(cls), ["exec(SOURCE)\n"])
+        exec("c = C()\nc.me = c\ndel c\n\n\nclass C(Pooled):\n    X = 3\n", ns)
+        del cls
+        gc.collect()
+        back = type(ns["pool"][0])
+    finally:
+        if enabled:
+            gc.enable()
+    assert back.X == 1
+    if resume._listed(back):
+        # 3.15+ keeps the weak references of what a finalizer brings back:
+        # the class keeps its pin.
+        assert resume._pinned_cell(back, ns) == (True, ["exec(SOURCE)\n"])
+    else:
+        assert resume._pinned_cell(back, ns) == (True, [])
+    assert resume._listed(ns["C"])  # a class alive as usual is listed
