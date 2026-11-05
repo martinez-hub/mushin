@@ -2818,3 +2818,17 @@ passed-over cells pinned oldest first, and the function guard removed (the
 walk hangs, and the test's thread times out); all caught. 313 tests in the
 module, passing on 3.11 to 3.15; the whole suite 1656 passed (in three
 parts); the docs build and the 165 docs tests pass.
+
+**Stopping rule for round 13's reviews, bounded (written before them).**
+The unbounded form ("any (a) or (b) blocks") has no end: a reviewer can
+always build one more shape. So:
+- a regression from 5f80f40 (the same probe gives a worse answer on the
+  new head) blocks, whatever its shape;
+- a pre-existing (a) or (b) case blocks only through shapes the tests
+  already treat as ordinary: plain `class` statements, instances,
+  decorators, bases, nested classes, `exec`/`%%time`/`%run` remakes, and
+  `run_cell` nesting that fires events;
+- a pre-existing case that needs a `str` subclass as a key or a module,
+  `silent=True`, a metaclass hook, a colliding `__hash__`, or a
+  `__module__` set to a non-`str` goes on the accepted list, and the PR
+  ships.
