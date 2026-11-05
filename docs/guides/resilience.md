@@ -157,8 +157,9 @@ plugin loader that fills a registry, an import in a `%%time` cell) may not be
 compared, as in a script; nor may a class be told apart by its statement when
 one cell holds more than one version of it (two `class` statements of it run,
 or a statement and a class bound from elsewhere). Nor may a cell holding a
-form feed, a vertical tab or a Unicode line separator be compared, nor what
-an IPython input transformer changes in a cell. After editing such a module
+form feed, a vertical tab or another character, other than a newline or a
+carriage return, that ends a line for Python's `str.splitlines` be
+compared, nor what an IPython input transformer changes in a cell. After editing such a module
 or class, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the

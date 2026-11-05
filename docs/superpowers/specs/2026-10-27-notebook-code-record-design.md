@@ -2674,3 +2674,94 @@ record reaches from the namespace's names that `_cell_classes` misses,
 made from text that is not kept, taking another kept text's digest; or
 (b) a wrong exact read. Cost, kept-text edges, the task-root case and
 docstrings are documented, and then the PR merges. No round 12 for an edge.
+
+### #295 round 12 (2026-11-05): the whole walk, and the passed-over cells
+
+The adversarial run on the round-11 delta (cc1d5a2...83db877) confirmed
+two findings under the stopping rule, and three minor ones.
+
+**(a) A missed reach, four lenses.** The record follows more than
+`_notebook_object`: its walk (`visit`) also follows a cell function's
+`__wrapped__` (resolved again), and a class's methods (`_class_methods`)
+with their `__wrapped__`. A class held only through a notebook decorator
+(`functools.wraps(cls)(make)`, a singleton factory) was never in reach, so
+a `%%time` or `exec` remake took the kept statement's digest. It is not a
+regression from cc1d5a2 (the same probe was stale there), but round 11
+claimed the watch reaches what the record reaches. *Mistake:* round 11
+mirrored the resolver and not the walk, and the plan named only the
+resolver. *Fix:* `_cell_classes` follows each value as the record does,
+reusing its hook-free readers: `_cell_function` (library wrappers,
+`lru_cache`, `partial`) for a cell function, whose `__wrapped__` is
+followed again; a class's methods through `_method_functions` and
+`_cell_function`, with theirs; and bases and nested classes, as before.
+
+**(b) A wrong exact read, introduced by round 11.** The walk passed over an
+inner running cell whose snapshot held the class, then pinned the outer
+cell, and that pin took the classes the inner cell had made so far. The
+outer cell's older statement was then read for them, inside the nested cell
+and after it. *Fix:* the cells passed over are pinned first, newest first,
+so each claims its own classes before an outer one can. This happens only
+when the class is new to some running cell, so a class every snapshot held
+still costs no scan.
+
+**Minor:**
+- the snapshot side of the shared reach had no test (the round-10 by-name
+  snapshot passed every test): a class made before the watch and held only
+  by an instance, read exactly after an unchanged re-run of its statement;
+- the bound-classmethod branch had no test: the reach test adds one;
+- the separator list named three of the eight characters: the docs now say
+  "a form feed, a vertical tab or another character, other than a newline
+  or a carriage return, that ends a line for `str.splitlines`", in words.
+
+**Tests:**
+- a class a notebook decorator wraps (`functools.wraps(cls)(make)`),
+  remade by `%%time` and by `exec`: never the kept statement's digest;
+- the nested-cell case: an outer cell states two classes and runs a nested
+  cell that restates one and records; the restated class is read from the
+  nested cell, exactly;
+- the reach test moves to the kernel fixture, so its functions are cell
+  functions, and adds a decorator's wrapped class, a method's wrapped class
+  and a bound classmethod;
+- the instance-only class made before the watch.
+
+**Mutants:**
+- no `__wrapped__` (the decorator cases);
+- no methods' `__wrapped__` (the reach test);
+- the passed-over cells not pinned first (the nested case);
+- the by-name snapshot (the class made before the watch);
+- no `take(owner)` (the reach test).
+
+**`/code-review` on the same delta** found the same two blocking findings
+and added:
+- *a foreign class's notebook metaclass:* `_notebook_object` reaches it
+  (`_notebook_class(type(value))` when the class is another module's), and
+  the reach now takes a class's metaclass too;
+- *a parity test, not a hand-written list:* a test now spies on the
+  classes the record visits for a task reaching every path above, and
+  asserts each is within `_cell_classes` (a `<locals>` class aside). The
+  hand-written reach test stays, for paths the record does not take today.
+  *Fixed the test's own premise on the way:* a method that
+  `functools.wraps(Target)` rewrote is not a method to the record (its
+  qualname is `Target`'s), so the record does not visit `Target`; the watch
+  reaching more is safe;
+- *a cost, accepted:* a class that becomes reachable only in a later cell
+  (stored in a dict at its own cell's end, then instantiated) is pinned to
+  that later cell, which states none of it: ambiguous, so its cells re-run,
+  where cc1d5a2 read the statement exactly;
+- *altitude, a follow-up:* the watch's reach and the record's walk are two
+  implementations; one hook-free resolver for both would make the parity
+  structural instead of tested.
+
+*Cost, measured again:* the walk's extra edges put `_cell_classes` at about
+1.3 ms on the same 901-name namespace (2.6 ms per cell); accepted.
+
+**Results (#295 round 12).** The parity test and the decorator and nested
+shell cases fail on 83db877's source and pass now. The instance-only case
+made before the watch passes on 83db877 too (it already snapshotted the
+full reach), and its mutant, the round-10 by-name snapshot, fails it.
+Mutants, with the bytecode cache cleared: no `__wrapped__`, no methods'
+`__wrapped__`, the passed-over cells not pinned first, the by-name
+snapshot, no `take(owner)`, and no metaclass; all caught, each on its own
+assertion. 312 tests in the module, passing on 3.11 to 3.15; the whole
+suite 1655 passed (in three parts); the docs build and the 165 docs tests
+pass.

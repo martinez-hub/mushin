@@ -3513,6 +3513,8 @@ def own():
 
 run("class Early:\\n    X = 1\\n")  # before the watch starts
 run("class Early3:\\n    X = 1\\n\\n\\nsaved3 = Early3\\ndel Early3\\n")
+early_inst = "class EarlyI:\\n    X = 1\\n\\n\\nei = EarlyI()\\ndel EarlyI\\n"
+run(early_inst)  # held only by an instance, before the watch
 run("import mushin._resume")  # the watch starts here
 v1 = "class Config:\\n    LR = 0.1\\n"
 run(v1)
@@ -3803,6 +3805,39 @@ run("def task23(a):\\n    return a * Loc.K\\n")
 local = [_fp(shell.user_ns["task23"])["code"]["Loc (notebook)"]]
 run("Loc = make_loc()\\n")
 local.append(_fp(shell.user_ns["task23"])["code"]["Loc (notebook)"])
+# A class a notebook decorator wraps (`functools.wraps(cls)(make)`), remade
+# by `%%time` and by `exec`: the record follows the wrapper's `__wrapped__`,
+# and so does the watch, so it is ambiguous, never the kept statement's.
+run(
+    "import functools\\n\\n\\ndef register(cls):\\n    def make():\\n"
+    "        return cls()\\n\\n    return functools.wraps(cls)(make)\\n"
+)
+run("@register\\nclass Wr:\\n    LR = 0.1\\n")
+run("def task24(a):\\n    return a * Wr().LR\\n")
+wrapped = [_fp(shell.user_ns["task24"])["code"]["Wr (notebook)"]]
+run("%%time\\n@register\\nclass Wr:\\n    LR = 0.2\\n")
+wrapped.append(_fp(shell.user_ns["task24"])["code"]["Wr (notebook)"])
+run("exec('@register\\\\nclass Wr:\\\\n    LR = 0.3\\\\n')\\n")
+wrapped.append(_fp(shell.user_ns["task24"])["code"]["Wr (notebook)"])
+# A record in a nested cell that restates one of two classes its outer cell
+# stated: the nested cell claims the class it made before the outer cell's
+# pin can, so the class is read from the nested cell's statement, exactly.
+run("def task25(a):\\n    return a * Nx.K * Ny.K\\n")
+run(
+    "class Ny:\\n    K = 1\\n\\n\\nclass Nx:\\n    K = 1\\n\\n\\n"
+    "get_ipython().run_cell(\\"class Ny:\\\\n    K = 2\\\\n\\\\n\\\\n"
+    "_N2 = _pf(task25)['code']['Ny (notebook)']\\\\n\\")\\n"
+)
+restated = [shell.user_ns["_N2"]]
+run("class Ny:\\n    K = 2\\n")
+restated.append(_fp(shell.user_ns["task25"])["code"]["Ny (notebook)"])
+# The class made before the watch and held only by an instance: in every
+# snapshot, so no later cell takes it, and its kept statement is read, as
+# after an unchanged re-run of its cell.
+run("def task26(a):\\n    return a * ei.X\\n")
+early_i = [_fp(shell.user_ns["task26"])["code"]["ei (notebook)"]]
+run(early_inst)
+early_i.append(_fp(shell.user_ns["task26"])["code"]["ei (notebook)"])
 # A base remade by `exec` and deleted, reached through a derived class.
 run("class Bse:\\n    X = 1\\n")
 run("class Der(Bse):\\n    pass\\n")
@@ -3852,7 +3887,8 @@ print(json.dumps({
     "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
     "derived": derived, "proxy": proxy, "restored": restored, "aliased": aliased,
     "instance_only": instance_only, "alias_nested": alias_nested,
-    "reached": reached, "based": based, "local": local,
+    "reached": reached, "based": based, "local": local, "wrapped": wrapped,
+    "restated": restated, "early_i": early_i,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3911,6 +3947,9 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
         assert kept not in (inside, after), kind
     assert got["based"][0] != got["based"][1]  # its base, remade, is seen
     assert got["local"][0] == got["local"][1]  # a local class: its factory's
+    assert got["wrapped"][0] not in got["wrapped"][1:]  # through `__wrapped__`
+    assert got["restated"][0] == got["restated"][1]  # the nested cell's own
+    assert got["early_i"][0] == got["early_i"][1]  # in every snapshot
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4450,26 +4489,99 @@ def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
     assert digests[0] != digests[1]
 
 
-def test_the_watch_reaches_what_the_record_reaches():
-    """`_cell_classes` gives the notebook classes a record can reach from the
-    names: a class a name binds, an instance's class, a bound method's
-    owner's class, and their notebook bases and nested classes; a library's
-    class is not one."""
-    import collections
-
+def test_the_watch_reaches_what_the_record_reaches(kernel):
+    """`_cell_classes` follows the record's walk: a class a name binds, an
+    instance's class, a bound method's owner (a classmethod's class too), a
+    cell function's `__wrapped__`, a method's `__wrapped__`, and notebook
+    bases and nested classes; a library's class is not one."""
     import mushin._resume as resume
 
-    ns = {"__name__": "mushin_t_reach"}
-    exec(
-        "class Base:\n    def go(self):\n        return 1\n\n\n"
-        "class Named(Base):\n    class Inner:\n        pass\n\n\n"
-        "class Held:\n    pass\n\n\nheld = Held()\n\n\n"
-        "class Owner(Base):\n    pass\n\n\nbound = Owner().go\ndel Held, Owner, Base\n",
-        ns,
+    kernel.run(
+        "import collections\nimport functools\n\n\nclass Base:\n"
+        "    def go(self):\n        return 1\n\n    @classmethod\n"
+        "    def make(cls):\n        return cls()\n"
     )
-    ns["counter"] = collections.Counter()
+    kernel.run("class Named(Base):\n    class Inner:\n        pass\n")
+    kernel.run("class Held:\n    pass\n\n\nheld = Held()\n")
+    kernel.run("class Owner(Base):\n    pass\n\n\nbound = Owner().go\n")
+    kernel.run("class Viacm(Base):\n    pass\n\n\ncm = Viacm.make\n")
+    kernel.run(
+        "class Wrapped:\n    pass\n\n\ndef _make():\n    return Wrapped()\n\n\n"
+        "maker = functools.wraps(Wrapped)(_make)\n"
+    )
+    kernel.run(
+        "class InMethod:\n    pass\n\n\nclass HasMethod:\n"
+        "    def _m(self):\n        return 1\n\n"
+        "    m = functools.wraps(InMethod)(_m)\n\n\nhm = HasMethod()\n"
+    )
+    kernel.run(
+        "del Held, Owner, Viacm, Wrapped, InMethod, HasMethod, Base\n"
+        "counter = collections.Counter()\n"
+    )
     reached = {
         type.__dict__["__qualname__"].__get__(cls)
-        for cls in resume._cell_classes(ns).values()
+        for cls in resume._cell_classes(kernel.ns).values()
     }
-    assert reached == {"Base", "Named", "Named.Inner", "Held", "Owner"}
+    assert reached == {
+        "Base",
+        "Named",
+        "Named.Inner",
+        "Held",
+        "Owner",
+        "Viacm",
+        "Wrapped",
+        "HasMethod",
+        "InMethod",
+    }
+
+
+def test_the_watch_reaches_every_class_the_record_visits(kernel, monkeypatch):
+    """Parity: every class the record visits from a task's names is within
+    the watch's reach (`_cell_classes`), whatever path leads to it, so no
+    class the watch cannot see is read from an older kept statement."""
+    import mushin._resume as resume
+
+    cells = [
+        "import functools\n\n\ndef register(cls):\n    def make():\n"
+        "        return cls()\n\n    return functools.wraps(cls)(make)\n",
+        "class Plain:\n    X = 1\n",
+        "class Held:\n    X = 1\n\n\nheld = Held()\ndel Held\n",
+        "@register\nclass Wrapped:\n    X = 1\n",
+        "class ByInstance:\n    X = 1\n\n\n"
+        "w_inst = functools.wraps(ByInstance())(lambda: 0)\ndel ByInstance\n",
+        "class InPartial:\n    X = 1\n\n\np_wrap = functools.partial(register(InPartial))\n"
+        "del InPartial\n",
+        "class Base:\n    def go(self):\n        return 1\n\n    @classmethod\n"
+        "    def make(cls):\n        return cls()\n",
+        "class Owned(Base):\n    X = 1\n\n\nbm = Owned().go\ndel Owned\n",
+        "class ViaCm(Base):\n    X = 1\n\n\ncm = ViaCm.make\ndel ViaCm\n",
+        "class Meta(type):\n    K = 1\n\n\nclass Lib(metaclass=Meta):\n"
+        "    __module__ = 'somelib'\n\n\ndel Meta\n",
+        "class Gone:\n    X = 1\n\n\nclass Kid(Gone):\n    pass\n\n\ndel Gone\n",
+        "class Out:\n    class In:\n        X = 1\n\n\ninner = Out.In()\ndel Out\n",
+        "class Target:\n    X = 1\n\n\nclass HasM:\n    def _m(self):\n        return 1\n\n"
+        "    m = functools.wraps(Target)(_m)\n\n\nhm = HasM()\ndel Target, HasM\n",
+        "def task(a):\n    return [Plain, held, Wrapped, w_inst, p_wrap, bm, cm, Lib,"
+        " Kid, inner, hm]\n",
+    ]
+    _run_cells(kernel, cells)
+    visited = []
+    real = resume._class_sites
+
+    def spy(cls, *args, **kwargs):
+        visited.append(cls)
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(resume, "_class_sites", spy)
+    resume.project_fingerprints(kernel.ns["task"])
+    reach = resume._cell_classes(kernel.ns)
+    names = {type.__dict__["__qualname__"].__get__(cls) for cls in visited}
+    assert {"Plain", "Held", "Wrapped", "ByInstance", "InPartial", "Owned"} <= names
+    assert {"ViaCm", "Meta", "Gone", "Kid", "Out.In", "HasM"} <= names
+    missed = [
+        type.__dict__["__qualname__"].__get__(cls)
+        for cls in visited
+        if id(cls) not in reach
+        and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
+    ]
+    assert missed == []

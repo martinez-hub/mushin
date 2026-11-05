@@ -2542,9 +2542,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             bound from elsewhere), a ``_target_`` defined in the notebook,
             code whose text the kernel does not keep (a ``%%time`` cell,
             ``exec``, a ``%run`` file; a class it makes re-runs instead),
-            possibly a cell holding a form feed, a vertical tab or a Unicode
-            line separator, what an IPython input transformer changes in a
-            cell, a
+            possibly a cell holding a form feed, a vertical tab or another
+            character, other than a newline or a carriage return, that ends a
+            line for ``str.splitlines``, what an IPython input transformer
+            changes in a cell, a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

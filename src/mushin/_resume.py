@@ -2268,18 +2268,25 @@ _CLASS_LINE = re.compile(r"(?:^|[\r\n])[ \t\f]*class\b")
 
 def _cell_classes(namespace: dict) -> dict:
     """``{id(cls): cls}`` for every notebook class the record can reach from
-    the namespace's names, as ``_notebook_object`` resolves them: a class a
-    name binds, an instance's class, a bound method's owner (or its class);
-    and from each, its notebook bases and the classes its body made
-    (``Outer.Inner``). Names are read as ``str``s, values by type and classes
-    through the type's own slots, so no notebook hook runs; the items are
-    copied once, as a callback thread can add names."""
+    the namespace's names, following its walk (``_notebook_entries``): a
+    value as ``_notebook_object`` resolves it (a class or its metaclass, an
+    instance's class, a bound method's owner or its class, a cell function
+    through its wrappers, ``_cell_function``); a cell function's
+    ``__wrapped__``, again;
+    a class's notebook bases and its methods (``_method_functions``), with
+    their ``__wrapped__``; and the classes a class's body made
+    (``Outer.Inner``). Names are read as ``str``s, values by type, functions
+    through their own ``__dict__`` and classes through the type's own slots,
+    so no notebook hook runs; the items are copied once, as a callback
+    thread can add names."""
     import types
 
     notebook = namespace.get("__name__")
     found: dict = {}
     checked: set = set()
+    functions: set = set()
     pending: list = []
+    calls: list = []
 
     def take(value) -> None:
         if id(value) in checked or not issubclass(type(value), type):
@@ -2290,18 +2297,33 @@ def _cell_classes(namespace: dict) -> dict:
             found[id(value)] = value
             pending.append(value)
 
-    for name, value in list(namespace.items()):
-        if type(name) is not str:
-            continue
+    def take_function(value) -> None:
+        function = _cell_function(value, namespace)
+        if function is not None and id(function) not in functions:
+            functions.add(id(function))
+            calls.append(function)
+
+    def follow(value) -> None:
         if type(value) is types.MethodType:
             owner = value.__self__
             take(owner)
             take(type(owner))
         elif issubclass(type(value), type):
             take(value)
+            take(type(value))  # a foreign class's notebook metaclass
+        elif _cell_function(value, namespace) is not None:
+            take_function(value)
         else:
             take(type(value))
-    while pending:
+
+    for name, value in list(namespace.items()):
+        if type(name) is str:
+            follow(value)
+    while pending or calls:
+        if calls:
+            # A notebook decorator's wrapper: the record follows what it wraps.
+            follow(calls.pop().__dict__.get("__wrapped__"))
+            continue
         cls = pending.pop()
         for base in type.__dict__["__bases__"].__get__(cls):
             take(base)
@@ -2311,6 +2333,9 @@ def _cell_classes(namespace: dict) -> dict:
                 inner = type.__dict__["__qualname__"].__get__(value)
                 if inner.startswith(prefix):
                     take(value)
+            else:
+                for method in _method_functions(value):
+                    take_function(method)
     return found
 
 
@@ -2464,19 +2489,26 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     inside running cells, now: the newest running cell whose start could not
     reach the class has what it made so far pinned (``_pin_classes``). A cell
     started after the class was made (a nested ``run_cell``) could, and is
-    passed over; one whose text is unknown may have made it, so the walk
-    stops there."""
+    passed over, after its own classes are pinned to it; one whose text is
+    unknown may have made it, so the walk stops there."""
     state = _cell_watch(register=False)
     if state is None:
         return False, None
     lines = _live_pin(state, cls)
     if lines is None:
+        passed: list = []
         for _, entry in reversed(state["running"]):
             if entry is None:
                 break  # its text is unknown: no pin to the cell around it
-            if id(cls) not in entry[1]:
-                _pin_classes(state, namespace, entry)
-                break
+            if id(cls) in entry[1]:
+                passed.append(entry)  # started after the class was made
+                continue
+            # The cells passed over claim their own classes first, newest
+            # first, so this one's pin takes only what it made itself.
+            for inner in passed:
+                _pin_classes(state, namespace, inner)
+            _pin_classes(state, namespace, entry)
+            break
         lines = _live_pin(state, cls)
     return lines is not None, lines
 
