@@ -1866,3 +1866,55 @@ exclusive. One test of mine failed at first for the wrong reason: the empty
 nested cell's case used `_pf` before the script defined it, so the cell
 raised; it now imports it itself.
 
+### #295 review round 4 (2026-11-04): plan
+
+`/code-review` (10) and the adversarial workflow (5 confirmed) reviewed
+d52238c. Plan, written before any edit.
+
+**The pattern, and the decision.** Four rounds, and each refinement of the
+3.11/3.12 rule for telling a class's statements apart produced the next
+blocker: round 3's skip of texts the watch had seen made a legitimate
+nested class lose every kept text, so an edit went unnoticed (adversarial,
+reproduced through a resume). On 3.11/3.12 a class does not say which of
+its statements made it; every rule built from the cell's syntax is a guess
+that the next shape breaks. So the guesses go, and the cases they aimed at
+become one documented residual: *on Python 3.11 and 3.12, a class stated
+more than once in one cell, in a loop or in a function that runs the sweep
+may not be told apart by its statement; after editing one, use a new
+`working_dir`.* That covers `/code-review`'s statement in a function with
+`global`, an `if` in a loop, and a dead branch's statement pinned for a
+`make_dataclass`; a class no `class` statement makes is documented already.
+On 3.13+ `__firstlineno__` answers exactly, and on every Python the common
+shapes (one statement, a factory, an edit and a revert under the watch) are
+exact.
+
+**Changes:**
+- *the skip of seen texts goes*, with its state (it also removes
+  `/code-review`'s `global` factory, key-format and growth findings);
+- *a nested class is pinned on demand* through its outer class (the
+  running cell's snapshot holds bare names: match the qualname's head);
+- *the post callback falls back* to the cell's `raw_cell` when IPython
+  passes a new execution info (an interrupted async cell), and ends the
+  newest entry when it passes none;
+- *registration* stores the state on the shell first and unregisters what
+  it added if the second step fails;
+- `_exclusive` stays `if`/`match`: widening it to `try` would be one more
+  guess;
+- the `_pinned_cell` docstring and a dead guard; a test that a `try` body's
+  statement and its handler's both run.
+
+**Stopping rule, set now:** round 5 is both reviews on this delta. A
+finding that depends on a run between two statements of one class on
+3.11/3.12 is the documented residual, not a blocker; the reviewers are told
+so. Anything else blocking gets fixed; otherwise merge.
+
+**Results (#295 round 4 fixes).** 302 tests in the module, passing on 3.11
+to 3.15; the whole suite 1647 passed (in three parts); the docs build and
+docs tests pass. Five mutations for this round, all caught by node id: the
+nested on-demand pin by the full qualname, each of the two post-callback
+fallbacks, the state stored after registering, and no unregister on a
+failed registration. The net change against d49dd89 was read hunk by hunk:
+the nested pins, the head match, the post fallbacks and the registration
+order add information; the 3.11/3.12 rule for statements is the one guess
+left, and its failure modes are the documented residual.
+

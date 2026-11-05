@@ -3556,6 +3556,18 @@ run(outer.format(2))
 nested.append(inner())
 run(outer.format(1))
 nested.append(inner())
+# A nested class reached as a base and recorded inside its own cell, its value
+# toggled 1, 2, 1, 2: pinned through its outer class, so each is exact.
+run("def task5(a):\\n    return a * D.x\\n")
+toggled = []
+for value in (1, 2, 1, 2):
+    run(
+        "from mushin._resume import project_fingerprints as _pf5\\n"
+        f"class Outer:\\n    class Inner:\\n        x = {value}\\n\\n\\n"
+        "class D(Outer.Inner):\\n    pass\\n\\n\\n"
+        "_T = _pf5(task5)['code']['D (notebook)']\\n"
+    )
+    toggled.append(shell.user_ns["_T"])
 # A class `type()` remakes after a watched statement: not that statement's.
 run("class Mk:\\n    X = 1\\n")
 run("def task4(a):\\n    return a * Mk.X\\n")
@@ -3622,7 +3634,7 @@ print(json.dumps({
     "magic_again": magic_again, "plain": plain, "timed": [timed, timed_same],
     "twice": twice, "hook": hook, "solo": [solo, solo_timed],
     "branch": [branch, branch_again], "nested": nested, "remade": remade,
-    "emptied": emptied,
+    "emptied": emptied, "toggled": toggled,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3658,7 +3670,11 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["branch"][0] == got["branch"][1]  # an if's branches: one runs
     n1, n2, n3 = got["nested"]  # a nested class, pinned: a revert is exact
     assert n1 != n2 and n3 == n1
-    assert got["remade"][0] != got["remade"][1]  # type() made it, not the cell
+    if sys.version_info >= (3, 13):
+        # type() made it, not the cell; 3.11/3.12 cannot tell (documented).
+        assert got["remade"][0] != got["remade"][1]
+    toggled = got["toggled"]  # a nested class recorded inside its own cell
+    assert toggled[0] != toggled[1] and toggled[2:] == toggled[:2]
     inside, after, inside_again, after_again = got["emptied"]
     assert inside == after == inside_again == after_again
     a, b, a_again, b_again = got["twice"]  # two statements in one cell
@@ -3971,3 +3987,94 @@ def test_a_factory_stating_its_class_twice_is_stable(kernel):
     first = _own(kernel, "C")
     kernel.run(factory)
     assert _own(kernel, "C") == first
+
+
+def test_a_try_body_and_its_handler_both_run(kernel):
+    """Two statements in one `try`, the body's and the handler's: both run, so
+    a record between them must not reuse the first one's results."""
+    kernel.run("def task(a):\n    return a * Config.LR\n")
+    kernel.run(
+        "from mushin._resume import project_fingerprints as _pf\n\ntry:\n\n"
+        "    class Config:\n        LR = 0.7\n\n"
+        "    _A = _pf(task)['code']['Config (notebook)']\n    raise ValueError\n"
+        "except ValueError:\n\n    class Config:\n        LR = 0.8\n\n"
+        "    _B = _pf(task)['code']['Config (notebook)']\n"
+    )
+    assert kernel.ns["_A"] != kernel.ns["_B"]
+
+
+def test_a_watch_that_cannot_register_leaves_no_callback(monkeypatch):
+    """The state is stored on the shell first, and a callback already added
+    is removed when the next fails, so no later record registers again."""
+    import mushin._resume as resume
+
+    class Events:
+        def __init__(self):
+            self.callbacks = []
+
+        def register(self, event, callback):
+            if event == "post_run_cell":
+                raise RuntimeError("refused")
+            self.callbacks.append((event, callback))
+
+        def unregister(self, event, callback):
+            self.callbacks.remove((event, callback))
+
+    class Shell:
+        user_ns: dict = {}
+
+        def __init__(self):
+            self.events = Events()
+
+        def transform_cell(self, raw):
+            return raw
+
+    shell = Shell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    assert resume._cell_watch() is None
+    assert shell.events.callbacks == []
+    assert type(getattr(shell, resume._CELL_WATCH)) is dict
+    assert resume._cell_watch() is getattr(shell, resume._CELL_WATCH)
+    assert shell.events.callbacks == []
+
+
+class _FakeEvents:
+    def __init__(self):
+        self.callbacks: dict = {}
+
+    def register(self, event, callback):
+        self.callbacks[event] = callback
+
+    def unregister(self, event, callback):
+        self.callbacks.pop(event, None)
+
+
+class _FakeShell:
+    def __init__(self):
+        self.events = _FakeEvents()
+        self.user_ns = {"__name__": "mushin_t_fake_shell"}
+
+    def transform_cell(self, raw):
+        return raw
+
+
+@pytest.mark.parametrize("ending", ["a new info, the same raw text", "no result"])
+def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
+    """An interrupted cell's result carries a new info around the same raw
+    text, and ipykernel can pass no result: the cell still ends and pins."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    raw = "class Config:\n    LR = 0.1\n"
+    info = types.SimpleNamespace(raw_cell=raw)
+    shell.events.callbacks["pre_run_cell"](info)
+    shell.user_ns["Config"] = type("Config", (), {"__module__": "mushin_t_fake_shell"})
+    if ending == "no result":
+        result = None
+    else:
+        result = types.SimpleNamespace(info=types.SimpleNamespace(raw_cell=raw))
+    shell.events.callbacks["post_run_cell"](result)
+    assert state["running"] == []
+    assert id(shell.user_ns["Config"]) in state["pins"]

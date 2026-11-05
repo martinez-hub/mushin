@@ -2282,12 +2282,7 @@ def _cell_watch(register: bool = True) -> dict | None:
             return state
         if not register:
             return None
-        state = {
-            "pins": {},
-            "made": {},
-            "running": [],
-            "transform": shell.transform_cell,
-        }
+        state = {"pins": {}, "running": [], "transform": shell.transform_cell}
 
         def pre(info=None) -> None:
             try:
@@ -2306,22 +2301,50 @@ def _cell_watch(register: bool = True) -> dict | None:
 
         def post(result=None) -> None:
             # IPython fires post without pre for an empty cell (a magic's
-            # empty body): end only the cell whose info this result carries.
+            # empty body): end the cell whose info this result carries. An
+            # interrupted cell's result can carry a new info around the same
+            # raw text, and ipykernel can pass no result at all: then the
+            # raw text, or the newest cell.
             try:
-                info = getattr(result, "info", None)
                 running = state["running"]
+                if not running:
+                    return
+                info = getattr(result, "info", None)
+                raw = getattr(info, "raw_cell", None)
+                found = None
                 for i in range(len(running) - 1, -1, -1):
                     if running[i][0] is info:
-                        entry = running.pop(i)[1]
-                        if entry is not None:
-                            _pin_classes(state, shell.user_ns, entry)
+                        found = i
                         break
+                if found is None and raw is not None:
+                    for i in range(len(running) - 1, -1, -1):
+                        if getattr(running[i][0], "raw_cell", None) is raw:
+                            found = i
+                            break
+                if found is None and result is None:
+                    found = len(running) - 1
+                if found is not None:
+                    entry = running.pop(found)[1]
+                    if entry is not None:
+                        _pin_classes(state, shell.user_ns, entry)
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
 
-        shell.events.register("pre_run_cell", pre)
-        shell.events.register("post_run_cell", post)
+        # The state first, so a failure below cannot leave callbacks that
+        # the next call would register again.
         setattr(shell, _CELL_WATCH, state)
+        added = []
+        try:
+            for event, callback in (("pre_run_cell", pre), ("post_run_cell", post)):
+                shell.events.register(event, callback)
+                added.append((event, callback))
+        except Exception:
+            for event, callback in added:
+                try:
+                    shell.events.unregister(event, callback)
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+            raise
         return state
     except Exception:  # noqa: BLE001 - no watch: classes go to the kept cells
         return None
@@ -2381,31 +2404,32 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     if not made:
         return
     lines = state["transform"](raw).splitlines(True)
-    key = _short_hash("".join(lines).encode("utf-8", "surrogatepass"))
     if len(pins) > 4096:  # drop the pins of classes that are gone
         for gone in [k for k, (ref, _) in pins.items() if ref() is None]:
             del pins[gone]
-    made_by = state["made"]
     for cls in made:
         pins[id(cls)] = (weakref.ref(cls), lines)
-        made_by.setdefault(qualname(cls), set()).add(key)
 
 
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     """``(pinned, lines)``: whether the shell's cell watch saw the cell whose
-    ``class`` statement made ``cls`` run, and that cell's text (None when it
-    holds no statement of the class: ``%%time``, ``exec``). Pinned when the
-    cell ended, or, for a record taken inside that cell, now (the name holds a
-    new object since the cell started)."""
+    ``class`` statement made ``cls`` run, and that cell's transformed text
+    (one holding no statement of the class, ``%%time`` or ``exec``, gives no
+    site when ``_class_sites`` reads it). Pinned when the cell ended, or, for
+    a record taken inside that cell, now: the name holds a new object since
+    the cell started; a nested class (``Outer.Inner``) through its outer
+    class, whose bare name the cell's snapshot holds."""
     state = _cell_watch(register=False)
     if state is None:
         return False, None
     pin = state["pins"].get(id(cls))
     if pin is None or pin[0]() is not cls:
         qualname = type.__dict__["__qualname__"].__get__(cls)
+        head = qualname.partition(".")[0]
         for _, entry in reversed(state["running"]):
-            if entry is not None and qualname in entry[1]:
-                _pin_classes(state, namespace, entry, only=cls)
+            if entry is not None and head in entry[1]:
+                outer = cls if head == qualname else namespace.get(head)
+                _pin_classes(state, namespace, entry, only=outer)
                 break
         pin = state["pins"].get(id(cls))
     if pin is not None and pin[0]() is cls:
@@ -2461,9 +2485,7 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     between them. Inside a function's or a class's body, they run as one step,
     and which object comes out is a value. Several kept texts with different
     statements are ambiguous (which is in force cannot be told) and all of
-    them are read. With the shell's watch on, a kept text it saw make another
-    object of the qualname is not this one's (``make_dataclass`` replacing a
-    watched ``class Config``).
+    them are read.
     ``later``: found otherwise than through a method, so main's record had
     no reading of it (``_notebook_entries`` follows it after main's seeds).
     No site when none is kept, or (3.13+) for a class no ``class`` statement
@@ -2527,21 +2549,17 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
 
     pinned, lines = _pinned_cell(cls, namespace)
     if pinned:
-        # A cell the watch could not read (`%%time`, `exec`): no site, as on
-        # main, and no older kept text stands in for it.
-        tree = _cell_tree(lines) if lines is not None else None
+        # A cell holding no statement of the class (`%%time`, `exec`): no
+        # site, as on main, and no older kept text stands in for it.
+        tree = _cell_tree(lines)
         nodes, siblings = statements(tree) if tree is not None else ([], False)
         return ([(tree, nodes)] if nodes else []), siblings, True
     texts = class_texts(qualname)
     if texts is None:
         return [], True, True
-    state = _cell_watch(register=False)
-    seen = state["made"].get(qualname, ()) if state is not None else ()
     groups: dict[str, list] = {}
     ambiguous = False
     for text in texts:
-        if seen and _short_hash(text.encode("utf-8", "surrogatepass")) in seen:
-            continue  # the watch saw this text make another object
         tree = _cell_tree(text.splitlines(True))
         nodes, siblings = statements(tree) if tree is not None else ([], False)
         if nodes:
