@@ -2247,3 +2247,162 @@ at the newest running cell (the nested-cell mention), the factory filter
 back to `not top` (the nested `%%time` remake), a failed scan ambiguous
 when pinned (the direct test), and on 3.14 the old `__firstlineno__` rule
 (the shell and the kernel `__module__` tests).
+
+### #295 round 8 (2026-11-05): a cell that binds a class it does not state
+
+`/code-review` on the round-7 delta (b17c4b8...be85372) gave thirteen
+findings; the first three reproduced in a real shell on 3.11 and 3.13:
+
+1. *Regression:* the namespace snapshot pins a class a cell derives from a
+   kept statement in another cell (`Config = dataclass(slots=True)(Config)`,
+   `type(C)(C.__name__, C.__bases__, dict(C.__dict__))`, `exec(In[n])`) to
+   the deriving cell, which states none. Round 6's rule then reads only a
+   factory's statements, finds none, and gives no site: a constant digest,
+   so an edit to the original statement is missed. Round 6 left these
+   unpinned, and the kept statement was read.
+2. A failed scan gives a pinned class with no statement no site, where it
+   was ambiguous (round 7 made this the rule and the test locks it in).
+3. On 3.13+, a cell that states a class and calls a `global` factory that
+   remakes it reads the cell's statement when both start on the same line
+   of their cells; the docs said only 3.11/3.12.
+4-5. No tests for 1 or 3.
+6. The nested walk stops once `made` holds 64 classes, and `made` now holds
+   every class a cell binds (`%run models.py` with 70 classes skips the
+   nested ones, and an older kept nested statement can stand in).
+7. `_CLASS_LINE` treats only `\n` as a line start; `compile()` accepts a
+   bare `\r`.
+8. Comments: `class_texts`' says a failed scan makes such a class
+   ambiguous; `_class_sites`' "as on main" (main had no reading of these).
+9. The fragment still describes the statement-based watch.
+10. The reworded `run()` docstring puts "a `_target_` defined there" after
+    "in a function it calls".
+11. Every running entry holds strong references to every class until the
+    cell ends, or until a stale entry is cleared.
+12. With `only=`, the pin walks the whole namespace where a lookup by the
+    qualname does.
+13. The class-binding test is written twice (the snapshot, the pin).
+
+**What finding 1 shows.** When the pinned cell states no statement of the
+class, code it ran made the class, from text that is not kept (`%%time`, an
+`exec` string, `%run`) or from a kept statement (a copy, `exec(In[n])`, a
+`global` factory). Nothing in a class with no methods tells which. Reading
+the kept statements misses `%%time`'s edits (round 5's `exec` regression);
+reading none misses the copy's (this finding); reading only a factory's is
+one more guess (round 6). Only "ambiguous" is safe both ways: the
+per-object token, so the cells re-run when that cell runs again or after a
+restart, and an unchanged object keeps its digest within the process.
+
+**Decision:** a class pinned to a cell that states none of it is
+ambiguous. The factory fallback (round 6) goes, with `in_function` and the
+unscanned special case; findings 1 and 2 go with it. Exact answers stay
+where they are facts: a pinned cell's own statements, a method's or 3.14's
+`__annotate_func__` cell, and the kept texts for a class the watch did not
+see bound. The cost: a `%%time`, `exec`, `%run` or `global`-factory class
+re-runs its cells each time its cell runs again, and after a restart,
+instead of keeping a constant digest that missed its edits. On 3.13+ a
+class `type()` makes keeps its constant digest (the `__static_attributes__`
+rule comes first): it has no statement, so a digest that never changes
+says "not compared", as documented.
+
+**The rest:**
+- 3: the docs say it: on 3.11/3.12, or on any Python when two of the
+  statements start on the same line of their cells. A test would lock in a
+  miss; none.
+- 6: the nested walk gets its own budget.
+- 7: the line-start regex accepts `\r`, `\r\n` and `\n`.
+- 8, 9, 10: comments, the fragment, the docstring.
+- 11: the snapshot holds weak references; a class gone by the cell's end is
+  not the one it held. (Not `id`s: a freed class's address is reused, and
+  the next class at it would read as unchanged.)
+- 12: the on-demand pin looks the class up by its qualname.
+- 13: one helper decides what a class binding is, for both.
+- Tests: the three derivations in a separate cell (an edit and its revert
+  never share a digest with the old version's); the `%%time` and mention
+  assertions now say "a re-run recomputes"; a cell binding 70 classes
+  still pins a nested one; the `\r` text is parsed.
+
+**The adversarial run on the same delta** confirmed one minor gap: no test
+told `in_function`'s any-step walk from an innermost-step check (a
+`global` factory's nested class). It is moot here, since the factory
+fallback goes. A refuted finding (refuted as older than round 7, not as
+wrong) still holds: `_pin_classes` runs `shell.transform_cell` after the
+cell. For a one-line cell that is IPython's prefilter, against the
+namespace the cell left, so `isinstance` can run a notebook object's
+`__class__` hook in the callback, and a raising hook drops the cell's pins.
+Round 7 made every cell that binds a class reach it. *Fix:* the watch
+transforms with IPython's static `input_transformer_manager`, which never
+reads the namespace. It handles every form the record parses: cell and
+line magics, `!`, `?`. Automagic `time class C` stays raw, does not parse,
+and is ambiguous, as the dynamic transform's `run_line_magic` text would
+be. A `_FakeShell` without the manager falls back to its `transform_cell`.
+Test: a one-line cell binding a raising proxy and remaking a class by
+`exec`: no hook runs, and the remade class is not the kept statement's.
+
+**Kept as they are:** 11 (strong references during a cell): a weak
+reference would change what "the class the name held" means in the middle
+of a review round, for memory held only while a cell runs (a stale entry
+until eight more cells start). Accepted.
+
+**Mutations, written now:** pinned-with-no-statement back to no site (the
+three derivations fail); the nested budget shared with the top-level count
+(the 70-class test fails); the `\n`-only line regex (the `\r` test fails);
+the dynamic `transform_cell` (the proxy case fails); the on-demand lookup
+by the wrong name (the nested-cell mention fails).
+
+**Codex on be85372 (P2):** two versions of a class saved under aliases
+before `import mushin`, then `Config = old1` and `Config = old2`: each
+existing object read as new, since only the name's previous object was
+compared, and was pinned to its assignment cell (no site under round 7, one
+digest for both). Round 8's rule alone makes it safe (a token). The root is
+the snapshot's question: *new* must mean no name in the namespace held the
+class when the cell started. So the snapshot becomes `{id(class): class}`.
+It holds the classes, so no id among them can be reused while the cell
+runs. `_pinned_cell` asks the same question.
+
+**Decisions the advisor pressed, made now:**
+- *`%run` and `%%time` classes re-run:* neither is a documented pattern
+  (both appear only in the limits sentences), so the single rule stands, and
+  the docs and the fragment name the cost: such a class re-runs its cells
+  when that cell runs again or after a restart.
+- *Finding 3:* the limit loses its version qualifier ("may not be told
+  apart ... when one cell runs more than one `class` statement of it"),
+  true on every Python with "may".
+- *Tests also:* the unscanned test flips and is renamed (pinned with no
+  statement is ambiguous whatever the scan gives); the `%%time` case also
+  checks that a record right after keeps the digest (a token is per
+  object, not per record); the proxy case runs once, with a unique name;
+  the mention cases keep `before != after`, which the no-site mutant fails.
+  A class saved under an alias before the watch and restored after it is
+  read from its kept statement (an exact match with an unchanged re-run),
+  which only the identity snapshot gives.
+- *Docstrings to change:* `_class_sites`' bullet and closing line,
+  `_pin_classes`' last sentence, the `_CELL_WATCH` comment, the
+  `class_texts` comment.
+
+**Stopping rule for round 8, given to both reviews:** a class pinned to a
+cell that states none of it is ambiguous and re-runs; it never takes
+another kept text's digest; on 3.13+ a class with no
+`__static_attributes__` keeps its constant digest. A finding that such a
+re-run costs work is the design. A finding that a class takes another
+text's digest, or that an exact read is wrong, blocks. The 3.11/3.12
+several-statements limit, and the `__build_class__` follow-up, stay as
+they are.
+
+**Results (#295 round 8).** 307 tests in the module, passing on 3.11 to
+3.15 (the logs kept); the whole suite 1651 passed (in three parts); the
+docs build and the 165 docs tests pass. Every mutant was caught by node id
+on its own assertion: pinned with no statement back to no site (the three
+derivations, the mentions, the `%%time` re-run and the direct test), the
+nested budget shared with the top-level count (the 70-class test), the
+`\n`-only line regex (the `\r` test), the dynamic transform (the proxy
+one-liner), round 7's snapshot keyed by name (the alias restored), the
+on-demand pin at the newest running cell (the nested-cell mention), and on
+3.14 the old `__firstlineno__` rule and no 3.13+ rule.
+
+*A mistake in the checks themselves, found here:* one comparison of
+mutants reported a mutant's behaviour for the next one. The two had the
+same byte size, and a cached `.pyc` was reused. Every round-8 mutant was
+rerun with `PYTHONDONTWRITEBYTECODE=1` and the cache cleared before each
+run; the results above are from that run. Earlier rounds' runners did not
+clear it. Their mutants were written one at a time against a restored
+source, which makes a reuse unlikely, but not impossible.

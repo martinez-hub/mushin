@@ -145,13 +145,17 @@ again. A class whose `class` statement cannot be told from another kept
 version of its cell (one a function makes, or one edited before `import
 mushin`), or on Python 3.11 and 3.12 from another statement of it that its
 cell runs too, can also make a resume re-run the cells, and `cache_dir=`
-compute them again, when its cell runs again or after a restart. A resume
+compute them again, when its cell runs again or after a restart. A class a
+cell binds without stating it (one a `%%time` cell, `exec`, `%run` or a
+`global` factory makes, or a copy such as `dataclass(slots=True)(C)`) makes
+a resume re-run the cells, and `cache_dir=` compute them again, whenever that
+cell runs again and after a restart. A resume
 on another Python version can also re-run the cells of a class stated more
 than once in its cell. A module loaded other than by an `import` statement of such a cell
 (`importlib.import_module`, a plugin loader that fills a registry, an import
-in a `%%time` cell) may not be compared, as in a script; nor, on Python 3.11
-and 3.12, may a class be told apart by its statement when one cell runs more
-than one `class` statement of it (two in the cell, in a loop, or in a
+in a `%%time` cell) may not be compared, as in a script; nor may a class be
+told apart by its statement when one cell runs more than one `class`
+statement of it (two in the cell, in a loop, or in a
 function the cell calls). After editing
 such a module or class, use a new `working_dir`.
 

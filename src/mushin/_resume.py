@@ -2255,15 +2255,21 @@ def _method_functions(value) -> list:
 #: so a reloaded ``_resume`` finds the same one): ``pins`` maps ``id(cls)``
 #: to ``(weakref, lines)``, the transformed text of the cell that bound it;
 #: ``running`` is the cells running now (a magic's nested cell too), each
-#: ``(info, (raw text, {name: class}))`` with every class the namespace held
-#: when the cell started, or ``(info, None)`` when the cell's text is
-#: unknown.
+#: ``(info, (raw text, {id(class): class}))`` with every class the namespace
+#: held under any name when the cell started, or ``(info, None)`` when the
+#: cell's text is unknown.
 _CELL_WATCH = "_mushin_cell_watch"
 #: A ``class`` keyword at a line's start, after its indentation: where every
 #: ``class`` statement of a kept cell's text starts (it is Python, magics
-#: already transformed). ``_cell_imports`` parses only a text with one, or
-#: with the word ``import``.
-_CLASS_LINE = re.compile(r"^[ \t\f]*class\b", re.MULTILINE)
+#: already transformed, and ``compile`` takes ``\r`` as a line end too).
+#: ``_cell_imports`` parses only a text with one, or with the word ``import``.
+_CLASS_LINE = re.compile(r"(?:^|[\r\n])[ \t\f]*class\b")
+
+
+def _class_binding(name, value) -> bool:
+    """Whether a namespace entry binds a class: a ``str`` name and a value
+    whose type is a metaclass, read by type alone, so no hook runs."""
+    return type(name) is str and issubclass(type(value), type)
 
 
 def _shell():
@@ -2289,7 +2295,13 @@ def _cell_watch(register: bool = True) -> dict | None:
             return state
         if not register:
             return None
-        state = {"pins": {}, "running": [], "transform": shell.transform_cell}
+        # IPython's static transforms only (magics, `!`, `?`): its full
+        # `transform_cell` runs the prefilter on a one-line cell, which reads
+        # the namespace (`isinstance`), and after a cell that can run a
+        # notebook object's hook in the callback.
+        manager = getattr(shell, "input_transformer_manager", None)
+        transform = getattr(manager, "transform_cell", None) or shell.transform_cell
+        state = {"pins": {}, "running": [], "transform": transform}
 
         def pre(info=None) -> None:
             try:
@@ -2300,16 +2312,17 @@ def _cell_watch(register: bool = True) -> dict | None:
                 try:
                     raw = getattr(info, "raw_cell", None)
                     if type(raw) is str:
-                        # Every class the namespace holds, whatever the text
-                        # says: a cell's text cannot tell a statement from a
-                        # mention, and `exec`, `%run` or a factory binds one
-                        # with no `class` in it. Names are read as `str`s and
-                        # values by type, so no hook runs; the items are
-                        # copied once, as a callback thread can add names.
+                        # Every class the namespace holds, under any name,
+                        # whatever the text says: a cell's text cannot tell a
+                        # statement from a mention, and `exec`, `%run` or a
+                        # factory binds one with no `class` in it. Held by
+                        # identity, so no id is reused while the cell runs;
+                        # the items are copied once, as a callback thread can
+                        # add names.
                         classes = {
-                            name: value
+                            id(value): value
                             for name, value in list(shell.user_ns.items())
-                            if type(name) is str and issubclass(type(value), type)
+                            if _class_binding(name, value)
                         }
                         entry = (raw, classes)
                 except Exception:  # noqa: BLE001 - the cell still ends at post
@@ -2372,16 +2385,15 @@ def _cell_watch(register: bool = True) -> dict | None:
 def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     """Pin each class the cell ``entry`` (``(raw, classes)``) bound, to the
     cell's transformed text, with the classes its body made
-    (``Outer.Inner``): every name that now holds a class other than the one
-    it held when the cell started (a name new since then held none), whose
-    qualname is that name and whose module is the notebook's. ``only`` limits
-    it to one class. The first pin wins: a magic's nested cell
-    (``%%capture``) ends before the magic's own cell, and only its text holds
-    the statement. Nothing is parsed here; a record reads the text
-    (``_class_sites``), and a text holding no statement of the class
-    (``%%time``, ``exec``, a factory's call) gives it no site, unless a kept
-    function states it under ``global``. Names are read as ``str``s and
-    classes through the type's own slots: no notebook hook runs."""
+    (``Outer.Inner``): every name that now holds a class no name held when
+    the cell started, whose qualname is that name and whose module is the
+    notebook's. ``only`` limits it to one class. The first pin wins: a
+    magic's nested cell (``%%capture``) ends before the magic's own cell, and
+    only its text holds the statement. Nothing is parsed here; a record reads
+    the text (``_class_sites``), and a class whose text holds no statement of
+    it (``%%time``, ``exec``, a factory's call, a copy) is ambiguous. Names
+    are read as ``str``s and classes through the type's own slots: no
+    notebook hook runs."""
     import weakref
 
     def qualname(cls) -> str:
@@ -2397,22 +2409,25 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     raw, before = entry
     pins = state["pins"]
     made = []
-    for name, value in list(namespace.items()):
-        if only is not None and value is not only:
-            continue
-        if type(name) is not str or not issubclass(type(value), type):
-            continue
-        if before.get(name) is value:
-            continue  # the class the name held when the cell started
+    if only is not None:  # a pin needs the qualname as its name
+        name = qualname(only)
+        bindings = [(name, only)] if namespace.get(name) is only else []
+    else:
+        bindings = list(namespace.items())
+    for name, value in bindings:
+        if not _class_binding(name, value) or id(value) in before:
+            continue  # not a class, or one the namespace held at the start
         module = own_dict(value).get("__module__")
         if type(module) is not str or module != namespace.get("__name__"):
             continue
         if qualname(value) != name or not unpinned(value):
             continue  # a class made elsewhere and bound here (`C = make()`)
         made.append(value)
-    # The classes their bodies made, a few levels down.
+    # The classes their bodies made, a few levels down, on their own budget:
+    # a cell can bind many classes (`%run models.py`).
     pending = list(made)
-    while pending and len(made) < 64:
+    nested = 0
+    while pending and nested < 256:
         outer = pending.pop()
         prefix = qualname(outer) + "."
         for value in list(own_dict(outer).values()):
@@ -2424,6 +2439,7 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
             ):
                 made.append(value)
                 pending.append(value)
+                nested += 1
     if not made:
         return
     lines = state["transform"](raw).splitlines(True)
@@ -2453,8 +2469,8 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
         outer = cls if head == qualname else namespace.get(head)
         if issubclass(type(outer), type):
             for _, entry in reversed(state["running"]):
-                # A name new since the cell started is not in its snapshot.
-                if entry is not None and entry[1].get(head) is not outer:
+                # A class made since the cell started is not in its snapshot.
+                if entry is not None and id(outer) not in entry[1]:
                     _pin_classes(state, namespace, entry, only=outer)
                     break
         pin = state["pins"].get(id(cls))
@@ -2500,10 +2516,11 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
       name spanning the method's first line;
     - 3.14's ``__annotate_func__`` (a class with annotations), the same way;
     - the cell the shell's watch saw bind it (``_pinned_cell``). When that
-      cell states no such class, code it ran made it: a function a kept cell
-      defines, stating it under ``global`` (a factory), whose statements are
-      read as below and alone; or text that is not kept (``%%time``,
-      ``exec``), which gives no site, as on main;
+      cell states no such class, code it ran made it, from text that is not
+      kept (``%%time``, an ``exec`` string, ``%run``) or from a kept
+      statement (a ``global`` factory, a copy such as
+      ``dataclass(slots=True)(C)``, ``exec(In[n])``), which cannot be told:
+      ambiguous;
     - the kept cells' texts with a statement of its qualname
       (``class_texts(qualname)``, None when the cells could not be scanned).
     In a text, every statement of the qualname counts (an ``if``'s two
@@ -2519,7 +2536,8 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
     ``later``: found otherwise than through a method, so main's record had
     no reading of it (``_notebook_entries`` follows it after main's seeds).
     No site when none is kept, or (3.13+) for a class no ``class`` statement
-    made (``type()``, ``make_dataclass``: no ``__static_attributes__``)."""
+    made (``type()``, ``make_dataclass``: no ``__static_attributes__``): its
+    digest never changes, so it is not compared."""
     import ast
     import sys
     import types
@@ -2566,21 +2584,14 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
             dumps[id(node)] = _canonical_dump(node)
         return dumps[id(node)]
 
-    def in_function(path) -> bool:
-        return any(step[0] in ("FunctionDef", "AsyncFunctionDef") for step in path)
-
-    def statements(tree, inner: bool = False) -> tuple[list, bool]:
+    def statements(tree) -> tuple[list, bool]:
         """The text's statements of the qualname (on 3.13+, at its first
-        line; when ``inner``, only those in a function's body: a factory's,
-        under ``global``, not a top-level class's nested one), sorted; and
-        whether two different ones of the cell's own can both run, so either
-        could be in force at a record taken between."""
+        line), sorted; and whether two different ones of the cell's own can
+        both run, so either could be in force at a record taken between."""
         found = [
             (node, path, top)
             for node, q, path, top in _class_nodes(tree)
-            if q == qualname
-            and (first is None or _first_line(node) == first)
-            and not (inner and not in_function(path))
+            if q == qualname and (first is None or _first_line(node) == first)
         ]
         both = any(
             dump(a) != dump(b) and not _exclusive(pa, pb)
@@ -2591,28 +2602,23 @@ def _class_sites(cls, methods, namespace: dict, class_texts) -> tuple[list, bool
         return sorted((node for node, _, _ in found), key=dump), both
 
     pinned, lines = _pinned_cell(cls, namespace)
-    inner = False
     if pinned:
         tree = _cell_tree(lines)
         nodes, siblings = statements(tree) if tree is not None else ([], False)
         if nodes:
             return [(tree, nodes)], siblings, True
-        # The cell states no such class, so code it ran made it. A factory's
-        # statement (in a function's body, under `global`) may stand in; an
-        # older one outside any function is another version's, and `%%time`
-        # or `exec` text is not kept: then no site, as on main.
-        inner = True
+        # The cell states no such class, so code it ran made it, and whether
+        # from a kept statement cannot be told. Reading one would miss a
+        # `%%time` cell's edits; reading none, a copy's. Ambiguous re-runs.
+        return [], True, True
     texts = class_texts(qualname)
     if texts is None:
-        # The kept cells could not be scanned: no factory can be read, so a
-        # class pinned to a cell stating none has no site, as on main; any
-        # other is ambiguous.
-        return [], not inner, True
+        return [], True, True
     groups: dict[str, list] = {}
     ambiguous = False
     for text in texts:
         tree = _cell_tree(text.splitlines(True))
-        nodes, siblings = statements(tree, inner) if tree is not None else ([], False)
+        nodes, siblings = statements(tree) if tree is not None else ([], False)
         if nodes:
             ambiguous |= siblings
             groups.setdefault("|".join(map(dump, nodes)), []).append((tree, nodes))

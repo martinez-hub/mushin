@@ -3512,6 +3512,7 @@ def own():
 
 
 run("class Early:\\n    X = 1\\n")  # before the watch starts
+run("class Early3:\\n    X = 1\\n\\n\\nsaved3 = Early3\\ndel Early3\\n")
 run("import mushin._resume")  # the watch starts here
 v1 = "class Config:\\n    LR = 0.1\\n"
 run(v1)
@@ -3531,6 +3532,7 @@ run("class Config:\\n    LR = 0.4\\n")
 plain = own()
 run("%%time\\nclass Config:\\n    LR = 0.6\\n")
 timed = own()
+timed_again = own()  # the same object: the same digest
 run("%%time\\nclass Config:\\n    LR = 0.6\\n")  # unchanged
 timed_same = own()
 ifelse = (
@@ -3692,6 +3694,44 @@ for value in (1, 2, 1):
         "get_ipython().run_cell(\\"_N = _pf(task12)['code']['Nest (notebook)']  # class Nest\\")\\n"
     )
     in_nested.append(shell.user_ns["_N"])
+# A class a later cell derives from a kept statement: that cell states
+# none, so the class is ambiguous, and an edit to the statement is seen.
+derived = {}
+for kind, name, derive in (
+    ("slots dataclass", "Der1", "import dataclasses\\nDer1 = dataclasses.dataclass(slots=True)(Der1)\\n"),
+    ("type copy", "Der2", "Der2 = type(Der2)(Der2.__name__, Der2.__bases__, dict(Der2.__dict__))\\n"),
+    ("exec of In", "Der3", "exec(In[-2])\\n"),
+):
+    run(f"def task15(a):\\n    return a * {name}().X\\n")
+    derived[kind] = []
+    for value in (1, 2):
+        run(f"class {name}:\\n    X: int = {value}\\n")
+        run(derive)
+        derived[kind].append(_fp(shell.user_ns["task15"])["code"][f"{name} (notebook)"])
+# A one-line cell whose first name an object with a raising `__class__`
+# hook binds, remaking a class by `exec`: the watch's transform reads no
+# namespace, so no hook runs, and the class is pinned (never the kept text).
+run(
+    "class Proxy:\\n    def __getattribute__(self, n):\\n        if n == '__class__':\\n"
+    "            print('proxy-class-read')\\n            raise RuntimeError(n)\\n"
+    "        return object.__getattribute__(self, n)\\n"
+)
+run("class Plain9:\\n    X = 1\\n")
+run("def task16(a):\\n    return a * Plain9.X\\n")
+proxy = [_fp(shell.user_ns["task16"])["code"]["Plain9 (notebook)"]]
+proxy_mark = len(out.getvalue())
+run("pp9 = Proxy(); exec('class Plain9:\\\\n    X = 2\\\\n')\\n")
+proxy.append(_fp(shell.user_ns["task16"])["code"]["Plain9 (notebook)"])
+proxy.append("proxy-class-read" in out.getvalue()[proxy_mark:])
+run("del pp9")
+# A class saved under an alias before the watch started, restored after it:
+# the namespace held it when that cell started, so the cell did not make it,
+# and its kept statement is read, as after an unchanged re-run.
+run("def task17(a):\\n    return a * Early3.X\\n")
+run("Early3 = saved3")
+restored = [_fp(shell.user_ns["task17"])["code"]["Early3 (notebook)"]]
+run("class Early3:\\n    X = 1\\n")
+restored.append(_fp(shell.user_ns["task17"])["code"]["Early3 (notebook)"])
 # A class made before the watch started: every later cell saw it when it
 # started, so none is taken for its cell; its kept statement is read, as
 # after an unchanged re-run under the watch.
@@ -3725,12 +3765,13 @@ print(json.dumps({
     "first": first, "edited": edited, "reverted": reverted, "raised": raised,
     "magic": magic, "inside": inside, "after_cell": after_cell,
     "callbacks": [callbacks, reloaded], "after_reload": after_reload,
-    "magic_again": magic_again, "plain": plain, "timed": [timed, timed_same],
+    "magic_again": magic_again, "plain": plain, "timed": [timed, timed_again, timed_same],
     "twice": twice, "hook": hook, "solo": [solo, solo_timed],
     "branch": [branch, branch_again], "nested": nested, "remade": remade,
     "emptied": emptied, "toggled": toggled, "mentions": mentions,
     "remakes": remakes, "module_set": module_set, "commented": commented,
     "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
+    "derived": derived, "proxy": proxy, "restored": restored,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3758,22 +3799,28 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["raised"] == got["first"]  # the statement never ran
     # A magic's nested cell pins the class to its body: exact, and stable.
     assert got["magic"] == got["magic_again"] == got["plain"]
-    # A `%%time` cell's class has no site, as on main: the same digest after
-    # an unchanged re-run, and never an older kept text's.
-    timed, timed_same = got["timed"]
-    assert timed == timed_same
+    # A `%%time` cell's class is ambiguous: its object keeps its digest, a
+    # re-run of the cell (a new object) recomputes, and an older kept text's
+    # digest never stands in.
+    timed, timed_again, timed_same = got["timed"]
+    assert timed == timed_again != timed_same
     assert timed not in (got["first"], got["edited"], got["magic"])
     assert got["solo"][0] != got["solo"][1]  # its only kept text is the old one
     for kind, (kept, remade) in got["remakes"].items():
         assert kept != remade, kind  # so for `%time`, automagic and `exec`
     # A cell that only mentions a factory's class states none: the factory's
-    # statement is read (exactly while one version is kept: an unchanged
-    # re-run keeps the digest), and an edit to it changes the digest.
-    for kind, (before, rerun, after) in got["mentions"].items():
-        assert before == rerun != after, kind
+    # statement is not read, as whether it made the class cannot be told:
+    # ambiguous, so an edit to the factory is never missed.
+    for kind, (before, _, after) in got["mentions"].items():
+        assert before != after, kind
     for kind, (kept, remade) in got["nested_remakes"].items():
         assert kept != remade, kind
     assert got["early"][0] == got["early"][1]  # never pinned to a later cell
+    for kind, (v1, v2) in got["derived"].items():
+        assert v1 != v2, kind
+    kept, remade, hook_ran = got["proxy"]
+    assert kept != remade and not hook_ran
+    assert got["restored"][0] == got["restored"][1]  # its statement, read
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4204,10 +4251,11 @@ def test_a_class_whose_module_is_assigned_is_still_read(kernel):
     assert _own(kernel) != first
 
 
-def test_a_pinned_class_with_no_statement_and_no_scan_has_no_site(monkeypatch):
-    """When the kept cells cannot be scanned, a class pinned to a cell that
-    states none (`exec`, `%%time`) has no site, as on main, and stays stable;
-    an unpinned one is ambiguous."""
+def test_a_class_pinned_to_a_cell_stating_none_is_ambiguous(monkeypatch):
+    """A class pinned to a cell that states none of it (`exec`, `%%time`, a
+    copy) is ambiguous whatever the kept cells hold: no kept statement stands
+    in for it. Unpinned, a kept statement is read, and no scan is
+    ambiguous."""
     import weakref
 
     import mushin._resume as resume
@@ -4219,9 +4267,13 @@ def test_a_pinned_class_with_no_statement_and_no_scan_has_no_site(monkeypatch):
     cls = shell.user_ns["Config"]
     state["pins"][id(cls)] = (weakref.ref(cls), ["exec(SOURCE)\n"])
     no_scan = lambda qualname: None  # noqa: E731
-    assert resume._class_sites(cls, [], shell.user_ns, no_scan) == ([], False, True)
+    kept = lambda qualname: ["class Config:\n    LR = 0.1\n"]  # noqa: E731
+    for texts in (no_scan, kept):
+        assert resume._class_sites(cls, [], shell.user_ns, texts) == ([], True, True)
     del state["pins"][id(cls)]
     assert resume._class_sites(cls, [], shell.user_ns, no_scan) == ([], True, True)
+    sites, ambiguous, _ = resume._class_sites(cls, [], shell.user_ns, kept)
+    assert sites and not ambiguous
 
 
 @pytest.mark.skipif(sys.version_info < (3, 13), reason="__static_attributes__ is 3.13+")
@@ -4235,3 +4287,24 @@ def test_a_class_type_makes_has_no_site_without_the_watch(kernel):
     kept = _own(kernel, "Mk")
     kernel.run("Mk = type('Mk', (), {'X': 2})\n")
     assert _own(kernel, "Mk") != kept
+
+
+def test_a_cell_binding_many_classes_still_pins_a_nested_one(monkeypatch):
+    """The nested walk has its own budget: a cell binding 70 classes
+    (`%run models.py`) still pins the class one of their bodies made."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    source = "".join(f"class C{i}:\n    X = {i}\n\n\n" for i in range(70))
+    exec(source + "class Outer:\n    class Inner:\n        X = 1\n", shell.user_ns)
+    resume._pin_classes(state, shell.user_ns, ("%run models.py\n", {}))
+    assert id(shell.user_ns["Outer"].Inner) in state["pins"]
+
+
+def test_a_kept_text_with_carriage_returns_is_read():
+    """`compile` takes a bare `\\r` as a line end, so the parse trigger does."""
+    import mushin._resume as resume
+
+    assert resume._cell_imports("x = 1\rclass A:\r    X = 1\r")[2] == ("A",)
