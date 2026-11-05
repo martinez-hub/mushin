@@ -2471,8 +2471,9 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     passed over; once the cell that made it is found, the cells passed over
     have their own classes pinned first, newest first. One whose text is
     unknown may have made it, so the walk stops there. ``(True, [])`` is a
-    class whose cell is lost (one in its lineage was brought back by a
-    finalizer): pinned to no text, so ambiguous."""
+    class whose cell is lost (one in its lineage was collected but lives
+    on: a finalizer brought it back, or ``gc.DEBUG_SAVEALL`` kept it):
+    pinned to no text, so ambiguous."""
     state = _cell_watch(register=False)
     if state is None:
         return False, None
