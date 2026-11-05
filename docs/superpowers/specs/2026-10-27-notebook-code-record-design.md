@@ -2653,3 +2653,24 @@ script's literals; and a `%%time` remake was prefixed with an import line,
 which pushed the magic off the cell's first line. 311 tests in the module,
 passing on 3.11 to 3.15; the whole suite 1654 passed (in three parts); the
 docs build and the 165 docs tests pass.
+
+**Before the round-11 reviews (decided now):**
+- *Cost, measured:* `_cell_classes` takes about 0.65 ms on a namespace of
+  901 names that reaches 600 notebook classes (`from numpy import *`,
+  pandas, xarray, 300 classes with a nested class each, 100 instances), and
+  runs twice per cell. Accepted.
+- *Codex:* its one inline finding since round 8 (on ecdffae, instance-only
+  classes) is the case this round fixes. It had none on cc1d5a2.
+- *A function's local class from a factory that `exec` defined* gets a
+  constant digest: no kept text states it, and it is never pinned (a
+  `<locals>` class is read from its factory's cell). That is "`exec` code is
+  not compared", as documented; accepted.
+- *The task root:* a class the record reaches only as the task (a bound
+  method of an instance no name holds) is outside the snapshot and goes to
+  the kept texts; accepted.
+
+**Stopping rule for round 11:** code changes only for (a) a class the
+record reaches from the namespace's names that `_cell_classes` misses,
+made from text that is not kept, taking another kept text's digest; or
+(b) a wrong exact read. Cost, kept-text edges, the task-root case and
+docstrings are documented, and then the PR merges. No round 12 for an edge.
