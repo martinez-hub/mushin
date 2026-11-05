@@ -3838,6 +3838,27 @@ run("def task26(a):\\n    return a * ei.X\\n")
 early_i = [_fp(shell.user_ns["task26"])["code"]["ei (notebook)"]]
 run(early_inst)
 early_i.append(_fp(shell.user_ns["task26"])["code"]["ei (notebook)"])
+# An old class a cell displays (IPython binds `_` and `_N` to it) after a
+# cell that restates it: the record never follows those names, so neither
+# does the watch, and the restating cell's statement is never read for it.
+run("class Dsp:\\n    LR = 0.1\\n\\n\\nregistry = {'old': Dsp}\\ndel Dsp\\n")
+run("class Dsp:\\n    LR = 0.2\\n\\n\\nregistry['old']\\n")
+run("old_dsp = registry['old']\\n")
+run("def task27(a):\\n    return a * old_dsp.LR * Dsp.LR\\n")
+shown = _fp(shell.user_ns["task27"])["code"]
+displayed = [shown["old_dsp (notebook)"], shown["Dsp (notebook)"]]
+# Three nested cells; the outer class sorts first, so the record reaches the
+# middle and the inner cells' class through cells it passes over: each cell
+# claims its own class, newest first.
+shell.user_ns["INNER3"] = (
+    "class C3:\\n    K = 3\\n\\n\\n_T3 = _pf(task28)['code']['C3 (notebook)']\\n"
+)
+shell.user_ns["MIDDLE3"] = "class C3:\\n    K = 2\\n\\n\\nget_ipython().run_cell(INNER3)\\n"
+run("def task28(a):\\n    return a * B3.K * C3.K\\n")
+run("class B3:\\n    K = 1\\n\\n\\nget_ipython().run_cell(MIDDLE3)\\n")
+three = [shell.user_ns["_T3"]]
+run("class C3:\\n    K = 3\\n")
+three.append(_fp(shell.user_ns["task28"])["code"]["C3 (notebook)"])
 # A base remade by `exec` and deleted, reached through a derived class.
 run("class Bse:\\n    X = 1\\n")
 run("class Der(Bse):\\n    pass\\n")
@@ -3888,7 +3909,8 @@ print(json.dumps({
     "derived": derived, "proxy": proxy, "restored": restored, "aliased": aliased,
     "instance_only": instance_only, "alias_nested": alias_nested,
     "reached": reached, "based": based, "local": local, "wrapped": wrapped,
-    "restated": restated, "early_i": early_i,
+    "restated": restated, "early_i": early_i, "displayed": displayed,
+    "three": three,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3950,6 +3972,8 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["wrapped"][0] not in got["wrapped"][1:]  # through `__wrapped__`
     assert got["restated"][0] == got["restated"][1]  # the nested cell's own
     assert got["early_i"][0] == got["early_i"][1]  # in every snapshot
+    assert got["displayed"][0] != got["displayed"][1]  # not the restated one's
+    assert got["three"][0] == got["three"][1]  # the inner cell's own
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4561,8 +4585,12 @@ def test_the_watch_reaches_every_class_the_record_visits(kernel, monkeypatch):
         "class Out:\n    class In:\n        X = 1\n\n\ninner = Out.In()\ndel Out\n",
         "class Target:\n    X = 1\n\n\nclass HasM:\n    def _m(self):\n        return 1\n\n"
         "    m = functools.wraps(Target)(_m)\n\n\nhm = HasM()\ndel Target, HasM\n",
+        "class S(str):\n    pass\n\n\nclass KeyCls:\n    X = 1\n\n\n"
+        "globals()[S('kobj')] = KeyCls()\ndel KeyCls\n",
+        "class ModCls:\n    X = 1\n\n\nModCls.__module__ = S(__name__)\n"
+        "mobj = ModCls()\ndel ModCls\n",
         "def task(a):\n    return [Plain, held, Wrapped, w_inst, p_wrap, bm, cm, Lib,"
-        " Kid, inner, hm]\n",
+        " Kid, inner, hm, kobj, mobj]\n",
     ]
     _run_cells(kernel, cells)
     visited = []
@@ -4577,7 +4605,8 @@ def test_the_watch_reaches_every_class_the_record_visits(kernel, monkeypatch):
     reach = resume._cell_classes(kernel.ns)
     names = {type.__dict__["__qualname__"].__get__(cls) for cls in visited}
     assert {"Plain", "Held", "Wrapped", "ByInstance", "InPartial", "Owned"} <= names
-    assert {"ViaCm", "Meta", "Gone", "Kid", "Out.In", "HasM"} <= names
+    assert {"ViaCm", "Meta", "Gone", "Kid", "Out.In", "HasM", "KeyCls"} <= names
+    assert "ModCls" in names
     missed = [
         type.__dict__["__qualname__"].__get__(cls)
         for cls in visited
@@ -4585,3 +4614,25 @@ def test_the_watch_reaches_every_class_the_record_visits(kernel, monkeypatch):
         and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
     ]
     assert missed == []
+
+
+def test_a_self_wrapped_function_ends_the_watch_s_walk(kernel):
+    """`functools.wraps(fn)(fn)` makes a function its own `__wrapped__`: the
+    walk takes each function once, so it ends (in the callbacks, a loop
+    would hang every cell). Run in a thread, so a regression fails here."""
+    import threading
+
+    import mushin._resume as resume
+
+    kernel.run(
+        "import functools\n\n\ndef keep(fn):\n    return functools.wraps(fn)(fn)\n"
+    )
+    kernel.run("@keep\ndef helper(x):\n    return x\n")
+    assert kernel.ns["helper"].__wrapped__ is kernel.ns["helper"]
+    done: list = []
+    walk = threading.Thread(
+        target=lambda: done.append(resume._cell_classes(kernel.ns)), daemon=True
+    )
+    walk.start()
+    walk.join(10)
+    assert done

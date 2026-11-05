@@ -2293,15 +2293,20 @@ def _cell_classes(namespace: dict) -> dict:
             return
         checked.add(id(value))
         module = type.__dict__["__dict__"].__get__(value).get("__module__")
-        if type(module) is str and module == notebook:
+        # Compared through `str`'s own slot, as a `str` subclass can be one.
+        if issubclass(type(module), str) and str.__eq__(module, notebook) is True:
             found[id(value)] = value
             pending.append(value)
 
-    def take_function(value) -> None:
+    def take_function(value) -> bool:
+        """Queue the cell function ``value`` stands for; False if none."""
         function = _cell_function(value, namespace)
-        if function is not None and id(function) not in functions:
+        if function is None:
+            return False
+        if id(function) not in functions:  # a wrapper can wrap itself
             functions.add(id(function))
             calls.append(function)
+        return True
 
     def follow(value) -> None:
         if type(value) is types.MethodType:
@@ -2311,13 +2316,13 @@ def _cell_classes(namespace: dict) -> dict:
         elif issubclass(type(value), type):
             take(value)
             take(type(value))  # a foreign class's notebook metaclass
-        elif _cell_function(value, namespace) is not None:
-            take_function(value)
-        else:
+        elif not take_function(value):
             take(type(value))
 
     for name, value in list(namespace.items()):
-        if type(name) is str:
+        # A `str` subclass as a key too, read through `str`'s own slot; not
+        # a kernel name (`_`, `_N`, a dunder), which the record never follows.
+        if issubclass(type(name), str) and not _kernel_name(str.__str__(name)):
             follow(value)
     while pending or calls:
         if calls:
@@ -2448,7 +2453,7 @@ def _cell_watch(register: bool = True) -> dict | None:
         return None
 
 
-def _pin_classes(state: dict, namespace: dict, entry) -> None:
+def _pin_classes(state: dict, namespace: dict, entry, reach=None) -> None:
     """Pin each class the cell ``entry`` (``(raw, classes)``) made to the
     cell's transformed text: every class the record can reach now
     (``_cell_classes``) that it could not when the cell started, unless its
@@ -2459,14 +2464,17 @@ def _pin_classes(state: dict, namespace: dict, entry) -> None:
     ends before the magic's own cell, and only its text holds the statement.
     Nothing is parsed here; a record reads the text (``_class_sites``), and a
     class whose text holds no statement of it (``%%time``, ``exec``, a
-    factory's call, a copy) is ambiguous."""
+    factory's call, a copy) is ambiguous. ``reach`` is ``_cell_classes``'s,
+    when the caller has it."""
     import weakref
 
     raw, before = entry
     pins = state["pins"]
+    if reach is None:
+        reach = _cell_classes(namespace)
     made = [
         cls
-        for key, cls in _cell_classes(namespace).items()
+        for key, cls in reach.items()
         if key not in before
         and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
         and _live_pin(state, cls) is None
@@ -2489,7 +2497,8 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     inside running cells, now: the newest running cell whose start could not
     reach the class has what it made so far pinned (``_pin_classes``). A cell
     started after the class was made (a nested ``run_cell``) could, and is
-    passed over, after its own classes are pinned to it; one whose text is
+    passed over; once a cell that could not is found, the cells passed over
+    have their own classes pinned first, newest first. One whose text is
     unknown may have made it, so the walk stops there."""
     state = _cell_watch(register=False)
     if state is None:
@@ -2505,9 +2514,10 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
                 continue
             # The cells passed over claim their own classes first, newest
             # first, so this one's pin takes only what it made itself.
+            reach = _cell_classes(namespace)
             for inner in passed:
-                _pin_classes(state, namespace, inner)
-            _pin_classes(state, namespace, entry)
+                _pin_classes(state, namespace, inner, reach)
+            _pin_classes(state, namespace, entry, reach)
             break
         lines = _live_pin(state, cls)
     return lines is not None, lines

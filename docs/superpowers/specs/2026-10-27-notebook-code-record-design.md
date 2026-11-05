@@ -2765,3 +2765,56 @@ snapshot, no `take(owner)`, and no metaclass; all caught, each on its own
 assertion. 312 tests in the module, passing on 3.11 to 3.15; the whole
 suite 1655 passed (in three parts); the docs build and the 165 docs tests
 pass.
+
+### #295 round 13 (2026-11-05): kernel names, and the last small gaps
+
+The reviews of the round-12 delta (83db877...5f80f40) found no regression
+from it. `/code-review` found four cases under the stopping rule, all
+already present at 83db877; the adversarial run found three minor test and
+docstring gaps.
+
+**Fixed:**
+- *(b) IPython's history names:* the watch followed `_`, `__`, `___` and
+  `_N`, which the record never follows (`_kernel_name`). Displaying an old
+  class as a cell's last expression made it newly reachable there, and the
+  cell's newer statement was read for it. The reach now skips kernel
+  names, as the record does;
+- *(a) a `str` subclass as a namespace key or as a class's `__module__`:*
+  the reach wanted an exact `str`, while the record finds the entry by its
+  code name and compares the module by equality. Both are now read through
+  `str`'s own slots (`str.__str__`, `str.__eq__`), still hook-free;
+- *cost:* a record inside nested cells computes the reach once per lookup,
+  not once per cell pinned; `follow` resolves a function once;
+- *docs:* the `_pinned_cell` docstring says the passed-over cells are pinned
+  only once a cell that could not reach the class is found; the separator
+  sentence uses parentheses.
+
+**Accepted, documented here:** a nested cell run with `silent=True` fires
+no cell events, so the watch counts its classes as the outer cell's. If the
+outer cell states the class too, that cell has run two `class` statements of
+it: the documented several-versions limit.
+
+**Tests:**
+- a cell displaying an old class after a cell that restates it;
+- three nested levels, with the outer class sorting first (the order of the
+  passed-over pins);
+- a self-wrapped cell function (`functools.wraps(fn)(fn)`), whose walk must
+  end (in a thread with a time limit, so a regression fails instead of
+  hanging);
+- a `str`-subclass key and module in the parity test.
+
+**Mutants:**
+- kernel names followed;
+- exact-`str` keys, and exact-`str` modules;
+- the passed-over cells pinned oldest first;
+- the function guard removed.
+
+**Results (#295 round 13).** The display case and the parity test's
+`str`-subclass key and module fail on 5f80f40's source and pass now. The
+three-level and self-wrapped cases pass on both: they guard code round 12
+had right, and their mutants fail them. Mutants, with the bytecode cache
+cleared: kernel names followed, exact-`str` keys, exact-`str` modules, the
+passed-over cells pinned oldest first, and the function guard removed (the
+walk hangs, and the test's thread times out); all caught. 313 tests in the
+module, passing on 3.11 to 3.15; the whole suite 1656 passed (in three
+parts); the docs build and the 165 docs tests pass.
