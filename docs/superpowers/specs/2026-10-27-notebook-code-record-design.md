@@ -2832,3 +2832,62 @@ always build one more shape. So:
   `silent=True`, a metaclass hook, a colliding `__hash__`, or a
   `__module__` set to a non-`str` goes on the accepted list, and the PR
   ships.
+
+### #295 round 14 (2026-11-05): shown is not made
+
+Both reviews of round 13 (5f80f40...e5f91b6) found one regression, from
+several angles: round 13 skipped kernel names in the snapshot and the pin
+alike. That fixed one direction (an old class shown by a later cell that
+restates it) and broke the mirror: a class kept only in a list and shown
+as its own cell's result reached no snapshot, so a later cell that
+subclassed it, or named it from `_` while stating the name, was taken for
+its maker, and that cell's statement was read for it. *Mistake:* round 13
+treated "the record skips kernel names" as "the watch may ignore them".
+The record's reach decides what is compared; it says nothing about which
+classes already existed.
+
+`/code-review` also probed the first fix tried here (history in the
+snapshot only): a class `%%time` made, kept in a list and shown, then named
+by `k = _`, was never pinned, and the older kept statement was read.
+
+**Fix:** the snapshot is everything in reach, IPython's history included,
+so nothing that existed reads as new. At a cell's end, a class newly in
+reach through the names the record follows is pinned to the cell's text,
+as before. One newly in reach only through history was *shown* by the
+cell, which may not have made it: it is pinned with no text, so it is
+ambiguous. `_cell_reach` walks once and returns both: everything, and
+what was reached without kernel names. The parity test keeps comparing
+the latter with the record.
+
+**Cost, accepted:** a class a cell makes and only shows (bound to no name)
+is ambiguous where 5f80f40 read it exactly (it re-runs).
+
+**Accepted under the bounded rule:** a class kept only in a container and
+subclassed under its own name by a later cell takes that cell's statement
+for the base (it was stale on 5f80f40 too). That cell holds a statement of
+the name and a class of that name from elsewhere: the documented
+several-versions limit.
+
+**Tests:**
+- a class shown by its own cell, then subclassed under its name;
+- a class `%%time` made and shown, then named from `_`;
+- an old class shown by one cell, then bound in a cell that restates it;
+- a class shown before the watch started, then named from its `_<n>` in a
+  cell that states it unchanged: read exactly. A snapshot without history
+  makes it ambiguous, which is safe but loses the exact read.
+
+**Mutants:**
+- (a) the snapshot without history;
+- (b) history-only classes left unpinned;
+- (c) history-only classes pinned with the cell's text.
+
+Each is caught by one of the four cases. The first form of the last case
+asserted a difference, and (a) passed it: history-only classes were
+already pinned with no text at the first watched cell, so both answers
+were ambiguous. The case now asserts the exact read.
+
+**Results (#295 round 14).** The four cases pass. Mutants (a), (b) and (c)
+are each caught through pytest by node id, with the bytecode cache
+cleared. The round-13 head fails the shown-base and shown-then-bound cases.
+313 tests in the module, passing on 3.11 to 3.15; the whole suite 1656
+passed (in three parts); the docs build and the 165 docs tests pass.

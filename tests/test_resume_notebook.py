@@ -3515,6 +3515,8 @@ run("class Early:\\n    X = 1\\n")  # before the watch starts
 run("class Early3:\\n    X = 1\\n\\n\\nsaved3 = Early3\\ndel Early3\\n")
 early_inst = "class EarlyI:\\n    X = 1\\n\\n\\nei = EarlyI()\\ndel EarlyI\\n"
 run(early_inst)  # held only by an instance, before the watch
+run("class Pre7:\\n    X = 1\\n\\n\\nreg7 = [Pre7]\\ndel Pre7\\nreg7[0]\\n")
+shown_before = shell.execution_count - 1  # its output is `_<n>` from here on
 run("import mushin._resume")  # the watch starts here
 v1 = "class Config:\\n    LR = 0.1\\n"
 run(v1)
@@ -3838,15 +3840,52 @@ run("def task26(a):\\n    return a * ei.X\\n")
 early_i = [_fp(shell.user_ns["task26"])["code"]["ei (notebook)"]]
 run(early_inst)
 early_i.append(_fp(shell.user_ns["task26"])["code"]["ei (notebook)"])
-# An old class a cell displays (IPython binds `_` and `_N` to it) after a
-# cell that restates it: the record never follows those names, so neither
-# does the watch, and the restating cell's statement is never read for it.
+# An old class displayed (IPython binds `_` and `_N` to it) by a cell that
+# also restates it: shown, not made, so that cell's statement is never read
+# for it.
 run("class Dsp:\\n    LR = 0.1\\n\\n\\nregistry = {'old': Dsp}\\ndel Dsp\\n")
 run("class Dsp:\\n    LR = 0.2\\n\\n\\nregistry['old']\\n")
 run("old_dsp = registry['old']\\n")
 run("def task27(a):\\n    return a * old_dsp.LR * Dsp.LR\\n")
 shown = _fp(shell.user_ns["task27"])["code"]
 displayed = [shown["old_dsp (notebook)"], shown["Dsp (notebook)"]]
+# A class held only in a list and displayed by the cell that made it, then
+# subclassed under its name by a later cell: IPython's history held it when
+# that cell started, so the later cell is not taken for its maker, and an
+# edit to it is never missed (round 13 skipped history in the snapshot too).
+run("class A13:\\n    Y = 10\\n\\n\\nreg13 = [A13]\\ndel A13\\nreg13[0]\\n")
+run("class A13(reg13[0]):\\n    X = 2\\n")
+run("def task29(a):\\n    return a * A13.Y\\n")
+shown_base = [_fp(shell.user_ns["task29"])["code"]["A13 (notebook)"]]
+run("class A13:\\n    Y = 20\\n\\n\\nreg13 = [A13]\\ndel A13\\nreg13[0]\\n")
+run("class A13(reg13[0]):\\n    X = 2\\n")
+shown_base.append(_fp(shell.user_ns["task29"])["code"]["A13 (notebook)"])
+# A class `%%time` made, kept in a list and shown as the cell's result, then
+# named by a later cell: history alone reached it at the `%%time` cell, so
+# it is pinned there with no text (ambiguous), and an edit is never missed.
+run("class K5:\\n    X = 1\\n")
+shown_made = []
+for value in (3, 7):
+    run(f"%%time\\nclass K5:\\n    X = {value}\\n\\n\\nreg5 = [K5]\\ndel K5\\nreg5[0]\\n")
+    run("k5 = _\\n")
+    run("def task30(a):\\n    return a * k5.X\\n")
+    shown_made.append(_fp(shell.user_ns["task30"])["code"]["k5 (notebook)"])
+# An old class only shown by one cell, then bound by a cell that restates it.
+shown_then_bound = []
+for value in (1, 5):
+    run(f"class K6:\\n    X = {value}\\n\\n\\nreg6 = {{'k': K6}}\\ndel K6\\n")
+    run("reg6['k']\\n")
+    run("class K6:\\n    X = 2\\n\\n\\nhold6 = _\\n")
+    run("def task31(a):\\n    return a * hold6.X\\n")
+    shown_then_bound.append(_fp(shell.user_ns["task31"])["code"]["hold6 (notebook)"])
+# A class shown before the watch started (`_<n>` holds it), then named by a
+# cell that states it again, unchanged: every snapshot holds it, so no cell
+# is taken for its maker (none pins it with no text), and its kept
+# statements, all one text, are read exactly.
+run(f"class Pre7:\\n    X = 1\\n\\n\\nhold7 = _{shown_before}\\n")
+run("def task32(a):\\n    return a * hold7.X * Pre7.X\\n")
+pre_shown = _fp(shell.user_ns["task32"])["code"]
+pre_shown = [pre_shown["hold7 (notebook)"], pre_shown["Pre7 (notebook)"]]
 # Three nested cells; the outer class sorts first, so the record reaches the
 # middle and the inner cells' class through cells it passes over: each cell
 # claims its own class, newest first.
@@ -3910,7 +3949,8 @@ print(json.dumps({
     "instance_only": instance_only, "alias_nested": alias_nested,
     "reached": reached, "based": based, "local": local, "wrapped": wrapped,
     "restated": restated, "early_i": early_i, "displayed": displayed,
-    "three": three,
+    "three": three, "shown_base": shown_base, "shown_made": shown_made,
+    "shown_then_bound": shown_then_bound, "pre_shown": pre_shown,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3974,6 +4014,10 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["early_i"][0] == got["early_i"][1]  # in every snapshot
     assert got["displayed"][0] != got["displayed"][1]  # not the restated one's
     assert got["three"][0] == got["three"][1]  # the inner cell's own
+    assert got["shown_base"][0] != got["shown_base"][1]  # its edit, seen
+    assert got["shown_made"][0] != got["shown_made"][1]  # pinned with no text
+    assert got["shown_then_bound"][0] != got["shown_then_bound"][1]
+    assert got["pre_shown"][0] == got["pre_shown"][1]  # read exactly, as stated
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind

@@ -2266,7 +2266,7 @@ _CELL_WATCH = "_mushin_cell_watch"
 _CLASS_LINE = re.compile(r"(?:^|[\r\n])[ \t\f]*class\b")
 
 
-def _cell_classes(namespace: dict) -> dict:
+def _cell_reach(namespace: dict) -> tuple[dict, set]:
     """``{id(cls): cls}`` for every notebook class the record can reach from
     the namespace's names, following its walk (``_notebook_entries``): a
     value as ``_notebook_object`` resolves it (a class or its metaclass, an
@@ -2278,7 +2278,10 @@ def _cell_classes(namespace: dict) -> dict:
     (``Outer.Inner``). Names are read as ``str``s, values by type, functions
     through their own ``__dict__`` and classes through the type's own slots,
     so no notebook hook runs; the items are copied once, as a callback
-    thread can add names."""
+    thread can add names. Returned as ``(classes, named)``: ``classes``
+    follows kernel names (IPython's history ``_``, ``_N``, and dunders) too,
+    and ``named`` holds the ids reached without them, as the record reaches
+    them (it skips kernel names)."""
     import types
 
     notebook = namespace.get("__name__")
@@ -2319,16 +2322,15 @@ def _cell_classes(namespace: dict) -> dict:
         elif not take_function(value):
             take(type(value))
 
-    for name, value in list(namespace.items()):
-        # A `str` subclass as a key too, read through `str`'s own slot; not
-        # a kernel name (`_`, `_N`, a dunder), which the record never follows.
-        if issubclass(type(name), str) and not _kernel_name(str.__str__(name)):
-            follow(value)
-    while pending or calls:
+    def close() -> None:
+        while pending or calls:
+            walk()
+
+    def walk() -> None:
         if calls:
             # A notebook decorator's wrapper: the record follows what it wraps.
             follow(calls.pop().__dict__.get("__wrapped__"))
-            continue
+            return
         cls = pending.pop()
         for base in type.__dict__["__bases__"].__get__(cls):
             take(base)
@@ -2341,7 +2343,28 @@ def _cell_classes(namespace: dict) -> dict:
             else:
                 for method in _method_functions(value):
                     take_function(method)
-    return found
+
+    # A `str` subclass as a key too, read through `str`'s own slot. The names
+    # the record follows first, then the kernel names it skips.
+    items = [(n, v) for n, v in list(namespace.items()) if issubclass(type(n), str)]
+    kernel = [_kernel_name(str.__str__(n)) for n, _ in items]
+    for (_, value), skipped in zip(items, kernel, strict=True):
+        if not skipped:
+            follow(value)
+    close()
+    named = set(found)
+    for (_, value), skipped in zip(items, kernel, strict=True):
+        if skipped:
+            follow(value)
+    close()
+    return found, named
+
+
+def _cell_classes(namespace: dict) -> dict:
+    """``{id(cls): cls}`` for every notebook class the record can reach from
+    the namespace's names (``_cell_reach``, without kernel names)."""
+    found, named = _cell_reach(namespace)
+    return {key: cls for key, cls in found.items() if key in named}
 
 
 def _live_pin(state: dict, cls):
@@ -2395,7 +2418,7 @@ def _cell_watch(register: bool = True) -> dict | None:
                         # from a mention, and `exec`, `%run` or a factory
                         # makes one with no `class` in it. Held by identity,
                         # so no id is reused while the cell runs.
-                        entry = (raw, _cell_classes(shell.user_ns))
+                        entry = (raw, _cell_reach(shell.user_ns)[0])
                 except Exception:  # noqa: BLE001 - the cell still ends at post
                     entry = None
                 running.append((info, entry))
@@ -2464,17 +2487,18 @@ def _pin_classes(state: dict, namespace: dict, entry, reach=None) -> None:
     ends before the magic's own cell, and only its text holds the statement.
     Nothing is parsed here; a record reads the text (``_class_sites``), and a
     class whose text holds no statement of it (``%%time``, ``exec``, a
-    factory's call, a copy) is ambiguous. ``reach`` is ``_cell_classes``'s,
-    when the caller has it."""
+    factory's call, a copy) is ambiguous. A class newly in reach only
+    through IPython's history (the cell's displayed result) was shown by the
+    cell, which may not have made it: it is pinned with no text, so it is
+    ambiguous. ``reach`` is ``_cell_reach``'s, when the caller has it."""
     import weakref
 
     raw, before = entry
     pins = state["pins"]
-    if reach is None:
-        reach = _cell_classes(namespace)
+    found, named = _cell_reach(namespace) if reach is None else reach
     made = [
-        cls
-        for key, cls in reach.items()
+        (cls, key in named)
+        for key, cls in found.items()
         if key not in before
         and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
         and _live_pin(state, cls) is None
@@ -2485,8 +2509,8 @@ def _pin_classes(state: dict, namespace: dict, entry, reach=None) -> None:
     if len(pins) > 4096:  # drop the pins of classes that are gone
         for gone in [k for k, (ref, _) in pins.items() if ref() is None]:
             del pins[gone]
-    for cls in made:
-        pins[id(cls)] = (weakref.ref(cls), lines)
+    for cls, by_name in made:
+        pins[id(cls)] = (weakref.ref(cls), lines if by_name else [])
 
 
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
@@ -2514,7 +2538,7 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
                 continue
             # The cells passed over claim their own classes first, newest
             # first, so this one's pin takes only what it made itself.
-            reach = _cell_classes(namespace)
+            reach = _cell_reach(namespace)
             for inner in passed:
                 _pin_classes(state, namespace, inner, reach)
             _pin_classes(state, namespace, entry, reach)
