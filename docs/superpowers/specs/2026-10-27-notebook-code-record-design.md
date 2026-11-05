@@ -2446,7 +2446,7 @@ hash-collision note on that lookup).
    walk is a tree (each step a longer qualname, each class once), so it has
    no budget now, and an id set keeps it linear.
 4. IPython keeps a cell as `splitlines()` lines, so a form feed (or `\v`,
-   `\x1c`-`\x1e`, `\x85`, ` `, ` `) adds a line that `compile`
+   `\x1c`-`\x1e`, `\x85`, `\u2028`, `\u2029`) adds a line that `compile`
    never counted; on 3.13+ no kept statement then sits at `__firstlineno__`,
    and the class got a constant digest. Kept statements of the qualname, but
    none at its first line, are now ambiguous.
@@ -2470,8 +2470,8 @@ a cell stating none of it).
 statement's digest); a class with 300 nested classes (every one pinned); a
 form-feed cell on 3.13+ without the watch (ambiguous, not constant); a
 running cell with no text before the one that bound the class (not pinned);
-a post transformer that rewrites a class's body (the pinned text is the
-rewritten one).
+a display cell before a class made before the watch is read (no post
+transformer test: item 2 is documented, not changed).
 
 **Mutations:** the pin by name again (the alias cases fail); the nested
 budget back (the 300 case); no ambiguity for kept statements off the first
@@ -2500,3 +2500,71 @@ whatever the budget, so it could not see the reviewer's case (many classes
 with one nested class each). The test now has that shape. Each new test
 also fails on 91f2709's source (`PYTHONPATH` at an archive of it), the
 form-feed one on 3.14.
+
+### #295 round 10 (2026-11-05): the record inside a cell pins only what is bound
+
+Both reviews of the round-9 delta (91f2709...ecdffae) found the same
+blocking regression, in five adversarial lenses and in `/code-review`.
+Round 9 gave the on-demand pin the class itself (`only`) with no lookup by
+name, and with it dropped the check that any name holds the class. A class
+only an instance holds (`cfg = Config()` with `Config` rebound since, or
+`Config = Config()`) is in no snapshot. A record inside a running cell
+pinned it there and read that cell's statement of the name exactly: one
+digest for two versions, a stale reuse. *Mistake:* round 9 replaced a check
+that did two jobs (this is the name; some name holds it) with one that kept
+neither, and the plan named only the first job.
+
+`/code-review` also found the on-demand pin still looking up a nested
+class's outer class by name. An outer class kept only under an alias left
+the record inside its cell reading an older kept nested statement.
+
+**Fix, one rule for both:** the record inside running cells pins, newest
+cell first, what each has bound so far (the end-of-cell pin, by object, with
+no `only`). It stops once the class is pinned, or at a cell whose text is
+unknown. Only a class some name holds is ever pinned, an alias's nested
+classes come with their outer class, and a class an outer cell made before
+a nested cell started is pinned to the outer cell. `only` goes; the pin's
+list and id set become one dict.
+
+**Kept-text edges, accepted (the stopping rule):** characters that
+`str.splitlines` breaks a line at and `compile` does not (a form feed, a
+vertical tab, ` `) shift IPython's kept text, or split a string so it
+does not parse. For a class made before `import mushin`, that can read an
+older kept version's statement on 3.13+, or give a constant digest. Main's
+function path has the same flaw. It is documented as a limit, and proposed
+as a follow-up issue (fix the line mapping where kept text is read, for
+functions and classes alike). `/code-review`'s textless-cell case (a
+running cell whose `raw_cell` is not a string, or whose snapshot raised)
+stays as is: IPython always passes a string.
+
+**Docs:**
+- the re-run sentence holds for cells run after `import mushin` (the watch
+  starts there), so it says so;
+- the separators and IPython input transformers join the limits, written in
+  words (a docstring would turn a backslash escape into the character).
+
+**Tests:**
+- a class only an instance holds, recorded inside a cell that states its
+  name at the same first line: an edit to its real cell changes the digest;
+- a nested class whose outer class a cell keeps only under an alias,
+  recorded inside that cell: not the kept nested statement's digest.
+
+Each must fail on ecdffae's source.
+
+**Mutants:**
+- the on-demand pin forcing a pin to the running cell when its walk found
+  nothing (the instance case);
+- the on-demand pin at the newest cell only (the nested-cell mention).
+
+**Results (#295 round 10).** Both new cases fail on ecdffae's source and
+pass now (each checked on its own: the instance-only class kept one digest
+across its edit, and the alias's nested class took the kept statement's).
+*A slip caught before running:* the first draft of the instance case put
+the record after the cell's statement, where it reads that cell's own
+class correctly, so it could not fail; the record now comes first, with
+the statement at the same first line as the earlier cell's. Mutants, with
+the bytecode cache cleared: a forced pin to the running cell when its walk
+found nothing (the instance case), and the walk at the newest cell only
+(the nested-cell mention); both caught. 310 tests in the module, passing on
+3.11 to 3.15; the whole suite 1653 passed (in three parts); the docs build
+and the 165 docs tests pass.

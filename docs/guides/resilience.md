@@ -146,7 +146,7 @@ version of its cell (one a function makes, or one edited before `import
 mushin`), or on Python 3.11 and 3.12 from another statement of it that its
 cell runs too, can also make a resume re-run the cells, and `cache_dir=`
 compute them again, when its cell runs again or after a restart. A class a
-cell binds without stating it (one a `%%time` cell, `exec`, `%run` or a
+cell run after `import mushin` binds without stating it (one a `%%time` cell, `exec`, `%run` or a
 `global` factory makes, or a copy such as `dataclass(slots=True)(C)`) is not
 read either, but it makes a resume re-run the cells, and `cache_dir=` compute
 them again, whenever that cell runs again and after a restart. A resume
@@ -156,7 +156,9 @@ than once in its cell. A module loaded other than by an `import` statement of su
 in a `%%time` cell) may not be compared, as in a script; nor may a class be
 told apart by its statement when one cell holds more than one version of it
 (two `class` statements of it run, or a statement and a class bound from
-elsewhere). After editing
+elsewhere). Nor may a cell holding a form feed, a vertical tab or another
+character that Python's `str.splitlines` ends a line at be compared, nor what
+an IPython input transformer changes in a cell. After editing
 such a module or class, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the

@@ -2510,8 +2510,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             statement cannot be told from another kept version of its cell
             (or, on 3.11/3.12, from another statement of it its cell runs)
             can make a resume re-run them, and ``cache_dir`` compute them,
-            when its cell runs again or after a restart. A class a cell binds
-            without stating it (one a ``%%time`` cell, ``exec``, ``%run`` or a
+            when its cell runs again or after a restart. A class a cell run
+            after ``import mushin`` binds without stating it (one a ``%%time`` cell, ``exec``, ``%run`` or a
             ``global`` factory makes, or a copy such as
             ``dataclass(slots=True)(C)``) is not read, but re-runs them
             whenever that cell runs again and after a restart. A resume on another
@@ -2541,7 +2541,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             version (two ``class`` statements run, or a statement and a class
             bound from elsewhere), a ``_target_`` defined in the notebook,
             code whose text the kernel does not keep (a ``%%time`` cell,
-            ``exec``, a ``%run`` file; a class it binds re-runs instead), a
+            ``exec``, a ``%run`` file; a class it binds re-runs instead),
+            possibly a cell holding a form feed or another character
+            ``str.splitlines`` ends a line at, what an IPython input
+            transformer changes in a cell, a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

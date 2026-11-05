@@ -3746,6 +3746,32 @@ for kind, name, make in (
     run(make)
     run(f"{name} = saved_{name}\\n")
     aliased[kind] = [kept, _fp(shell.user_ns["task18"])["code"][f"{name} (notebook)"]]
+# A class only an instance holds, recorded inside a cell that states its
+# name at the same first line before running the statement: that cell bound
+# nothing of it, so it is not pinned there, and an edit to its own cell is
+# seen.
+run("def task19(a):\\n    return a * Inst.LR\\n")
+run("from mushin._resume import project_fingerprints as _pf\\n")
+record_cell = "_I = _pf(task19)['code']['Inst (notebook)']\\nclass Inst:\\n    LR = 0.5\\n"
+instance_only = []
+for value in (0.1, 0.2):
+    run(f"x = 0\\nclass Inst:\\n    LR = {value}\\n\\n\\nInst = Inst()\\n")
+    run(record_cell)
+    instance_only.append(shell.user_ns["_I"])
+# A nested class whose outer class a cell keeps only under an alias, recorded
+# inside that cell: its outer class is bound (by `savedA`), so both are
+# pinned there, and the kept nested statement never stands in.
+run("class OutA:\\n    class Inner:\\n        X = 1\\n\\n\\ncfg2 = OutA.Inner()\\n")
+run("def task20(a):\\n    return a * cfg2.X\\n")
+alias_nested = [_fp(shell.user_ns["task20"])["code"]["cfg2 (notebook)"]]
+run(
+    "from mushin._resume import project_fingerprints as _pf\\n"
+    "exec('class OutA:\\\\n    class Inner:\\\\n        X = 2\\\\n')\\n"
+    "savedA = OutA\\ndel OutA\\ncfg2 = savedA.Inner()\\n"
+    "_J = _pf(task20)['code']['cfg2 (notebook)']\\n"
+)
+alias_nested.append(shell.user_ns["_J"])
+run("del cfg2")
 # A class made before the watch started: every later cell saw it when it
 # started, so none is taken for its cell; its kept statement is read, as
 # after an unchanged re-run under the watch.
@@ -3787,6 +3813,7 @@ print(json.dumps({
     "remakes": remakes, "module_set": module_set, "commented": commented,
     "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
     "derived": derived, "proxy": proxy, "restored": restored, "aliased": aliased,
+    "instance_only": instance_only, "alias_nested": alias_nested,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3838,6 +3865,8 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["restored"][0] == got["restored"][1]  # its statement, read
     for kind, (kept, restored) in got["aliased"].items():
         assert kept != restored, kind
+    assert got["instance_only"][0] != got["instance_only"][1]  # its edit, seen
+    assert got["alias_nested"][0] != got["alias_nested"][1]  # no stand-in
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind

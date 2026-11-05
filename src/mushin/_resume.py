@@ -2382,15 +2382,15 @@ def _cell_watch(register: bool = True) -> dict | None:
         return None
 
 
-def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
+def _pin_classes(state: dict, namespace: dict, entry) -> None:
     """Pin each class the cell ``entry`` (``(raw, classes)``) bound, to the
     cell's transformed text, with the classes its body made
     (``Outer.Inner``): every class some name now holds that no name held when
     the cell started, whose qualname has no dot (a top-level or ``global``
     statement's, not a function's local class) and whose module is the
     notebook's. By the object, not the name: a class left only under an alias
-    (``saved = Config; del Config``) is still the cell's. ``only`` limits it
-    to one class, new since the cell started. The first pin wins: a
+    (``saved = Config; del Config``) is still the cell's, and a class no name
+    holds (only an instance) is never one. The first pin wins: a
     magic's nested cell (``%%capture``) ends before the magic's own cell, and
     only its text holds the statement. Nothing is parsed here; a record reads
     the text (``_class_sites``), and a class whose text holds no statement of
@@ -2412,37 +2412,33 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     raw, before = entry
     pins = state["pins"]
     notebook = namespace.get("__name__")
-    made: list = []
-    made_ids: set = set()
-    bindings = [("", only)] if only is not None else list(namespace.items())
-    for name, value in bindings:
+    made: dict = {}  # id -> class, in the order taken
+    for name, value in list(namespace.items()):
         if not _class_binding(name, value) or id(value) in before:
             continue  # not a class, or one the namespace held at the start
-        if id(value) in made_ids:
+        if id(value) in made:
             continue  # bound under a second name
         module = own_dict(value).get("__module__")
         if type(module) is not str or module != notebook:
             continue
         if "." in qualname(value) or not unpinned(value):
             continue  # a function's local class (`C = make()`), or pinned
-        made.append(value)
-        made_ids.add(id(value))
+        made[id(value)] = value
     # The classes their bodies made: each step a longer qualname, each class
     # once, so the walk ends without a budget (`%run models.py` can bind
     # hundreds).
-    pending = list(made)
+    pending = list(made.values())
     while pending:
         outer = pending.pop()
         prefix = qualname(outer) + "."
         for value in list(own_dict(outer).values()):
             if (
                 issubclass(type(value), type)
-                and id(value) not in made_ids
+                and id(value) not in made
                 and qualname(value).startswith(prefix)
                 and unpinned(value)
             ):
-                made.append(value)
-                made_ids.add(id(value))
+                made[id(value)] = value
                 pending.append(value)
     if not made:
         return
@@ -2450,7 +2446,7 @@ def _pin_classes(state: dict, namespace: dict, entry, only=None) -> None:
     if len(pins) > 4096:  # drop the pins of classes that are gone
         for gone in [k for k, (ref, _) in pins.items() if ref() is None]:
             del pins[gone]
-    for cls in made:
+    for cls in made.values():
         pins[id(cls)] = (weakref.ref(cls), lines)
 
 
@@ -2459,28 +2455,24 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     bound ``cls`` run, and that cell's transformed text (one may hold no
     statement of the class: ``%%time``, ``exec``, a factory's call; see
     ``_class_sites``). Pinned when the cell ended, or, for a record taken
-    inside that cell, now: in the newest running cell whose start did not see
-    the class (a nested class, ``Outer.Inner``, through its outer class). A
-    cell started after the class was made (a nested ``run_cell``) saw it, and
-    is passed over."""
+    inside running cells, now: each, newest first, has what it bound so far
+    pinned (``_pin_classes``), until the class is. So only a class some name
+    holds is pinned, a nested one (``Outer.Inner``) with its outer class, and
+    a class an outer cell made before a nested ``run_cell`` started goes to
+    the outer cell. A cell whose text is unknown may have made it, so the
+    walk stops there."""
     state = _cell_watch(register=False)
     if state is None:
         return False, None
     pin = state["pins"].get(id(cls))
     if pin is None or pin[0]() is not cls:
-        qualname = type.__dict__["__qualname__"].__get__(cls)
-        head = qualname.partition(".")[0]
-        outer = cls if head == qualname else namespace.get(head)
-        if issubclass(type(outer), type):
-            for _, entry in reversed(state["running"]):
-                if entry is None:
-                    # A cell whose text is unknown may have made it: no pin
-                    # to the cell around it, whose statement could be older.
-                    break
-                # A class made since the cell started is not in its snapshot.
-                if id(outer) not in entry[1]:
-                    _pin_classes(state, namespace, entry, only=outer)
-                    break
+        for _, entry in reversed(state["running"]):
+            if entry is None:
+                break  # its text is unknown: no pin to the cell around it
+            _pin_classes(state, namespace, entry)
+            pin = state["pins"].get(id(cls))
+            if pin is not None and pin[0]() is cls:
+                break
         pin = state["pins"].get(id(cls))
     if pin is not None and pin[0]() is cls:
         return True, pin[1]
