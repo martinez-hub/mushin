@@ -2979,3 +2979,39 @@ snapshot, the `<locals>` skip removed, the passed-over cells not pinned
 first, and the walk through the attribute instead of the slot; all
 caught. 311 tests in the module, passing on 3.11 to 3.15; the whole suite
 1654 passed (in three parts); the docs build and the 165 docs tests pass.
+
+### #295 round 16 (2026-11-05): the snapshot holds nothing alive
+
+Both reviews of round 15 (7ec564f...128fd22) found no wrong read and no
+stand-in. Both found one regression outside the read rule: the snapshot
+held every live notebook class strongly, superseded versions that were
+not yet collected included. A user's `gc.collect()` always runs inside a
+cell, after the next snapshot has taken them again, so a replaced class
+and what it holds (class attributes, `functools.cache` contents) were never
+freed, and `Base.__subclasses__()` kept listing stale versions. *Mistake:*
+round 8's reason for holding the classes (no id reused while a cell runs)
+was carried into a design where the snapshot is no longer the namespace's
+own objects but everything alive.
+
+**Fix:** the snapshot holds weak references. A class counts as alive at a
+cell's start only if its id's reference still gives that class
+(`_alive_at`), so a reused id is still never taken for it.
+
+**Also:**
+- the liveness test was order-dependent, since another test's kernel class
+  of the same module name could still be uncollected. It now has its own
+  kernel name, collects first, and asserts by identity;
+- the two round-15 cases assert an exact read (an edit, then a revert);
+- "bound" became "made" in two comments;
+- the thread limit says "a background thread or a callback" at all three
+  sites.
+
+**Accepted:** a record that reaches a class the pin never takes (a
+`<locals>` class made in the running cell) walks again on each record (a
+cost).
+
+**Results.** The leak case fails on 128fd22 and passes now; the mutant
+that holds the snapshot strongly behind the same interface is caught.
+311 tests in the module, passing on 3.11 to 3.15; the whole suite 1654
+passed (in three parts); the docs build, the 165 docs tests and the lazy
+import tests pass.

@@ -3492,6 +3492,7 @@ import importlib
 import io
 import json
 import sys
+import weakref
 from contextlib import redirect_stderr, redirect_stdout
 
 from IPython.core.interactiveshell import InteractiveShell
@@ -3902,7 +3903,7 @@ three.append(_fp(shell.user_ns["task28"])["code"]["C3 (notebook)"])
 # nested cell names it: the class was alive before both cells, so neither
 # is taken for its maker, and the outer cell's statement is never read.
 loop_named = []
-for value in (1, 5):
+for value in (1, 5, 1):
     run(f"class Lpd:\\n    LR = {value}\\n\\n\\nregl = {{'old': Lpd}}\\ndel Lpd\\n")
     run(
         "class Lpd:\\n    LR = 2\\n\\n\\nfor _ in regl.values():\\n    pass\\n\\n\\n"
@@ -3923,11 +3924,18 @@ run("del build_g, g_obj\\n")
 # cell that states that name: the base was made by its own cell, so it is
 # read from there, and an edit to it is seen.
 held_base = []
-for value in (1, 5):
+for value in (1, 5, 1):
     run(f"class Hb:\\n    X = {value}\\n\\n\\nregh = {{'k': Hb}}\\ndel Hb\\n")
     run("class Hb(regh['k']):\\n    Y = 2\\n")
     run("def task35(a):\\n    return a * Hb.X\\n")
     held_base.append(_fp(shell.user_ns["task35"])["code"]["Hb (notebook)"])
+# The watch holds its snapshots weakly: a class replaced by a later cell is
+# freed by a `gc.collect()` in a cell after that.
+run("class Leak:\\n    BUF = bytearray(1000)\\n")
+leak_ref = weakref.ref(shell.user_ns["Leak"])
+run("class Leak:\\n    BUF = b''\\n")
+run("import gc\\n\\n\\ngc.collect()\\n")
+leaked = leak_ref() is not None
 # A base remade by `exec` and deleted, reached through a derived class.
 run("class Bse:\\n    X = 1\\n")
 run("class Der(Bse):\\n    pass\\n")
@@ -3984,6 +3992,7 @@ print(json.dumps({
     "three": three, "shown_base": shown_base, "shown_made": shown_made,
     "shown_then_bound": shown_then_bound, "pre_shown": pre_shown,
     "loop_named": loop_named, "global_made": global_made, "held_base": held_base,
+    "leaked": leaked,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -4051,9 +4060,11 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["shown_made"][0] != got["shown_made"][1]  # pinned with no text
     assert got["shown_then_bound"][0] != got["shown_then_bound"][1]
     assert got["pre_shown"][0] == got["pre_shown"][1]  # read exactly, as stated
-    assert got["loop_named"][0] != got["loop_named"][1]  # its edit, seen
     assert got["global_made"][0] != got["global_made"][1]  # ambiguous: re-runs
-    assert got["held_base"][0] != got["held_base"][1]  # the base's own cell
+    for kind in ("loop_named", "held_base"):  # read exactly: an edit, a revert
+        v1, v5, v1_again = got[kind]
+        assert v1 != v5 and v1_again == v1, kind
+    assert not got["leaked"]  # the watch keeps no superseded class alive
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4593,25 +4604,42 @@ def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
     assert digests[0] != digests[1]
 
 
-def test_the_watch_finds_every_live_notebook_class(kernel):
+def test_the_watch_finds_every_live_notebook_class():
     """`_live_classes` finds every class whose module is the notebook's,
     however it is held (a name, an instance, a list, only as a base or a
     nested class) and none of a library's, without running a metaclass's
-    own `__subclasses__`."""
+    own `__subclasses__`. Its own kernel name, so no other test's class
+    (dead but not yet collected) can stand in."""
+    import gc
+
     import mushin._resume as resume
 
-    kernel.run(
-        "import collections\n\n\nclass Named:\n    pass\n\n\n"
-        "class Held:\n    pass\n\n\nheld = Held()\n\n\n"
-        "class InList:\n    pass\n\n\nkept = [InList]\n\n\n"
-        "class Base:\n    pass\n\n\nclass Kid(Base):\n    pass\n\n\n"
-        "class Out:\n    class In:\n        pass\n\n\n"
-        "class Meta(type):\n    def __subclasses__(cls):\n"
-        "        raise RuntimeError('hook ran')\n\n\n"
-        "class WithMeta(metaclass=Meta):\n    pass\n\n\n"
-        "del Held, InList, Base, Out\ncounter = collections.Counter()\n"
-    )
-    live = resume._live_classes(kernel.ns["__name__"])
-    names = {type.__dict__["__qualname__"].__get__(cls) for cls in live.values()}
-    assert {"Named", "Held", "InList", "Base", "Kid", "Out", "Out.In"} <= names
-    assert {"Meta", "WithMeta"} <= names and "Counter" not in names
+    k = Kernel("mushin_t_kernel_live")
+    try:
+        k.run(
+            "import collections\n\n\nclass Named:\n    pass\n\n\n"
+            "class Held:\n    pass\n\n\nheld = Held()\n\n\n"
+            "class InList:\n    pass\n\n\nkept = [InList]\n\n\n"
+            "class Base:\n    pass\n\n\nclass Kid(Base):\n    pass\n\n\n"
+            "class Out:\n    class In:\n        pass\n\n\nout_in = Out.In\n\n\n"
+            "class Meta(type):\n    def __subclasses__(cls):\n"
+            "        raise RuntimeError('hook ran')\n\n\n"
+            "class WithMeta(metaclass=Meta):\n    pass\n\n\n"
+            "del Held, InList, Base, Out\ncounter = collections.Counter()\n"
+        )
+        ns = k.ns
+        expected = [
+            ns["Named"],
+            type(ns["held"]),
+            ns["kept"][0],
+            ns["Kid"].__bases__[0],
+            ns["Kid"],
+            ns["out_in"],
+            ns["Meta"],
+            ns["WithMeta"],
+        ]
+        gc.collect()
+        live = resume._live_classes(ns["__name__"])
+        assert set(live) == {id(cls) for cls in expected}
+    finally:
+        k.close()

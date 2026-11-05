@@ -12,6 +12,7 @@ import hashlib
 import itertools
 import json
 import re
+import weakref as _weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2253,11 +2254,13 @@ def _method_functions(value) -> list:
 
 #: The attribute of an IPython shell holding mushin's cell watch (a dict,
 #: so a reloaded ``_resume`` finds the same one): ``pins`` maps ``id(cls)``
-#: to ``(weakref, lines)``, the transformed text of the cell that bound it;
+#: to ``(weakref, lines)``, the transformed text of the cell that made it;
 #: ``running`` is the cells running now (a magic's nested cell too), each
-#: ``(info, (raw text, {id(class): class}))`` with every notebook class
+#: ``(info, (raw text, {id(class): weakref}))`` with every notebook class
 #: alive when the cell started (``_live_classes``), or ``(info, None)``
-#: when the cell's text is unknown.
+#: when the cell's text is unknown. Weak, so the watch keeps no superseded
+#: class alive (a later cell's ``gc.collect()`` frees it); a class counts as
+#: alive at the start only if its id's reference still gives that class.
 _CELL_WATCH = "_mushin_cell_watch"
 #: A ``class`` keyword at a line's start, after its indentation: where every
 #: ``class`` statement of a kept cell's text starts (it is Python, magics
@@ -2290,6 +2293,13 @@ def _live_classes(notebook) -> dict:
             if issubclass(type(module), str) and str.__eq__(module, notebook) is True:
                 found[id(sub)] = sub
     return found
+
+
+def _alive_at(snapshot: dict, cls) -> bool:
+    """Whether ``cls`` was alive when the cell whose ``snapshot`` it is
+    started: its id's weak reference still gives this class."""
+    ref = snapshot.get(id(cls))
+    return ref is not None and ref() is cls
 
 
 def _live_pin(state: dict, cls):
@@ -2340,10 +2350,11 @@ def _cell_watch(register: bool = True) -> dict | None:
                     if type(raw) is str:
                         # Every notebook class alive now, whatever the text
                         # says or holds it: one alive at the end and not now
-                        # was made by the cell. Held by identity, so no id
-                        # is reused while the cell runs.
+                        # was made by the cell. By weak reference, checked by
+                        # identity, so a reused id is never taken for it.
                         notebook = shell.user_ns.get("__name__")
-                        entry = (raw, _live_classes(notebook))
+                        live = _live_classes(notebook)
+                        entry = (raw, {k: _weakref.ref(c) for k, c in live.items()})
                 except Exception:  # noqa: BLE001 - the cell still ends at post
                     entry = None
                 running.append((info, entry))
@@ -2421,7 +2432,7 @@ def _pin_classes(state: dict, namespace: dict, entry, live=None) -> None:
     made = [
         cls
         for key, cls in live.items()
-        if key not in before
+        if not _alive_at(before, cls)
         and "<locals>" not in type.__dict__["__qualname__"].__get__(cls)
         and _live_pin(state, cls) is None
     ]
@@ -2437,7 +2448,7 @@ def _pin_classes(state: dict, namespace: dict, entry, live=None) -> None:
 
 def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
     """``(pinned, lines)``: whether the shell's cell watch saw the cell that
-    bound ``cls`` run, and that cell's transformed text (one may hold no
+    made ``cls`` run, and that cell's transformed text (one may hold no
     statement of the class: ``%%time``, ``exec``, a factory's call; see
     ``_class_sites``). Pinned when the cell ended, or, for a record taken
     inside running cells, now: the newest running cell the class was not
@@ -2455,7 +2466,7 @@ def _pinned_cell(cls, namespace: dict) -> tuple[bool, list | None]:
         for _, entry in reversed(state["running"]):
             if entry is None:
                 break  # its text is unknown: no pin to the cell around it
-            if id(cls) in entry[1]:
+            if _alive_at(entry[1], cls):
                 passed.append(entry)  # started after the class was made
                 continue
             # The cells passed over claim their own classes first, newest

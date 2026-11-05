@@ -2545,8 +2545,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             possibly a cell holding a form feed, a vertical tab or another
             character that ends a line for ``str.splitlines`` (not a newline
             or a carriage return), what an IPython input transformer changes
-            in a cell, possibly a class a background thread makes while a
-            cell runs (taken for that cell's), a
+            in a cell, possibly a class a background thread or a callback
+            makes while a cell runs (taken for that cell's), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script
