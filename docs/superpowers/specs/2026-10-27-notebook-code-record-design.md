@@ -2112,3 +2112,138 @@ automagic and the `exec` cases, checked one by one), and on 3.14 the old
 that two reruns, one with the failure summary saved, did not repeat; the
 first run's output was not kept, so the test is unknown (like the 3.13
 flake in round 2). CI's 3.14 legs are the check.
+
+### #295 round 7 (2026-11-05): the snapshot stops reading names from text
+
+`/code-review` on the round-6 delta (844d027...b17c4b8) gave ten findings,
+reproduced in a real shell:
+
+1. *Regression:* `\s+` in the restored regex crosses a newline, so a line
+   ending in the word `class` (`# the config class`) right above
+   `class Solo5:` captures the keyword `class` as the name, and `findall`
+   never sees `Solo5`. Unpinned, a `%%time` remake reads the older kept
+   statement (stale on 3.11, and on 3.14 when the lines match); a kept
+   cell's edit and revert become a token. Round 4 had the same bug.
+2. *Regression:* the factory fallback keeps `not top`, which is also true in
+   a class's body, so a kept `Outer.Inner` statement stands in for a
+   `%%time` or `exec` remake of it.
+3. On 3.11/3.12, a cell that states a class and also calls a kept `global`
+   factory that remakes it reads the cell's statement (the factory's edits
+   are missed). Older than round 6.
+4. A failed scan turns a pinned class with no statement into a token
+   (it was a stable no site).
+5. `_pinned_cell` stops at the innermost running cell whose snapshot names
+   the class, even when nothing was pinned there; a nested cell that only
+   mentions the class hides the outer cell that stated it.
+6. Efficiency: a pinned class with no statement now builds the class index.
+7. The mention test's `rerun != after` holds through the token; its comment
+   says more.
+8. No tests for 1 and 2.
+9. Stale docstrings: `_cell_imports`, `_pin_classes`, `_CELL_WATCH`.
+10. *Design:* correctness rests on taking class names out of a cell's text,
+    which cannot tell a mention from code. Each round traded one stale reuse
+    for another (round 5 broke `exec`, round 6 broke comment-adjacent
+    statements).
+
+**The decision: take 10.** Rounds 4 to 6 each moved the regex and each
+broke a case the last one held. The text is the wrong source for which
+names a cell bound to new classes; the namespace has the fact. So:
+
+- `pre` snapshots `{name: value}` for every class-valued name in the
+  namespace (`issubclass(type(value), type)`, no hook runs), plus the raw
+  text;
+- `post` pins every name that now holds a class that is not the snapshot's
+  object, whose qualname is the name and whose module is the notebook's,
+  that is not pinned yet (first pin wins), with the classes its body made;
+- `_pinned_cell` (a record inside a running cell) walks the running cells
+  newest first and pins in the first one whose snapshot does not hold the
+  class's outer object (it is new since that cell started), so a nested
+  cell that started after the class was made is skipped (finding 5);
+- the record keeps round 6's rule: a pinned cell that states the class is
+  read; one that does not is a factory's call (statements in a *function's*
+  body only, finding 2) or text that is not kept (no site).
+- `_cell_imports`' parse trigger needs only "a `class` keyword at a line's
+  start" (a kept text is Python, where a statement always starts a line):
+  no name capture, so finding 1 cannot recur there.
+
+What this changes beyond the findings: a class a cell binds without any
+`class` text (`Config = make_dataclass(...)`, `exec(src)`, `%run`, a
+factory called from a cell that does not mention it) is now pinned. With no
+statement in the pinned text it gets no site, or a factory's statement,
+never an older top-level one. On 3.11/3.12 that removes the stand-in the
+`type()` residual describes. The cost: two passes over the namespace's
+items per cell (a dict comprehension), holding the old class objects until
+the cell ends.
+
+**The rest:**
+- 3: the 3.11/3.12 family (several statements one cell runs). The
+  documented sentence is reworded to cover it: on 3.11/3.12, a class with
+  more than one `class` statement that one cell runs (twice in the cell, in
+  a loop, or in a function the cell calls) may not be told apart.
+- 4: a pinned class with no statement and a failed scan gets no site, as
+  before round 6.
+- 6: accepted; the index is built once per record and only for such a
+  class.
+- 7: the comment says what the test shows (exact while one version is
+  kept; an edit changes it).
+- 8: tests for 1, 2 and 5, plus `make_dataclass` without a mention.
+- 9: docstrings.
+
+The adversarial run on the same delta confirmed one finding, finding 2
+(reproduced end to end: `cache_dir=` returned the old nested class's
+results). Codex finished on b17c4b8 with none, and CI passed.
+
+**Checks the redesign must keep (from the advisor, written before code):**
+- a brand-new name has no key in the snapshot, so the class bound to it is
+  new; a comment says so. A later rebinding of the outer name within the
+  same cell skips `cls`, as today (the 3.11/3.12 residual), and is not
+  improved here;
+- hook-free: `issubclass(type(v), type)`, never `isinstance`; the snapshot
+  copies `list(ns.items())` once, since a callback thread can grow the
+  namespace while it runs;
+- every cell is snapshotted, with no text filter: `exec(src)` from a file,
+  `%run` and a factory called from a cell that never says `class` are the
+  cases a filter would drop back to the stand-in. Measured once: 40 us per
+  snapshot of an 800-name namespace holding 371 classes (`from numpy import
+  *`, pandas, xarray and 300 notebook classes);
+- the `remade` assertion (`Mk = type(...)` after a statement) loses its
+  3.13+ gate: with the pin it must hold on 3.11 and 3.12 too;
+- finding 4 gets a direct test: a pinned class whose text states nothing,
+  with `class_texts` giving None, is `([], False, True)`, while an unpinned
+  one stays ambiguous;
+- the trigger regex is renamed: it captures no name.
+
+**Mutations, written now:** a snapshot of the regex's names only (the
+comment-ending-in-`class` case fails); `_pinned_cell` stopping at the first
+entry naming the class (the nested-mention case fails); the factory filter
+back to `not top` (the nested `%%time` and `exec` cases fail); a failed scan
+ambiguous when pinned (the direct test fails); a snapshot only when the raw
+text holds `class` (the `make_dataclass`-without-mention case fails); on
+3.14, the two 3.13+ rule mutations again.
+
+**Results (#295 round 7).** The `remade` case (`type()` after a statement)
+now passes on 3.11 and 3.12 too, with its gate dropped, which is the check
+that the namespace snapshot pins what the text never named. 305 tests in
+the module, passing on 3.11 to 3.15 (the logs kept); the whole suite 1649
+passed (in three parts); the docs build and the 165 docs tests pass. Two
+mutants showed gaps in the plan's list:
+- *A snapshot of the regex's names only* survived at first. The new pin
+  walks the namespace, so a name missing from the snapshot reads as new and
+  is still pinned: that mutant was weak, not the test. The faithful round-6
+  mutant (names from the text, and the pin walking only them) fails on the
+  comment-above case and on `remade`. The weak one exposed what the
+  snapshot is for, which no test covered: telling a class that existed
+  before the cell from one it bound. An empty snapshot pins a class made
+  before the watch started to the next cell, which states none. A class
+  `Early` made before `import mushin` now checks it, and both snapshot
+  mutants fail on it.
+- *No 3.13+ rule* survived on 3.14: the watch now pins a `type()` class on
+  its own, so the rule matters only without the watch (no IPython, or a
+  class made before `import mushin`). A kernel test without the watch on
+  3.13+ now catches it.
+Every other mutant was caught on its own assertion, by node id: a snapshot
+only when the raw text says `class` (`remade`), the on-demand pin stopping
+at the newest running cell (the nested-cell mention), the factory filter
+back to `not top` (the nested `%%time` remake), a failed scan ambiguous
+when pinned (the direct test), and on 3.14 the old `__firstlineno__` rule
+(the shell and the kernel `__module__` tests).

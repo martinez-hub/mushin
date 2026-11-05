@@ -3511,6 +3511,7 @@ def own():
     return project_fingerprints(shell.user_ns["task"])["code"]["Config (notebook)"]
 
 
+run("class Early:\\n    X = 1\\n")  # before the watch starts
 run("import mushin._resume")  # the watch starts here
 v1 = "class Config:\\n    LR = 0.1\\n"
 run(v1)
@@ -3659,6 +3660,45 @@ module_set = []
 for value in (1, 2, 1):
     run(moved.format(value))
     module_set.append(_fp(shell.user_ns["task9"])["code"]["Moved (notebook)"])
+# A kept class whose comment line above ends in the word `class`: still
+# pinned (the snapshot reads the namespace, not the text), so exact.
+run("def task10(a):\\n    return a * Rev.X\\n")
+commented = []
+for value in (1, 2, 1):
+    run(f"# the Rev class\\nclass Rev:\\n    X = {value}\\n")
+    commented.append(_fp(shell.user_ns["task10"])["code"]["Rev (notebook)"])
+# A nested class remade from text that is not kept, after one kept version:
+# never the kept nested statement's digest (it is no factory's).
+nested_remakes = {}
+for kind, outer, remake in (
+    ("%%time", "Box", "%%time\\nclass Box:\\n    class Cfg:\\n        X = 2\\n\\n\\ncfg = Box.Cfg()\\n"),
+    ("exec", "Box2", "exec('class Box2:\\\\n    class Cfg:\\\\n        X = 2\\\\n')\\ncfg = Box2.Cfg()\\n"),
+):
+    run(f"class {outer}:\\n    class Cfg:\\n        X = 1\\n\\n\\ncfg = {outer}.Cfg()\\n")
+    run("def task11(a):\\n    return a * cfg.X\\n")
+    kept = _fp(shell.user_ns["task11"])["code"]["cfg (notebook)"]
+    run(remake)
+    nested_remakes[kind] = [kept, _fp(shell.user_ns["task11"])["code"]["cfg (notebook)"]]
+run("del cfg")
+# A record taken in a nested cell that only mentions the class its outer
+# cell just stated: pinned to the outer cell, so an edit and a revert are
+# exact.
+run("def task12(a):\\n    return a * Nest.X\\n")
+in_nested = []
+for value in (1, 2, 1):
+    run(
+        "from mushin._resume import project_fingerprints as _pf\\n"
+        f"class Nest:\\n    X = {value}\\n\\n\\n"
+        "get_ipython().run_cell(\\"_N = _pf(task12)['code']['Nest (notebook)']  # class Nest\\")\\n"
+    )
+    in_nested.append(shell.user_ns["_N"])
+# A class made before the watch started: every later cell saw it when it
+# started, so none is taken for its cell; its kept statement is read, as
+# after an unchanged re-run under the watch.
+run("def task13(a):\\n    return a * Early.X\\n")
+early = [_fp(shell.user_ns["task13"])["code"]["Early (notebook)"]]
+run("class Early:\\n    X = 1\\n")
+early.append(_fp(shell.user_ns["task13"])["code"]["Early (notebook)"])
 mark = len(out.getvalue())  # the callbacks' own output, before any record
 run(
     "class M(type):\\n    def __getattribute__(cls, n):\\n"
@@ -3689,7 +3729,8 @@ print(json.dumps({
     "twice": twice, "hook": hook, "solo": [solo, solo_timed],
     "branch": [branch, branch_again], "nested": nested, "remade": remade,
     "emptied": emptied, "toggled": toggled, "mentions": mentions,
-    "remakes": remakes, "module_set": module_set,
+    "remakes": remakes, "module_set": module_set, "commented": commented,
+    "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3726,17 +3767,24 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     for kind, (kept, remade) in got["remakes"].items():
         assert kept != remade, kind  # so for `%time`, automagic and `exec`
     # A cell that only mentions a factory's class states none: the factory's
-    # statement is read, exactly, and its edit is seen.
+    # statement is read (exactly while one version is kept: an unchanged
+    # re-run keeps the digest), and an edit to it changes the digest.
     for kind, (before, rerun, after) in got["mentions"].items():
         assert before == rerun != after, kind
+    for kind, (kept, remade) in got["nested_remakes"].items():
+        assert kept != remade, kind
+    assert got["early"][0] == got["early"][1]  # never pinned to a later cell
+    for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
+        v1, v2, v1_again = got[kind]
+        assert v1 != v2 and v1_again == v1, kind
     m1, m2, m3 = got["module_set"]  # `__module__` assigned: still exact
     assert m1 != m2 and m3 == m1
     assert got["branch"][0] == got["branch"][1]  # an if's branches: one runs
     n1, n2, n3 = got["nested"]  # a nested class, pinned: a revert is exact
     assert n1 != n2 and n3 == n1
-    if sys.version_info >= (3, 13):
-        # type() made it, not the cell; 3.11/3.12 cannot tell (documented).
-        assert got["remade"][0] != got["remade"][1]
+    # type() made it: the watch pins it to its cell, which states none, so
+    # the older statement never stands in for it, on every Python.
+    assert got["remade"][0] != got["remade"][1]
     toggled = got["toggled"]  # a nested class recorded inside its own cell
     assert toggled[0] != toggled[1] and toggled[2:] == toggled[:2]
     inside, after, inside_again, after_again = got["emptied"]
@@ -4142,7 +4190,7 @@ def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
     else:
         result = types.SimpleNamespace(info=types.SimpleNamespace(raw_cell=raw))
     shell.events.callbacks["post_run_cell"](result)
-    assert state["running"] == [(outer, None)]
+    assert [running for running, _ in state["running"]] == [outer]
     assert id(shell.user_ns["Config"]) in state["pins"]
 
 
@@ -4154,3 +4202,36 @@ def test_a_class_whose_module_is_assigned_is_still_read(kernel):
     first = _own(kernel)
     kernel.run(cell.format(2))
     assert _own(kernel) != first
+
+
+def test_a_pinned_class_with_no_statement_and_no_scan_has_no_site(monkeypatch):
+    """When the kept cells cannot be scanned, a class pinned to a cell that
+    states none (`exec`, `%%time`) has no site, as on main, and stays stable;
+    an unpinned one is ambiguous."""
+    import weakref
+
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    exec("class Config:\n    LR = 0.1\n", shell.user_ns)
+    cls = shell.user_ns["Config"]
+    state["pins"][id(cls)] = (weakref.ref(cls), ["exec(SOURCE)\n"])
+    no_scan = lambda qualname: None  # noqa: E731
+    assert resume._class_sites(cls, [], shell.user_ns, no_scan) == ([], False, True)
+    del state["pins"][id(cls)]
+    assert resume._class_sites(cls, [], shell.user_ns, no_scan) == ([], True, True)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__static_attributes__ is 3.13+")
+def test_a_class_type_makes_has_no_site_without_the_watch(kernel):
+    """With no watch (a class made before `import mushin`), 3.13+ still tells a
+    class `type()` made from one a statement made: no older kept statement
+    stands in for it."""
+    _run_cells(
+        kernel, ["class Mk:\n    X = 1\n", "def task(a):\n    return a * Mk.X\n"]
+    )
+    kept = _own(kernel, "Mk")
+    kernel.run("Mk = type('Mk', (), {'X': 2})\n")
+    assert _own(kernel, "Mk") != kept

@@ -2533,8 +2533,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             than by a cell's ``import`` statement (``importlib.import_module``,
             a plugin loader that fills a registry, an import in a ``%%time``
             cell), possibly a class no ``class`` statement makes (``type(...)``,
-            ``make_dataclass``) or, on 3.11/3.12, one stated more than once in
-            one cell, a loop or a function that runs the sweep, a ``_target_``
+            ``make_dataclass``) or, on 3.11/3.12, one of which a cell runs more
+            than one ``class`` statement (two in the cell, in a loop, or in a
+            function it calls), a ``_target_``
             defined there, code whose text the kernel does not keep (a ``%%time``
             cell, ``exec``, a ``%run`` file), a
             top-level statement of the driver script that changes an object in

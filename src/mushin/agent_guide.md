@@ -177,9 +177,9 @@ rules:
   module loaded other than by a cell's `import` statement
   (`importlib.import_module`, a plugin loader, an import in a `%%time` cell)
   may not be compared, nor may a class no `class` statement makes
-  (`type(...)`, `make_dataclass`), or on 3.11/3.12 a class stated more than
-  once in one cell, a loop or a function that runs the sweep: after editing
-  one, use a new `working_dir`. Taking
+  (`type(...)`, `make_dataclass`), or on 3.11/3.12 a class of which one cell
+  runs more than one `class` statement (two in the cell, in a loop, or in a
+  function it calls): after editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed

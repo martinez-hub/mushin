@@ -150,8 +150,9 @@ on another Python version can also re-run the cells of a class stated more
 than once in its cell. A module loaded other than by an `import` statement of such a cell
 (`importlib.import_module`, a plugin loader that fills a registry, an import
 in a `%%time` cell) may not be compared, as in a script; nor, on Python 3.11
-and 3.12, may a class stated more than once in one cell, in a loop or in a
-function that runs the sweep be told apart by its statement. After editing
+and 3.12, may a class be told apart by its statement when one cell runs more
+than one `class` statement of it (two in the cell, in a loop, or in a
+function the cell calls). After editing
 such a module or class, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
