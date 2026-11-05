@@ -2568,3 +2568,88 @@ found nothing (the instance case), and the walk at the newest cell only
 (the nested-cell mention); both caught. 310 tests in the module, passing on
 3.11 to 3.15; the whole suite 1653 passed (in three parts); the docs build
 and the 165 docs tests pass.
+
+### #295 round 11 (2026-11-05): the watch sees what the record reaches
+
+Both reviews of the round-10 delta (ecdffae...cc1d5a2) found the mirror
+image of round 9's regression. Round 10's pin takes only classes a name
+holds, but the record also reaches a class through an instance
+(`_notebook_object`: an instance's class, a bound method's owner) and
+through notebook bases. So a class a post-import cell made from text that
+is not kept and left only under an instance (`Config = Config()`, `cfg =
+Config(); del Config`, an instance of a nested class whose outer class was
+deleted) was never pinned. It took an older kept statement's digest, or a
+constant one, and `cache_dir=` returned old results (reproduced end to end,
+3.11 and 3.14). *Mistake, the same one twice:* rounds 9 and 10 each patched
+one side of a mismatch at record time. Round 9 forced a pin (wrong exact
+reads); round 10 dropped it (lost re-runs). The mismatch itself, between
+what the watch counts as a cell's classes and what the record can reach,
+was never named.
+
+**Fix: one reach for both.** `_cell_classes(namespace)` gives every
+notebook class the record can reach from the namespace's names, as
+`_notebook_object` resolves them: a class a name binds, an instance's
+class, a bound method's owner (or its class). From each it adds the
+class's notebook bases and the classes its body made, all read by type and
+through the type's own slots. The snapshot is that set when a cell starts.
+The pin at a cell's end takes what is in it now and was not then, whose
+qualname is not a function's local one (`<locals>`), first pin winning.
+The record inside running cells walks them newest first. It passes over a
+cell whose snapshot already held the class (it started after the class was
+made), pins in the first one that did not, and stops at a cell whose text
+is unknown. The nested walk and the name rules go: a nested class is in
+reach through its outer class, an instance or a base, and its own qualname
+says it is not a local one.
+
+What this does beyond the findings: an instance-only class from a plain
+`class` cell is now pinned to that cell and read exactly (round 10 made it
+ambiguous through the kept texts). The record's other reach, a task passed
+as a bound method of an unbound instance, stays outside the snapshot and
+goes to the kept texts, as before.
+
+**Also:**
+- `/code-review`'s efficiency finding goes with the walk: a class every
+  running cell's snapshot held is never re-scanned;
+- the separator limit names the characters (a form feed, a vertical tab, a
+  Unicode line separator) instead of `str.splitlines`, which also ends a
+  line at `\n`;
+- the fragment gets the "after `import mushin`" qualifier;
+- one helper reads a live pin;
+- the long lines in the edited paragraphs are reflowed.
+
+**Tests:**
+- a class held only by an instance, remade by `exec` or `%%time` (the
+  singleton and `del` forms), recorded inside its cell and after it: never
+  the kept statement's digest;
+- a base class remade by `exec` and deleted, reached through a derived
+  class: the derived class's digest changes;
+- an instance of a nested class whose outer class was deleted;
+- the instance-only case from round 10, now exact (an unchanged re-run
+  keeps the digest; an edit changes it);
+- `_cell_classes` directly: a name, an instance, a bound method, a base
+  and a nested class are reached, and a library class is not.
+
+Each must fail on cc1d5a2's source.
+
+**Mutants:**
+- no instance's class (the remakes);
+- no bases (the base case);
+- no nested classes (the 300 models);
+- `<locals>` not skipped (the factory exactness tests);
+- the walk without passing over (the nested-cell mention).
+
+**Results (#295 round 11).** Every new shell case fails on cc1d5a2's source
+and passes now (checked one by one: the four remakes, the base, the
+instance case's exactness). The reach test is new. Mutants, with the
+bytecode cache cleared: no instance's class, no bases, no nested classes,
+`<locals>` not skipped, and the walk without passing over; all caught. Two
+needed a sharper test first. "No bases" passed the reach test, whose `Base`
+was also bound by name; the test now deletes it. "`<locals>` not skipped"
+had no test under the watch (the factory tests use the kernel fixture,
+which has none); a shell case now re-runs a factory call and keeps the
+digest. *Slips, both caught before any result:* the remake cases were first
+written with single `\n` escapes in a raw patch string, which broke the
+script's literals; and a `%%time` remake was prefixed with an import line,
+which pushed the magic off the cell's first line. 311 tests in the module,
+passing on 3.11 to 3.15; the whole suite 1654 passed (in three parts); the
+docs build and the 165 docs tests pass.

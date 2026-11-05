@@ -3747,14 +3747,15 @@ for kind, name, make in (
     run(f"{name} = saved_{name}\\n")
     aliased[kind] = [kept, _fp(shell.user_ns["task18"])["code"][f"{name} (notebook)"]]
 # A class only an instance holds, recorded inside a cell that states its
-# name at the same first line before running the statement: that cell bound
-# nothing of it, so it is not pinned there, and an edit to its own cell is
-# seen.
+# name at the same first line before running the statement: the cell that
+# made it is found through the instance, so it is read from that cell
+# exactly (an unchanged re-run keeps the digest, an edit changes it), never
+# from the record cell's statement.
 run("def task19(a):\\n    return a * Inst.LR\\n")
 run("from mushin._resume import project_fingerprints as _pf\\n")
 record_cell = "_I = _pf(task19)['code']['Inst (notebook)']\\nclass Inst:\\n    LR = 0.5\\n"
 instance_only = []
-for value in (0.1, 0.2):
+for value in (0.1, 0.1, 0.2):
     run(f"x = 0\\nclass Inst:\\n    LR = {value}\\n\\n\\nInst = Inst()\\n")
     run(record_cell)
     instance_only.append(shell.user_ns["_I"])
@@ -3772,6 +3773,43 @@ run(
 )
 alias_nested.append(shell.user_ns["_J"])
 run("del cfg2")
+# A class held only by an instance (or reached as a base), remade from text
+# that is not kept: the record reaches it, so the cell that made it is found,
+# and it is ambiguous, never the kept statement's digest. Recorded inside the
+# remaking cell and after it.
+reached = {}
+for kind, name, remake in (
+    ("%%time singleton", "Inr1", "%%time\\nclass Inr1:\\n    LR = 0.2\\n\\n\\nInr1 = Inr1()\\nobj_Inr1 = Inr1\\n"),
+    ("exec singleton", "Inr2", "exec('class Inr2:\\\\n    LR = 0.2\\\\n')\\nInr2 = Inr2()\\nobj_Inr2 = Inr2\\n"),
+    ("exec, then del", "Inr3", "exec('class Inr3:\\\\n    LR = 0.2\\\\n')\\nobj_Inr3 = Inr3()\\ndel Inr3\\n"),
+    ("nested, outer deleted", "Inr4", "exec('class Inr4:\\\\n    class Cfg:\\\\n        LR = 0.2\\\\n')\\nobj_Inr4 = Inr4.Cfg()\\ndel Inr4\\n"),
+):
+    if kind.startswith("nested"):
+        run(f"class {name}:\\n    class Cfg:\\n        LR = 0.1\\n\\n\\nobj_{name} = {name}.Cfg()\\n")
+    else:
+        run(f"class {name}:\\n    LR = 0.1\\n\\n\\nobj_{name} = {name}()\\n")
+    run(f"def task21(a):\\n    return a * obj_{name}.LR\\n")
+    key = f"obj_{name} (notebook)"
+    kept = _fp(shell.user_ns["task21"])["code"][key]
+    run(remake + f"_R = _pf(task21)['code']['{key}']\\n")  # `_pf`: an earlier cell's
+    reached[kind] = [kept, shell.user_ns["_R"], _fp(shell.user_ns["task21"])["code"][key]]
+    run(f"del obj_{name}\\n")
+# A function's local class (`make.<locals>.Loc`), bound by a cell that calls
+# the factory: not that cell's, so it is read from the factory's cell, and an
+# unchanged re-run of the call keeps the digest.
+run("def make_loc():\\n    class Loc:\\n        K = 1\\n\\n    return Loc\\n")
+run("Loc = make_loc()\\n")
+run("def task23(a):\\n    return a * Loc.K\\n")
+local = [_fp(shell.user_ns["task23"])["code"]["Loc (notebook)"]]
+run("Loc = make_loc()\\n")
+local.append(_fp(shell.user_ns["task23"])["code"]["Loc (notebook)"])
+# A base remade by `exec` and deleted, reached through a derived class.
+run("class Bse:\\n    X = 1\\n")
+run("class Der(Bse):\\n    pass\\n")
+run("def task22(a):\\n    return a * Der.X\\n")
+based = [_fp(shell.user_ns["task22"])["code"]["Der (notebook)"]]
+run("exec('class Bse:\\\\n    X = 2\\\\n')\\nclass Der(Bse):\\n    pass\\n\\n\\ndel Bse\\n")
+based.append(_fp(shell.user_ns["task22"])["code"]["Der (notebook)"])
 # A class made before the watch started: every later cell saw it when it
 # started, so none is taken for its cell; its kept statement is read, as
 # after an unchanged re-run under the watch.
@@ -3814,6 +3852,7 @@ print(json.dumps({
     "nested_remakes": nested_remakes, "in_nested": in_nested, "early": early,
     "derived": derived, "proxy": proxy, "restored": restored, "aliased": aliased,
     "instance_only": instance_only, "alias_nested": alias_nested,
+    "reached": reached, "based": based, "local": local,
     "errors": [line for line in (out.getvalue() + err.getvalue()).splitlines()
                if "callback" in line.lower()],
 }))
@@ -3865,8 +3904,13 @@ def test_an_ipython_shell_pins_each_class_to_the_cell_that_made_it(tmp_path):
     assert got["restored"][0] == got["restored"][1]  # its statement, read
     for kind, (kept, restored) in got["aliased"].items():
         assert kept != restored, kind
-    assert got["instance_only"][0] != got["instance_only"][1]  # its edit, seen
+    first, again, edited = got["instance_only"]
+    assert first == again != edited  # read from its own cell, exactly
     assert got["alias_nested"][0] != got["alias_nested"][1]  # no stand-in
+    for kind, (kept, inside, after) in got["reached"].items():
+        assert kept not in (inside, after), kind
+    assert got["based"][0] != got["based"][1]  # its base, remade, is seen
+    assert got["local"][0] == got["local"][1]  # a local class: its factory's
     for kind in ("commented", "in_nested"):  # pinned: an edit and a revert
         v1, v2, v1_again = got[kind]
         assert v1 != v2 and v1_again == v1, kind
@@ -4404,3 +4448,28 @@ def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
         linecache.cache[name] = (size, mtime, kept, filename)
         digests.append(_own(kernel))
     assert digests[0] != digests[1]
+
+
+def test_the_watch_reaches_what_the_record_reaches():
+    """`_cell_classes` gives the notebook classes a record can reach from the
+    names: a class a name binds, an instance's class, a bound method's
+    owner's class, and their notebook bases and nested classes; a library's
+    class is not one."""
+    import collections
+
+    import mushin._resume as resume
+
+    ns = {"__name__": "mushin_t_reach"}
+    exec(
+        "class Base:\n    def go(self):\n        return 1\n\n\n"
+        "class Named(Base):\n    class Inner:\n        pass\n\n\n"
+        "class Held:\n    pass\n\n\nheld = Held()\n\n\n"
+        "class Owner(Base):\n    pass\n\n\nbound = Owner().go\ndel Held, Owner, Base\n",
+        ns,
+    )
+    ns["counter"] = collections.Counter()
+    reached = {
+        type.__dict__["__qualname__"].__get__(cls)
+        for cls in resume._cell_classes(ns).values()
+    }
+    assert reached == {"Base", "Named", "Named.Inner", "Held", "Owner"}
