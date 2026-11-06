@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.17.1] - 2026-11-06
+
+### Fixed
+
+- In a notebook, `resume=True` and `cache_dir=` now compare a project submodule the task reaches through its package (a cell's `import pkg.sub`, then `pkg.sub.X` in the task, a helper, a class's bases, a function's decorator or a default), and the project modules a notebook function imports inside its body. Before, editing `pkg/sub.py` and resuming reused the completed cells. A resume keeps the record a reused cell was written with, so a sweep started on 0.17.0 still does not compare such a submodule: after editing one, use a new `working_dir`. A notebook task whose record gains such a file misses `cache_dir` once after upgrading. (#291)
+- In a notebook, `resume=True` and `cache_dir=` now also compare a project submodule the task reaches through an alias of its package (`m = pkg`, `s = pkg.sub`, a parameter defaulting to `pkg`), through the import of a function a class or a decorator is made in, or through a class-body import a method's default names. (#293)
+- For a task defined in a notebook, `resume=True` and `cache_dir=` now compare every project module a cell imports, whether or not the task names it, as `from pkg import sub` already did. A submodule the task reaches through an argument, a call's result, a parameter's default or a local name such as `m = pkg if a else None` is compared too. On Python 3.15, a second `cache_dir` run in the same kernel now reuses the cells when the task reads a module past a `lazy import pkg.sub`. With `cache_dir=`, importing another project module in a cell can now make the cells compute again. A resume keeps the record a reused cell was written with, so a sweep started on an earlier version does not compare these modules for its completed cells: after editing one, use a new `working_dir`. (#294)
+- For a task defined in a notebook, `resume=True` and `cache_dir=` now compare a class with no method of its own (a dataclass or an `Enum` of fields, a class of constants) by its `class` statement, and a class whose every method a notebook decorator wraps. In a running IPython shell mushin notes which cell made each class (one alive at the cell's end that was not at its start): a class whose cell states it is read from that statement, and one that a cell run after `import mushin` makes without stating it (in a `%%time` cell, by `exec`, `%run` or a `global` factory, or a copy such as `dataclass(slots=True)(C)`) re-runs its cells instead of reusing results, whenever that cell runs again and after a restart. So does a class whose kept versions cannot be told apart. A resume re-runs the cells once after upgrading for a task that reaches a class with no method of its own. (#295)
+
+### Misc
+
+- #290
+
+
 ## [0.17.0] - 2026-11-03
 
 ### Added
@@ -682,7 +696,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/martinez-hub/mushin/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/martinez-hub/mushin/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/martinez-hub/mushin/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/martinez-hub/mushin/compare/v0.15.0...v0.15.1
