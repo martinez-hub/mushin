@@ -2332,7 +2332,7 @@ wheels = [
 
 [[package]]
 name = "mushin-py"
-version = "0.17.0"
+version = "0.17.1"
 source = { editable = "." }
 dependencies = [
     { name = "hydra-core" },
