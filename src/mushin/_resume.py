@@ -318,7 +318,7 @@ def _foreign_top(top: str, loaded_only: bool = False) -> bool:
         return True
     if loaded_only:  # main's rule: a loaded module, by its file alone
         module = sys.modules.get(top)
-        file = getattr(module, "__file__", None) if module is not None else None
+        file = _module_attr(module, "__file__") if module is not None else None
         return isinstance(file, str) and bool(file) and _foreign_by_path(file, top)
     try:
         file = _find_file(top)
@@ -364,7 +364,7 @@ def _is_foreign_module(name: str, file: str | None = None) -> bool:
         return True
     if file is None:
         module = sys.modules.get(name)
-        file = getattr(module, "__file__", None) if module is not None else None
+        file = _module_attr(module, "__file__") if module is not None else None
     if file is None:
         file = _find_file(name)  # not imported yet: where it would load from
     if isinstance(file, str) and file:
@@ -484,7 +484,7 @@ def _find_file(name: str) -> str | None:
 
     loaded = sys.modules.get(name)
     if loaded is not None:
-        file = getattr(loaded, "__file__", None)
+        file = _module_attr(loaded, "__file__")
         return file if isinstance(file, str) and file else None
     parts = name.split(".")
     path = None
@@ -498,8 +498,8 @@ def _find_file(name: str) -> str | None:
             return None
         loaded = sys.modules.get(dotted)
         if loaded is not None:
-            path = getattr(loaded, "__path__", None)
-            spec = getattr(loaded, "__spec__", None)
+            path = _module_attr(loaded, "__path__")
+            spec = _module_attr(loaded, "__spec__")
             continue
         if i == 0:
             # Every finder, for the top level only (importing nothing): an
@@ -1105,11 +1105,14 @@ def _loaded_digest(name: str, digest: str) -> str:
     that load of it: if it was not reloaded, the old code still runs. The file
     is recorded either way, since an in-place reload (IPython's %autoreload
     patches functions without replacing ``__spec__``) does run the new code,
-    and this process cannot tell the two apart."""
+    and this process cannot tell the two apart. A LazyLoader module whose
+    file has not run (``_unloaded_lazy``) takes no baseline yet: none of its
+    code runs, so none of it can be stale, and its first read runs the file
+    as it is then."""
     import sys
 
     module = sys.modules.get(name)
-    if module is not None:
+    if module is not None and not _unloaded_lazy(module):
         identity = (getattr(module, "__spec__", None) or module,)
         _warn_if_moved(name, name, identity, digest)
     return digest
@@ -2237,19 +2240,57 @@ def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset, frozens
 #: is loaded with the interpreter). LazyImportType is new in 3.15.
 _MODULE_TYPE = type(functools)
 _LAZY_IMPORT_TYPE = getattr(__import__("types"), "LazyImportType", None)
+#: The descriptor that hands out a module's ``__dict__`` without an
+#: attribute lookup (``_module_attr``).
+_MODULE_DICT = _MODULE_TYPE.__dict__["__dict__"]
+
+
+def _unloaded_lazy(value) -> bool:
+    """Whether ``value`` is a module ``importlib.util.LazyLoader`` made (as
+    ``lazy_loader.load`` does) whose file has not run: its class runs the file
+    on the first attribute read. Decided by type alone, so nothing is read
+    from ``value`` (an ``isinstance`` check the module fails would read its
+    ``__class__``). Only LazyLoader's class: ``module_from_spec`` filled its
+    dict (``_module_attr``), while another class that hooks every read
+    (``lazy_import``'s, apipkg's aliases) keeps no file there, so such a
+    module is read as it always was. None can exist before ``importlib.util``
+    is imported, so it is not imported here."""
+    import sys
+
+    lazy = getattr(sys.modules.get("importlib.util"), "_LazyModule", None)
+    return isinstance(lazy, type) and issubclass(type(value), lazy)
+
+
+def _module_attr(module, name: str, default=None):
+    """``getattr(module, name, default)``, unless LazyLoader made the module
+    and its file has not run (``_unloaded_lazy``): then from the module's own
+    dict, through ModuleType's descriptor, where ``module_from_spec`` put
+    ``__name__``, ``__file__``, ``__path__`` and ``__spec__`` before LazyLoader
+    swapped its class. So the record reads what it would once the module ran,
+    without running it: an error from that import would reach no one, and the
+    user's own first read would then get an AttributeError instead of the
+    error. ``name`` ``"__dict__"`` gives that dict itself."""
+    if not _unloaded_lazy(module):
+        return getattr(module, name, default)
+    try:
+        found = _MODULE_DICT.__get__(module)
+    except Exception:  # noqa: BLE001 - no dict of its own: nothing to read
+        return default
+    return found if name == "__dict__" else found.get(name, default)
 
 
 def _module_name_of(value) -> tuple[str | None, bool] | None:
     """For a module, or on 3.15 a lazy import (PEP 810) of one, ``(its name,
     whether it is lazy)``; the name is None when none can be read. None for
-    any other value. A module's ``__name__`` is read; a lazy proxy is not
-    asked for anything (``_lazy_import_name``). Raises what a module's
-    attribute hook raises."""
+    any other value. A module's ``__name__`` is read (``_module_attr``, so a
+    LazyLoader module is not imported); a lazy proxy is not asked for
+    anything (``_lazy_import_name``). Raises what an ordinary module's
+    ``__getattr__`` raises, other than AttributeError."""
     kind = type(value)
     if kind is _LAZY_IMPORT_TYPE:
         return _lazy_import_name(value), True
     if issubclass(kind, _MODULE_TYPE):
-        name = value.__name__
+        name = _module_attr(value, "__name__")
         return (name if isinstance(name, str) else None), False
     return None
 
@@ -2417,7 +2458,9 @@ def _shell():
     import sys
 
     ipython = sys.modules.get("IPython")
-    get = getattr(ipython, "get_ipython", None) if ipython is not None else None
+    if ipython is None or _unloaded_lazy(ipython):
+        return None  # a LazyLoader IPython that has not run has no shell
+    get = getattr(ipython, "get_ipython", None)
     return get() if callable(get) else None
 
 
@@ -3100,8 +3143,8 @@ def _notebook_entries(
     object bound has no notebook entries and no modules (with a warning):
     which objects a cut walk took depends on its order. Objects are
     inspected by type, and only a function's own ``__dict__`` and a module's
-    ``__name__`` (which ``_namespace_modules`` reads too) are read, so a
-    lazy proxy is never resolved."""
+    ``__name__`` (``_module_attr``, as ``_namespace_modules`` reads it) are
+    read, so neither a lazy proxy nor a LazyLoader module is resolved."""
     import types
 
     def resolve(value):
@@ -3510,7 +3553,9 @@ def _bound_callables(value, depth: int = 0):
     and dicts too: code the task runs, whose modules the record follows."""
     import types
 
-    if depth > 4:
+    if depth > 4 or _unloaded_lazy(value):
+        # A module binds no code here, and `isinstance` would read a
+        # LazyLoader module's `__class__`, which imports it.
         return
     if isinstance(value, (types.FunctionType, types.MethodType, type)):
         yield value
@@ -3583,7 +3628,7 @@ def _root_entries(
         else:
             cls = layer if isinstance(layer, type) else type(layer)
             module = sys.modules.get(getattr(cls, "__module__", ""), None)
-            namespace = getattr(module, "__dict__", None) or {}
+            namespace = _module_attr(module, "__dict__") or {}
             tops = {cls.__qualname__.partition(".")[0]}
             identity = cls
         name, file = namespace.get("__name__"), namespace.get("__file__")
@@ -3691,7 +3736,7 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
     parts = path.split(".")
     if parts[0] == "__main__":
         main = sys.modules.get("__main__")
-        namespace = getattr(main, "__dict__", None) or {}
+        namespace = _module_attr(main, "__dict__") or {}
         file = namespace.get("__file__")
         if (
             len(parts) > 1

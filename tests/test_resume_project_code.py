@@ -3042,3 +3042,141 @@ def test_the_main_guards_spelling_is_not_an_edit(tmp_path):
         tmp_path, "gs2", text.format(guard="'__main__' == __name__"), {"task"}
     )
     assert one == two
+
+
+# --- a module loaded through importlib.util.LazyLoader (#303) -----------------
+
+LAZY_TASK = """
+import functools
+import importlib.util
+import sys
+
+
+def lazy(name):
+    # As lazy_loader.load does: the module's file runs on its first read.
+    spec = importlib.util.find_spec(name)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+top = lazy("lzrec_mod")  # a top-level module
+pkg = lazy("lzrec")  # a package; its submodule is not imported
+
+
+def task(a):
+    import lzrec.sub
+    import lzrec_mod
+
+    return a
+
+
+def helper(m, a):
+    return a
+
+
+bound = functools.partial(helper, top)
+"""
+
+
+def test_a_record_does_not_import_a_lazy_loader_module(tmp_path):
+    """A module loaded through `importlib.util.LazyLoader` runs its file on
+    its first attribute read. Taking a script's record runs none: one a
+    partial binds (`isinstance` would read its `__class__`), one the task
+    imports (its file, its load), and a package whose submodule is looked
+    up through it. Each is still recorded by its file."""
+    run = "import lazy_ran\nlazy_ran.RAN.append(__name__)\n"
+    (tmp_path / "lazy_ran.py").write_text("RAN = []\n")
+    (tmp_path / "lzrec").mkdir()
+    (tmp_path / "lzrec" / "__init__.py").write_text(run)
+    (tmp_path / "lzrec" / "sub.py").write_text("VALUE = 1\n")
+    (tmp_path / "lzrec_mod.py").write_text(run + "VALUE = 1\n")
+    (tmp_path / "lzrec_task.py").write_text(LAZY_TASK)
+    probe = (
+        "import json, lazy_ran, lzrec_task; "
+        "from mushin._resume import project_fingerprints as p; "
+        "keys = [sorted(k for k in p(f)['code'] if k.endswith(' (file)')) "
+        "for f in (lzrec_task.bound, lzrec_task.task)]; "
+        "print(json.dumps([lazy_ran.RAN, keys]))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+    ).stdout
+    ran, keys = json.loads(out.strip().splitlines()[-1])
+    assert ran == []
+    files = ["lzrec (file)", "lzrec.sub (file)", "lzrec_mod (file)"]
+    for record in keys:
+        assert set(files) <= set(record)
+
+
+def test_a_module_whose_class_states_its_file_is_read_as_before(tmp_path, monkeypatch):
+    """Only a module whose class hooks every read is read from its own dict:
+    one whose class merely states its file is read as it always was."""
+    from mushin._resume import _find_file
+
+    file = tmp_path / "mushin_t_classfile.py"
+    file.write_text("X = 1\n")
+
+    class FileModule(types.ModuleType):
+        __file__ = str(file)
+
+    module = FileModule("mushin_t_classfile")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert _find_file(module.__name__) == str(file)
+
+
+def test_a_module_whose_class_hooks_reads_otherwise_is_read_as_before(
+    tmp_path, monkeypatch
+):
+    """Only LazyLoader's module is read from its own dict, which
+    `module_from_spec` filled. A module whose class hooks every read some
+    other way (as `lazy_import`'s does) keeps no file there: it is read as
+    it always was, so its file stays in the record."""
+    from mushin._resume import _find_file
+
+    file = tmp_path / "mushin_t_hooked.py"
+    file.write_text("X = 1\n")
+    real = types.ModuleType("mushin_t_hooked")
+    real.__file__ = str(file)
+
+    class Hooked(types.ModuleType):
+        def __getattribute__(self, name):
+            return getattr(real, name)  # loads on first read, in a real one
+
+    module = Hooked("mushin_t_hooked")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert _find_file(module.__name__) == str(file)
+
+
+def test_a_lazy_loader_module_that_has_not_run_is_never_stale(tmp_path, monkeypatch):
+    """A LazyLoader module whose file has not run keeps no baseline: an edit
+    before its first read is the code that will run, so no "the old code still
+    runs" warning, and the module still has not run."""
+    import importlib.util
+
+    (tmp_path / "mushin_t_lzstale.py").write_text("VALUE = 1\n")
+    (tmp_path / "mushin_t_lzstale_task.py").write_text(
+        "def task(a):\n    import mushin_t_lzstale\n\n    return a\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    spec = importlib.util.find_spec("mushin_t_lzstale")
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    lazy = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "mushin_t_lzstale", lazy)
+    spec.loader.exec_module(lazy)
+    task_module = importlib.import_module("mushin_t_lzstale_task")
+    monkeypatch.delitem(sys.modules, "mushin_t_lzstale_task")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        before = project_fingerprints(task_module.task)["code"]
+        (tmp_path / "mushin_t_lzstale.py").write_text("VALUE = 22\n")
+        after = project_fingerprints(task_module.task)["code"]
+    assert before["mushin_t_lzstale (file)"] != after["mushin_t_lzstale (file)"]
+    assert not [w for w in caught if "changed on disk" in str(w.message)]
+    assert type(lazy) is importlib.util._LazyModule  # its file has not run

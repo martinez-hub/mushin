@@ -5244,3 +5244,114 @@ def test_an_ipython_shell_reads_a_split_cell_as_compiled(tmp_path):
     ).stdout
     got = json.loads(out.strip().splitlines()[-1])
     assert got == {case: [True, True] for case, _, _ in cases}
+
+
+# --- a module loaded through importlib.util.LazyLoader (#303) -----------------
+
+LAZY_SCRIPT = """
+import json
+
+from IPython.core.interactiveshell import InteractiveShell
+
+import lazy_ran
+import mushin._resume as resume
+
+shell = InteractiveShell.instance()
+LAZY = '''
+import importlib.util, sys
+
+
+def lazy(name):
+    # As lazy_loader.load does: the module's file runs on its first read.
+    spec = importlib.util.find_spec(name)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+'''
+assert shell.run_cell(LAZY, store_history=True).success
+for cell in CELLS.values():
+    assert shell.run_cell(cell, store_history=True).success, cell
+records = {}
+for case in CELLS:
+    code = resume.project_fingerprints(shell.user_ns["t_" + case])["code"]
+    records[case] = sorted(key for key in code if key.endswith(" (file)"))
+ran = list(lazy_ran.RAN)
+try:
+    shell.user_ns["broken"].anything  # the user's own first read
+    first_read = None
+except Exception as error:
+    first_read = [type(error).__name__, str(error)]
+print(json.dumps([ran, records, first_read]))
+"""
+
+
+def test_a_notebook_record_does_not_import_a_lazy_loader_module(tmp_path):
+    """A real shell. A module loaded through `importlib.util.LazyLoader` runs
+    its file on its first attribute read. Taking the record runs none of
+    them: one the task does not use, one it reads by name, a top-level one,
+    one in a default and one in a closure. Each is still recorded by its
+    file. A module that fails to import keeps its error for the user's own
+    first read, not an AttributeError after the record swallowed it."""
+    pytest.importorskip("IPython")
+    cells = {
+        "unused": "broken = lazy('lzpkg.broken')\ndef t_unused(a):\n    return a\n",
+        "name": (
+            "c_name = lazy('lzpkg.c_name')\n"
+            "def t_name(a):\n    return a * c_name.VALUE\n"
+        ),
+        "top": "lztop = lazy('lztop')\ndef t_top(a):\n    return a * lztop.VALUE\n",
+        "default": (
+            "def t_default(a, m=lazy('lzpkg.c_default')):\n    return a * m.VALUE\n"
+        ),
+        "closure": (
+            "def make(m):\n    def t_closure(a):\n        return a * m.VALUE\n"
+            "    return t_closure\nt_closure = make(lazy('lzpkg.c_closure'))\n"
+        ),
+    }
+    run = "import lazy_ran\nlazy_ran.RAN.append(__name__)\n"
+    (tmp_path / "lazy_ran.py").write_text("RAN = []\n")
+    (tmp_path / "lzpkg").mkdir()
+    (tmp_path / "lzpkg" / "__init__.py").write_text("")
+    broken = run + "raise RuntimeError('broken on import')\n"
+    (tmp_path / "lzpkg" / "broken.py").write_text(broken)
+    for name in ("c_name", "c_default", "c_closure"):
+        (tmp_path / "lzpkg" / f"{name}.py").write_text(run + "VALUE = 3\n")
+    (tmp_path / "lztop.py").write_text(run + "VALUE = 3\n")
+    script = tmp_path / "lazy.py"
+    script.write_text(f"CELLS = {cells!r}\n" + LAZY_SCRIPT)
+    out = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, check=True
+    ).stdout
+    ran, records, first_read = json.loads(out.strip().splitlines()[-1])
+    assert ran == []
+    own = {
+        "unused": "lzpkg.broken",
+        "name": "lzpkg.c_name",
+        "top": "lztop",
+        "default": "lzpkg.c_default",
+        "closure": "lzpkg.c_closure",
+    }
+    for case, name in own.items():
+        assert f"{name} (file)" in records[case], case
+    assert first_read == ["RuntimeError", "broken on import"]
+
+
+def test_an_ipython_loaded_lazily_that_has_not_run_has_no_shell(tmp_path, monkeypatch):
+    """An IPython that `importlib.util.LazyLoader` made and that has not run
+    has no shell: looking for one does not run it."""
+    import importlib.util
+
+    import mushin._resume as resume
+
+    ran = tmp_path / "ran"
+    stub = tmp_path / "ipython_stub.py"
+    stub.write_text(f"open({str(ran)!r}, 'w').close()\n")
+    spec = importlib.util.spec_from_file_location("IPython", stub)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, "IPython", module)
+    assert resume._shell() is None
+    assert not ran.exists()

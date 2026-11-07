@@ -180,10 +180,11 @@ keys, a container of more than 256 items, more than three steps from a name
 `partial` and bound method is a step), a subclass of a container, a
 metaclass, or a class from outside the notebook.
 
-Taking the record can import a module loaded through
-`importlib.util.LazyLoader` (as `lazy_loader.load` does), and an error from
-that import may go unreported. If such a module has side effects or can fail
-to import, import it yourself before calling `run()`.
+`run()` can import a module loaded through `importlib.util.LazyLoader` (as
+`lazy_loader.load` does) that has not run yet, even one the task does not
+use, and one that fails to import can make `run()` raise its error. If such
+a module has side effects or can fail to import, import it yourself before
+calling `run()`.
 
 ### The full loop
 
