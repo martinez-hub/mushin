@@ -183,12 +183,13 @@ rules:
   may not be compared, nor may a class no `class` statement makes
   (`type(...)`, `make_dataclass`), or a class of which one cell holds more
   than one version (two `class` statements run, or a statement and a class
-  bound from elsewhere), nor a cell holding a form feed, a vertical tab or
-  another character that ends a line for `str.splitlines` (not a newline or
-  a carriage return), nor what an IPython input transformer changes in a
-  cell, and a class a background thread or a callback makes while a cell
-  runs may be taken for that cell's: after editing one, use a new
-  `working_dir`. Taking
+  bound from elsewhere), nor what an IPython input transformer changes in a
+  cell, nor a cell holding a form feed, a vertical tab or another character
+  that ends a line for `str.splitlines` (not a newline or a carriage return)
+  that ran inside another cell (`%%capture`) before `import mushin` (a cell
+  holding one can also re-run the cells), and a class a background thread
+  or a callback makes while a cell runs may be taken for that cell's: after
+  editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed
