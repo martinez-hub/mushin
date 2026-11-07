@@ -2872,8 +2872,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         for job, cfg, wdir in zip(
             self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
         ):
-            # Keyed on the swept params only, as `_grid_keys` keys the grid that
-            # `to_xarray` fills, so `_metrics_by_combo` and manifest keys align.
+            # Keyed on the swept params only (all `_combo_of_cfg` returns), as
+            # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and manifest
+            # keys align.
             swept_combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             key = combo_key(swept_combo)
 
@@ -3429,7 +3430,18 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # Assemble the metric data in *grid order*, keyed by each cell's config
         # combination, so that a missing/failed cell yields a full-shaped array
         # with NaN rather than mis-sizing a job-ordered reshape.
+        import itertools
+
         from ._sweep_io import combo_key
+
+        # The grid is keyed *only* on the swept (multirun) params. Under
+        # `non_multirun_params_as_singleton_dims` `orig_coords` also carries
+        # length-1 non-multirun dims; those must be projected out of the lookup
+        # key so it matches `_combo_of_cfg` (which uses only swept names).
+        swept_names = self._swept_param_names()
+
+        def _lookup_key(combo: dict[str, Any]) -> str:
+            return combo_key({n: combo[n] for n in swept_names})
 
         # If `_metrics_by_combo` was not populated by `jobs_post_process` (e.g. a
         # workflow loaded from disk), reconstruct it per cell. Prefer the
@@ -3456,11 +3468,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                         combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
                         self._metrics_by_combo[combo_key(combo)] = per_job
 
-        # Every cell's key, in the order of `orig_coords`' product: its
-        # non-swept dims (`non_multirun_params_as_singleton_dims`) have length
-        # 1, and every non-multirun sequence is a str there, so its other dims
-        # are exactly the swept params, in the same order.
-        grid_keys = self._grid_keys()
+        grid_names = list(orig_coords)
+        grid_combos = [
+            dict(zip(grid_names, vals, strict=True))
+            for vals in itertools.product(*[orig_coords[n] for n in grid_names])
+        ]
 
         # Union of metric keys across all present cells, preserving first-seen order.
         metric_keys: list[str] = []
@@ -3473,13 +3485,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     _seen.add(k)
                     metric_keys.append(k)
 
-        def _grid_column(name: str) -> list[Any]:
+        def _grid_column(key: str) -> list[Any]:
             col: list[Any] = []
             missing: list[int] = []
-            for i, key in enumerate(grid_keys):
-                m = self._metrics_by_combo.get(key)
-                if m is not None and name in m:
-                    val = m[name]
+            for i, combo in enumerate(grid_combos):
+                m = self._metrics_by_combo.get(_lookup_key(combo))
+                if m is not None and key in m:
+                    val = m[key]
                     # match `_process_metrics`: unwrap length-1 lists to a scalar
                     if isinstance(val, list) and len(val) == 1:
                         val = val[0]
@@ -3517,7 +3529,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 )
             }
             metrics_to_add["working_subdir"] = [
-                workdir_by_combo.get(key, "") for key in grid_keys
+                workdir_by_combo.get(_lookup_key(combo), "") for combo in grid_combos
             ]
 
         data = {}
