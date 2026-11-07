@@ -1521,6 +1521,63 @@ def test_config_group_sweep_survives_offline_reload(tmp_path, restore_config_gro
     assert float(ds["w"].sel(model="small")) == 4.0
 
 
+@pytest.mark.config_group("model")
+def test_config_group_cell_records_the_choice_name(tmp_path, restore_config_group):
+    """Each cell records its config-GROUP coordinate as the chosen option
+    name, as Hydra chose it in that job, so the offline views (built from the
+    cell records, not from hydra.yaml) show `small`/`big`, not a sub-config."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import make_config
+
+    import mushin
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(model=None):
+            return dict(w=float(model["width"]))
+
+    wd = tmp_path / "s"
+    W(make_config(model=None)).run(
+        working_dir=str(wd), model=multirun(["small", "big"])
+    )
+    rows = {r["model"]: r["w"] for r in mushin.show(wd).rows}
+    assert rows == {"small": 4.0, "big": 8.0}
+
+
+def test_a_subclass_sanitizer_keys_cells_and_grid_alike(tmp_path):
+    """A workflow that overrides `_sanitize_coordinate_for_xarray` keys each
+    cell's result with it, as it keys the grid, in-process and reloaded."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+        @staticmethod
+        def _sanitize_coordinate_for_xarray(value):
+            if isinstance(value, multirun):
+                return [f"x{v}" for v in value]
+            return f"x{value}"
+
+    wd = tmp_path / "s"
+    wf = W()
+    wf.run(a=multirun([1, 2]), working_dir=str(wd))
+    loaded = W().load_from_dir(wd, "mushin_metrics.json")
+    for w in (wf, loaded):
+        ds = w.to_xarray()
+        assert list(ds["a"].values) == ["x1", "x2"]
+        assert ds["v"].values.tolist() == [1.0, 2.0]
+    assert loaded.failures == [] and loaded.skipped == []
+
+
 def test_load_from_dir_without_job_dirs_says_so(tmp_path):
     """A sweep killed before its first job has a multirun.yaml and no cells;
     the reload names that instead of failing to unpack an empty sort."""

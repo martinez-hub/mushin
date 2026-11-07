@@ -314,6 +314,38 @@ def _current_group_choice(name: str) -> str | None:
     return None
 
 
+def _swept_combo(
+    cfg,
+    names,
+    choice_of: Callable[[str], str | None],
+    sanitize: Callable[[Any], Any],
+) -> dict:
+    """The sanitized swept-parameter combination of the job config ``cfg``.
+
+    Values are unwrapped (0-d scalars), converted out of OmegaConf containers,
+    and passed through ``sanitize`` (a workflow's
+    `_sanitize_coordinate_for_xarray`), so they key identically to the
+    (already-sanitized) coordinate values `to_xarray` builds the grid from.
+    Swept names may be nested config paths
+    (``model.width``). A config-GROUP axis (model=small,big) keys by its
+    chosen option name, ``choice_of(name)``, not the composed sub-config:
+    inside a job Hydra records the choice in runtime.choices, and a job loaded
+    from disk records it in its sidecar or hydra.yaml."""
+    from omegaconf import OmegaConf
+
+    combo = {}
+    for n in names:
+        val = _read_swept_value(cfg, n)
+        if OmegaConf.is_config(val):
+            choice = choice_of(n)
+            if choice is not None:
+                val = choice
+            else:
+                val = OmegaConf.to_container(val, resolve=True)
+        combo[n] = sanitize(_unwrap_scalar(val))
+    return combo
+
+
 def _current_job_fields() -> tuple[int | None, dict | None]:
     """The current Hydra job's number and ``runtime.choices``, as its
     hydra.yaml records them, each None when unknown: outside a Hydra job (a
@@ -851,24 +883,12 @@ class _TaskRunner:
 
     @staticmethod
     def _combo(cfg, names):
-        from omegaconf import OmegaConf
-
-        combo = {}
-        for n in names:
-            val = _read_swept_value(cfg, n)
-            if OmegaConf.is_config(val):
-                # A config-GROUP axis (model=small,big): the coordinate is the
-                # chosen option name, not the composed sub-config. Inside a job
-                # Hydra records the choice in runtime.choices.
-                choice = _current_group_choice(n)
-                if choice is not None:
-                    val = choice
-                else:
-                    val = OmegaConf.to_container(val, resolve=True)
-            combo[n] = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray(
-                _unwrap_scalar(val)
-            )
-        return combo
+        return _swept_combo(
+            cfg,
+            names,
+            _current_group_choice,
+            MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray,
+        )
 
     def __call__(self, cfg):
         import warnings
@@ -1734,8 +1754,8 @@ class BaseWorkflow:
         # `+`-appended as a config key nothing reads and surfaces as a phantom
         # constant sweep dimension. Only the head of a dotted path is checked
         # (`model.width` -> `model`). A task with `**kwargs` opts out entirely.
-        task_attr = "evaluation_task" if hasattr(self, "evaluation_task") else "task"
-        task_targets = _override_name_targets(getattr(self, task_attr, None))
+        jobdir = getattr(self, "_JOBDIR_NAME", None)
+        task_targets = _override_name_targets(getattr(self, "task", None))
         if task_targets is not None:
             # Explicit pre_task params are valid targets too; the default
             # `pre_task(**kwargs)` contributes nothing (targets is None -> set()).
@@ -1753,7 +1773,6 @@ class BaseWorkflow:
                     cfg_names = {str(key) for key in container}
             except Exception:  # noqa: BLE001 - unreadable cfg -> signature only
                 cfg_names = set()
-            jobdir = getattr(self, "_JOBDIR_NAME", None)
             real_targets = (
                 task_targets
                 | (pre_targets or set())
@@ -1837,9 +1856,6 @@ class BaseWorkflow:
                 launch_overrides.append(f"{prefix}{k}={_to_override_element(v)}")
 
         for _name in self._REQUIRED_STATIC_METHODS:
-            if _name == "task" and hasattr(self, "evaluation_task"):
-                # TODO: remove when evaluation_task support is removed
-                _name = "evaluation_task"
             if not isinstance(getattr_static(self, _name), staticmethod):
                 raise TypeError(
                     f"{type(self).__name__}.{_name} must be a static method"
@@ -1852,8 +1868,7 @@ class BaseWorkflow:
         # per cell. Only the head of a dotted override counts (`model.width`
         # satisfies a `model` parameter). A parameter supplied via override is
         # valid even when the base config is empty (the common decorator case).
-        task_attr = "evaluation_task" if hasattr(self, "evaluation_task") else "task"
-        required = _required_params(getattr(self, task_attr, None))
+        required = _required_params(getattr(self, "task", None))
         required |= _required_params(getattr(self, "pre_task", None))
         provided = _config_field_names(self.eval_task_cfg) | {
             k.split(".", 1)[0] for k in workflow_overrides
@@ -1862,7 +1877,6 @@ class BaseWorkflow:
         # to supply a parameter; strip any leading +/~/++ and dotted tail.
         for o in overrides or []:
             provided.add(o.split("=", 1)[0].lstrip("+~").split(".", 1)[0])
-        jobdir = getattr(self, "_JOBDIR_NAME", None)
         if jobdir:
             provided.add(jobdir)
         missing = sorted(required - provided)
@@ -1879,9 +1893,10 @@ class BaseWorkflow:
         # gate, and `sample=`. Derived from the FULLY parsed launch overrides so a
         # sweep axis counts whether it came through a `param=` kwarg OR the raw
         # `overrides=[...]` list; the `hydra.*` plumbing is excluded.
+        parsed = self._parse_overrides(launch_overrides)
         _grid = {
             k: v
-            for k, v in self._parse_overrides(launch_overrides).items()
+            for k, v in parsed.items()
             # Exclude only real Hydra plumbing (`hydra.sweep.dir`, `hydra/launcher`)
             # — a USER axis merely named with that prefix (`hydraulic`) counts.
             if not (k == "hydra" or k.startswith(("hydra.", "hydra/")))
@@ -1973,12 +1988,9 @@ class BaseWorkflow:
         if pre_task_fn_wrapper is None:
             pre_task_fn_wrapper = _identity
 
-        # Swept dimension names for the per-cell combo (unchanged).
-        _swept_names = tuple(
-            k
-            for k, v in self._parse_overrides(launch_overrides).items()
-            if isinstance(v, multirun)
-        )
+        # Swept dimension names for the per-cell combo: from the full parse,
+        # `hydra.*` keys included (unlike `_grid`, which drops them).
+        _swept_names = tuple(k for k, v in parsed.items() if isinstance(v, multirun))
         # BaseWorkflow (no sanitizer) records an empty combo, as before.
         _runner_swept = (
             _swept_names if hasattr(self, "_sanitize_coordinate_for_xarray") else ()
@@ -2860,10 +2872,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         for job, cfg, wdir in zip(
             self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
         ):
-            # Project onto the swept params only, matching `to_xarray`'s
-            # `_lookup_key` so `_metrics_by_combo` and manifest keys align.
-            combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
-            swept_combo = {n: combo[n] for n in swept_names}
+            # Keyed on the swept params only (all `_combo_of_cfg` returns), as
+            # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and manifest
+            # keys align.
+            swept_combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             key = combo_key(swept_combo)
 
             # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
@@ -2945,28 +2957,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         ]
 
     def _combo_of_cfg(self, cfg: Any, choices: dict | None = None) -> dict[str, Any]:
-        """The sanitized swept-parameter combination for a single job config.
+        """`_swept_combo` of one job config; ``choices`` is the job's
+        ``hydra.runtime.choices``."""
 
-        Values are unwrapped (0-d scalars), converted out of OmegaConf
-        containers, and passed through `_sanitize_coordinate_for_xarray` so
-        they key identically to the (already-sanitized) coordinate values used
-        to build the grid in `to_xarray`. Swept names may be nested config
-        paths (``model.width``). ``choices`` is the job's
-        ``hydra.runtime.choices``; a config-GROUP axis keys by its chosen
-        option name (matching the grid coordinate), not the composed
-        sub-config."""
-        from omegaconf import OmegaConf
+        def choice_of(name: str) -> str | None:
+            choice = (choices or {}).get(name)
+            return None if choice is None else str(choice)
 
-        combo = {}
-        for n in self._swept_param_names():
-            val = _read_swept_value(cfg, n)
-            if OmegaConf.is_config(val):
-                if choices and choices.get(n) is not None:
-                    val = str(choices[n])
-                else:
-                    val = OmegaConf.to_container(val, resolve=True)
-            combo[n] = self._sanitize_coordinate_for_xarray(_unwrap_scalar(val))
-        return combo
+        return _swept_combo(
+            cfg,
+            self._swept_param_names(),
+            choice_of,
+            self._sanitize_coordinate_for_xarray,
+        )
 
     def _job_choices(self, i: int) -> dict | None:
         """``runtime.choices`` for job ``i``, when jobs align with cfgs.
