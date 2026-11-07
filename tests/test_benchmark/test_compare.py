@@ -173,7 +173,7 @@ def test_compare_detection_does_not_demand_num_classes(monkeypatch):
     monkeypatch.setitem(
         _tasks._TASKS,
         "detection",
-        _tasks.TaskSpec(
+        _tasks.Task(
             fake_battery,
             lambda m, x: (m(x), None),
             frozenset(),

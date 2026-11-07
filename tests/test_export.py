@@ -42,6 +42,21 @@ def test_export_table_returns_csv_string(tmp_path):
     assert float(r["acc"]) == pytest.approx(1.2)
 
 
+def test_export_table_columns_keep_sweep_and_metric_order(tmp_path):
+    """The swept params, then ``status``, then the metrics, each in the order
+    the sweep produced them (not sorted)."""
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed, lr):
+            return dict(loss=float(seed), acc=float(lr))
+
+    wd = tmp_path / "s"
+    W().run(seed=multirun([0, 1]), lr=multirun([0.1]), working_dir=str(wd))
+    header = next(csv.reader(io.StringIO(mushin.export.table(wd))))
+    assert header == ["seed", "lr", "status", "loss", "acc"]
+
+
 def test_export_table_writes_file_and_returns_path(tmp_path):
     wd = tmp_path / "s"
     _run(wd)

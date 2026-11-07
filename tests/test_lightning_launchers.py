@@ -3,7 +3,10 @@
 """Unit tests for HydraDDP launcher helpers that don't need GPUs."""
 
 import os
+import sys
 from pathlib import Path
+
+import pytest
 
 from mushin.lightning import launchers
 from mushin.lightning.launchers import _set_env, _setup_environment, _teardown
@@ -225,9 +228,10 @@ def test_pl_main_pl_validating_calls_trainer_validate():
     trainer.test.assert_not_called()
 
 
-def _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, overrides):
+def _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, overrides, **entry):
     """hydra-zen-launch a job and invoke the REAL _subprocess_call inside it,
-    with Popen captured. Returns (captured, launch_cwd, output_dir_seen)."""
+    with Popen captured. Returns (captured, launch_cwd, output_dir_seen).
+    ``entry`` sets the testing/predicting/validating flags (default: fit)."""
     import subprocess
 
     from hydra_zen import launch, make_config
@@ -247,9 +251,8 @@ def _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, overrides):
 
         captured["task_cwd"] = os.getcwd()
         captured["output_dir"] = HydraConfig.get().runtime.output_dir
-        launchers._subprocess_call(
-            local_rank=1, global_rank=1, testing=False, predicting=False
-        )
+        flags = {"testing": False, "predicting": False, **entry}
+        launchers._subprocess_call(local_rank=1, global_rank=1, **flags)
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
@@ -279,6 +282,30 @@ def test_subprocess_call_locates_job_dir_without_chdir(monkeypatch, tmp_path):
         o for o in captured["command"] if o.startswith("hydra.run.dir=")
     ).split("=", 1)[1]
     assert Path(run_dir.strip("'\"")).resolve() == job_dir
+
+
+@pytest.mark.parametrize("entry", [None, "testing", "predicting", "validating"])
+def test_subprocess_call_argv(monkeypatch, tmp_path, entry):
+    """The child rank's argv: the entry module, the job's saved config, one
+    flag per Trainer entry point (only ``entry`` true; none for fit), the
+    local rank, then the job's Hydra settings."""
+    captured = _run_subprocess_call_in_hydra_job(
+        monkeypatch, tmp_path, [], **({entry: True} if entry else {})
+    )
+    cmd = captured["command"]
+    assert cmd[:4] == [sys.executable, "-m", "mushin.lightning._pl_main", "-cp"]
+    assert cmd[5:11] == [
+        "-cn",
+        "config.yaml",
+        f"++pl_testing={'true' if entry == 'testing' else 'false'}",
+        f"++pl_predicting={'true' if entry == 'predicting' else 'false'}",
+        f"++pl_validating={'true' if entry == 'validating' else 'false'}",
+        "++pl_local_rank=1",
+    ]
+    assert cmd[11].startswith("hydra.run.dir=")
+    assert cmd[12] == "hydra.output_subdir=.pl_hydra_rank_1"
+    assert cmd[13].startswith("hydra.job.name=")
+    assert len(cmd) == 14
 
 
 def test_subprocess_call_unchanged_when_chdir_is_on(monkeypatch, tmp_path):

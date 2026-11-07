@@ -61,10 +61,6 @@ class Task:
     update_fn: UpdateFn | None = None
 
 
-# Backward-compat alias (deprecated; removed in a future release).
-TaskSpec = Task
-
-
 _TASKS: dict[str, Task] = {
     "classification": Task(
         classification_battery,
@@ -146,7 +142,3 @@ def get_task(task: str) -> Task:
 def list_tasks() -> dict[str, str]:
     """Return ``{name: description}`` for every registered task, name-sorted."""
     return {name: _TASKS[name].description for name in sorted(_TASKS)}
-
-
-# Backward-compat alias (deprecated; use get_task).
-get_task_spec = get_task
