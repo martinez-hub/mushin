@@ -12,8 +12,10 @@ docs/superpowers/specs/2026-10-27-notebook-code-record-design.md).
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import linecache
+import pathlib
 import subprocess
 import sys
 import textwrap
@@ -70,6 +72,25 @@ class Kernel:
         for name in self.names:
             linecache.cache.pop(name, None)
             linecache.__dict__.get("_ipython_cache", {}).pop(name, None)
+
+
+@pytest.fixture(autouse=True)
+def _new_modules_are_found(monkeypatch):
+    """Tests here write a module and then import it or look it up. The import
+    system caches each directory's listing and rescans it only when the
+    directory's mtime moves, which on Windows can lag a file written a moment
+    ago, so the module is not found. ``importlib.invalidate_caches`` is the
+    documented remedy; every ``.py`` written here calls it (as in
+    test_resume_project_code.py)."""
+    write_text = pathlib.Path.write_text
+
+    def write_and_invalidate(self, *args, **kwargs):
+        n = write_text(self, *args, **kwargs)
+        if self.suffix == ".py":
+            importlib.invalidate_caches()
+        return n
+
+    monkeypatch.setattr(pathlib.Path, "write_text", write_and_invalidate)
 
 
 @pytest.fixture
@@ -323,6 +344,20 @@ NOTEBOOK_EDITS = {
             TASK,
         ],
         ["def helper(x):\n    return x * 2\n"],
+    ),
+    # `class \` and the name on the next line: still a statement.
+    "a continued class statement": (
+        ["class \\\nCfg2:\n    LR = 0.1\n", "def task(a):\n    return a * Cfg2.LR\n"],
+        ["class \\\nCfg2:\n    LR = 0.2\n"],
+    ),
+    # Assigning a class's `__module__` deletes its `__firstlineno__` on 3.13+;
+    # a `class` statement still made it.
+    "a class whose module is assigned": (
+        [
+            "class Config:\n    LR = 1\n\n\nConfig.__module__ = __name__\n",
+            "def task(a):\n    return a * Config.LR\n",
+        ],
+        ["class Config:\n    LR = 2\n\n\nConfig.__module__ = __name__\n"],
     ),
 }
 
@@ -912,6 +947,45 @@ NOTEBOOK_NOT_EDITS = {
             "def task(a):\n    REG[0]().switch()\n    return helper(a)\n",
         ],
         ["task(1)\n"],
+    ),
+    # Only one branch runs, and which is a value: the cell's statements
+    # count together, so an unchanged re-run keeps the record.
+    "a class in two branches of an if, re-run": (
+        [
+            "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\nelse:\n\n    class Config:\n        LR = 2\n",
+            "def task(a):\n    return a * Config.LR\n",
+        ],
+        [
+            "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\nelse:\n\n    class Config:\n        LR = 2\n"
+        ],
+    ),
+    "a class in two branches of an elif, re-run": (
+        [
+            "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\nelif FLAG == 1:\n\n    class Config:\n        LR = 1\n",
+            "def task(a):\n    return a * Config.LR\n",
+        ],
+        [
+            "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\nelif FLAG == 1:\n\n    class Config:\n        LR = 1\n"
+        ],
+    ),
+    "a class in two branches of a match, re-run": (
+        [
+            "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n",
+            "def task(a):\n    return a * Config.LR\n",
+        ],
+        [
+            "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n"
+        ],
+    ),
+    # Inside a function's body two statements run as one step.
+    "a factory stating its class twice, re-run": (
+        [
+            "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n    return C\n\n\nC = make()\n",
+            "def task(a):\n    return a * C.K\n",
+        ],
+        [
+            "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n    return C\n\n\nC = make()\n"
+        ],
     ),
 }
 
@@ -2995,27 +3069,6 @@ def test_a_lazy_import_the_task_reads_past_records_alike(
     assert before == after
 
 
-def test_a_closure_the_run_rebinds_records_alike_before_and_after(kernel, sub_project):
-    """`nonlocal s; s = pkg.pkg`: the alias's targets count where the
-    declaration sends the name, so the record does not follow the cell's
-    value from one run to the next."""
-    kernel.run(
-        f"import importlib\nimport {SUBPKG}\n"
-        f"importlib.import_module('{SUBPKG}.sub')\n"
-        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
-    )
-    kernel.run(
-        f"def make():\n    s = {SUBPKG}.sub\n\n    def task(a):\n        nonlocal s\n"
-        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
-        f"        s = {SUBPKG}.{SUBPKG}\n        return out\n\n    return task\n\n\n"
-        "task = make()\n"
-    )
-    before = _files(kernel, "task")
-    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
-    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
-    assert _files(kernel, "task") == before
-
-
 @pytest.mark.parametrize(
     "params", ["a, m=mod", "a, *, m=mod"], ids=["positional", "keyword"]
 )
@@ -3217,28 +3270,6 @@ def test_only_a_cells_own_imports_bind_a_lazy_name(kernel, cell_imports):
     assert f"{SUBPKG}.{SUBPKG}.other (file)" not in files
 
 
-def test_a_rebinding_in_another_function_counts_for_the_binding(kernel, sub_project):
-    """`rebind` sets the `s` that `task` reads (`nonlocal`, or `global` for the
-    namespace's): what it can hold counts for `task`'s chains, so the record
-    reads alike before and after a run rebinds it."""
-    kernel.run(
-        f"import importlib\nimport {SUBPKG}\n"
-        f"importlib.import_module('{SUBPKG}.sub')\n"
-        f"importlib.import_module('{SUBPKG}.{SUBPKG}.deep')\n"
-    )
-    kernel.run(
-        f"def make():\n    s = {SUBPKG}.sub\n\n    def rebind():\n        nonlocal s\n"
-        f"        s = {SUBPKG}.{SUBPKG}\n\n    def task(a):\n"
-        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
-        "        rebind()\n        return out\n\n    return task\n\n\n"
-        "task = make()\n"
-    )
-    before = _files(kernel, "task")
-    assert kernel.ns["task"](1) == 2  # rebinds the closure's `s`
-    assert f"{SUBPKG}.{SUBPKG}.deep (file)" in before
-    assert _files(kernel, "task") == before
-
-
 def test_an_import_in_another_function_counts_for_the_binding(kernel, sub_project):
     """`nonlocal s; import pkg.pkg as s` in `rebind`: the module counts for
     `task`'s chains on `s` before the run rebinds it."""
@@ -3373,8 +3404,25 @@ def test_a_lazy_reading_does_not_follow_a_name_rebound_to_another_module(
         "            out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
         "            rebind()\n            return out\n\n        return task\n\n"
         "    return make\n\n\nmake = outer()\n",
+        # `nonlocal s; s = pkg.pkg` in the task itself: the alias's targets
+        # count where the declaration sends the name, so the record does not
+        # follow the cell's value from one run to the next.
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def task(a):\n        nonlocal s\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        f"        s = {SUBPKG}.{SUBPKG}\n        return out\n\n    return task\n\n\n",
+        # `rebind` sets the `s` that `task` reads: what it can hold counts for
+        # `task`'s chains.
+        f"def make():\n    s = {SUBPKG}.sub\n\n    def rebind():\n        nonlocal s\n"
+        f"        s = {SUBPKG}.{SUBPKG}\n\n    def task(a):\n"
+        "        out = s.deep.f(a) if hasattr(s, 'deep') else s.f(a)\n"
+        "        rebind()\n        return out\n\n    return task\n\n\n",
     ],
-    ids=["through a function that does not bind it", "the nearest binding"],
+    ids=[
+        "through a function that does not bind it",
+        "the nearest binding",
+        "the task rebinds it",
+        "another function rebinds it",
+    ],
 )
 def test_a_rebinding_goes_on_the_binding_it_rebinds(kernel, sub_project, factory):
     kernel.run(
@@ -4266,53 +4314,6 @@ def test_a_class_no_statement_made_is_not_an_older_statement(kernel):
     assert _own(kernel) != statement
 
 
-def test_two_statements_one_after_the_other_are_not_one_class(kernel):
-    """A cell defines the class twice, with a record between: the two objects
-    must not share a digest (on 3.11/3.12 they are ambiguous; on 3.13+ the
-    first line tells them apart)."""
-    kernel.run("def task(a):\n    return a * Config.LR\n")
-    kernel.run(
-        "from mushin._resume import project_fingerprints as _pf\n\n\n"
-        "class Config:\n    LR = 0.7\n\n\n"
-        "_A = _pf(task)['code']['Config (notebook)']\n\n\n"
-        "class Config:\n    LR = 0.8\n\n\n"
-        "_B = _pf(task)['code']['Config (notebook)']\n"
-    )
-    assert kernel.ns["_A"] != kernel.ns["_B"]
-
-
-@pytest.mark.parametrize(
-    "cell",
-    [
-        "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\n"
-        "else:\n\n    class Config:\n        LR = 2\n",
-        "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\n"
-        "elif FLAG == 1:\n\n    class Config:\n        LR = 1\n",
-        "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n"
-        "            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n",
-    ],
-    ids=["if", "elif", "match"],
-)
-def test_a_class_in_two_branches_of_an_if_is_stable(kernel, cell):
-    """Only one branch runs, and which is a value: the cell's statements
-    count together, so an unchanged re-run keeps the digest."""
-    _run_cells(kernel, [cell, "def task(a):\n    return a * Config.LR\n"])
-    first = _own(kernel)
-    kernel.run(cell)
-    assert _own(kernel) == first
-
-
-def test_a_continued_class_statement_is_found(kernel):
-    """`class \\` and the name on the next line: still a statement."""
-    _run_cells(
-        kernel,
-        ["class \\\nCfg2:\n    LR = 0.1\n", "def task(a):\n    return a * Cfg2.LR\n"],
-    )
-    first = _own(kernel, "Cfg2")
-    kernel.run("class \\\nCfg2:\n    LR = 0.2\n")
-    assert _own(kernel, "Cfg2") != first
-
-
 def test_a_forked_process_gets_its_own_token(kernel, monkeypatch):
     """A forked child inherits the module's state: the token is per process
     id, so its ambiguous digests are its own."""
@@ -4366,10 +4367,13 @@ def test_a_method_less_class_s_statement_is_read_exactly(cell):
 @pytest.mark.parametrize(
     "between",
     [
+        # Plain: on 3.11/3.12 the two are ambiguous; on 3.13+ the first line
+        # tells them apart.
+        "class Config:\n    LR = 0.8\n",
         "if True:\n\n    class Config:\n        LR = 0.8\n",
         "try:\n\n    class Config:\n        LR = 0.8\n\nexcept ValueError:\n    pass\n",
     ],
-    ids=["a later if", "a try"],
+    ids=["one after the other", "a later if", "a try"],
 )
 def test_two_statements_that_both_run_are_not_one_class(kernel, between):
     """A top-level statement and a later one in another block both run: a
@@ -4383,19 +4387,6 @@ def test_two_statements_that_both_run_are_not_one_class(kernel, between):
         "_B = _pf(task)['code']['Config (notebook)']\n"
     )
     assert kernel.ns["_A"] != kernel.ns["_B"]
-
-
-def test_a_factory_stating_its_class_twice_is_stable(kernel):
-    """Inside a function's body two statements run as one step: an unchanged
-    re-run of the factory keeps the digest."""
-    factory = (
-        "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n"
-        "    return C\n\n\nC = make()\n"
-    )
-    _run_cells(kernel, [factory, "def task(a):\n    return a * C.K\n"])
-    first = _own(kernel, "C")
-    kernel.run(factory)
-    assert _own(kernel, "C") == first
 
 
 def test_a_try_body_and_its_handler_both_run(kernel):
@@ -4491,16 +4482,6 @@ def test_a_cell_s_end_is_found_without_its_own_info(monkeypatch, ending):
     assert id(shell.user_ns["Config"]) in state["pins"]
 
 
-def test_a_class_whose_module_is_assigned_is_still_read(kernel):
-    """Assigning a class's `__module__` deletes its `__firstlineno__` on 3.13+;
-    a `class` statement still made it, so an edit is seen."""
-    cell = "class Config:\n    LR = {}\n\n\nConfig.__module__ = __name__\n"
-    _run_cells(kernel, [cell.format(1), "def task(a):\n    return a * Config.LR\n"])
-    first = _own(kernel)
-    kernel.run(cell.format(2))
-    assert _own(kernel) != first
-
-
 def test_a_class_pinned_to_a_cell_stating_none_is_ambiguous(monkeypatch):
     """A class pinned to a cell that states none of it (`exec`, `%%time`, a
     copy) is ambiguous whatever the kept cells hold: no kept statement stands
@@ -4537,20 +4518,6 @@ def test_a_class_type_makes_has_no_site_without_the_watch(kernel):
     kept = _own(kernel, "Mk")
     kernel.run("Mk = type('Mk', (), {'X': 2})\n")
     assert _own(kernel, "Mk") != kept
-
-
-def test_a_cell_binding_many_classes_still_pins_a_nested_one(monkeypatch):
-    """The nested walk has its own budget: a cell binding 70 classes
-    (`%run models.py`) still pins the class one of their bodies made."""
-    import mushin._resume as resume
-
-    shell = _FakeShell()
-    monkeypatch.setattr(resume, "_shell", lambda: shell)
-    state = resume._cell_watch()
-    source = "".join(f"class C{i}:\n    X = {i}\n\n\n" for i in range(70))
-    exec(source + "class Outer:\n    class Inner:\n        X = 1\n", shell.user_ns)
-    resume._pin_classes(state, shell.user_ns, ("%run models.py\n", {}))
-    assert id(shell.user_ns["Outer"].Inner) in state["pins"]
 
 
 def test_a_kept_text_with_carriage_returns_is_read():

@@ -26,173 +26,53 @@ def _write_metrics(job_dir, acc=0.9):
     torch.save({"acc": [acc]}, job_dir / "metrics.pt")
 
 
-# ---------------------------------------------------------------------------
-# BUG 2: single-run layout — working_dir should be the per-job dir, not parent
-# ---------------------------------------------------------------------------
-class TestSingleRunLayout:
-    def test_cfg_loaded(self, tmp_path):
-        """cfg must not be None for a plain single-run experiment."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.1)
-        _write_metrics(tmp_path)
+# BUG 2: a single run's working_dir is its own dir, not the parent.
+def test_single_run_layout(tmp_path):
+    """A plain single run: the Experiment carries its cfg, its metrics, and
+    the run's own directory."""
+    _write_hydra_cfg(tmp_path / ".hydra", lr=0.1)
+    _write_metrics(tmp_path, acc=0.9)
 
-        result = load_experiment(tmp_path)
+    result = load_experiment(tmp_path)
 
-        assert isinstance(result, Experiment)
-        assert result.cfg is not None, "cfg should not be None for single-run layout"
-
-    def test_cfg_values(self, tmp_path):
-        """cfg.lr must equal the value written into config.yaml."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.1)
-        _write_metrics(tmp_path)
-
-        result = load_experiment(tmp_path)
-
-        assert float(result.cfg.lr) == pytest.approx(0.1)
-
-    def test_metrics_loaded(self, tmp_path):
-        """metrics dict must contain the saved 'metrics' key."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.1)
-        _write_metrics(tmp_path, acc=0.9)
-
-        result = load_experiment(tmp_path)
-
-        assert "metrics" in result.metrics
-
-    def test_working_dir_is_job_dir(self, tmp_path):
-        """working_dir must be the per-job directory, NOT its parent."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.1)
-        _write_metrics(tmp_path)
-
-        result = load_experiment(tmp_path)
-
-        # BUG 2: current code does path.parent.parent (one level too high)
-        assert result.working_dir == str(tmp_path), (
-            f"working_dir should be {tmp_path}, got {result.working_dir}"
-        )
+    assert isinstance(result, Experiment)
+    assert float(result.cfg.lr) == pytest.approx(0.1)
+    assert "metrics" in result.metrics
+    assert result.working_dir == str(tmp_path)
 
 
-# ---------------------------------------------------------------------------
-# BUG 1 (P1): DDP layout — second config must NOT cause cfg to become None
-# ---------------------------------------------------------------------------
-class TestDDPLayout:
-    def test_cfg_not_none_with_extra_rank_config(self, tmp_path):
-        """DDP rank configs must not shadow the canonical .hydra/config.yaml."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.2)
-        _write_metrics(tmp_path)
+# BUG 1 (P1): a DDP rank config beside .hydra/config.yaml made cfg None.
+def test_ddp_layout_reads_the_job_config_not_a_rank_config(tmp_path):
+    """HydraDDP writes a rank config beside the job's own .hydra/config.yaml;
+    the job's config is the one loaded, and working_dir is the job dir."""
+    _write_hydra_cfg(tmp_path / ".hydra", lr=0.42)
+    _write_metrics(tmp_path)
+    # A DIFFERENT lr in the rank config tells which one was loaded.
+    _write_hydra_cfg(tmp_path / ".pl_hydra_rank_1", lr=0.99)
 
-        # Simulate the extra config written by mushin's HydraDDP launcher
-        rank1_dir = tmp_path / ".pl_hydra_rank_1"
-        _write_hydra_cfg(rank1_dir, lr=0.2)  # same lr, different path
+    result = load_experiment(tmp_path)
 
-        result = load_experiment(tmp_path)
-
-        # BUG 1: current code globs **/config.yaml, finds 2 files, == 1 fails → None
-        assert isinstance(result, Experiment)
-        assert result.cfg is not None, (
-            "cfg must not be None when a DDP rank config exists alongside .hydra/config.yaml"
-        )
-
-    def test_cfg_loaded_from_hydra_dir(self, tmp_path):
-        """The cfg loaded must be from .hydra/config.yaml (canonical source)."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.42)
-        _write_metrics(tmp_path)
-
-        # DDP rank config with a DIFFERENT lr to distinguish which was loaded
-        rank1_dir = tmp_path / ".pl_hydra_rank_1"
-        _write_hydra_cfg(rank1_dir, lr=0.99)
-
-        result = load_experiment(tmp_path)
-
-        assert result.cfg is not None
-        assert float(result.cfg.lr) == pytest.approx(0.42), (
-            "Should load from .hydra/config.yaml (lr=0.42), not rank config (lr=0.99)"
-        )
-
-    def test_working_dir_is_job_dir_ddp(self, tmp_path):
-        """working_dir must equal the job dir even in DDP layout."""
-        hydra_dir = tmp_path / ".hydra"
-        _write_hydra_cfg(hydra_dir, lr=0.1)
-        _write_metrics(tmp_path)
-        rank1_dir = tmp_path / ".pl_hydra_rank_1"
-        _write_hydra_cfg(rank1_dir, lr=0.1)
-
-        result = load_experiment(tmp_path)
-
-        assert result.working_dir == str(tmp_path)
+    assert isinstance(result, Experiment)
+    assert float(result.cfg.lr) == pytest.approx(0.42)
+    assert result.working_dir == str(tmp_path)
 
 
-# ---------------------------------------------------------------------------
-# BUG 2: multirun layout — each job working_dir must be its own subdirectory
-# ---------------------------------------------------------------------------
-class TestMultirunLayout:
-    def test_returns_list_of_two_experiments(self, tmp_path):
-        """load_experiment on a multirun root must return a list of Experiments."""
-        for i, lr in enumerate([0.01, 0.001]):
-            job_dir = tmp_path / str(i)
-            job_dir.mkdir()
-            _write_hydra_cfg(job_dir / ".hydra", lr=lr)
-            _write_metrics(job_dir)
+# BUG 2: each multirun job's working_dir is its own subdirectory.
+def test_multirun_layout(tmp_path):
+    """A multirun root gives one Experiment per job, each with the lr from its
+    own config and its own directory (not the shared root)."""
+    for i, lr in enumerate([0.01, 0.001]):
+        job_dir = tmp_path / str(i)
+        job_dir.mkdir()
+        _write_hydra_cfg(job_dir / ".hydra", lr=lr)
+        _write_metrics(job_dir)
 
-        result = load_experiment(tmp_path)
+    results = load_experiment(tmp_path)
 
-        assert isinstance(result, list), "multirun should return a list"
-        assert len(result) == 2
-
-    def test_each_experiment_has_cfg(self, tmp_path):
-        """Each Experiment in the multirun list must have cfg loaded."""
-        lrs = [0.01, 0.001]
-        for i, lr in enumerate(lrs):
-            job_dir = tmp_path / str(i)
-            job_dir.mkdir()
-            _write_hydra_cfg(job_dir / ".hydra", lr=lr)
-            _write_metrics(job_dir)
-
-        results = load_experiment(tmp_path)
-
-        for exp in results:
-            assert exp.cfg is not None, "Each experiment must have its cfg loaded"
-
-    def test_each_experiment_has_correct_lr(self, tmp_path):
-        """Each Experiment must carry the lr from its own config.yaml."""
-        lrs = [0.01, 0.001]
-        for i, lr in enumerate(lrs):
-            job_dir = tmp_path / str(i)
-            job_dir.mkdir()
-            _write_hydra_cfg(job_dir / ".hydra", lr=lr)
-            _write_metrics(job_dir)
-
-        results = load_experiment(tmp_path)
-        # Sort by lr to make the assertion order-independent
-        results_sorted = sorted(results, key=lambda e: float(e.cfg.lr))
-
-        assert float(results_sorted[0].cfg.lr) == pytest.approx(0.001)
-        assert float(results_sorted[1].cfg.lr) == pytest.approx(0.01)
-
-    def test_working_dirs_are_per_job(self, tmp_path):
-        """working_dir for each Experiment must point to its own job dir.
-
-        BUG 2: current code uses path.parent.parent which collapses every job's
-        working_dir to the shared multirun root instead of its own subdirectory.
-        """
-        for i, lr in enumerate([0.01, 0.001]):
-            job_dir = tmp_path / str(i)
-            job_dir.mkdir()
-            _write_hydra_cfg(job_dir / ".hydra", lr=lr)
-            _write_metrics(job_dir)
-
-        results = load_experiment(tmp_path)
-        working_dirs = {exp.working_dir for exp in results}
-
-        expected = {str(tmp_path / "0"), str(tmp_path / "1")}
-        assert working_dirs == expected, (
-            f"working_dirs should be per-job {expected}, got {working_dirs}"
-        )
+    assert isinstance(results, list)
+    assert {e.working_dir: float(e.cfg.lr) for e in results} == pytest.approx(
+        {str(tmp_path / "0"): 0.01, str(tmp_path / "1"): 0.001}
+    )
 
 
 def test_original_cwd_outside_hydra_returns_process_cwd():

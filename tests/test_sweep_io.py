@@ -27,14 +27,6 @@ def test_read_metrics_sidecar_corrupt_returns_none(tmp_path):
     assert read_metrics_sidecar(tmp_path) is None
 
 
-def test_metrics_sidecar_coerces_numpy_and_tensors(tmp_path):
-    import numpy as np
-
-    write_metrics_sidecar(tmp_path, {"a": np.float32(0.5), "b": np.array([1, 2])})
-    got = read_metrics_sidecar(tmp_path)
-    assert got == {"a": 0.5, "b": [1, 2]}
-
-
 def test_manifest_tracks_and_replaces_cells(tmp_path):
     m = Manifest.load_or_new(tmp_path, params=["lr", "seed"])
     m.mark({"lr": 0.1, "seed": 0}, dir="0", status="completed")

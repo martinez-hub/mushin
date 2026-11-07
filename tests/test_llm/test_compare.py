@@ -205,7 +205,9 @@ def test_actual_seed_values_preserved():
 
 def test_zero_variance_masked_per_metric():
     """Masking is per-metric: a metric that's constant across seeds is masked,
-    while a metric that varies in the same run is left as a real test."""
+    while a metric that varies in the same run is left as a real test. Masking
+    one metric does not emit the whole-system 'identical scores' warning,
+    which is reserved for systems constant in *every* metric."""
     import warnings
 
     data = _data(6)
@@ -224,10 +226,12 @@ def test_zero_variance_masked_per_metric():
         return 1.0  # constant for every example/seed -> zero variance
 
     metric = {"const": const, "acc": exact}
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         result = compare_llms({"A": A, "B": B}, data, metric=metric, seeds=range(4))
 
+    msgs = [str(w.message) for w in caught]
+    assert not any("identical scores across all" in m for m in msgs)
     comps = result.comparisons
     const_row = comps[comps["metric"] == "const"].iloc[0]
     acc_row = comps[comps["metric"] == "acc"].iloc[0]
@@ -269,11 +273,6 @@ def test_holm_recorrected_over_surviving_pairs():
     # every comparison involving C is masked
     cpairs = comps[(comps.method_a == "C") | (comps.method_b == "C")]
     assert cpairs["p_value"].isna().all()
-
-
-def test_empty_seeds_rejected():
-    with pytest.raises(ValueError, match="seed"):
-        compare_llms({"a": lambda ins, s: list(ins)}, _data(2), metric=exact, seeds=[])
 
 
 def test_empty_seeds_rejected_before_instantiating_systems():
@@ -477,39 +476,6 @@ def test_system_receives_actual_seed_values():
 
     compare_llms({"A": sysA}, data, metric=exact, seeds=[5, 9])
     assert seen == {5, 9}
-
-
-def test_per_metric_masking_does_not_warn_whole_system():
-    """Masking a single constant metric must NOT emit the whole-system
-    'identical scores' warning, which is reserved for systems constant in *every*
-    metric."""
-    import warnings
-
-    data = _data(6)
-
-    def A(inputs, seed):
-        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
-        out[seed % len(out)] = "no"  # `acc` varies with seed
-        return out
-
-    def B(inputs, seed):
-        out = ["yes" if i % 2 == 0 else "no" for i in inputs]
-        out[(seed + 1) % len(out)] = "yes"
-        return out
-
-    def const(o, r):
-        return 1.0  # constant only in this metric
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        compare_llms(
-            {"A": A, "B": B},
-            data,
-            metric={"const": const, "acc": exact},
-            seeds=range(4),
-        )
-    msgs = [str(w.message) for w in caught]
-    assert not any("identical scores across all" in m for m in msgs)
 
 
 def test_surviving_pairs_recorrected_over_reduced_family():

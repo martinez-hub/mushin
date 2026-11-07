@@ -770,18 +770,13 @@ def test_echo_writes_text_the_stream_can_encode_unchanged():
     assert raw.getvalue() == METRIC.encode("utf-8")
 
 
-def test_echo_leaves_a_lenient_error_handler_in_charge():
-    # A POSIX locale gives stdout surrogateescape, which writes an undecodable
-    # path's lone surrogate back as its original byte; escaping it would not.
-    raw, stream = _stream("ascii", errors="surrogateescape")
-    echo("\udcff", file=stream)
-    stream.flush()
-    assert raw.getvalue() == b"\xff\n"
-
-
 @pytest.mark.parametrize(
     "text, expected",
     [
+        # A POSIX locale gives stdout surrogateescape, which writes an
+        # undecodable path's lone surrogate back as its original byte;
+        # escaping it would not.
+        ("\udcff", b"\xff\n"),
         (f"\udcff {ALPHA}", b"\xff \\u03b1\n"),
         # One run for the codec: the surrogate right after the alpha must
         # still reach the handler on its own.

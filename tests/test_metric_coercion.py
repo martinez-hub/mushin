@@ -2,13 +2,12 @@
 
 Pins fixes for the value-coercion divergence: the sidecar normalizer must
 recurse into nested dicts (a nested numpy value used to crash the write *after*
-the task had already succeeded), non-finite floats must serialize as valid JSON
-and round-trip back to NaN, and a non-JSON-native metric value must be
-stringified rather than abort the sweep.
+the task had already succeeded), and a non-JSON-native metric value must be
+stringified rather than abort the sweep. Non-finite floats are pinned in
+test_sweep_io.py (test_metrics_sidecar_roundtrips_infinities).
 """
 
 import json
-import math
 
 import numpy as np
 import pytest
@@ -21,26 +20,19 @@ from mushin.workflows import MultiRunMetricsWorkflow
 def test_nested_numpy_metric_serializes_and_roundtrips(tmp_path):
     metrics = {
         "acc": np.float64(0.9),
+        "half": np.float32(0.5),
+        "arr": np.array([1, 2]),
         "counts": {"tp": np.int64(5), "row": np.array([1, 2, 3])},
         "seq": [np.float32(1.5), np.int32(2)],
     }
     write_metrics_sidecar(tmp_path, metrics)  # must not raise
     back = read_metrics_sidecar(tmp_path)
     assert back["acc"] == 0.9
+    assert back["half"] == 0.5 and back["arr"] == [1, 2]
     assert back["counts"] == {"tp": 5, "row": [1, 2, 3]}
     assert back["seq"] == [1.5, 2]
     # on-disk file is strict, valid JSON
     json.loads((tmp_path / "mushin_metrics.json").read_text())
-
-
-def test_nonfinite_metric_is_valid_json_and_restores_nonfinite(tmp_path):
-    write_metrics_sidecar(tmp_path, {"loss": float("nan"), "grad": float("inf")})
-    raw = (tmp_path / "mushin_metrics.json").read_text()
-    assert "NaN" not in raw and "Infinity" not in raw  # not python-only literals
-    json.loads(raw)  # strict parse succeeds
-    back = read_metrics_sidecar(tmp_path)
-    assert math.isnan(back["loss"])
-    assert back["grad"] == math.inf  # ±Inf keeps its sign (no NaN collapse)
 
 
 def test_nonnative_metric_value_is_stringified_not_crashing(tmp_path):

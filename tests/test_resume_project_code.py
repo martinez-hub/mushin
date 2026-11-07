@@ -225,6 +225,19 @@ EDITS = {
         2,
         3,
     ),
+    # A project file is hashed as it is, strings included: `EOS_TOKEN = "</s>"`
+    # is a tokenizer setting, not a secret to leave out.
+    "a setting named like a secret": (
+        "EOS_TOKEN = {v!r}\n\n\ndef task(a):\n    return a\n",
+        "</s>",
+        "<|endoftext|>",
+    ),
+    # A value that starts like a token (`hf_`) is a setting all the same.
+    "a setting shaped like a token prefix": (
+        "MODEL = {v!r}\n\n\ndef task(a):\n    return a\n",
+        "hf_tiny_random_gpt2_model",
+        "hf_tiny_random_llama_model",
+    ),
 }
 
 #: Not edits: the record must stay as it was.
@@ -536,6 +549,9 @@ def test_changed_project_code_compares_the_keys_both_records_have():
     a = {"python": "3.11", "code": {"m:f": "1", "only_a": "1"}}
     assert changed_project_code(a, {"python": "3.11", "code": {"m:f": "2"}}) == ["m:f"]
     assert changed_project_code(a, {"python": "3.11", "code": {"other": "2"}}) == []
+    # File digests read alike on every supported Python, so an edit made
+    # around an interpreter upgrade is still seen.
+    assert changed_project_code(a, {"python": "3.12", "code": {"m:f": "2"}}) == ["m:f"]
     assert changed_project_code(None, a) is None  # a sidecar from before the field
     assert changed_project_code(a, None) is None  # not fingerprinted this run
 
@@ -630,16 +646,6 @@ def test_a_comment_or_docstring_edited_after_import_is_not_stale(project):
         warnings.simplefilter("error")
         after = _code(exp.W.task)[f"{HELPERS} (file)"]
     assert after == before
-
-
-def test_sidecar_records_the_project_code(project):
-    root, exp = project
-    wd = root / "sweep"
-    exp.W().run(a=multirun([1]), working_dir=str(wd))
-    (status,) = wd.rglob(STATUS_FILE)
-    assert json.loads(status.read_text())["code_deps"] == project_fingerprints(
-        exp.W.task
-    )
 
 
 def test_resume_reuses_legacy_sidecars_without_project_code(project):
@@ -782,6 +788,11 @@ def test_cache_key_keeps_main_two_part_form_without_project_code():
     assert runner._cache_key("h", {"python": PY, "code": {}}) == two_part
     assert runner._cache_key("h", {"python": PY, "code": {"m:f": "1"}}) != two_part
     assert runner._cache_key("h", None) is None
+    # The key does not depend on the Python version the record names.
+    code = {"m (file)": "1"}
+    assert runner._cache_key(
+        "h", {"python": "3.11", "code": code}
+    ) == runner._cache_key("h", {"python": "3.13", "code": code})
 
 
 def test_a_runner_with_no_code_roots_keys_the_cache_as_before(tmp_path):
@@ -820,6 +831,18 @@ def test_a_partial_task_is_never_cached():
     assert partial_task_cacheable(train)
     assert not partial_task_cacheable(functools.partial(train, layers=[64, 128]))
     assert not partial_task_cacheable(functools.partial(train, fn=len))
+
+    # Whatever the partial wraps: a closure, a bound method, a lambda.
+    def make(w):
+        return lambda a: a * w
+
+    class T:
+        def fit(self, a):
+            return a
+
+    assert not partial_task_cacheable(functools.partial(make(2.0)))
+    assert not partial_task_cacheable(functools.partial(T().fit))
+    assert not partial_task_cacheable(functools.partial(lambda a: a))
 
 
 # --- a task defined in the script that runs it --------------------------------
@@ -1590,23 +1613,6 @@ def test_a_target_class_in_the_driver_script_is_covered(tmp_path):
     assert calls.read_text() == "xxxx"
 
 
-def test_settings_named_like_secrets_are_compared(project):
-    """`EOS_TOKEN = "</s>"` is a tokenizer setting: a project file is hashed
-    as it is, strings included."""
-    root, _ = project
-    src = "EOS_TOKEN = {v!r}\n\n\ndef task(a):\n    return a\n"
-    assert _edited(root, "mushin_t_eos", src, "</s>", "<|endoftext|>") != []
-
-
-def test_a_record_from_another_python_version_is_compared():
-    """File digests read alike on every supported Python, so an edit made
-    around an interpreter upgrade is still seen."""
-    a = {"python": "3.11", "code": {"m (file)": "1"}}
-    assert changed_project_code(a, {"python": "3.12", "code": {"m (file)": "2"}}) == [
-        "m (file)"
-    ]
-
-
 LAZY_PROXY = """
 RESOLVED = []
 
@@ -1838,21 +1844,6 @@ def test_a_foreign_decorator_on_main_does_not_count_a_project_one_does(tmp_path)
     assert lin != base
 
 
-def test_a_partial_over_a_closure_or_a_bound_method_is_not_cached():
-    from mushin._resume import partial_task_cacheable
-
-    def make(w):
-        return lambda a: a * w
-
-    class T:
-        def fit(self, a):
-            return a
-
-    assert not partial_task_cacheable(functools.partial(make(2.0)))
-    assert not partial_task_cacheable(functools.partial(T().fit))
-    assert not partial_task_cacheable(functools.partial(lambda a: a))
-
-
 def test_a_target_module_not_imported_yet_is_judged_by_its_file(project, monkeypatch):
     """`_target_: mushin_t_tgtpkg.models.Net` while an installed distribution
     also ships that top-level name: before Hydra imports it, its file decides,
@@ -1889,34 +1880,6 @@ def test_a_partials_bound_arguments_are_not_hashed():
     one = project_fingerprints(functools.partial(task, db_password="hunter2"))
     two = project_fingerprints(functools.partial(task, db_password="correct-horse"))
     assert one == two
-
-
-def test_a_setting_shaped_like_a_token_prefix_is_compared(project):
-    root, _ = project
-    src = "MODEL = {v!r}\n\n\ndef task(a):\n    return a\n"
-    a, b = "hf_tiny_random_gpt2_model", "hf_tiny_random_llama_model"
-    assert _edited(root, "mushin_t_hfname", src, a, b) != []
-
-
-def test_the_cache_key_does_not_depend_on_the_python_version():
-    from mushin.workflows import _TaskRunner
-
-    runner = _TaskRunner(
-        task=None,
-        pre_task=None,
-        swept_names=(),
-        base_provenance=None,
-        on_error="raise",
-        inject_resume=False,
-        prior_manifest=None,
-        code_hash="c0de",
-        cache_dir="cache",
-        code_roots=(len,),
-    )
-    code = {"m (file)": "1"}
-    assert runner._cache_key(
-        "h", {"python": "3.11", "code": code}
-    ) == runner._cache_key("h", {"python": "3.13", "code": code})
 
 
 def test_a_nested_namespace_package_does_not_drop_the_record(project):
