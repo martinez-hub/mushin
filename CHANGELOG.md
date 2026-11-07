@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.17.2] - 2026-11-07
+
+### Fixed
+
+- For a task defined in a notebook, `resume=True` and `cache_dir=` now notice an edit to a function or lambda defined below a line holding a form feed, a vertical tab, U+2028 or another character that ends a line for Python's `str.splitlines` but not for `compile`. Before, such an edit was missed and a resume reused cells computed with the old code. mushin now reads such a cell as Python compiled it, from the shell's input history or from the cells it saw run after `import mushin`, and reads the project modules such a cell imports and the classes it states the same way. A cell that neither holds (such as one `%run` runs from a notebook or an `.ipy` file, a silent one, or one a magic ran inside another cell before `import mushin`) may still not be compared. A function in a kept cell whose definition is not found where its code says, in such a cell or any other (one an earlier version of a cell defined, once the cell has run again under the same name), now re-runs its cells instead of keeping one fixed digest that missed every edit to it. After upgrading, a resume can re-run the cells once for a task that reaches a function or class defined below such a character. (#299)
+
+
 ## [0.17.1] - 2026-11-06
 
 ### Fixed
@@ -696,7 +703,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/martinez-hub/mushin/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/martinez-hub/mushin/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/martinez-hub/mushin/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/martinez-hub/mushin/compare/v0.15.1...v0.16.0
