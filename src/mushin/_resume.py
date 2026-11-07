@@ -2347,9 +2347,10 @@ def _method_functions(value) -> list:
 #: ``(info, (raw text, {id(class): weakref}))`` with every notebook class
 #: alive when the cell started (``_start_classes``), or ``(info, None)``
 #: when the cell's text is unknown; ``texts`` the compiled texts of cells
-#: the history may not hold (``_keep_cell_text``); ``end``, the last
-#: top-level cell's end set, which the next one starts from unless an
-#: execution ended since (``_start_classes``). Weak, so the watch keeps no
+#: the history may not hold (``_keep_cell_text``); ``depth``, the
+#: executions running; ``end``, the last cell's end set, which the next
+#: outermost cell starts from unless an execution ended since
+#: (``_start_classes``). Weak, so the watch keeps no
 #: superseded class alive (a later cell's ``gc.collect()`` frees it); a
 #: class counts as alive at the start only if its id's reference still
 #: gives that class.
@@ -2397,15 +2398,17 @@ def _start_classes(notebook, end) -> dict:
     """``{id(cls): weakref}`` for every class of ``notebook`` (its
     namespace's ``__name__``) alive as a cell starts: ``end``, the set the
     last top-level cell's end took, when it is for the same name; else a
-    walk of every live class (``_live_classes``). The watch keeps that set
-    from the ``post_run_cell`` of a stored cell with none running around it
-    until the next execution ends (``post_execute``, a silent one too) or a
-    cell starts (which takes it), so a class a nested cell, the cell around
-    it, startup code or a silent execution made is alive at a walk. One that
-    code running outside any cell makes between two cells (a background
-    thread, a callback, an expression a frontend evaluates after a cell) is
-    taken for the next cell's, as one made while a cell runs already could
-    be (``_pin_classes``)."""
+    walk of every live class (``_live_classes``). A cell's ``post_run_cell``
+    leaves that set; every execution's ``post_execute`` (a silent or nested
+    one too) drops it; and only a cell that starts with no other execution
+    running (``state["depth"]``, counted by every execution's
+    ``pre_execute`` and ``post_execute``) uses it. So a class a nested cell,
+    the execution around one or a silent execution made is alive at a walk,
+    and so is one a cell whose end the watch could not match made. One that
+    code running outside any execution makes between two cells (a
+    background thread, a callback, an expression a frontend evaluates after
+    a cell) is taken for the next cell's, as one made while a cell runs
+    already could be (``_pin_classes``)."""
     if end is not None and end[0] is notebook:
         return end[1]
     return _weak_set(_live_classes(notebook))
@@ -2450,7 +2453,7 @@ def _shell():
 
 
 def _cell_watch(register: bool = True) -> dict | None:
-    """The shell's cell watch (``_CELL_WATCH``), registering its two event
+    """The shell's cell watch (``_CELL_WATCH``), registering its four event
     callbacks the first time (``register``); None outside a shell. Best
     effort: an IPython that refuses the callbacks leaves a watch without
     them, which pins nothing, and no later call registers again."""
@@ -2469,7 +2472,24 @@ def _cell_watch(register: bool = True) -> dict | None:
         # notebook object's hook in the callback.
         manager = getattr(shell, "input_transformer_manager", None)
         transform = getattr(manager, "transform_cell", None) or shell.transform_cell
-        state = {"pins": {}, "running": [], "transform": transform, "texts": {}}
+        # `depth` counts the executions running (`pre_execute` and
+        # `post_execute`, which every execution fires, a silent or nested one
+        # too). The watch is installed inside one: the cell that imports
+        # mushin, or a run. Installed outside any (a startup file), it never
+        # comes down to 0, and every cell walks twice, as before the end set.
+        state = {
+            "pins": {},
+            "running": [],
+            "transform": transform,
+            "texts": {},
+            "depth": 1,
+        }
+
+        def began(*_) -> None:
+            try:
+                state["depth"] += 1
+            except Exception:  # noqa: BLE001 - a callback must never raise
+                pass
 
         def pre(info=None) -> None:
             try:
@@ -2477,9 +2497,10 @@ def _cell_watch(register: bool = True) -> dict | None:
                 if len(running) > 8:  # cells whose end never fired
                     running.clear()
                 entry = None
-                # A start takes the last end set: a cell whose end never
-                # fires cannot hand a later cell a set from before it ran.
-                end = state.pop("end", None)
+                # Only an outermost cell starts from the last end set: one
+                # inside another execution (`%%capture`, `run_cell`, a silent
+                # one) starts after that execution ran code of its own.
+                end = state.get("end") if state.get("depth") == 1 else None
                 try:
                     raw = getattr(info, "raw_cell", None)
                     if type(raw) is str:
@@ -2525,21 +2546,16 @@ def _cell_watch(register: bool = True) -> dict | None:
                 if found is None and result is None:
                     found = len(running) - 1
                 if found is not None:
-                    ended, entry = running.pop(found)
+                    entry = running.pop(found)[1]
                     if entry is not None:
                         notebook = shell.user_ns.get("__name__")
                         live = _live_classes(notebook)
                         _pin_classes(state, shell.user_ns, entry, live)
-                        # The next cell starts from this walk (one walk per
-                        # cell, not two), only after a stored cell with none
-                        # around it: a nested cell (`%%capture`, `%rerun`,
-                        # `run_cell`) is never stored, and the cell around it
-                        # may not be in `running` (the cell that imported
-                        # mushin started before the watch), so its later
-                        # classes would be taken for the next cell's.
-                        stored = getattr(ended, "store_history", None) is True
-                        if stored and not running:
-                            state["end"] = (notebook, _weak_set(live))
+                        # The next cell starts from this walk: one walk per
+                        # cell, not two. One a nested cell leaves is never
+                        # used: a cell starting inside an execution walks,
+                        # and the execution's end drops it.
+                        state["end"] = (notebook, _weak_set(live))
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
 
@@ -2547,7 +2563,11 @@ def _cell_watch(register: bool = True) -> dict | None:
             # Every execution ends here, a silent one and a nested cell too,
             # before a visible cell's post_run_cell: a set kept across it
             # would take what it made for the next cell's.
-            state["end"] = None
+            try:
+                state["end"] = None
+                state["depth"] = max(0, state["depth"] - 1)
+            except Exception:  # noqa: BLE001 - a callback must never raise
+                pass
 
         # The state first, so a failure below cannot leave callbacks that
         # the next call would register again.
@@ -2555,6 +2575,7 @@ def _cell_watch(register: bool = True) -> dict | None:
         added = []
         try:
             for event, callback in (
+                ("pre_execute", began),
                 ("pre_run_cell", pre),
                 ("post_execute", ended),
                 ("post_run_cell", post),
