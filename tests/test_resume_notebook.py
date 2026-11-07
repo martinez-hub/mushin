@@ -1867,6 +1867,7 @@ def _files(kernel, *names, allow_failure=False, **kwargs) -> set:
 
     resume._NOTEBOOK_FAILURE_WARNED.clear()  # it warns once per run otherwise
     getattr(resume, "_CELL_SCAN_WARNED", []).clear()  # (absent before #294)
+    getattr(resume, "_HISTORY_WARNED", []).clear()  # (absent before #299)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         record = project_fingerprints(*(kernel.ns[n] for n in names), **kwargs)
@@ -4593,10 +4594,12 @@ def test_a_running_cell_with_no_text_stops_the_on_demand_pin(monkeypatch):
 
 
 @pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
-def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel):
+def test_a_kept_cell_split_at_a_form_feed_is_ambiguous(kernel, no_shell):
     """IPython keeps a cell as its `splitlines()` lines, so a form feed adds a
-    line `compile` never counted, and no kept statement sits at the class's
-    first line: ambiguous, so an edit is seen (a constant would miss it)."""
+    line `compile` never counted. With no text of the cell as compiled (no
+    shell: see `test_a_split_class_cell_is_read_as_compiled` for one), no
+    kept statement sits at the class's first line: ambiguous, so an edit is
+    seen (a constant would miss it)."""
     _run_cells(kernel, ["def task(a):\n    return a * Config.LR\n"])
     digests = []
     for value in (0.1, 0.2):
@@ -4735,3 +4738,509 @@ def test_a_class_a_finalizer_brings_back_is_ambiguous(monkeypatch):
     else:  # 3.15 keeps them, and the class its pin
         assert resume._pinned_cell(back, ns) == (True, ["exec(SOURCE)\n"])
     assert resume._listed(ns["C"])  # a class alive as usual is listed
+
+
+# --- a cell split where `compile` does not end a line (#296) ----------------------
+
+#: The characters `str.splitlines` ends a line at and `compile` does not.
+SPLIT_ONLY = ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+#: Where a cell can hold one above a definition; each compiles. In a
+#: one-line string, the cell as IPython keeps it does not parse.
+SPLIT_HEADS = {
+    "comment": "# a{}b\n",
+    "triple-quoted": 'S = """a{}b"""\n',
+    "string": 'S = "a{}b"\n',
+}
+SPLIT_CASES = [
+    pytest.param(head.format(c), id=f"{where}-{ord(c):04x}")
+    for where, head in SPLIT_HEADS.items()
+    for c in SPLIT_ONLY
+] + [pytest.param("x = 1\f\n", id="page-break")]
+
+
+class _HistoryShell(_FakeShell):
+    """A shell with IPython's input history: each stored cell as compiled."""
+
+    def __init__(self):
+        super().__init__()
+        self.history_manager = types.SimpleNamespace(input_hist_parsed=[""])
+
+
+@pytest.fixture
+def history(monkeypatch):
+    """The input history of a shell the record sees (``_HistoryShell``)."""
+    import mushin._resume as resume
+
+    shell = _HistoryShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    return shell.history_manager.input_hist_parsed
+
+
+@pytest.fixture
+def no_shell(monkeypatch):
+    """No shell: neither a history nor a cell watch to read a cell from."""
+    import mushin._resume as resume
+
+    monkeypatch.setattr(resume, "_shell", lambda: None)
+
+
+def _run_kept(kernel, text: str, history=None) -> None:
+    """Run a cell, kept as IPython keeps it (``[line + "\\n" for line in
+    text.splitlines()]``) and, with ``history``, stored as IPython stores it
+    (the text it compiled, without trailing newlines)."""
+    kernel.run(text)
+    name = kernel.names[-1]
+    size, mtime, _, filename = linecache.cache[name]
+    kept = [line + "\n" for line in text.splitlines()]
+    linecache.cache[name] = (size, mtime, kept, filename)
+    if history is not None:
+        history.append(text.rstrip("\n"))
+
+
+def _helper(kernel) -> str:
+    return _record(kernel, "task")["helper (notebook)"]
+
+
+@pytest.mark.parametrize("head", SPLIT_CASES)
+def test_a_split_cell_is_read_as_compiled(kernel, history, head):
+    """IPython keeps a cell as its `splitlines()` lines, so such a character
+    above a definition moves it below the line its code names, or the kept
+    cell does not parse. The history holds the cell as compiled: an edit is
+    seen, and the same text again is not (exact, not ambiguous)."""
+    _run_kept(kernel, TASK, history)
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, head + f"def helper(a):\n    return a * {k}\n", history)
+        digests.append(_helper(kernel))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+@pytest.mark.parametrize("head", SPLIT_CASES)
+def test_a_split_cell_not_known_as_compiled_is_ambiguous(kernel, no_shell, head):
+    """With no text of the cell as compiled, its one definition is not at its
+    code's line in the kept text: ambiguous, so an edit is seen, the same
+    object keeps its digest, and a re-run of the cell (a new object)
+    recomputes. A constant digest would miss every edit. (A second
+    definition of its kind there can be taken for it: a documented limit.)"""
+    _run_cells(kernel, [TASK])
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, head + f"def helper(a):\n    return a * {k}\n")
+        digests.append(_helper(kernel))
+        assert _helper(kernel) == digests[-1]
+    assert len(set(digests)) == 3
+
+
+def test_lambdas_below_a_page_break_are_told_apart(kernel, history):
+    """Two lambdas on consecutive lines below a form feed: in the kept text,
+    the second's line holds the first, whose text would hide the second's
+    edits."""
+    _run_kept(kernel, "def task(a):\n    return second(a)\n", history)
+    cell = "x = 1\f\nfirst = lambda a: a * 2\nsecond = lambda a: a * {}\n"
+    digests = []
+    for k in (3, 4, 4):
+        _run_kept(kernel, cell.format(k), history)
+        digests.append(_record(kernel, "task")["second (notebook)"])
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_a_method_below_page_breaks_names_its_own_class(kernel, history):
+    """Two versions of a class in one cell below two form feeds: in the kept
+    text, the second's method's line falls in the first, whose statement
+    would hide an edit to the second's (the method itself is the same)."""
+    _run_kept(kernel, "def task(a):\n    return a * C.K\n", history)
+    cell = (
+        "x = 1\f\f\nclass C:\n    def f(self): return 1\n    K = 0\n"
+        "class C:\n    def f(self): return 1\n    K = {}\n"
+    )
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, cell.format(k), history)
+        digests.append(_own(kernel, "C"))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_cells_kept_alike_that_define_it_differently_are_ambiguous(kernel, history):
+    """Two stored cells that differ only where one holds such a character
+    and the other a newline keep the same lines. When both hold a definition
+    at the code's line and those differ, which one the code came from cannot
+    be told: ambiguous (a new object recomputes)."""
+    _run_kept(kernel, TASK, history)
+    split = 'def helper(a):\n    return a, """x\u2028y"""\n'
+    plain = 'def helper(a):\n    return a, """x\ny"""\n'
+    _run_kept(kernel, plain, history)
+    _run_kept(kernel, split, history)
+    first = _helper(kernel)
+    assert _helper(kernel) == first  # the same object
+    _run_kept(kernel, split, history)
+    assert _helper(kernel) != first
+
+
+def test_cells_kept_alike_where_one_lacks_it_are_exact(kernel, history):
+    """Kept alike, but the cell without the character holds no definition at
+    the code's line (its newline moved it down), so the code came from the
+    other: exact, so an edit is seen and the same text again is not."""
+    _run_kept(kernel, TASK, history)
+    digests = []
+    for k in (2, 3, 3):
+        body = f"def helper(a):\n    return a * {k}\n"
+        _run_kept(kernel, 'S = """a\nb"""\n' + body, history)
+        _run_kept(kernel, 'S = """a\u2028b"""\n' + body, history)
+        digests.append(_helper(kernel))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_a_twin_with_carriage_returns_is_a_candidate(kernel, history):
+    """A stored cell with carriage-return line ends keeps the same lines as
+    its twin holding such a character: it is a candidate too, so the twins'
+    different definitions are ambiguous."""
+    _run_kept(kernel, TASK, history)
+    split = 'def helper(a):\n    return a, """x\u2028y"""\n'
+    plain = 'def helper(a):\r\n    return a, """x\r\ny"""\r\n'
+    _run_kept(kernel, split, history)
+    _run_kept(kernel, plain, history)
+    first = _helper(kernel)
+    _run_kept(kernel, plain, history)
+    assert _helper(kernel) != first
+
+
+def test_candidates_that_agree_are_exact(kernel, history):
+    """Two stored cells kept alike whose definitions agree (they differ in
+    which such character a string holds): exact, for a function and for a
+    class found through its method."""
+    _run_kept(kernel, "def task(a):\n    return helper(a) * C().f()\n", history)
+    digests = []
+    for k in (2, 3, 3):
+        for c in ("\f", "\v"):
+            text = (
+                f'S = "a{c}b"\ndef helper(a):\n    return a * {k}\n'
+                f"class C:\n    def f(self):\n        return {k}\n"
+            )
+            _run_kept(kernel, text, history)
+        record = _record(kernel, "task")
+        digests.append((record["helper (notebook)"], record["C (notebook)"]))
+    assert digests[0][0] != digests[1][0] and digests[0][1] != digests[1][1]
+    assert digests[1] == digests[2]
+
+
+def test_a_class_in_twins_that_differ_is_not_read_from_the_first(kernel, history):
+    """Two stored cells kept alike whose class statements differ (inside a
+    string) and whose method is the same: the first text's statement is not
+    taken for the class, so the edit is seen."""
+    _run_kept(kernel, "def task(a):\n    return a * len(C.K)\n", history)
+    body = "class C:\n    def f(self):\n        return 1\n\n    K = "
+    _run_kept(kernel, body + '"""x\u2028y"""\n', history)
+    before = _own(kernel, "C")
+    _run_kept(kernel, body + '"""x\ny"""\n', history)
+    assert _own(kernel, "C") != before
+
+
+def test_a_split_cell_in_an_older_ipython_s_cache_is_read_as_compiled(history):
+    """IPython before 8.6 kept its cells in its own `linecache._ipython_cache`
+    as `splitlines()` lines as well: read as compiled too."""
+    k = Kernel("mushin_t_kernel_legacy_split", legacy=True)
+    try:
+
+        def run(text):
+            k.run(text)
+            name = k.names[-1]
+            size, mtime, _, filename = linecache._ipython_cache[name]
+            kept = [line + "\n" for line in text.splitlines()]
+            linecache._ipython_cache[name] = (size, mtime, kept, filename)
+            history.append(text.rstrip("\n"))
+
+        run(TASK)
+        digests = []
+        for n in (2, 3, 3):
+            run(f"x = 1\f\ndef helper(a):\n    return a * {n}\n")
+            digests.append(_record(k, "task")["helper (notebook)"])
+        assert digests[0] != digests[1]
+        assert digests[1] == digests[2]
+    finally:
+        k.close()
+
+
+def test_an_unstored_plain_twin_is_not_read_from_a_stored_split_one(
+    kernel, monkeypatch
+):
+    """A plain cell run without being stored (a magic's inner cell) keeps the
+    same lines as a stored cell holding such a character: the watch keeps its
+    text, so the two are told apart and switching from one to the other is
+    seen."""
+    import mushin._resume as resume
+
+    shell = _HistoryShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    resume._cell_watch()
+    history = shell.history_manager.input_hist_parsed
+    _run_kept(kernel, TASK, history)
+    _run_kept(kernel, 'def helper(a):\n    return a, """x\u2028y"""\n', history)
+    split = _helper(kernel)
+    plain = 'def helper(a):\n    return a, """x\ny"""\n'
+    info = types.SimpleNamespace(raw_cell=plain, store_history=False)
+    shell.events.callbacks["pre_run_cell"](info)
+    _run_kept(kernel, plain)  # not stored
+    shell.events.callbacks["post_run_cell"](types.SimpleNamespace(info=info))
+    assert _helper(kernel) != split
+
+
+def test_the_scan_reads_a_kept_text_s_imports_too(kernel, history, cell_imports):
+    """A kept cell whose only candidate (a stored cell holding such a
+    character that never compiled) does not parse, while the kept text,
+    from a cell nothing stored, does: its import still counts, as when only
+    kept texts were read."""
+    history.append(f"import {SUBPKG}.sub\nx = 1\x1c")  # a SyntaxError
+    _run_kept(kernel, f"import {SUBPKG}.sub\nx = 1\n\n")  # not stored
+    _run_kept(kernel, "def task(a):\n    return a\n", history)
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="__annotate_func__ is 3.14+")
+def test_a_class_s_annotations_in_cells_kept_alike_are_not_picked(kernel, history):
+    """3.14 finds a method-less class with annotations through its
+    `__annotate_func__`, like a method. In two cells kept alike whose
+    statements differ, the first text's statement is not taken for it: the
+    edit is seen."""
+    _run_kept(kernel, "def task(a):\n    return a * len(C.K)\n", history)
+    _run_kept(kernel, 'class C:\n    K: str = """a\u2028b"""\n', history)
+    assert "__annotate_func__" in vars(kernel.ns["C"])
+    before = _own(kernel, "C")
+    _run_kept(kernel, 'class C:\n    K: str = """a\nb"""\n', history)
+    assert _own(kernel, "C") != before
+
+
+def test_a_split_cell_ending_in_blank_lines_is_read_as_compiled(kernel, history):
+    """The history strips a cell's trailing newlines; the kept lines keep
+    them: the two still match."""
+    _run_kept(kernel, TASK, history)
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, f"x = 1\f\ndef helper(a):\n    return a * {k}\n\n\n", history)
+        digests.append(_helper(kernel))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_a_split_cell_s_imports_count(kernel, history, cell_imports):
+    """A cell whose kept text does not parse (such a character in a string)
+    is scanned as compiled: its project import counts."""
+    _run_kept(kernel, f'S = "a\u2028b"\nimport {SUBPKG}.sub\n', history)
+    _run_kept(kernel, "def task(a):\n    return a\n", history)
+    assert f"{SUBPKG}.sub (file)" in _files(kernel, "task")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="__firstlineno__ is 3.13+")
+def test_a_split_class_cell_is_read_as_compiled(kernel, history):
+    """A method-less class below a form feed, read from the kept cells (the
+    watch did not see it run): as compiled, its statement is at its first
+    line, so it reads as the same class without the form feed does
+    (ambiguous, it would have a digest of its own)."""
+    task = "def task(a):\n    return a * Config.LR\n"
+    _run_kept(kernel, task, history)
+    _run_kept(kernel, "x = 1\f\nclass Config:\n    LR = 0.1\n", history)
+    split = _own(kernel)
+    kernel.close()  # its cells leave linecache: the plain one is read alone
+    plain = Kernel("mushin_t_kernel_plain")
+    try:
+        _run_kept(plain, task)
+        _run_kept(plain, "x = 1\nclass Config:\n    LR = 0.1\n")
+        assert _own(plain) == split
+    finally:
+        plain.close()
+
+
+def test_a_history_without_such_a_character_is_not_split(monkeypatch):
+    """The usual case: no stored or watched text holds such a character, so
+    no kept form is computed and nothing is indexed."""
+    import mushin._resume as resume
+
+    shell = _HistoryShell()
+    shell.history_manager.input_hist_parsed.extend(
+        f"x = {i}\ny = x\n" for i in range(200)
+    )
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    resume._cell_watch()
+    called = []
+    monkeypatch.setattr(resume, "_kept_form", lambda text: called.append(text))
+    assert resume._compiled_texts() == {}
+    assert called == []
+
+
+def test_the_watch_keeps_the_texts_of_split_cells(monkeypatch):
+    """The cell watch keeps the text a cell holding such a character compiles
+    as (a cell run without being stored is in no history, so its text is
+    kept whatever it holds): the shell's own (`transformed_cell`), else the
+    static transform's; each once, the newest ``_SPLIT_TEXTS_MAX``."""
+    import mushin._resume as resume
+
+    shell = _HistoryShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    monkeypatch.setattr(resume, "_SPLIT_TEXTS_MAX", 2)
+    state = resume._cell_watch()
+    pre = shell.events.callbacks["pre_run_cell"]
+    post = shell.events.callbacks["post_run_cell"]
+
+    def run(raw, transformed=None, stored=True):
+        info = types.SimpleNamespace(
+            raw_cell=raw, transformed_cell=transformed, store_history=stored
+        )
+        pre(info)
+        post(types.SimpleNamespace(info=info))
+
+    run("x = 1\n")
+    assert state["texts"] == {}  # a stored cell without one: nothing kept
+    run("p = 1\n", stored=False)
+    assert list(state["texts"]) == ["p = 1"]  # one not stored is kept
+    run("a = 1\f\n\n")
+    run("b = 1\f\n")
+    run("a = 1\f\n")  # again: the newest
+    run("%magic\f\n", transformed="c = 1\f\n")  # the shell's text
+    assert list(state["texts"]) == ["a = 1\f", "c = 1\f"]
+    assert resume._compiled_texts() == {
+        "a = 1": ["a = 1\f"],
+        "c = 1": ["c = 1\f"],
+    }
+
+
+def test_the_watch_s_texts_count_when_the_history_raises(kernel, monkeypatch):
+    """A history that cannot be read warns; the texts the watch kept are
+    still read, so a split cell it saw run is read as compiled."""
+    import mushin._resume as resume
+
+    class Broken(_FakeShell):
+        @property
+        def history_manager(self):
+            raise RuntimeError("no history")
+
+    shell = Broken()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    monkeypatch.setattr(resume, "_HISTORY_WARNED", [])
+    resume._cell_watch()
+    pre = shell.events.callbacks["pre_run_cell"]
+    _run_kept(kernel, TASK)
+    digests = []
+    for k in (2, 3, 3):
+        text = f"x = 1\f\ndef helper(a):\n    return a * {k}\n"
+        pre(types.SimpleNamespace(raw_cell=text))
+        _run_kept(kernel, text)
+        with pytest.warns(UserWarning, match="input history could not be read"):
+            digests.append(_helper(kernel))
+        resume._HISTORY_WARNED.clear()
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_a_cell_whose_text_raises_still_starts(monkeypatch):
+    """An info whose `raw_cell` raises still starts a cell, with no text, so
+    a class made inside it is not pinned to the cell around it."""
+    import mushin._resume as resume
+
+    class Info:
+        @property
+        def raw_cell(self):
+            raise RuntimeError("no text")
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    info = Info()
+    shell.events.callbacks["pre_run_cell"](info)
+    assert state["running"] == [(info, None)]
+
+
+def test_a_watch_without_the_store_reads_the_history(kernel, monkeypatch):
+    """A watch an older `_resume` registered keeps no texts (its callbacks
+    stay registered across a reload): the history alone is read."""
+    import mushin._resume as resume
+
+    shell = _HistoryShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    del state["texts"]
+    history = shell.history_manager.input_hist_parsed
+    _run_kept(kernel, TASK, history)
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, f"x = 1\f\ndef helper(a):\n    return a * {k}\n", history)
+        digests.append(_helper(kernel))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_a_history_that_cannot_be_read_leaves_the_scan(
+    kernel, monkeypatch, cell_imports
+):
+    """A shell whose history raises: a warning, and the kept cells' imports
+    are still read."""
+    import mushin._resume as resume
+
+    class Broken(_FakeShell):
+        @property
+        def history_manager(self):
+            raise RuntimeError("no history")
+
+    shell = Broken()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    monkeypatch.setattr(resume, "_HISTORY_WARNED", [])
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run("def task(a):\n    return a\n")
+    with pytest.warns(UserWarning, match="input history could not be read"):
+        files = _files(kernel, "task", allow_failure=True)
+    assert f"{SUBPKG}.sub (file)" in files
+
+
+SPLIT_SCRIPT = """
+import json
+
+from IPython.core.interactiveshell import InteractiveShell
+
+import mushin._resume as resume
+
+shell = InteractiveShell.instance()
+resume._cell_watch()  # as the first record would
+
+
+def helper_digest(history_only):
+    if history_only:  # what the watch kept goes: the history alone tells
+        getattr(shell, resume._CELL_WATCH)["texts"].clear()
+    rec = resume.project_fingerprints(shell.user_ns["task"])["code"]
+    return rec["helper (notebook)"]
+
+
+out = {}
+for n, (case, prefix, store) in enumerate(CASES):
+    shell.run_cell("def task(a):\\n    return helper(a)\\n", store_history=store)
+    seen = []
+    for k in (2, 3, 3):
+        # Each case its own text: no other case's stored cell can stand in.
+        body = "x = %d\\f\\ndef helper(a):\\n    return a * %d\\n" % (n, k)
+        cell = prefix + body
+        result = shell.run_cell(cell, store_history=store)
+        assert result.success, case
+        seen.append(helper_digest(case == "stored"))
+    out[case] = [seen[0] != seen[1], seen[1] == seen[2]]
+print(json.dumps(out))
+"""
+
+
+def test_an_ipython_shell_reads_a_split_cell_as_compiled(tmp_path):
+    """A real shell: a stored cell read from its history alone, a cell run
+    without being stored (the watch keeps it), and a magic's inner cell,
+    which is never stored."""
+    pytest.importorskip("IPython")
+    cases = [
+        ("stored", "", True),
+        ("not stored", "", False),
+        ("a magic's inner cell", "%%capture\n", True),
+    ]
+    script = tmp_path / "split.py"
+    script.write_text(f"CASES = {cases!r}\n" + SPLIT_SCRIPT)
+    out = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, check=True
+    ).stdout
+    got = json.loads(out.strip().splitlines()[-1])
+    assert got == {case: [True, True] for case, _, _ in cases}
