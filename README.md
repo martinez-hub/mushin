@@ -171,8 +171,8 @@ full extras table and the platform/torch/NumPy support matrix.
 mushin follows SemVer with pre-1.0 semantics: **a minor bump (0.8 → 0.9) may
 contain breaking changes**, always listed with migration notes in the
 [changelog](CHANGELOG.md); patch releases never break. The public API is the
-top-level `mushin` namespace plus the documented `mushin.benchmark` /
-`mushin.llm` symbols. Underscore modules are internal. The project's scope is
+top-level `mushin` namespace plus the documented `mushin.workflows`,
+`mushin.benchmark` and `mushin.llm` symbols. Underscore modules are internal. The project's scope is
 deliberately narrow: **boilerplate-free, reproducible sweep → dataset**, with
 an optional evaluation layer behind the `eval` extra. It complements, and
 does not replace, experiment trackers like W&B or TensorBoard (see the

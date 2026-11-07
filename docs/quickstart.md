@@ -50,8 +50,9 @@ class directly (shown next).
 ## Going deeper: the workflow class
 
 For advanced control (custom `pre_task`, `jobs_post_process`, subclassing like
-`RobustnessCurve`), subclass `MultiRunMetricsWorkflow` and implement a static
-`task` method. This is exactly what `@mushin.sweep` builds for you:
+`mushin.workflows.RobustnessCurve`), subclass `MultiRunMetricsWorkflow` and
+implement a static `task` method. This is exactly what `@mushin.sweep` builds
+for you:
 
 ```python
 import torch as tr

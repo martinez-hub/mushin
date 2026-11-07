@@ -99,13 +99,10 @@ See the [API Reference: workflows](../reference/workflows.md) for full
 parameter documentation.
 
 !!! note "Import path"
-    `MultiRunMetricsWorkflow` is the class most experiments use, and it stays a
+    `MultiRunMetricsWorkflow` is the class most experiments use, and it is a
     top-level import (`from mushin import MultiRunMetricsWorkflow`). Its base
-    `BaseWorkflow` and the `RobustnessCurve` variant now live in
-    `mushin.workflows`; import them as
-    `from mushin.workflows import BaseWorkflow, RobustnessCurve`. Accessing them
-    as `mushin.BaseWorkflow` / `mushin.RobustnessCurve` still works but is
-    deprecated and emits a `DeprecationWarning`.
+    `BaseWorkflow` and the `RobustnessCurve` variant live in `mushin.workflows`:
+    `from mushin.workflows import BaseWorkflow, RobustnessCurve`.
 
 ## hydra_list and multirun
 
