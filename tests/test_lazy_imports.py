@@ -94,9 +94,10 @@ def test_aliases_removed_from_the_top_level(name):
 
     assert hasattr(workflows, name)
     assert name not in mushin.__all__
-    assert name not in dir(mushin)
     with pytest.raises(AttributeError, match=name):
         getattr(mushin, name)
+    with pytest.raises(ImportError, match=name):
+        exec(f"from mushin import {name}", {})
 
 
 def test_import_mushin_does_not_load_torch():

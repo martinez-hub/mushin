@@ -162,11 +162,14 @@ local pass therefore does not cover them, and you should not claim it does.
   does not check that the lock is current: its `uv sync` re-resolves a stale
   lock without failing.
 - **Public API** is the top-level `mushin` namespace plus the documented
-  `mushin.benchmark` and `mushin.llm` symbols. Underscore modules are internal.
-  The project is pre-1.0: a breaking change goes in a minor release with
-  migration notes in its fragment, and a moved top-level name keeps working for
-  a release, warning with a `DeprecationWarning` from the module `__getattr__`
-  in `src/mushin/__init__.py`.
+  `mushin.workflows`, `mushin.benchmark` and `mushin.llm` symbols. Underscore
+  modules are internal. The project is pre-1.0: a breaking change goes in a
+  minor release with migration notes in its fragment, and a moved top-level
+  name keeps working for a release, warning with a `DeprecationWarning` from the
+  module `__getattr__` in `src/mushin/__init__.py`. Keep such a name out of
+  `__all__` (so out of `dir()`: `help(mushin)` reads every listed name, and the
+  warning then fires on every render, an error under `-W error`), and do not
+  cache it in `globals()`, or it warns only once.
 - **Docstrings** on public functions are NumPy style; mkdocstrings renders
   them into the API reference, so they are user-facing docs.
 - **Comments explain why.** The codebase documents the reason behind each
