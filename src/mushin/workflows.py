@@ -2550,7 +2550,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             before ``import mushin``; a cell holding one can re-run the
             cells instead), what an IPython input transformer
             changes in a cell, possibly a class a background thread or a
-            callback makes while a cell runs (taken for that cell's), a
+            callback makes while a cell runs or between two cells (taken for
+            that cell's or the next one's), a
             top-level statement of the driver script that changes an object in
             place (``CFG["x"] = 2``, ``parser.add_argument(...)``) or a call
             in its main block that rebinds a global (``setup()``), a script

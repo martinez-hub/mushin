@@ -164,9 +164,9 @@ history does not hold and mushin did not see run, such as one that `%run`
 runs from a notebook or an `.ipy` file, one run silently, or one run inside
 another cell (`%%capture`) before `import mushin`. A cell holding one can
 also make a resume re-run the cells, and `cache_dir=` compute them again. A
-class a background thread or a callback makes while a cell runs may be taken
-for one that cell made. After editing such a module, class or cell, use a
-new `working_dir`.
+class a background thread or a callback makes while a cell runs, or between
+two cells, may be taken for one that cell, or the next, made. After editing
+such a module, class or cell, use a new `working_dir`.
 
 mushin finds those functions by looking through the notebook's names: the
 functions they hold, and what those reach through decorators, `partial`s,

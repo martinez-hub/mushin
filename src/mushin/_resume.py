@@ -2345,10 +2345,13 @@ def _method_functions(value) -> list:
 #: to ``(weakref, lines)``, the transformed text of the cell that made it;
 #: ``running`` is the cells running now (a magic's nested cell too), each
 #: ``(info, (raw text, {id(class): weakref}))`` with every notebook class
-#: alive when the cell started (``_live_classes``), or ``(info, None)``
-#: when the cell's text is unknown. Weak, so the watch keeps no superseded
-#: class alive (a later cell's ``gc.collect()`` frees it); a class counts as
-#: alive at the start only if its id's reference still gives that class.
+#: alive when the cell started (``_start_classes``), or ``(info, None)``
+#: when the cell's text is unknown; ``texts`` the compiled texts of cells
+#: the history may not hold (``_keep_cell_text``); ``end``, the
+#: last top-level cell's end set, which the next one starts from
+#: (``_start_classes``). Weak, so the watch keeps no superseded class alive
+#: (a later cell's ``gc.collect()`` frees it); a class counts as alive at
+#: the start only if its id's reference still gives that class.
 _CELL_WATCH = "_mushin_cell_watch"
 #: A ``class`` keyword at a line's start, after its indentation: where every
 #: ``class`` statement of a kept cell's text starts (it is Python, magics
@@ -2381,6 +2384,23 @@ def _live_classes(notebook) -> dict:
             if issubclass(type(module), str) and str.__eq__(module, notebook) is True:
                 found[id(sub)] = sub
     return found
+
+
+def _start_classes(state: dict, notebook) -> dict:
+    """``{id(cls): weakref}`` for every class of ``notebook`` (its
+    namespace's ``__name__``) alive as a cell starts: the set the last
+    top-level cell's end took (``state["end"]``, by its ``post``), when no
+    cell has started since and it is for the same name. No class can be made
+    between two cells but by a background thread or a callback, which a cell
+    can already take for its own (``_pin_classes``). Each start takes the
+    set away, so a nested cell (the cell around it took it) and a cell after
+    one whose end never fired walk every live class (``_live_classes``), as
+    the first cell the watch sees does."""
+    end = state.get("end")
+    if type(end) is tuple and len(end) == 2 and end[0] is notebook:
+        return end[1]
+    live = _live_classes(notebook)
+    return {k: _weakref.ref(c) for k, c in live.items()}
 
 
 def _alive_at(snapshot: dict, cls) -> bool:
@@ -2457,10 +2477,12 @@ def _cell_watch(register: bool = True) -> dict | None:
                         # was made by the cell. By weak reference, checked by
                         # identity, so a reused id is never taken for it.
                         notebook = shell.user_ns.get("__name__")
-                        live = _live_classes(notebook)
-                        entry = (raw, {k: _weakref.ref(c) for k, c in live.items()})
+                        entry = (raw, _start_classes(state, notebook))
                 except Exception:  # noqa: BLE001 - the cell still ends at post
                     entry = None
+                # Used once: a cell whose end never fires cannot hand a later
+                # cell a set from before it ran.
+                state["end"] = None
                 running.append((info, entry))
                 try:
                     _keep_cell_text(state, info)
@@ -2496,7 +2518,14 @@ def _cell_watch(register: bool = True) -> dict | None:
                 if found is not None:
                     entry = running.pop(found)[1]
                     if entry is not None:
-                        _pin_classes(state, shell.user_ns, entry)
+                        notebook = shell.user_ns.get("__name__")
+                        live = _live_classes(notebook)
+                        _pin_classes(state, shell.user_ns, entry, live)
+                        if not running:
+                            # The next top-level cell starts from this walk
+                            # (`_start_classes`): one walk per cell, not two.
+                            weak = {k: _weakref.ref(c) for k, c in live.items()}
+                            state["end"] = (notebook, weak)
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
 
@@ -2554,7 +2583,7 @@ def _keep_cell_text(state: dict, info) -> None:
 def _pin_classes(state: dict, namespace: dict, entry, live=None) -> None:
     """Pin each class the cell ``entry`` (``(raw, classes)``) made to the
     cell's transformed text: every notebook class alive now that was not
-    when the cell started (``_live_classes``), however it is held, unless
+    when the cell started (``_start_classes``), however it is held, unless
     its qualname is a function's local one (``make.<locals>.C``, read from
     the function's cell). The first pin wins: a magic's nested cell
     (``%%capture``) ends before the magic's own cell, and only its text

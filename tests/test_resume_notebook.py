@@ -5244,3 +5244,153 @@ def test_an_ipython_shell_reads_a_split_cell_as_compiled(tmp_path):
     ).stdout
     got = json.loads(out.strip().splitlines()[-1])
     assert got == {case: [True, True] for case, _, _ in cases}
+
+
+# --- one walk of the live classes per cell (#297) ---------------------------------
+
+
+@pytest.fixture
+def watched(monkeypatch):
+    """A fake shell's cell watch, its callbacks, and the walks of the live
+    classes it takes (``_live_classes`` calls)."""
+    import mushin._resume as resume
+
+    shell = _FakeShell()
+    shell.user_ns["__name__"] = "mushin_t_one_walk"  # no other test's classes
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    walks: list = []
+    real = resume._live_classes
+
+    def counted(notebook):
+        walks.append(notebook)
+        return real(notebook)
+
+    monkeypatch.setattr(resume, "_live_classes", counted)
+    pre = shell.events.callbacks["pre_run_cell"]
+    post = shell.events.callbacks["post_run_cell"]
+
+    def start(raw: str):
+        info = types.SimpleNamespace(raw_cell=raw)
+        pre(info)
+        return info
+
+    def end(info) -> None:
+        post(types.SimpleNamespace(info=info))
+
+    def run(raw: str) -> None:
+        info = start(raw)
+        exec(raw, shell.user_ns)
+        end(info)
+
+    return types.SimpleNamespace(
+        shell=shell, state=state, walks=walks, start=start, end=end, run=run
+    )
+
+
+def _pinned_text(watched, name: str):
+    cls = watched.shell.user_ns[name]
+    pin = watched.state["pins"].get(id(cls))
+    return None if pin is None or pin[0]() is not cls else "".join(pin[1])
+
+
+def test_a_top_level_cell_walks_once(watched):
+    """After the first cell, a top-level cell starts from the classes the
+    previous one ended with: one walk per cell, at its end."""
+    for i in range(4):
+        watched.run(f"x = {i}\n")
+    assert len(watched.walks) == 5  # the first cell's start, then each end
+
+
+def test_a_class_a_cell_makes_is_pinned_from_the_previous_end(watched):
+    """Starting from the previous cell's end set, a cell still pins exactly
+    the classes it made: not one an earlier cell made."""
+    exec("class Before:\n    X = 1\n", watched.shell.user_ns)
+    watched.run("class A:\n    X = 1\n")
+    watched.run("class B:\n    X = 1\n")
+    assert _pinned_text(watched, "Before") is None
+    assert _pinned_text(watched, "A") == "class A:\n    X = 1\n"
+    assert _pinned_text(watched, "B") == "class B:\n    X = 1\n"
+
+
+def test_a_class_made_between_cells_goes_to_the_next(watched):
+    """The cost of one walk: a class a callback or a thread makes between
+    two cells is taken for one the next cell made (a documented limit)."""
+    watched.run("x = 1\n")
+    exec("class Stray:\n    X = 1\n", watched.shell.user_ns)
+    watched.run("y = 1\n")
+    assert _pinned_text(watched, "Stray") == "y = 1\n"
+
+
+def test_a_nested_cell_walks_at_its_start(watched):
+    """A cell inside another (a magic's) starts after the outer cell has run
+    for a while: the previous end set is not its start, so it walks."""
+    watched.run("x = 1\n")
+    outer = watched.start("%%capture\n")
+    exec("class Outer:\n    X = 1\n", watched.shell.user_ns)
+    before = len(watched.walks)
+    inner = watched.start("class Inner:\n    X = 1\n")
+    assert len(watched.walks) == before + 1
+    exec("class Inner:\n    X = 1\n", watched.shell.user_ns)
+    watched.end(inner)
+    watched.end(outer)
+    assert _pinned_text(watched, "Inner") == "class Inner:\n    X = 1\n"
+    assert _pinned_text(watched, "Outer") == "%%capture\n"
+
+
+def test_a_nested_cell_s_end_leaves_no_start_set(watched):
+    """The cell around a nested one keeps running after it ends: a second
+    nested cell walks, so a class the outer cell made between the two is
+    the outer cell's."""
+    outer = watched.start("%%capture\n")
+    watched.run("x = 1\n")
+    exec("class Between:\n    X = 1\n", watched.shell.user_ns)
+    watched.run("y = 1\n")
+    watched.end(outer)
+    assert _pinned_text(watched, "Between") == "%%capture\n"
+
+
+def test_a_cell_whose_end_never_fired_leaves_no_start_set(watched):
+    """A cell's start uses the end set once. When a cell's end never fires,
+    the next cell walks: a class the unfinished cell made is not its."""
+    watched.run("x = 1\n")
+    watched.start("class Lost:\n    X = 1\n")  # its end never fires
+    exec("class Lost:\n    X = 1\n", watched.shell.user_ns)
+    before = len(watched.walks)
+    watched.run("y = 1\n")
+    assert len(watched.walks) == before + 2  # its start walks, and its end
+    assert _pinned_text(watched, "Lost") is None
+
+
+def test_a_cell_with_no_text_leaves_no_start_set(watched):
+    """A cell whose text is unknown takes the end set and leaves none: the
+    next cell walks, so a class that cell made is not taken for the next."""
+    watched.run("x = 1\n")
+    unknown = types.SimpleNamespace(raw_cell=None)
+    watched.shell.events.callbacks["pre_run_cell"](unknown)
+    exec("class Hidden:\n    X = 1\n", watched.shell.user_ns)
+    watched.end(unknown)
+    watched.run("y = 1\n")
+    assert _pinned_text(watched, "Hidden") is None
+
+
+def test_the_end_set_is_weak(watched):
+    """The set a cell's end keeps holds its classes by weak reference: a
+    class a later cell supersedes is freed."""
+    import gc
+    import weakref
+
+    watched.run("class Gone:\n    X = 1\n")
+    ref = weakref.ref(watched.shell.user_ns["Gone"])
+    watched.run("class Gone:\n    X = 2\n")
+    gc.collect()
+    assert ref() is None
+
+
+def test_a_renamed_namespace_walks(watched):
+    """An end set taken under another `__name__` is not this one's start."""
+    watched.run("x = 1\n")
+    watched.shell.user_ns["__name__"] = "mushin_t_one_walk_renamed"
+    before = len(watched.walks)
+    watched.run("y = 1\n")
+    assert len(watched.walks) == before + 2
