@@ -72,13 +72,6 @@ _LAZY_BENCHMARK = frozenset(
     }
 )
 
-# Legacy names kept importable from the top level for one release, with a warning
-# pointing at their new home. They are NOT advertised in __all__.
-_DEPRECATED = {
-    "BaseWorkflow": "mushin.workflows",
-    "RobustnessCurve": "mushin.workflows",
-}
-
 if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
     from . import llm
     from .benchmark import (
@@ -104,9 +97,6 @@ if TYPE_CHECKING:  # help static analysers/IDEs see the lazy names
         submitit_slurm_config,
     )
 
-    # Not in __all__ (deprecated top-level names); kept for type-checkers only.
-    from .workflows import BaseWorkflow, RobustnessCurve  # noqa: F401
-
 
 def __getattr__(name: str):
     if name in ("llm", "lightning", "benchmark", "mcp", "testing", "export"):
@@ -123,25 +113,11 @@ def __getattr__(name: str):
         value = getattr(importlib.import_module("mushin.lightning"), name)
         globals()[name] = value  # cache so later lookups skip __getattr__
         return value
-    if name in _DEPRECATED:
-        import warnings
-
-        warnings.warn(
-            f"mushin.{name} is deprecated and will be removed in a future "
-            f"release; import it from {_DEPRECATED[name]} instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Intentionally NOT cached in globals(): re-import is cheap and keeps the
-        # warning firing on each top-level access during the deprecation window.
-        return getattr(importlib.import_module(_DEPRECATED[name]), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
-    # Only names that resolve: `__all__` (filtered below on a core install). The
-    # deprecated aliases stay importable but are not listed, since help(mushin)
-    # touches every listed name and each alias warns on access.
+    # Only names that resolve: `__all__` (filtered below on a core install).
     return sorted(__all__)
 
 

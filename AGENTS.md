@@ -165,7 +165,8 @@ local pass therefore does not cover them, and you should not claim it does.
   `mushin.benchmark` and `mushin.llm` symbols. Underscore modules are internal.
   The project is pre-1.0: a breaking change goes in a minor release with
   migration notes in its fragment, and a moved top-level name keeps working for
-  a release through the `_DEPRECATED` table in `src/mushin/__init__.py`.
+  a release, warning with a `DeprecationWarning` from the module `__getattr__`
+  in `src/mushin/__init__.py`.
 - **Docstrings** on public functions are NumPy style; mkdocstrings renders
   them into the API reference, so they are user-facing docs.
 - **Comments explain why.** The codebase documents the reason behind each
