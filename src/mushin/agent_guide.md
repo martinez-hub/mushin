@@ -189,9 +189,10 @@ rules:
   that the shell's history does not hold and mushin did not see run (such
   as one `%run` runs from a notebook or an `.ipy` file, a silent one, or one
   run inside another cell before `import mushin`; a cell holding one can
-  also re-run the cells), and a class a background thread
-  or a callback makes while a cell runs may be taken for that cell's: after
-  editing one, use a new `working_dir`. Taking
+  also re-run the cells), and a class that code outside any cell makes (a
+  background thread, a callback, an expression a frontend evaluates after a
+  cell) while a cell runs, or between two cells, may be taken for that
+  cell's or the next one's: after editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an
   error from that import may go unreported: import such modules before
   `run()`. Resume does not see an installed
