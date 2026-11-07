@@ -8,7 +8,7 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 ## Cutting a release
 
 1. Choose the next version `X.Y.Z` (SemVer; `0.x` keeps breaking changes in the
-   minor slot).
+   minor slot, so a pending `changes/*.removed.md` fragment means a minor).
 2. Assemble the changelog from news fragments:
    ```bash
    make changelog VERSION=X.Y.Z
