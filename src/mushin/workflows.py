@@ -314,13 +314,19 @@ def _current_group_choice(name: str) -> str | None:
     return None
 
 
-def _swept_combo(cfg, names, choice_of: Callable[[str], str | None]) -> dict:
+def _swept_combo(
+    cfg,
+    names,
+    choice_of: Callable[[str], str | None],
+    sanitize: Callable[[Any], Any],
+) -> dict:
     """The sanitized swept-parameter combination of the job config ``cfg``.
 
     Values are unwrapped (0-d scalars), converted out of OmegaConf containers,
-    and passed through `_sanitize_coordinate_for_xarray`, so they key
-    identically to the (already-sanitized) coordinate values `to_xarray`
-    builds the grid from. Swept names may be nested config paths
+    and passed through ``sanitize`` (a workflow's
+    `_sanitize_coordinate_for_xarray`), so they key identically to the
+    (already-sanitized) coordinate values `to_xarray` builds the grid from.
+    Swept names may be nested config paths
     (``model.width``). A config-GROUP axis (model=small,big) keys by its
     chosen option name, ``choice_of(name)``, not the composed sub-config:
     inside a job Hydra records the choice in runtime.choices, and a job loaded
@@ -336,9 +342,7 @@ def _swept_combo(cfg, names, choice_of: Callable[[str], str | None]) -> dict:
                 val = choice
             else:
                 val = OmegaConf.to_container(val, resolve=True)
-        combo[n] = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray(
-            _unwrap_scalar(val)
-        )
+        combo[n] = sanitize(_unwrap_scalar(val))
     return combo
 
 
@@ -879,7 +883,12 @@ class _TaskRunner:
 
     @staticmethod
     def _combo(cfg, names):
-        return _swept_combo(cfg, names, _current_group_choice)
+        return _swept_combo(
+            cfg,
+            names,
+            _current_group_choice,
+            MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray,
+        )
 
     def __call__(self, cfg):
         import warnings
@@ -1808,7 +1817,25 @@ class BaseWorkflow:
             prefix = "+" if _cfg_missing_or_none(self.eval_task_cfg, k) else ""
 
             if isinstance(v, multirun):
-                # A repeated value is rejected below, over the parsed grid.
+                # A repeated axis value cannot form a well-defined coordinate:
+                # two cells would share a combo key (silently collapsing to the
+                # last, and making `.sel` ambiguous). Repeat trials belong on a
+                # distinct axis (e.g. seed), not as duplicate values.
+                keys = [_scalar_repr(item) for item in v]
+                if len(set(keys)) != len(keys):
+                    dupes = sorted(
+                        {
+                            repr(item)
+                            for item, kk in zip(v, keys, strict=True)
+                            if keys.count(kk) > 1
+                        }
+                    )
+                    raise ValueError(
+                        f"`{k}` has duplicate sweep values {', '.join(dupes)}; a "
+                        "repeated axis value collapses to a single cell. Use "
+                        "distinct values, or add a separate axis (e.g. seed) for "
+                        "repeat trials."
+                    )
                 # Build a Hydra `choice(...)` sweep rather than a comma-joined
                 # string. `choice(...)` always yields a sweep – even for a
                 # single element (so length-1 multiruns remain swept dimensions)
@@ -1880,12 +1907,9 @@ class BaseWorkflow:
         for v in axes.values():
             num_cells *= len(v)
 
-        # A repeated axis value cannot form a well-defined coordinate: two cells
-        # would share a combo key (silently collapsing to the last, and making
-        # `.sel` ambiguous). Repeat trials belong on a distinct axis (e.g. seed).
-        # Checked over the PARSED grid, so a `param=` kwarg and a raw
-        # `overrides=["+a=1,1"]` are rejected alike. (A `hydra.*` axis is not in
-        # it: Hydra refuses to sweep its own config.)
+        # Duplicate-value guard over the PARSED grid, so a sweep supplied via raw
+        # `overrides=["+a=1,1"]` is rejected like a duplicate multirun kwarg is
+        # (two cells sharing a combo key silently collapse to the last).
         for k, vals in axes.items():
             keys = [_scalar_repr(item) for item in vals]
             if len(set(keys)) != len(keys):
@@ -2848,10 +2872,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         for job, cfg, wdir in zip(
             self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
         ):
-            # Project onto the swept params only, matching `to_xarray`'s
-            # `_lookup_key` so `_metrics_by_combo` and manifest keys align.
-            combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
-            swept_combo = {n: combo[n] for n in swept_names}
+            # Keyed on the swept params only, as `_grid_keys` keys the grid that
+            # `to_xarray` fills, so `_metrics_by_combo` and manifest keys align.
+            swept_combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             key = combo_key(swept_combo)
 
             # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
@@ -2940,7 +2963,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             choice = (choices or {}).get(name)
             return None if choice is None else str(choice)
 
-        return _swept_combo(cfg, self._swept_param_names(), choice_of)
+        return _swept_combo(
+            cfg,
+            self._swept_param_names(),
+            choice_of,
+            self._sanitize_coordinate_for_xarray,
+        )
 
     def _job_choices(self, i: int) -> dict | None:
         """``runtime.choices`` for job ``i``, when jobs align with cfgs.

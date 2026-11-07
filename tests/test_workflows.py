@@ -1550,6 +1550,34 @@ def test_config_group_cell_records_the_choice_name(tmp_path, restore_config_grou
     assert rows == {"small": 4.0, "big": 8.0}
 
 
+def test_a_subclass_sanitizer_keys_cells_and_grid_alike(tmp_path):
+    """A workflow that overrides `_sanitize_coordinate_for_xarray` keys each
+    cell's result with it, as it keys the grid, in-process and reloaded."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+        @staticmethod
+        def _sanitize_coordinate_for_xarray(value):
+            if isinstance(value, multirun):
+                return [f"x{v}" for v in value]
+            return f"x{value}"
+
+    wd = tmp_path / "s"
+    wf = W()
+    wf.run(a=multirun([1, 2]), working_dir=str(wd))
+    loaded = W().load_from_dir(wd, "mushin_metrics.json")
+    for w in (wf, loaded):
+        ds = w.to_xarray()
+        assert list(ds["a"].values) == ["x1", "x2"]
+        assert ds["v"].values.tolist() == [1.0, 2.0]
+    assert loaded.failures == [] and loaded.skipped == []
+
+
 def test_load_from_dir_without_job_dirs_says_so(tmp_path):
     """A sweep killed before its first job has a multirun.yaml and no cells;
     the reload names that instead of failing to unpack an empty sort."""

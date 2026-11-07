@@ -65,7 +65,11 @@ def test_duplicate_sweep_axis_value_is_rejected(tmp_path):
 
 @pytest.mark.parametrize(
     "values, shown",
-    [([1, 2, 1], "1"), ([np.float64(0.5), 0.5], "0.5"), (["a,b", "a,b"], "'a,b'")],
+    [
+        ([1, 2, 1], "1"),
+        ([np.float64(0.5), 0.5], "0.5, np.float64(0.5)"),
+        (["a,b", "a,b"], "'a,b'"),
+    ],
 )
 def test_duplicate_sweep_value_is_rejected_before_a_dry_run(values, shown):
     """Two values that would share a cell are refused before the dry-run
