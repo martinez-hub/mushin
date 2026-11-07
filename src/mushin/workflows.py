@@ -2545,8 +2545,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             possibly a cell holding a form feed, a vertical tab or another
             character that ends a line for ``str.splitlines`` (not a newline
             or a carriage return) that the shell's history does not hold and
-            mushin did not see run (one ``%run`` runs from a notebook or an
-            ``.ipy`` file, a silent one, or one run inside another cell
+            mushin did not see run (such as one ``%run`` runs from a notebook
+            or an ``.ipy`` file, a silent one, or one run inside another cell
             before ``import mushin``; a cell holding one can re-run the
             cells instead), what an IPython input transformer
             changes in a cell, possibly a class a background thread or a

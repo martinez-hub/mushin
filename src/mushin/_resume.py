@@ -1314,7 +1314,7 @@ def _cell_lines(filename) -> list | None:
 #: string may not even parse as kept (``_cell_texts``). A raw string, so
 #: the literal is ASCII (``re`` reads the escapes).
 _SPLIT_ONLY = re.compile(r"[\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
-#: How many cell texts holding one of them the cell watch keeps.
+#: How many cell texts the cell watch keeps (``_keep_cell_text``).
 _SPLIT_TEXTS_MAX = 1024
 
 
@@ -1329,26 +1329,33 @@ def _compiled_texts() -> dict[str, list[str]]:
     ``_SPLIT_ONLY`` character: the texts ``compile`` may have seen for what
     the kernel keeps of them (``_kept_form``), without trailing newlines.
     From the shell's history (every stored cell, as IPython compiled it,
-    before ``import mushin`` too) and the cell watch's (``_keep_split_text``:
-    a cell run without being stored, a magic's inner cell). A stored cell
+    before ``import mushin`` too) and the cell watch's (``_keep_cell_text``:
+    a cell run without being stored, a magic's inner cell). A known text
     without such a character whose kept form is one of these is a candidate
     too: two cells that differ only by them keep the same lines, and which
-    one a function's code came from cannot be told. Empty, the usual case,
-    when no known text holds one: then nothing but a search per text runs."""
+    one a function's code came from cannot be told by them. Empty, the usual
+    case, when no known text holds one: then nothing but a search per text
+    runs. A history that cannot be read warns (``_warn_history_unread``),
+    and the watch's texts still count."""
     shell = _shell()
     if shell is None:
         return {}
-    manager = getattr(shell, "history_manager", None)
-    history = getattr(manager, "input_hist_parsed", None)
-    history = [t for t in history if type(t) is str] if type(history) is list else []
-    split: list[str] = []
-    plain: list[str] = []
-    for text in history:
-        (plain if _SPLIT_ONLY.search(text) is None else split).append(text)
+    known: list[str] = []
+    try:
+        manager = getattr(shell, "history_manager", None)
+        history = getattr(manager, "input_hist_parsed", None)
+        if type(history) is list:
+            known.extend(t for t in history if type(t) is str)
+    except Exception as error:  # noqa: BLE001 - the watch's texts still count
+        _warn_history_unread(error)
     state = _cell_watch(register=False)
     watched = state.get("texts") if state is not None else None
     if type(watched) is dict:
-        split.extend(t for t in list(watched) if type(t) is str)
+        known.extend(t for t in list(watched) if type(t) is str)
+    split: list[str] = []
+    plain: list[str] = []
+    for text in known:
+        (plain if _SPLIT_ONLY.search(text) is None else split).append(text)
     if not split:
         return {}
     index: dict[str, dict[str, None]] = {}
@@ -1396,8 +1403,9 @@ def _parse_cell(text: str):
 
 
 def _cell_tree(lines):
-    """A cell's syntax tree without docstrings, cached by its text (a few,
-    since a long session runs many cells); None when it does not parse."""
+    """A cell's syntax tree without docstrings, from its ``lines`` joined (a
+    text can be passed as one item), cached by its text (a few, since a long
+    session runs many cells); None when it does not parse."""
     text = "".join(lines)
     key = _short_hash(text.encode("utf-8", "surrogatepass"))
     if key in _CELL_TREES:
@@ -1560,7 +1568,11 @@ def _scan_kept_cells(compiled: dict | None = None) -> list[tuple[str, tuple]]:
     keeps: a ``linecache`` entry ``_cell_lines`` would serve (``_kept_cell``),
     read as ``compile`` saw it (``_cell_texts``, each text it may have been,
     with ``compiled`` from ``_compiled_texts``), with what ``_cell_imports``
-    reads in it, cached by the text. The cache keeps what
+    reads in it, cached by the text. A kept text read otherwise counts for
+    its imports too, not its classes: it may be the text that ran (a cell
+    neither the history nor the watch holds), and the imports are never
+    fewer than reading only kept texts gives; its line numbers may not be
+    the code's, so its class statements are not read. The cache keeps what
     this scan saw: a fixed bound would evict cells the next scan needs again,
     and re-parse every one once a session passes it."""
     import linecache
@@ -1569,23 +1581,27 @@ def _scan_kept_cells(compiled: dict | None = None) -> list[tuple[str, tuple]]:
     legacy = getattr(linecache, "_ipython_cache", None)
     if type(legacy) is dict:
         sources.append(legacy)
-    texts: set[str] = set()
+    # Each text, and whether its class statements are read.
+    texts: dict[str, bool] = {}
     for source in sources:
         for entry in list(source.values()):
             if _kept_cell(entry, legacy=source is legacy):
                 try:
-                    texts.update(_cell_texts(entry[2], compiled))
+                    kept = "".join(entry[2])
+                    for text in _cell_texts(entry[2], compiled):
+                        texts[text] = True
                 except TypeError:  # a line that is not text
                     continue
+                texts.setdefault(kept, False)
     out: list[tuple[str, tuple]] = []
     seen: dict[str, tuple] = {}
-    for text in texts:
+    for text, classes in texts.items():
         key = _short_hash(text.encode("utf-8", "surrogatepass"))
         found = _CELL_IMPORTS.get(key)
         if found is None:
             found = _cell_imports(text)
         seen[key] = found
-        out.append((text, found))
+        out.append((text, found if classes else (*found[:2], ())))
     _CELL_IMPORTS.clear()
     _CELL_IMPORTS.update(seen)
     return out
@@ -2274,7 +2290,7 @@ def _definition_site(code, text: str) -> tuple | None:
     own."""
     import ast
 
-    tree = _cell_tree(text.splitlines(True))
+    tree = _cell_tree([text])
     if tree is None:
         return None
     line = code.co_firstlineno
@@ -2447,7 +2463,7 @@ def _cell_watch(register: bool = True) -> dict | None:
                     entry = None
                 running.append((info, entry))
                 try:
-                    _keep_split_text(state, info)
+                    _keep_cell_text(state, info)
                 except Exception:  # noqa: BLE001 - its kept lines are read then
                     pass
             except Exception:  # noqa: BLE001 - a callback must never raise
@@ -2504,24 +2520,28 @@ def _cell_watch(register: bool = True) -> dict | None:
         return None
 
 
-def _keep_split_text(state: dict, info) -> None:
-    """Keep the text the cell starting with ``info`` compiles as, when it
-    holds a ``_SPLIT_ONLY`` character, in the watch ``state``
-    (``_compiled_texts`` reads it): what the kernel keeps of such a cell is
-    not what ``compile`` saw, and a cell run without being stored (a magic's
-    inner cell) is not in the shell's history. The text is the shell's own
-    (``transformed_cell``, IPython 8 and later, with every input
-    transformer's change), else the static transform's. A transform never
-    adds such a character (it writes a magic's body as an escaped string),
-    so a raw text without one is not transformed. The newest
-    ``_SPLIT_TEXTS_MAX`` texts, each once."""
+def _keep_cell_text(state: dict, info) -> None:
+    """Keep the text the cell starting with ``info`` compiles as in the
+    watch ``state`` (``_compiled_texts`` reads it) when the shell's history
+    may not hold it and it matters: a cell holding a ``_SPLIT_ONLY``
+    character, whose kept lines are not what ``compile`` saw, and any cell
+    run without being stored (a magic's inner cell), which can keep the
+    same lines as a stored one holding such a character. The text is the
+    shell's own (``transformed_cell``, IPython 9.4 and later, with every
+    input transformer's change), else the static transform's. A transform
+    never adds such a character (it writes a magic's body as an escaped
+    string), so a stored cell whose raw text holds none is not transformed.
+    The newest ``_SPLIT_TEXTS_MAX`` texts, each once."""
     raw = getattr(info, "raw_cell", None)
-    if type(raw) is not str or _SPLIT_ONLY.search(raw) is None:
+    if type(raw) is not str:
+        return
+    unstored = getattr(info, "store_history", None) is False
+    if not unstored and _SPLIT_ONLY.search(raw) is None:
         return
     text = getattr(info, "transformed_cell", None)
     if type(text) is not str:
         text = state["transform"](raw)
-    if type(text) is not str or _SPLIT_ONLY.search(text) is None:
+    if type(text) is not str or (not unstored and _SPLIT_ONLY.search(text) is None):
         return
     texts = state.setdefault("texts", {})
     text = text.rstrip("\n")
@@ -2692,7 +2712,7 @@ def _class_sites(
         lines = _cell_lines(code.co_filename)
         found = []
         for text in _cell_texts(lines, compiled) if lines is not None else []:
-            tree = _cell_tree(text.splitlines(True))
+            tree = _cell_tree([text])
             if tree is None:
                 continue
             best = None
@@ -2712,7 +2732,9 @@ def _class_sites(
         # from (`_cell_texts`), so from one that holds a statement there. When
         # those differ, which is in force cannot be told by line: the pin or
         # the kept cells' texts decide.
-        if found and len({_canonical_dump(best) for _, best in found}) == 1:
+        if len(found) == 1 or (
+            found and len({_canonical_dump(best) for _, best in found}) == 1
+        ):
             tree, best = found[0]
             return [(tree, [best])], False, later
     # A class body's compile sets both names on 3.13+. Assigning `__module__`
@@ -2766,7 +2788,7 @@ def _class_sites(
     groups: dict[str, list] = {}
     ambiguous = False
     for text in texts:
-        tree = _cell_tree(text.splitlines(True))
+        tree = _cell_tree([text])
         nodes, siblings = statements(tree) if tree is not None else ([], False)
         if nodes:
             ambiguous |= siblings
@@ -3184,6 +3206,8 @@ def _notebook_entries(
                 for site in (_definition_site(code, text) for text in texts)
                 if site is not None
             ]
+            if len(sites) < 2:  # one text read, as for every ordinary cell
+                return sites, not sites, False
             dumps = {
                 "|".join(_canonical_dump(node) for node in nodes) for _, nodes in sites
             }
@@ -3391,8 +3415,8 @@ def _warn_history_unread(error: BaseException) -> None:
     _HISTORY_WARNED.append(True)
     _best_effort_warning(
         "resume/cache_dir: the shell's input history could not be read "
-        f"({_error_kind(error)}), so an edit to code in a cell holding a form "
-        "feed may go unnoticed; use a fresh working_dir after editing one."
+        f"({_error_kind(error)}), so code in a cell holding a form feed may "
+        "not be compared; use a fresh working_dir after editing it."
     )
 
 
