@@ -242,12 +242,6 @@ class Manifest:
             }
         return m
 
-    def status(self, combo: dict) -> str:
-        return self.cells.get(combo_key(combo), {}).get("status", "pending")
-
-    def dir(self, combo: dict) -> str | None:
-        return self.cells.get(combo_key(combo), {}).get("dir")
-
     def mark(
         self, combo: dict, *, dir: str, status: str, error: str | None = None
     ) -> None:
@@ -255,13 +249,6 @@ class Manifest:
         if error is not None:
             entry["error"] = error
         self.cells[combo_key(combo)] = entry  # replace in place
-
-    def failed_cells(self) -> list[dict]:
-        return [
-            {"key": k, **v}
-            for k, v in self.cells.items()
-            if v.get("status") == "failed"
-        ]
 
     def is_complete(self) -> bool:
         return all(v.get("status") == "completed" for v in self.cells.values())

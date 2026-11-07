@@ -240,6 +240,25 @@ def test_warn_if_underpowered_rejects_an_unknown_correction(test, n_seeds):
         warn_if_underpowered(test, n_seeds, 0.05, n_comparisons=3, correction="Holm")
 
 
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"test": ["wilcoxon"]},
+        {"test": np.array("wilcoxon")},
+        {"test": None},
+        {"correction": ["holm"]},
+        {"correction": np.array("holm")},
+    ],
+)
+def test_compare_methods_reports_a_non_str_test_or_correction_as_unknown(kw):
+    """Only a str names a test or correction. A list could not be looked up
+    (unhashable), and a 0-d array compares equal to the name it holds, which
+    let it past a membership test and then failed at the lookup."""
+    ds = to_dataset({"a": [{"accuracy": 0.9}] * 3, "b": [{"accuracy": 0.7}] * 3})
+    with pytest.raises(ValueError, match=f"unknown {next(iter(kw))} "):
+        compare_methods(ds, **kw)
+
+
 @pytest.mark.parametrize("n_comparisons", [0, -5])
 def test_warn_if_underpowered_rejects_an_empty_family(n_comparisons):
     """A miscomputed pair count must not pass as the single-pair floor."""

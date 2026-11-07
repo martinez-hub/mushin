@@ -12,8 +12,6 @@ from torchmetrics import Metric
 PredictFn = Callable[[torch.nn.Module, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
 
 # Owns all metric.update() calls for one batch: (battery, preds, probs, target).
-# `Optional[...]` (not `... | None`) because this alias is evaluated at runtime,
-# and `X | None` is a TypeError under Python 3.9.
 UpdateFn = Callable[
     [dict[str, Metric], torch.Tensor, torch.Tensor | None, object], None
 ]

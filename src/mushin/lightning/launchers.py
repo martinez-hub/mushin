@@ -106,7 +106,7 @@ def _subprocess_call(
     testing: bool,
     predicting: bool,
     validating: bool = False,
-) -> None:
+) -> subprocess.Popen:
     env_copy = os.environ.copy()
     env_copy["LOCAL_RANK"] = f"{local_rank}"
     hydra_cfg = HydraConfig.get()
@@ -116,12 +116,6 @@ def _subprocess_call(
     # wherever the app was launched from.
     cwd = hydra_cfg.runtime.output_dir
     os_cwd = _hydra_run_dir_override(cwd)
-
-    command = [
-        sys.executable,
-        "-m",
-        "mushin.lightning._pl_main",
-    ]
 
     hydra_output = (
         os.path.join(cwd, hydra_cfg.output_subdir)
@@ -142,19 +136,20 @@ def _subprocess_call(
             "Missing configurations `trainer` and `module` are required for use with HydraDDP.  See documentation for further details."
         )
 
-    # create the command for CLI
-    command += ["-cp", hydra_output, "-cn", "config.yaml"]
-
-    # Flags selecting which Trainer entry point `_pl_main.py` runs on the child
-    # rank (fit is the default when all are false).
-    command += ["++pl_testing=" + ("true" if testing else "false")]
-    command += ["++pl_predicting=" + ("true" if predicting else "false")]
-    command += ["++pl_validating=" + ("true" if validating else "false")]
-
-    # Set flag for local rank
-    command += [f"++pl_local_rank={local_rank}"]
-
-    command += [
+    command = [
+        sys.executable,
+        "-m",
+        "mushin.lightning._pl_main",
+        "-cp",
+        hydra_output,
+        "-cn",
+        "config.yaml",
+        # Which Trainer entry point `_pl_main.py` runs on the child rank (fit
+        # is the default when all are false).
+        f"++pl_testing={'true' if testing else 'false'}",
+        f"++pl_predicting={'true' if predicting else 'false'}",
+        f"++pl_validating={'true' if validating else 'false'}",
+        f"++pl_local_rank={local_rank}",
         f"hydra.run.dir={os_cwd}",
         f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
         f"hydra.job.name={hydra_cfg.job.name}",

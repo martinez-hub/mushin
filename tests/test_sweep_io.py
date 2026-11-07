@@ -42,17 +42,17 @@ def test_manifest_tracks_and_replaces_cells(tmp_path):
     m.save()
 
     m2 = Manifest.load_or_new(tmp_path, params=["lr", "seed"])
-    assert m2.status({"lr": 0.1, "seed": 0}) == "completed"
-    assert m2.status({"lr": 0.1, "seed": 2}) == "failed"
-    assert m2.status({"lr": 1.0, "seed": 0}) == "pending"  # unseen -> pending
+    assert m2.cells == {
+        "lr=0.1,seed=0": {"dir": "0", "status": "completed"},
+        "lr=0.1,seed=2": {"dir": "5", "status": "failed", "error": "OOM"},
+    }
     # a re-run REPLACES in place (no duplicate entry)
     m2.mark({"lr": 0.1, "seed": 2}, dir="9", status="completed")
-    assert m2.status({"lr": 0.1, "seed": 2}) == "completed"
-    assert m2.dir({"lr": 0.1, "seed": 2}) == "9"
-    assert m2.failed_cells() == []
+    assert m2.cells["lr=0.1,seed=2"] == {"dir": "9", "status": "completed"}
+    assert len(m2.cells) == 2
+    assert m2.is_complete()
     m2.mark({"lr": 1.0, "seed": 1}, dir="3", status="failed", error="boom")
     assert not m2.is_complete()
-    assert {"lr=1.0,seed=1"} == {c["key"] for c in m2.failed_cells()}
 
 
 def test_manifest_load_or_new_corrupt_returns_fresh(tmp_path):

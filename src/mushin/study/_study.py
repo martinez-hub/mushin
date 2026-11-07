@@ -25,37 +25,11 @@ class Study:
     ``Study.from_checkpoints`` to compare already-trained checkpoints.
     """
 
-    def _init_common(
-        self,
-        load_fn,
-        data,
-        num_classes,
-        task,
-        test,
-        alpha,
-        ignore_index,
-        predict_fn=None,
-        metrics=None,
-        prob_metrics=None,
-        correction="holm",
-    ):
-        self._load_fn = load_fn
-        self._data = data
-        self._num_classes = num_classes
-        self._task = task
-        self._test = test
-        self._alpha = alpha
-        self._ignore_index = ignore_index
-        self._predict_fn = predict_fn
-        self._metrics = metrics
-        self._prob_metrics = prob_metrics
-        self._correction = correction
-
     def __init__(
         self,
-        methods: dict[str, TrainFn],
+        methods: dict[str, TrainFn] | None,
         load_fn: Callable[[str], Any],
-        seeds: Sequence[int],
+        seeds: Sequence[int] | None,
         data,
         *,
         num_classes: int | None = None,
@@ -72,21 +46,22 @@ class Study:
         resume: bool = False,
         capture_env: bool = False,
     ):
-        self._init_common(
-            load_fn,
-            data,
-            num_classes,
-            task,
-            test,
-            alpha,
-            ignore_index,
-            predict_fn=predict_fn,
-            metrics=metrics,
-            prob_metrics=prob_metrics,
-            correction=correction,
-        )
+        # `methods` and `seeds` are both None for `from_checkpoints`, which
+        # evaluates the checkpoints it is given instead of training. Training
+        # needs seeds: `list(seeds)` raises TypeError here for `seeds=None`.
         self._methods = methods
-        self._seeds = list(seeds)
+        self._seeds = None if methods is None and seeds is None else list(seeds)
+        self._load_fn = load_fn
+        self._data = data
+        self._num_classes = num_classes
+        self._task = task
+        self._test = test
+        self._alpha = alpha
+        self._correction = correction
+        self._ignore_index = ignore_index
+        self._predict_fn = predict_fn
+        self._metrics = metrics
+        self._prob_metrics = prob_metrics
         self.working_dir = working_dir
         self._on_error = on_error
         self._resume = resume
@@ -113,23 +88,21 @@ class Study:
         """Build a Study that compares already-trained checkpoints (no training)."""
         if not checkpoints:
             raise ValueError("checkpoints must not be empty")
-        study = cls.__new__(cls)
-        study._init_common(
+        study = cls(
+            None,
             load_fn,
+            None,
             data,
-            num_classes,
-            task,
-            test,
-            alpha,
-            ignore_index,
+            num_classes=num_classes,
+            task=task,
+            test=test,
+            alpha=alpha,
+            correction=correction,
+            ignore_index=ignore_index,
             predict_fn=predict_fn,
             metrics=metrics,
             prob_metrics=prob_metrics,
-            correction=correction,
         )
-        study._methods = None
-        study._seeds = None
-        study.working_dir = None
         study.checkpoints = {m: list(p) for m, p in checkpoints.items()}
         return study
 

@@ -184,8 +184,16 @@ def available_corrections() -> list[str]:
     return list(_CORRECTIONS)
 
 
+# Only a str can name a test or correction: anything else (a list, or a 0-d
+# numpy array that compares equal to a name, passed by mistake) is reported as
+# unknown here, before any paid work, rather than failing at the dict lookup.
+def _check_test(test: str) -> None:
+    if not isinstance(test, str) or test not in _TESTS:
+        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+
+
 def _check_correction(correction: str) -> None:
-    if correction not in _CORRECTIONS:
+    if not isinstance(correction, str) or correction not in _CORRECTIONS:
         raise ValueError(
             f"unknown correction {correction!r}; choose from {available_corrections()}"
         )
@@ -394,8 +402,7 @@ def compare_methods(
             UserWarning,
             stacklevel=2,
         )
-    if test not in _TESTS:
-        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
+    _check_test(test)
     _check_correction(correction)
     correct = _CORRECTIONS[correction]
     n_seeds = int(ds.sizes["seed"])
@@ -661,14 +668,10 @@ def paired_item_bootstraps(
     return results  # type: ignore[return-value]
 
 
-def _cluster_units(
-    clusters, shape: tuple
-) -> tuple[np.ndarray | None, np.ndarray | None]:
+def _cluster_units(clusters, shape: tuple) -> tuple[np.ndarray, np.ndarray]:
     """``(codes, sizes)`` of the cluster labels: each item's group index and
-    each group's item count; ``(None, None)`` without clusters. ``shape`` is
-    the per-item scores', which the labels must match."""
-    if clusters is None:
-        return None, None
+    each group's item count. ``shape`` is the per-item scores', which the
+    labels must match."""
     labels = np.asarray(clusters)
     if labels.shape != shape:
         raise ValueError(

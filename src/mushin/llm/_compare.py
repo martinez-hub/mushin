@@ -17,8 +17,8 @@ from mushin.benchmark._aggregate import to_dataset
 from mushin.benchmark._result import BenchmarkResult
 from mushin.benchmark._stats import (
     _CORRECTIONS,
-    available_corrections,
-    available_tests,
+    _check_correction,
+    _check_test,
     compare_methods,
     paired_item_bootstraps,
 )
@@ -108,28 +108,35 @@ def _score_one(
     return {base: sum(scores) / len(scores)}, {base: scores}
 
 
+def _check_item_bootstrap(item_bootstrap) -> None:
+    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
+        raise TypeError(
+            f"`item_bootstrap` must be an int (0 disables), got "
+            f"{type(item_bootstrap).__name__}"
+        )
+    if item_bootstrap < 0:
+        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
+
+
 def _score(
     metrics, outputs, refs, seed: int
 ) -> tuple[dict[str, float], dict[str, list[float]]]:
     row: dict[str, float] = {}
     items: dict[str, list[float]] = {}
-    if isinstance(metrics, dict):
-        for name, m in metrics.items():
-            scored, per_item = _score_one(name, m, outputs, refs, seed)
-            # A dict-returning metric expands to `<name>_<subkey>`, which can collide
-            # with another battery entry (e.g. {"squad": SQuAD(), "squad_f1": ...}).
-            # Silently overwriting would report the wrong metric, so reject it.
-            clash = row.keys() & scored.keys()
-            if clash:
-                raise ValueError(
-                    f"metric battery produced colliding output name(s) "
-                    f"{sorted(clash)}; a dict-returning metric expands to "
-                    "`<name>_<subkey>`. Rename the battery key(s) to avoid the clash."
-                )
-            row.update(scored)
-            items.update(per_item)
-    else:
-        scored, per_item = _score_one(None, metrics, outputs, refs, seed)
+    # A single metric is scored as a one-entry battery named None.
+    battery = metrics.items() if isinstance(metrics, dict) else [(None, metrics)]
+    for name, m in battery:
+        scored, per_item = _score_one(name, m, outputs, refs, seed)
+        # A dict-returning metric expands to `<name>_<subkey>`, which can collide
+        # with another battery entry (e.g. {"squad": SQuAD(), "squad_f1": ...}).
+        # Silently overwriting would report the wrong metric, so reject it.
+        clash = row.keys() & scored.keys()
+        if clash:
+            raise ValueError(
+                f"metric battery produced colliding output name(s) "
+                f"{sorted(clash)}; a dict-returning metric expands to "
+                "`<name>_<subkey>`. Rename the battery key(s) to avoid the clash."
+            )
         row.update(scored)
         items.update(per_item)
     return row, items
@@ -190,25 +197,13 @@ def compare_llms(
 ) -> BenchmarkResult:
     if not systems:
         raise ValueError("`systems` is empty")
-    if test not in available_tests():
-        # Validate up front so a typo'd test name fails before any (possibly
-        # token-spending) system calls or cache writes.
-        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
-    if correction not in available_corrections():
-        raise ValueError(
-            f"unknown correction {correction!r}; choose from {available_corrections()}"
-        )
+    # Validate up front so a typo'd test name (or any bad value below) fails
+    # before any (possibly token-spending) system calls or cache writes.
+    _check_test(test)
+    _check_correction(correction)
     if isinstance(metric, dict) and not metric:
         raise ValueError("`metric` battery is empty; provide at least one metric")
-    # Validate up front, alongside test/correction: a bad value must not surface
-    # only after every (token-spending) system call has already run.
-    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
-        raise TypeError(
-            f"`item_bootstrap` must be an int (0 disables), got "
-            f"{type(item_bootstrap).__name__}"
-        )
-    if item_bootstrap < 0:
-        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
+    _check_item_bootstrap(item_bootstrap)
     inputs, refs = _normalize_examples(data)
     if not inputs:
         raise ValueError("`data` is empty")
@@ -404,23 +399,13 @@ def compare_scores(
     """
     if not scores:
         raise ValueError("`scores` is empty")
-    if test not in available_tests():
-        raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
-    if correction not in available_corrections():
-        raise ValueError(
-            f"unknown correction {correction!r}; choose from {available_corrections()}"
-        )
+    _check_test(test)
+    _check_correction(correction)
 
     # Validate everything BEFORE building the dataset, and mirror the checks
     # compare_llms performs — a caller reaching compare_scores has already spent
     # the tokens elsewhere, but a silently misread array is worse than an error.
-    if isinstance(item_bootstrap, bool) or not isinstance(item_bootstrap, int):
-        raise TypeError(
-            f"`item_bootstrap` must be an int (0 disables), got "
-            f"{type(item_bootstrap).__name__}"
-        )
-    if item_bootstrap < 0:
-        raise ValueError(f"`item_bootstrap` must be >= 0, got {item_bootstrap}")
+    _check_item_bootstrap(item_bootstrap)
     metric_name = str(metric_name)  # comparisons stringifies; keep the keys aligned
 
     arrays: dict[str, np.ndarray] = {}

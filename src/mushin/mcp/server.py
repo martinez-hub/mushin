@@ -70,9 +70,7 @@ def _is_safe_global(module: str, name: str) -> bool:
     if name in {"_reconstruct", "scalar"} and module.endswith("multiarray"):
         return True
     # numpy stores raw array bytes via codecs.encode(bytes, "latin1")
-    if (module, name) == ("_codecs", "encode"):
-        return True
-    return False
+    return (module, name) == ("_codecs", "encode")
 
 
 class _DataOnlyUnpickler(pickle.Unpickler):
@@ -428,8 +426,7 @@ def _get_provenance(
             continue  # a wrong-shape record is skipped, not crashed on
         if not include_config:
             rec.pop("config", None)
-        rel = f.parent if f.parent == p else f.parent.relative_to(p)
-        runs[str(rel) if rel != p else "."] = rec
+        runs[str(f.parent.relative_to(p))] = rec  # "." for the root itself
     return {"path": str(p), "num_runs": len(runs), "runs": runs}
 
 

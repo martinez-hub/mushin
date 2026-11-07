@@ -20,12 +20,7 @@ from ._console import echo
 def _ordered_union(dicts: list[dict]) -> list[str]:
     """Keys across ``dicts`` in first-seen order (preserves sweep-axis and
     metric ordering rather than sorting alphabetically)."""
-    seen: list[str] = []
-    for d in dicts:
-        for k in d:
-            if k not in seen:
-                seen.append(k)
-    return seen
+    return list(dict.fromkeys(k for d in dicts for k in d))
 
 
 def _fmt(v: Any) -> str:
@@ -181,6 +176,28 @@ class ShowResult:
         return iter(self.rows)
 
 
+def _cell_rows(
+    cells: list[dict], metrics: list[str] | None
+) -> tuple[list[str], list[str], list[dict]]:
+    """``(param_cols, columns, rows)`` of the cells ``_read_cells`` returns:
+    one row per cell, in ``cells`` order, with its swept params, ``status``
+    and the metric columns ``metrics`` selects (``show`` and
+    ``export.table``)."""
+    param_cols = _ordered_union([c["combo"] for c in cells])
+    metric_cols = _ordered_union([c["metrics"] for c in cells])
+    metric_cols = _apply_metric_filter(metrics, metric_cols)
+    colname = _metric_column_names(param_cols, metric_cols)
+    rows: list[dict] = []
+    for c in cells:
+        row: dict[str, Any] = {p: c["combo"].get(p) for p in param_cols}
+        row["status"] = c["status"]
+        for m in metric_cols:
+            row[colname[m]] = c["metrics"].get(m)
+        rows.append(row)
+    columns = [*param_cols, "status", *(colname[m] for m in metric_cols)]
+    return param_cols, columns, rows
+
+
 def show(
     root, *, metrics: list[str] | None = None, sort: str | None = None
 ) -> ShowResult:
@@ -205,22 +222,7 @@ def show(
         ``.rows`` (one dict per cell) and ``.table`` (the rendered string); the
         table is also printed.
     """
-    cells = _read_cells(root)
-
-    param_cols = _ordered_union([c["combo"] for c in cells])
-    metric_cols = _ordered_union([c["metrics"] for c in cells])
-    metric_cols = _apply_metric_filter(metrics, metric_cols)
-    colname = _metric_column_names(param_cols, metric_cols)
-
-    rows: list[dict] = []
-    for c in cells:
-        row: dict[str, Any] = {p: c["combo"].get(p) for p in param_cols}
-        row["status"] = c["status"]
-        for m in metric_cols:
-            row[colname[m]] = c["metrics"].get(m)
-        rows.append(row)
-
-    columns = [*param_cols, "status", *(colname[m] for m in metric_cols)]
+    param_cols, columns, rows = _cell_rows(_read_cells(root), metrics)
     if sort is not None:
         if sort not in columns:
             raise ValueError(
