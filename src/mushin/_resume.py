@@ -2347,11 +2347,12 @@ def _method_functions(value) -> list:
 #: ``(info, (raw text, {id(class): weakref}))`` with every notebook class
 #: alive when the cell started (``_start_classes``), or ``(info, None)``
 #: when the cell's text is unknown; ``texts`` the compiled texts of cells
-#: the history may not hold (``_keep_cell_text``); ``end``, the
-#: last top-level cell's end set, which the next one starts from
-#: (``_start_classes``). Weak, so the watch keeps no superseded class alive
-#: (a later cell's ``gc.collect()`` frees it); a class counts as alive at
-#: the start only if its id's reference still gives that class.
+#: the history may not hold (``_keep_cell_text``); ``end``, the last
+#: top-level cell's end set, which the next one starts from unless an
+#: execution ended since (``_start_classes``). Weak, so the watch keeps no
+#: superseded class alive (a later cell's ``gc.collect()`` frees it); a
+#: class counts as alive at the start only if its id's reference still
+#: gives that class.
 _CELL_WATCH = "_mushin_cell_watch"
 #: A ``class`` keyword at a line's start, after its indentation: where every
 #: ``class`` statement of a kept cell's text starts (it is Python, magics
@@ -2386,21 +2387,28 @@ def _live_classes(notebook) -> dict:
     return found
 
 
-def _start_classes(state: dict, notebook) -> dict:
-    """``{id(cls): weakref}`` for every class of ``notebook`` (its
-    namespace's ``__name__``) alive as a cell starts: the set the last
-    top-level cell's end took (``state["end"]``, by its ``post``), when no
-    cell has started since and it is for the same name. No class can be made
-    between two cells but by a background thread or a callback, which a cell
-    can already take for its own (``_pin_classes``). Each start takes the
-    set away, so a nested cell (the cell around it took it) and a cell after
-    one whose end never fired walk every live class (``_live_classes``), as
-    the first cell the watch sees does."""
-    end = state.get("end")
-    if type(end) is tuple and len(end) == 2 and end[0] is notebook:
-        return end[1]
-    live = _live_classes(notebook)
+def _weak_set(live: dict) -> dict:
+    """``{id(cls): weakref}`` for ``live`` (``_live_classes``'): a start set
+    holds its classes weakly, so the watch keeps no superseded class alive."""
     return {k: _weakref.ref(c) for k, c in live.items()}
+
+
+def _start_classes(notebook, end) -> dict:
+    """``{id(cls): weakref}`` for every class of ``notebook`` (its
+    namespace's ``__name__``) alive as a cell starts: ``end``, the set the
+    last top-level cell's end took, when it is for the same name; else a
+    walk of every live class (``_live_classes``). The watch keeps that set
+    from the ``post_run_cell`` of a stored cell with none running around it
+    until the next execution ends (``post_execute``, a silent one too) or a
+    cell starts (which takes it), so a class a nested cell, the cell around
+    it, startup code or a silent execution made is alive at a walk. One that
+    code running outside any cell makes between two cells (a background
+    thread, a callback, an expression a frontend evaluates after a cell) is
+    taken for the next cell's, as one made while a cell runs already could
+    be (``_pin_classes``)."""
+    if end is not None and end[0] is notebook:
+        return end[1]
+    return _weak_set(_live_classes(notebook))
 
 
 def _alive_at(snapshot: dict, cls) -> bool:
@@ -2469,20 +2477,21 @@ def _cell_watch(register: bool = True) -> dict | None:
                 if len(running) > 8:  # cells whose end never fired
                     running.clear()
                 entry = None
+                # A start takes the last end set: a cell whose end never
+                # fires cannot hand a later cell a set from before it ran.
+                end = state.pop("end", None)
                 try:
                     raw = getattr(info, "raw_cell", None)
                     if type(raw) is str:
-                        # Every notebook class alive now, whatever the text
-                        # says or holds it: one alive at the end and not now
-                        # was made by the cell. By weak reference, checked by
-                        # identity, so a reused id is never taken for it.
+                        # Every notebook class alive as the cell starts,
+                        # whatever the text says or holds it: one alive at its
+                        # end and not in this set was made by the cell. By
+                        # weak reference, checked by identity, so a reused id
+                        # is never taken for it.
                         notebook = shell.user_ns.get("__name__")
-                        entry = (raw, _start_classes(state, notebook))
+                        entry = (raw, _start_classes(notebook, end))
                 except Exception:  # noqa: BLE001 - the cell still ends at post
                     entry = None
-                # Used once: a cell whose end never fires cannot hand a later
-                # cell a set from before it ran.
-                state["end"] = None
                 running.append((info, entry))
                 try:
                     _keep_cell_text(state, info)
@@ -2516,25 +2525,40 @@ def _cell_watch(register: bool = True) -> dict | None:
                 if found is None and result is None:
                     found = len(running) - 1
                 if found is not None:
-                    entry = running.pop(found)[1]
+                    ended, entry = running.pop(found)
                     if entry is not None:
                         notebook = shell.user_ns.get("__name__")
                         live = _live_classes(notebook)
                         _pin_classes(state, shell.user_ns, entry, live)
-                        if not running:
-                            # The next top-level cell starts from this walk
-                            # (`_start_classes`): one walk per cell, not two.
-                            weak = {k: _weakref.ref(c) for k, c in live.items()}
-                            state["end"] = (notebook, weak)
+                        # The next cell starts from this walk (one walk per
+                        # cell, not two), only after a stored cell with none
+                        # around it: a nested cell (`%%capture`, `%rerun`,
+                        # `run_cell`) is never stored, and the cell around it
+                        # may not be in `running` (the cell that imported
+                        # mushin started before the watch), so its later
+                        # classes would be taken for the next cell's.
+                        stored = getattr(ended, "store_history", None) is True
+                        if stored and not running:
+                            state["end"] = (notebook, _weak_set(live))
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
+
+        def ended(*_) -> None:
+            # Every execution ends here, a silent one and a nested cell too,
+            # before a visible cell's post_run_cell: a set kept across it
+            # would take what it made for the next cell's.
+            state["end"] = None
 
         # The state first, so a failure below cannot leave callbacks that
         # the next call would register again.
         setattr(shell, _CELL_WATCH, state)
         added = []
         try:
-            for event, callback in (("pre_run_cell", pre), ("post_run_cell", post)):
+            for event, callback in (
+                ("pre_run_cell", pre),
+                ("post_execute", ended),
+                ("post_run_cell", post),
+            ):
                 shell.events.register(event, callback)
                 added.append((event, callback))
         except Exception:
