@@ -318,7 +318,7 @@ def _foreign_top(top: str, loaded_only: bool = False) -> bool:
         return True
     if loaded_only:  # main's rule: a loaded module, by its file alone
         module = sys.modules.get(top)
-        file = getattr(module, "__file__", None) if module is not None else None
+        file = _module_attr(module, "__file__") if module is not None else None
         return isinstance(file, str) and bool(file) and _foreign_by_path(file, top)
     try:
         file = _find_file(top)
@@ -364,7 +364,7 @@ def _is_foreign_module(name: str, file: str | None = None) -> bool:
         return True
     if file is None:
         module = sys.modules.get(name)
-        file = getattr(module, "__file__", None) if module is not None else None
+        file = _module_attr(module, "__file__") if module is not None else None
     if file is None:
         file = _find_file(name)  # not imported yet: where it would load from
     if isinstance(file, str) and file:
@@ -484,7 +484,7 @@ def _find_file(name: str) -> str | None:
 
     loaded = sys.modules.get(name)
     if loaded is not None:
-        file = getattr(loaded, "__file__", None)
+        file = _module_attr(loaded, "__file__")
         return file if isinstance(file, str) and file else None
     parts = name.split(".")
     path = None
@@ -498,8 +498,8 @@ def _find_file(name: str) -> str | None:
             return None
         loaded = sys.modules.get(dotted)
         if loaded is not None:
-            path = getattr(loaded, "__path__", None)
-            spec = getattr(loaded, "__spec__", None)
+            path = _module_attr(loaded, "__path__")
+            spec = _module_attr(loaded, "__spec__")
             continue
         if i == 0:
             # Every finder, for the top level only (importing nothing): an
@@ -1110,7 +1110,7 @@ def _loaded_digest(name: str, digest: str) -> str:
 
     module = sys.modules.get(name)
     if module is not None:
-        identity = (getattr(module, "__spec__", None) or module,)
+        identity = (_module_attr(module, "__spec__") or module,)
         _warn_if_moved(name, name, identity, digest)
     return digest
 
@@ -2237,19 +2237,64 @@ def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset, frozens
 #: is loaded with the interpreter). LazyImportType is new in 3.15.
 _MODULE_TYPE = type(functools)
 _LAZY_IMPORT_TYPE = getattr(__import__("types"), "LazyImportType", None)
+#: A module's own attribute lookup, and the descriptor that hands out its
+#: ``__dict__`` without one (``_module_namespace``).
+_MODULE_GETATTRIBUTE = _MODULE_TYPE.__getattribute__
+_MODULE_DICT = _MODULE_TYPE.__dict__["__dict__"]
+
+
+def _hooked(value) -> bool:
+    """Whether ``value`` is a module whose class runs code on every attribute
+    read, as ``importlib.util.LazyLoader``'s does (``lazy_loader.load`` uses
+    it): its first read runs the module's file. Decided by type alone, so
+    nothing is read from ``value``; ``isinstance`` would read its
+    ``__class__``."""
+    kind = type(value)
+    return (
+        issubclass(kind, _MODULE_TYPE)
+        and kind.__getattribute__ is not _MODULE_GETATTRIBUTE
+    )
+
+
+def _module_namespace(module) -> dict | None:
+    """A module's ``__dict__``, None when it has none. Read with ``getattr``,
+    as always, unless the module's class hooks every read (``_hooked``): then
+    through ModuleType's own descriptor, so neither the hook nor a
+    ``__dict__`` property runs, and the module is not imported."""
+    if not _hooked(module):
+        return getattr(module, "__dict__", None)
+    try:
+        return _MODULE_DICT.__get__(module)
+    except Exception:  # noqa: BLE001 - no dict of its own: nothing to read
+        return None
+
+
+def _module_attr(module, name: str, default=None):
+    """``getattr(module, name, default)``, unless the module's class hooks
+    every read (``_hooked``): then from the module's own dict, where
+    ``module_from_spec`` put ``__name__``, ``__file__``, ``__path__`` and
+    ``__spec__`` before LazyLoader swapped its class. So the record reads what
+    it would once the module ran, without running it: an error from that
+    import would reach no one, and the user's own first read would then get
+    an AttributeError instead of the error."""
+    if not _hooked(module):
+        return getattr(module, name, default)
+    found = _module_namespace(module)
+    return found.get(name, default) if type(found) is dict else default
 
 
 def _module_name_of(value) -> tuple[str | None, bool] | None:
     """For a module, or on 3.15 a lazy import (PEP 810) of one, ``(its name,
     whether it is lazy)``; the name is None when none can be read. None for
-    any other value. A module's ``__name__`` is read; a lazy proxy is not
-    asked for anything (``_lazy_import_name``). Raises what a module's
-    attribute hook raises."""
+    any other value. A module's ``__name__`` is read (``_module_attr``, so a
+    LazyLoader module is not imported); a lazy proxy is not asked for
+    anything (``_lazy_import_name``). Raises what an ordinary module's
+    ``__getattr__`` raises."""
     kind = type(value)
     if kind is _LAZY_IMPORT_TYPE:
         return _lazy_import_name(value), True
     if issubclass(kind, _MODULE_TYPE):
-        name = value.__name__
+        name = _module_attr(value, "__name__")
         return (name if isinstance(name, str) else None), False
     return None
 
@@ -3100,8 +3145,8 @@ def _notebook_entries(
     object bound has no notebook entries and no modules (with a warning):
     which objects a cut walk took depends on its order. Objects are
     inspected by type, and only a function's own ``__dict__`` and a module's
-    ``__name__`` (which ``_namespace_modules`` reads too) are read, so a
-    lazy proxy is never resolved."""
+    ``__name__`` (``_module_attr``, as ``_namespace_modules`` reads it) are
+    read, so neither a lazy proxy nor a LazyLoader module is resolved."""
     import types
 
     def resolve(value):
@@ -3510,7 +3555,9 @@ def _bound_callables(value, depth: int = 0):
     and dicts too: code the task runs, whose modules the record follows."""
     import types
 
-    if depth > 4:
+    if depth > 4 or _hooked(value):
+        # A module binds no code here, and `isinstance` would read a
+        # LazyLoader module's `__class__`, which imports it.
         return
     if isinstance(value, (types.FunctionType, types.MethodType, type)):
         yield value
@@ -3583,7 +3630,7 @@ def _root_entries(
         else:
             cls = layer if isinstance(layer, type) else type(layer)
             module = sys.modules.get(getattr(cls, "__module__", ""), None)
-            namespace = getattr(module, "__dict__", None) or {}
+            namespace = _module_namespace(module) or {}
             tops = {cls.__qualname__.partition(".")[0]}
             identity = cls
         name, file = namespace.get("__name__"), namespace.get("__file__")
@@ -3691,7 +3738,7 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
     parts = path.split(".")
     if parts[0] == "__main__":
         main = sys.modules.get("__main__")
-        namespace = getattr(main, "__dict__", None) or {}
+        namespace = _module_namespace(main) or {}
         file = namespace.get("__file__")
         if (
             len(parts) > 1

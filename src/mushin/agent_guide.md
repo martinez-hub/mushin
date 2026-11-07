@@ -191,10 +191,7 @@ rules:
   run inside another cell before `import mushin`; a cell holding one can
   also re-run the cells), and a class a background thread
   or a callback makes while a cell runs may be taken for that cell's: after
-  editing one, use a new `working_dir`. Taking
-  the fingerprint can import an `importlib.util.LazyLoader` module, and an
-  error from that import may go unreported: import such modules before
-  `run()`. Resume does not see an installed
+  editing one, use a new `working_dir`. Resume does not see an installed
   package, data files, or code reached only through some other string. After
   such a
   change, use a new `working_dir`. `cache_dir=` keys on the same fingerprints. Hydra still

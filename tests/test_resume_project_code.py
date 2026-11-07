@@ -3042,3 +3042,90 @@ def test_the_main_guards_spelling_is_not_an_edit(tmp_path):
         tmp_path, "gs2", text.format(guard="'__main__' == __name__"), {"task"}
     )
     assert one == two
+
+
+# --- a module loaded through importlib.util.LazyLoader (#303) -----------------
+
+LAZY_TASK = """
+import functools
+import importlib.util
+import sys
+
+
+def lazy(name):
+    # As lazy_loader.load does: the module's file runs on its first read.
+    spec = importlib.util.find_spec(name)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+top = lazy("lzrec_mod")  # a top-level module
+pkg = lazy("lzrec")  # a package; its submodule is not imported
+
+
+def task(a):
+    import lzrec.sub
+    import lzrec_mod
+
+    return a
+
+
+def helper(m, a):
+    return a
+
+
+bound = functools.partial(helper, top)
+"""
+
+
+def test_a_record_does_not_import_a_lazy_loader_module(tmp_path):
+    """A module loaded through `importlib.util.LazyLoader` runs its file on
+    its first attribute read. Taking a script's record runs none: one a
+    partial binds (`isinstance` would read its `__class__`), one the task
+    imports (its file, its load), and a package whose submodule is looked
+    up through it. Each is still recorded by its file."""
+    run = "import lazy_ran\nlazy_ran.RAN.append(__name__)\n"
+    (tmp_path / "lazy_ran.py").write_text("RAN = []\n")
+    (tmp_path / "lzrec").mkdir()
+    (tmp_path / "lzrec" / "__init__.py").write_text(run)
+    (tmp_path / "lzrec" / "sub.py").write_text("VALUE = 1\n")
+    (tmp_path / "lzrec_mod.py").write_text(run + "VALUE = 1\n")
+    (tmp_path / "lzrec_task.py").write_text(LAZY_TASK)
+    probe = (
+        "import json, lazy_ran, lzrec_task; "
+        "from mushin._resume import project_fingerprints as p; "
+        "keys = [sorted(k for k in p(f)['code'] if k.endswith(' (file)')) "
+        "for f in (lzrec_task.bound, lzrec_task.task)]; "
+        "print(json.dumps([lazy_ran.RAN, keys]))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+    ).stdout
+    ran, keys = json.loads(out.strip().splitlines()[-1])
+    assert ran == []
+    files = ["lzrec (file)", "lzrec.sub (file)", "lzrec_mod (file)"]
+    for record in keys:
+        assert set(files) <= set(record)
+
+
+def test_a_module_whose_class_states_its_file_is_read_as_before(tmp_path, monkeypatch):
+    """Only a module whose class hooks every read is read from its own dict:
+    one whose class merely states its file is read as it always was."""
+    from mushin._resume import _find_file
+
+    file = tmp_path / "mushin_t_classfile.py"
+    file.write_text("X = 1\n")
+
+    class FileModule(types.ModuleType):
+        __file__ = str(file)
+
+    module = FileModule("mushin_t_classfile")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert _find_file(module.__name__) == str(file)

@@ -2525,10 +2525,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             is not reloaded, the old code keeps running while the cells
             computed now are recorded as the new code's, so reload it (or
             restart) before resuming. mushin warns when it had recorded that
-            file earlier in the same process. Taking the fingerprint can
-            import a module loaded through ``importlib.util.LazyLoader``, and
-            an error from that import may go unreported, so import such a
-            module yourself before ``run()``. Not
+            file earlier in the same process. Not
             covered: installed packages other than editable ones, data files,
             the environment, in a notebook its values, a function reached
             only through a container (a registry), a closure or a default, a

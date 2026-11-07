@@ -97,6 +97,23 @@ def _apple_chip() -> str | None:
 _NO_ACCELERATOR: dict = {"cuda": None, "cudnn": None, "device": None}
 
 
+def _loaded_torch():
+    """``sys.modules["torch"]`` once torch has run, else None. A module
+    loaded through ``importlib.util.LazyLoader`` (``lazy_loader.load``) runs
+    its file on its first attribute read, so until then its class overrides
+    ``__getattribute__``: such a torch is not imported yet, and is not read
+    (judged by type, since ``isinstance`` would read its ``__class__``)."""
+    import types
+
+    torch = sys.modules.get("torch")
+    kind = type(torch)
+    if issubclass(kind, types.ModuleType) and (
+        kind.__getattribute__ is not types.ModuleType.__getattribute__
+    ):
+        return None
+    return torch
+
+
 def _accelerator() -> dict | None:
     """Accelerator identity: the part of GPU numerics the torch wheel version
     alone cannot reconstruct: CUDA/cuDNN build + device name on NVIDIA, the MPS
@@ -106,7 +123,7 @@ def _accelerator() -> dict | None:
     initializes CUDA, unless MPS is available. Makes no ``torch.cuda`` call
     unless the task already initialized CUDA: the device is named once the
     task has (the cuDNN version is a library constant, read without one)."""
-    torch = sys.modules.get("torch")
+    torch = _loaded_torch()
     if torch is None:
         # Never import torch here. Importing it is the dominant cost of a
         # provenance capture, and a process that has not loaded torch has no
@@ -167,7 +184,7 @@ _ACCELERATOR_SEEN: dict[bool, dict] = {}
 def _seen_accelerator() -> dict | None:
     """This process's accelerator, from the cache for its current CUDA state;
     ``None`` when torch is not loaded."""
-    torch = sys.modules.get("torch")
+    torch = _loaded_torch()
     if torch is None:
         return None
     state = _cuda_initialized(torch)

@@ -126,6 +126,29 @@ def test_accelerator_does_not_import_torch_for_a_sweep_without_it(
     assert _provenance._ACCELERATOR_SEEN == {}
 
 
+def test_accelerator_does_not_run_a_torch_loaded_lazily(tmp_path, monkeypatch):
+    """A torch loaded through `importlib.util.LazyLoader` (`lazy_loader.load`)
+    has not run until something reads it, so it counts as not imported: no
+    accelerator is recorded, and its file does not run."""
+    import importlib.util
+    import sys
+
+    from mushin import _provenance
+
+    ran = tmp_path / "ran"
+    stub = tmp_path / "torch_stub.py"
+    stub.write_text(f"open({str(ran)!r}, 'w').close()\n")
+    spec = importlib.util.spec_from_file_location("torch", stub)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, "torch", module)
+    monkeypatch.setattr(_provenance, "_ACCELERATOR_SEEN", {})
+    assert _provenance._accelerator() is None
+    assert _provenance._seen_accelerator() is None
+    assert not ran.exists()
+
+
 def test_run_does_not_import_torch_for_a_sweep_without_it(tmp_path):
     """The whole run() path, in a fresh interpreter: a sweep whose task never
     imports torch finishes without mushin importing it, and records a null
