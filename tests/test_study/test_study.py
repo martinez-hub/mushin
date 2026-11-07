@@ -53,6 +53,26 @@ def test_training_study_requires_seeds_at_construction(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_from_checkpoints_builds_a_subclass_through_its_init(tmp_path):
+    """`from_checkpoints` constructs `cls`, so a subclass's `__init__` runs,
+    with `methods` and `seeds` None."""
+
+    class Sub(Study):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.marker = True
+
+    study = Sub.from_checkpoints(
+        _save(tmp_path, ["m1", "m2"]),
+        load_fn=lambda p: torch.load(p, weights_only=False),
+        data=_loader(),
+        num_classes=3,
+    )
+    assert type(study) is Sub and study.marker
+    assert study._methods is None and study._seeds is None
+    assert study.working_dir is None
+
+
 def test_from_checkpoints_rejects_empty():
     import pytest
 

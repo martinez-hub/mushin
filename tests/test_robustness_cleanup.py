@@ -10,6 +10,7 @@ must be well-formed; and `correction=` must be validated before any paid work.
 
 import json
 
+import numpy as np
 import pytest
 
 
@@ -139,7 +140,17 @@ def test_value_check_optional_message_is_well_formed():
 
 
 # --- validate correction before any paid work -------------------------------
-def test_compare_rejects_unknown_correction_before_evaluating():
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"correction": "nope"},
+        {"test": "bogus"},
+        # Equal to a name, yet not one: it used to pass the check, run every
+        # model, then fail at the lookup.
+        {"test": np.array("welch")},
+    ],
+)
+def test_compare_rejects_unknown_test_or_correction_before_evaluating(kw):
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -155,8 +166,8 @@ def test_compare_rejects_unknown_correction_before_evaluating():
     data = DataLoader(
         TensorDataset(torch.randn(4, 2), torch.zeros(4, dtype=torch.long))
     )
-    with pytest.raises(ValueError, match="correction"):
-        compare({"m": [_M()]}, data, task="classification", correction="nope")
+    with pytest.raises(ValueError, match=f"unknown {next(iter(kw))} "):
+        compare({"m": [_M()]}, data, task="classification", num_classes=3, **kw)
     assert called["n"] == 0  # no model was evaluated
 
 
