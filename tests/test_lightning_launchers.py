@@ -229,8 +229,9 @@ def test_pl_main_pl_validating_calls_trainer_validate():
 
 
 def _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, overrides, **entry):
-    """hydra-zen-launch a job and invoke the REAL _subprocess_call inside it,
-    with Popen captured. Returns (captured, launch_cwd, output_dir_seen).
+    """hydra-zen-launch a job and invoke the REAL _subprocess_call inside it
+    (local rank 1, global rank 5), with Popen captured. Returns the captured
+    dict: ``command``, ``cwd`` (Popen's), ``task_cwd`` and ``output_dir``.
     ``entry`` sets the testing/predicting/validating flags (default: fit)."""
     import subprocess
 
@@ -252,7 +253,7 @@ def _run_subprocess_call_in_hydra_job(monkeypatch, tmp_path, overrides, **entry)
         captured["task_cwd"] = os.getcwd()
         captured["output_dir"] = HydraConfig.get().runtime.output_dir
         flags = {"testing": False, "predicting": False, **entry}
-        launchers._subprocess_call(local_rank=1, global_rank=1, **flags)
+        launchers._subprocess_call(local_rank=1, global_rank=5, **flags)
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
@@ -303,7 +304,7 @@ def test_subprocess_call_argv(monkeypatch, tmp_path, entry):
         "++pl_local_rank=1",
     ]
     assert cmd[11].startswith("hydra.run.dir=")
-    assert cmd[12] == "hydra.output_subdir=.pl_hydra_rank_1"
+    assert cmd[12] == "hydra.output_subdir=.pl_hydra_rank_5"
     assert cmd[13].startswith("hydra.job.name=")
     assert len(cmd) == 14
 

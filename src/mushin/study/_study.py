@@ -46,10 +46,11 @@ class Study:
         resume: bool = False,
         capture_env: bool = False,
     ):
-        # `methods` and `seeds` are None only for `from_checkpoints`, which
-        # evaluates the checkpoints it is given instead of training.
+        # `methods` and `seeds` are both None for `from_checkpoints`, which
+        # evaluates the checkpoints it is given instead of training. Training
+        # needs seeds: `list(seeds)` raises TypeError here for `seeds=None`.
         self._methods = methods
-        self._seeds = None if seeds is None else list(seeds)
+        self._seeds = None if methods is None and seeds is None else list(seeds)
         self._load_fn = load_fn
         self._data = data
         self._num_classes = num_classes

@@ -184,16 +184,16 @@ def available_corrections() -> list[str]:
     return list(_CORRECTIONS)
 
 
-# The two checks test membership in the list, not the dict: a value that
-# cannot be hashed (a list passed by mistake) is then reported as unknown
-# rather than raising "unhashable type".
+# Only a str can name a test or correction: anything else (a list, or a 0-d
+# numpy array that compares equal to a name, passed by mistake) is reported as
+# unknown here, before any paid work, rather than failing at the dict lookup.
 def _check_test(test: str) -> None:
-    if test not in available_tests():
+    if not isinstance(test, str) or test not in _TESTS:
         raise ValueError(f"unknown test {test!r}; choose from {available_tests()}")
 
 
 def _check_correction(correction: str) -> None:
-    if correction not in available_corrections():
+    if not isinstance(correction, str) or correction not in _CORRECTIONS:
         raise ValueError(
             f"unknown correction {correction!r}; choose from {available_corrections()}"
         )

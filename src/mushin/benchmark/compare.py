@@ -61,8 +61,9 @@ def compare(
         set when a custom ``metrics=`` battery is given. Every name must be a
         key of the battery in use.
     test : str
-        Statistical test for pairwise method comparison; one of
-        ``mushin.benchmark.available_tests()`` (default paired Wilcoxon).
+        Statistical test for pairwise method comparison: ``"wilcoxon"``
+        (paired Wilcoxon, the default), ``"ttest_rel"``, ``"welch"``,
+        ``"ttest_ind"`` or ``"mannwhitney"``.
     alpha : float
         Significance level for the (multiple-comparison-corrected) comparisons.
     correction : str

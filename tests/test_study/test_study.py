@@ -41,6 +41,18 @@ def test_from_checkpoints_runs_and_compares(tmp_path):
     assert study.working_dir is None
 
 
+def test_training_study_requires_seeds_at_construction(tmp_path):
+    """`seeds=None` is only for `from_checkpoints`: with `methods` it fails
+    when the Study is built, before `run()` writes anything."""
+    import pytest
+
+    with pytest.raises(TypeError):
+        Study(
+            {"m": lambda seed: "x"}, lambda p: p, None, None, working_dir=str(tmp_path)
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_from_checkpoints_rejects_empty():
     import pytest
 
