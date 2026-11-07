@@ -3129,3 +3129,54 @@ def test_a_module_whose_class_states_its_file_is_read_as_before(tmp_path, monkey
     module = FileModule("mushin_t_classfile")
     monkeypatch.setitem(sys.modules, module.__name__, module)
     assert _find_file(module.__name__) == str(file)
+
+
+def test_a_module_whose_class_hooks_reads_otherwise_is_read_as_before(
+    tmp_path, monkeypatch
+):
+    """Only LazyLoader's module is read from its own dict, which
+    `module_from_spec` filled. A module whose class hooks every read some
+    other way (as `lazy_import`'s does) keeps no file there: it is read as
+    it always was, so its file stays in the record."""
+    from mushin._resume import _find_file
+
+    file = tmp_path / "mushin_t_hooked.py"
+    file.write_text("X = 1\n")
+    real = types.ModuleType("mushin_t_hooked")
+    real.__file__ = str(file)
+
+    class Hooked(types.ModuleType):
+        def __getattribute__(self, name):
+            return getattr(real, name)  # loads on first read, in a real one
+
+    module = Hooked("mushin_t_hooked")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert _find_file(module.__name__) == str(file)
+
+
+def test_a_lazy_loader_module_that_has_not_run_is_never_stale(tmp_path, monkeypatch):
+    """A LazyLoader module whose file has not run keeps no baseline: an edit
+    before its first read is the code that will run, so no "the old code still
+    runs" warning, and the module still has not run."""
+    import importlib.util
+
+    (tmp_path / "mushin_t_lzstale.py").write_text("VALUE = 1\n")
+    (tmp_path / "mushin_t_lzstale_task.py").write_text(
+        "def task(a):\n    import mushin_t_lzstale\n\n    return a\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    spec = importlib.util.find_spec("mushin_t_lzstale")
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    lazy = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "mushin_t_lzstale", lazy)
+    spec.loader.exec_module(lazy)
+    task_module = importlib.import_module("mushin_t_lzstale_task")
+    monkeypatch.delitem(sys.modules, "mushin_t_lzstale_task")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        before = project_fingerprints(task_module.task)["code"]
+        (tmp_path / "mushin_t_lzstale.py").write_text("VALUE = 22\n")
+        after = project_fingerprints(task_module.task)["code"]
+    assert before["mushin_t_lzstale (file)"] != after["mushin_t_lzstale (file)"]
+    assert not [w for w in caught if "changed on disk" in str(w.message)]
+    assert type(lazy) is importlib.util._LazyModule  # its file has not run

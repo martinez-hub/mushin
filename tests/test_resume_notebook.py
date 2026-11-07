@@ -5336,3 +5336,22 @@ def test_a_notebook_record_does_not_import_a_lazy_loader_module(tmp_path):
     for case, name in own.items():
         assert f"{name} (file)" in records[case], case
     assert first_read == ["RuntimeError", "broken on import"]
+
+
+def test_an_ipython_loaded_lazily_that_has_not_run_has_no_shell(tmp_path, monkeypatch):
+    """An IPython that `importlib.util.LazyLoader` made and that has not run
+    has no shell: looking for one does not run it."""
+    import importlib.util
+
+    import mushin._resume as resume
+
+    ran = tmp_path / "ran"
+    stub = tmp_path / "ipython_stub.py"
+    stub.write_text(f"open({str(ran)!r}, 'w').close()\n")
+    spec = importlib.util.spec_from_file_location("IPython", stub)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, "IPython", module)
+    assert resume._shell() is None
+    assert not ran.exists()

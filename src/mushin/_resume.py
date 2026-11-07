@@ -1105,12 +1105,15 @@ def _loaded_digest(name: str, digest: str) -> str:
     that load of it: if it was not reloaded, the old code still runs. The file
     is recorded either way, since an in-place reload (IPython's %autoreload
     patches functions without replacing ``__spec__``) does run the new code,
-    and this process cannot tell the two apart."""
+    and this process cannot tell the two apart. A LazyLoader module whose
+    file has not run (``_unloaded_lazy``) takes no baseline yet: none of its
+    code runs, so none of it can be stale, and its first read runs the file
+    as it is then."""
     import sys
 
     module = sys.modules.get(name)
-    if module is not None:
-        identity = (_module_attr(module, "__spec__") or module,)
+    if module is not None and not _unloaded_lazy(module):
+        identity = (getattr(module, "__spec__", None) or module,)
         _warn_if_moved(name, name, identity, digest)
     return digest
 
@@ -2237,50 +2240,43 @@ def _unit_reading(tree, roots) -> tuple[frozenset, frozenset, frozenset, frozens
 #: is loaded with the interpreter). LazyImportType is new in 3.15.
 _MODULE_TYPE = type(functools)
 _LAZY_IMPORT_TYPE = getattr(__import__("types"), "LazyImportType", None)
-#: A module's own attribute lookup, and the descriptor that hands out its
-#: ``__dict__`` without one (``_module_namespace``).
-_MODULE_GETATTRIBUTE = _MODULE_TYPE.__getattribute__
+#: The descriptor that hands out a module's ``__dict__`` without an
+#: attribute lookup (``_module_attr``).
 _MODULE_DICT = _MODULE_TYPE.__dict__["__dict__"]
 
 
-def _hooked(value) -> bool:
-    """Whether ``value`` is a module whose class runs code on every attribute
-    read, as ``importlib.util.LazyLoader``'s does (``lazy_loader.load`` uses
-    it): its first read runs the module's file. Decided by type alone, so
-    nothing is read from ``value``; ``isinstance`` would read its
-    ``__class__``."""
-    kind = type(value)
-    return (
-        issubclass(kind, _MODULE_TYPE)
-        and kind.__getattribute__ is not _MODULE_GETATTRIBUTE
-    )
+def _unloaded_lazy(value) -> bool:
+    """Whether ``value`` is a module ``importlib.util.LazyLoader`` made (as
+    ``lazy_loader.load`` does) whose file has not run: its class runs the file
+    on the first attribute read. Decided by type alone, so nothing is read
+    from ``value`` (an ``isinstance`` check the module fails would read its
+    ``__class__``). Only LazyLoader's class: ``module_from_spec`` filled its
+    dict (``_module_attr``), while another class that hooks every read
+    (``lazy_import``'s, apipkg's aliases) keeps no file there, so such a
+    module is read as it always was. None can exist before ``importlib.util``
+    is imported, so it is not imported here."""
+    import sys
 
-
-def _module_namespace(module) -> dict | None:
-    """A module's ``__dict__``, None when it has none. Read with ``getattr``,
-    as always, unless the module's class hooks every read (``_hooked``): then
-    through ModuleType's own descriptor, so neither the hook nor a
-    ``__dict__`` property runs, and the module is not imported."""
-    if not _hooked(module):
-        return getattr(module, "__dict__", None)
-    try:
-        return _MODULE_DICT.__get__(module)
-    except Exception:  # noqa: BLE001 - no dict of its own: nothing to read
-        return None
+    lazy = getattr(sys.modules.get("importlib.util"), "_LazyModule", None)
+    return isinstance(lazy, type) and issubclass(type(value), lazy)
 
 
 def _module_attr(module, name: str, default=None):
-    """``getattr(module, name, default)``, unless the module's class hooks
-    every read (``_hooked``): then from the module's own dict, where
-    ``module_from_spec`` put ``__name__``, ``__file__``, ``__path__`` and
-    ``__spec__`` before LazyLoader swapped its class. So the record reads what
-    it would once the module ran, without running it: an error from that
-    import would reach no one, and the user's own first read would then get
-    an AttributeError instead of the error."""
-    if not _hooked(module):
+    """``getattr(module, name, default)``, unless LazyLoader made the module
+    and its file has not run (``_unloaded_lazy``): then from the module's own
+    dict, through ModuleType's descriptor, where ``module_from_spec`` put
+    ``__name__``, ``__file__``, ``__path__`` and ``__spec__`` before LazyLoader
+    swapped its class. So the record reads what it would once the module ran,
+    without running it: an error from that import would reach no one, and the
+    user's own first read would then get an AttributeError instead of the
+    error. ``name`` ``"__dict__"`` gives that dict itself."""
+    if not _unloaded_lazy(module):
         return getattr(module, name, default)
-    found = _module_namespace(module)
-    return found.get(name, default) if type(found) is dict else default
+    try:
+        found = _MODULE_DICT.__get__(module)
+    except Exception:  # noqa: BLE001 - no dict of its own: nothing to read
+        return default
+    return found if name == "__dict__" else found.get(name, default)
 
 
 def _module_name_of(value) -> tuple[str | None, bool] | None:
@@ -2289,7 +2285,7 @@ def _module_name_of(value) -> tuple[str | None, bool] | None:
     any other value. A module's ``__name__`` is read (``_module_attr``, so a
     LazyLoader module is not imported); a lazy proxy is not asked for
     anything (``_lazy_import_name``). Raises what an ordinary module's
-    ``__getattr__`` raises."""
+    ``__getattr__`` raises, other than AttributeError."""
     kind = type(value)
     if kind is _LAZY_IMPORT_TYPE:
         return _lazy_import_name(value), True
@@ -2462,7 +2458,9 @@ def _shell():
     import sys
 
     ipython = sys.modules.get("IPython")
-    get = getattr(ipython, "get_ipython", None) if ipython is not None else None
+    if ipython is None or _unloaded_lazy(ipython):
+        return None  # a LazyLoader IPython that has not run has no shell
+    get = getattr(ipython, "get_ipython", None)
     return get() if callable(get) else None
 
 
@@ -3555,7 +3553,7 @@ def _bound_callables(value, depth: int = 0):
     and dicts too: code the task runs, whose modules the record follows."""
     import types
 
-    if depth > 4 or _hooked(value):
+    if depth > 4 or _unloaded_lazy(value):
         # A module binds no code here, and `isinstance` would read a
         # LazyLoader module's `__class__`, which imports it.
         return
@@ -3630,7 +3628,7 @@ def _root_entries(
         else:
             cls = layer if isinstance(layer, type) else type(layer)
             module = sys.modules.get(getattr(cls, "__module__", ""), None)
-            namespace = _module_namespace(module) or {}
+            namespace = _module_attr(module, "__dict__") or {}
             tops = {cls.__qualname__.partition(".")[0]}
             identity = cls
         name, file = namespace.get("__name__"), namespace.get("__file__")
@@ -3738,7 +3736,7 @@ def _target_entries(path: str, seeds: list[str], scripts: dict) -> None:
     parts = path.split(".")
     if parts[0] == "__main__":
         main = sys.modules.get("__main__")
-        namespace = _module_namespace(main) or {}
+        namespace = _module_attr(main, "__dict__") or {}
         file = namespace.get("__file__")
         if (
             len(parts) > 1

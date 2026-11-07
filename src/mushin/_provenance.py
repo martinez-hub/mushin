@@ -98,20 +98,14 @@ _NO_ACCELERATOR: dict = {"cuda": None, "cudnn": None, "device": None}
 
 
 def _loaded_torch():
-    """``sys.modules["torch"]`` once torch has run, else None. A module
-    loaded through ``importlib.util.LazyLoader`` (``lazy_loader.load``) runs
-    its file on its first attribute read, so until then its class overrides
-    ``__getattribute__``: such a torch is not imported yet, and is not read
-    (judged by type, since ``isinstance`` would read its ``__class__``)."""
-    import types
+    """``sys.modules["torch"]`` once torch has run, else None. A torch that
+    ``importlib.util.LazyLoader`` made (``lazy_loader.load``) runs its file on
+    its first attribute read, so until then it is not imported, and is not
+    read (the record's own rule, ``_unloaded_lazy``)."""
+    from ._resume import _unloaded_lazy
 
     torch = sys.modules.get("torch")
-    kind = type(torch)
-    if issubclass(kind, types.ModuleType) and (
-        kind.__getattribute__ is not types.ModuleType.__getattribute__
-    ):
-        return None
-    return torch
+    return None if _unloaded_lazy(torch) else torch
 
 
 def _accelerator() -> dict | None:
