@@ -2544,9 +2544,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ``exec``, a ``%run`` file; a class it makes re-runs instead),
             possibly a cell holding a form feed, a vertical tab or another
             character that ends a line for ``str.splitlines`` (not a newline
-            or a carriage return) that ran inside another cell
-            (``%%capture``) before ``import mushin`` (a cell holding one can
-            re-run the cells instead), what an IPython input transformer
+            or a carriage return) that the shell's history does not hold and
+            mushin did not see run (one ``%run`` runs from a notebook or an
+            ``.ipy`` file, a silent one, or one run inside another cell
+            before ``import mushin``; a cell holding one can re-run the
+            cells instead), what an IPython input transformer
             changes in a cell, possibly a class a background thread or a
             callback makes while a cell runs (taken for that cell's), a
             top-level statement of the driver script that changes an object in

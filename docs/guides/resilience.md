@@ -159,9 +159,11 @@ one cell holds more than one version of it (two `class` statements of it run,
 or a statement and a class bound from elsewhere). Nor may what an IPython input
 transformer changes in a cell be compared, nor a cell holding a form feed, a
 vertical tab or another character that ends a line for Python's
-`str.splitlines` (not a newline or a carriage return) that ran inside
-another cell (`%%capture`) before `import mushin`; a cell holding one can
-also make a resume re-run the cells, and `cache_dir=` compute them again. A
+`str.splitlines` (not a newline or a carriage return) that the shell's
+history does not hold and mushin did not see run: one that `%run` runs from
+a notebook or an `.ipy` file, one run silently, or one run inside another
+cell (`%%capture`) before `import mushin`. A cell holding one can also make
+a resume re-run the cells, and `cache_dir=` compute them again. A
 class a background thread or a callback makes while a cell runs may be taken
 for one that cell made. After editing such a module, class or cell, use a
 new `working_dir`.

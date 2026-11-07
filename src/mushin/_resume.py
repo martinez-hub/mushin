@@ -1270,6 +1270,7 @@ def _kernel_name(name: str) -> bool:
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
 _CELL_SCAN_WARNED: list = []
+_HISTORY_WARNED: list = []
 #: The notebook's later modules cut by the file bound: per run in the driver
 #: (``driver_script_entries`` clears it), once per process in a parallel
 #: worker, as ``_TRUNCATION_WARNED`` is.
@@ -1354,7 +1355,9 @@ def _compiled_texts() -> dict[str, list[str]]:
     for text in split:
         index.setdefault(_kept_form(text), {})[text.rstrip("\n")] = None
     for text in plain:
-        found = index.get(_kept_form(text))
+        # Without a carriage return, a plain text's kept form is itself.
+        key = text.rstrip("\n") if "\r" not in text else _kept_form(text)
+        found = index.get(key)
         if found is not None:
             found[text.rstrip("\n")] = None
     return {key: list(texts) for key, texts in index.items()}
@@ -2430,13 +2433,8 @@ def _cell_watch(register: bool = True) -> dict | None:
                 if len(running) > 8:  # cells whose end never fired
                     running.clear()
                 entry = None
-                raw = getattr(info, "raw_cell", None)
                 try:
-                    if type(raw) is str and _SPLIT_ONLY.search(raw) is not None:
-                        _keep_split_text(state, raw)
-                except Exception:  # noqa: BLE001 - its kept lines are read then
-                    pass
-                try:
+                    raw = getattr(info, "raw_cell", None)
                     if type(raw) is str:
                         # Every notebook class alive now, whatever the text
                         # says or holds it: one alive at the end and not now
@@ -2448,6 +2446,10 @@ def _cell_watch(register: bool = True) -> dict | None:
                 except Exception:  # noqa: BLE001 - the cell still ends at post
                     entry = None
                 running.append((info, entry))
+                try:
+                    _keep_split_text(state, info)
+                except Exception:  # noqa: BLE001 - its kept lines are read then
+                    pass
             except Exception:  # noqa: BLE001 - a callback must never raise
                 pass
 
@@ -2502,20 +2504,26 @@ def _cell_watch(register: bool = True) -> dict | None:
         return None
 
 
-def _keep_split_text(state: dict, raw: str) -> None:
-    """Keep the text a cell's ``raw`` text compiles as, when it holds a
-    ``_SPLIT_ONLY`` character, in the watch ``state`` (``_compiled_texts``
-    reads it): what the kernel keeps of such a cell is not what ``compile``
-    saw, and a cell run without being stored (a magic's inner cell) is not
-    in the shell's history. A transform never adds one (it writes a magic's
-    body as an escaped string), so only a ``raw`` holding one is passed.
-    The newest ``_SPLIT_TEXTS_MAX`` texts, each once."""
-    text = state["transform"](raw)
+def _keep_split_text(state: dict, info) -> None:
+    """Keep the text the cell starting with ``info`` compiles as, when it
+    holds a ``_SPLIT_ONLY`` character, in the watch ``state``
+    (``_compiled_texts`` reads it): what the kernel keeps of such a cell is
+    not what ``compile`` saw, and a cell run without being stored (a magic's
+    inner cell) is not in the shell's history. The text is the shell's own
+    (``transformed_cell``, IPython 8 and later, with every input
+    transformer's change), else the static transform's. A transform never
+    adds such a character (it writes a magic's body as an escaped string),
+    so a raw text without one is not transformed. The newest
+    ``_SPLIT_TEXTS_MAX`` texts, each once."""
+    raw = getattr(info, "raw_cell", None)
+    if type(raw) is not str or _SPLIT_ONLY.search(raw) is None:
+        return
+    text = getattr(info, "transformed_cell", None)
+    if type(text) is not str:
+        text = state["transform"](raw)
     if type(text) is not str or _SPLIT_ONLY.search(text) is None:
         return
-    texts = state.get("texts")
-    if type(texts) is not dict:  # a state an older `_resume` made
-        texts = state["texts"] = {}
+    texts = state.setdefault("texts", {})
     text = text.rstrip("\n")
     texts.pop(text, None)  # the newest last
     texts[text] = None
@@ -2682,25 +2690,30 @@ def _class_sites(
     for fn, later in body:
         code = fn.__code__
         lines = _cell_lines(code.co_filename)
-        texts = _cell_texts(lines, compiled) if lines is not None else []
-        if len(texts) != 1:
-            # Several texts it may have been compiled from: which holds the
-            # statement cannot be told by line, so the pin or the kept
-            # cells' texts decide.
-            continue
-        tree = _cell_tree(texts[0].splitlines(True))
-        if tree is None:
-            continue
-        best = None
-        for node in ast.walk(tree):
-            if (
-                type(node) is ast.ClassDef
-                and node.name == name
-                and _first_line(node) <= code.co_firstlineno <= (node.end_lineno or 0)
-                and (best is None or node.lineno >= best.lineno)
-            ):
-                best = node
-        if best is not None:
+        found = []
+        for text in _cell_texts(lines, compiled) if lines is not None else []:
+            tree = _cell_tree(text.splitlines(True))
+            if tree is None:
+                continue
+            best = None
+            for node in ast.walk(tree):
+                if (
+                    type(node) is ast.ClassDef
+                    and node.name == name
+                    and _first_line(node)
+                    <= code.co_firstlineno
+                    <= (node.end_lineno or 0)
+                    and (best is None or node.lineno >= best.lineno)
+                ):
+                    best = node
+            if best is not None:
+                found.append((tree, best))
+        # The code came from one of the texts its cell may have been compiled
+        # from (`_cell_texts`), so from one that holds a statement there. When
+        # those differ, which is in force cannot be told by line: the pin or
+        # the kept cells' texts decide.
+        if found and len({_canonical_dump(best) for _, best in found}) == 1:
+            tree, best = found[0]
             return [(tree, [best])], False, later
     # A class body's compile sets both names on 3.13+. Assigning `__module__`
     # deletes `__firstlineno__` (a line in another module means nothing) but
@@ -3157,9 +3170,10 @@ def _notebook_entries(
         syntax nodes in them (a function's definition, a class's ``class``
         statement, see ``_class_sites``); none when its cell is not kept.
         A function is read from each text its cell may have been compiled
-        from (``_cell_texts``): one, with its definition at the code's line,
-        is exact. Several, or none holding it there, are ambiguous: a
-        constant digest for "not found" would miss every edit."""
+        from (``_cell_texts``). The code came from one of them, so from one
+        holding its definition at the code's line: when those all define it
+        alike, that definition is exact. None, or different ones, are
+        ambiguous: a constant digest for "not found" would miss every edit."""
         kind, obj, _, methods = units[uid]
         if kind == "function":
             code = obj.__code__
@@ -3170,7 +3184,10 @@ def _notebook_entries(
                 for site in (_definition_site(code, text) for text in texts)
                 if site is not None
             ]
-            return sites, len(texts) != 1 or not sites, False
+            dumps = {
+                "|".join(_canonical_dump(node) for node in nodes) for _, nodes in sites
+            }
+            return sites, len(dumps) != 1, False
         return _class_sites(obj, methods, namespace, class_texts, compiled)
 
     def own(kind: str, nodes) -> str:
@@ -3365,6 +3382,20 @@ def _warn_cells_unread(error: BaseException) -> None:
     )
 
 
+def _warn_history_unread(error: BaseException) -> None:
+    """Warn, once per run like ``_warn_cells_unread``, that the texts the
+    shell compiled could not be read, so a cell holding a ``_SPLIT_ONLY``
+    character is read as the kernel keeps it."""
+    if _HISTORY_WARNED:
+        return
+    _HISTORY_WARNED.append(True)
+    _best_effort_warning(
+        "resume/cache_dir: the shell's input history could not be read "
+        f"({_error_kind(error)}), so an edit to code in a cell holding a form "
+        "feed may go unnoticed; use a fresh working_dir after editing one."
+    )
+
+
 def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[str]]:
     """``(entries, reached, later)`` for ``notebooks`` (``{id: (namespace,
     [(key, root)])}``): the notebook entries; the project modules their
@@ -3388,8 +3419,12 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[s
     compiled: dict = {}
     try:
         # The texts `compile` saw for the cells whose kept lines are not it
-        # (`_cell_texts`), for the scan and the definitions alike.
+        # (`_cell_texts`), for the scan and the definitions alike. Without
+        # them, such a cell is read as kept, and the scan still runs.
         compiled = _compiled_texts()
+    except Exception as error:  # noqa: BLE001 - never fail the record
+        _warn_history_unread(error)
+    try:
         scan = _scan_kept_cells(compiled)
         cell_modules, cell_bindings = _kept_cell_reading(scan)
     except Exception as error:  # noqa: BLE001 - never fail the record
@@ -3574,6 +3609,7 @@ def driver_script_entries(roots) -> dict:
     _NOTEBOOK_TRUNCATION_WARNED.clear()
     _NOTEBOOK_FAILURE_WARNED.clear()
     _CELL_SCAN_WARNED.clear()
+    _HISTORY_WARNED.clear()
     _LATER_TRUNCATION_WARNED.clear()
     try:
         code: dict[str, str] = {}

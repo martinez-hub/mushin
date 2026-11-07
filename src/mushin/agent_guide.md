@@ -186,8 +186,10 @@ rules:
   bound from elsewhere), nor what an IPython input transformer changes in a
   cell, nor a cell holding a form feed, a vertical tab or another character
   that ends a line for `str.splitlines` (not a newline or a carriage return)
-  that ran inside another cell (`%%capture`) before `import mushin` (a cell
-  holding one can also re-run the cells), and a class a background thread
+  that the shell's history does not hold and mushin did not see run (one
+  `%run` runs from a notebook or an `.ipy` file, a silent one, or one run
+  inside another cell before `import mushin`; a cell holding one can also
+  re-run the cells), and a class a background thread
   or a callback makes while a cell runs may be taken for that cell's: after
   editing one, use a new `working_dir`. Taking
   the fingerprint can import an `importlib.util.LazyLoader` module, and an

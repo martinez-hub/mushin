@@ -4817,10 +4817,11 @@ def test_a_split_cell_is_read_as_compiled(kernel, history, head):
 
 @pytest.mark.parametrize("head", SPLIT_CASES)
 def test_a_split_cell_not_known_as_compiled_is_ambiguous(kernel, no_shell, head):
-    """With no text of the cell as compiled, its definition is not at its
+    """With no text of the cell as compiled, its one definition is not at its
     code's line in the kept text: ambiguous, so an edit is seen, the same
     object keeps its digest, and a re-run of the cell (a new object)
-    recomputes. A constant digest would miss every edit."""
+    recomputes. A constant digest would miss every edit. (A second
+    definition of its kind there can be taken for it: a documented limit.)"""
     _run_cells(kernel, [TASK])
     digests = []
     for k in (2, 3, 3):
@@ -4861,19 +4862,60 @@ def test_a_method_below_page_breaks_names_its_own_class(kernel, history):
     assert digests[1] == digests[2]
 
 
-def test_cells_kept_alike_are_ambiguous(kernel, history):
+def test_cells_kept_alike_that_define_it_differently_are_ambiguous(kernel, history):
     """Two stored cells that differ only where one holds such a character
-    and the other a newline keep the same lines: which one a function's code
-    came from cannot be told, so it is ambiguous (a new object recomputes)."""
+    and the other a newline keep the same lines. When both hold a definition
+    at the code's line and those differ, which one the code came from cannot
+    be told: ambiguous (a new object recomputes)."""
     _run_kept(kernel, TASK, history)
-    plain = 'S = """a\nb"""\ndef helper(a):\n    return a * 2\n'
-    split = 'S = """a\u2028b"""\ndef helper(a):\n    return a * 2\n'
+    split = 'def helper(a):\n    return a, """x\u2028y"""\n'
+    plain = 'def helper(a):\n    return a, """x\ny"""\n'
     _run_kept(kernel, plain, history)
     _run_kept(kernel, split, history)
     first = _helper(kernel)
     assert _helper(kernel) == first  # the same object
     _run_kept(kernel, split, history)
     assert _helper(kernel) != first
+
+
+def test_cells_kept_alike_where_one_lacks_it_are_exact(kernel, history):
+    """Kept alike, but the cell without the character holds no definition at
+    the code's line (its newline moved it down), so the code came from the
+    other: exact."""
+    _run_kept(kernel, TASK, history)
+    plain = 'S = """a\nb"""\ndef helper(a):\n    return a * 2\n'
+    split = 'S = """a\u2028b"""\ndef helper(a):\n    return a * 2\n'
+    _run_kept(kernel, plain, history)
+    _run_kept(kernel, split, history)
+    first = _helper(kernel)
+    _run_kept(kernel, split, history)
+    assert _helper(kernel) == first
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="__annotate_func__ is 3.14+")
+def test_a_class_s_annotations_in_cells_kept_alike_are_not_picked(kernel, history):
+    """3.14 finds a method-less class with annotations through its
+    `__annotate_func__`, like a method. In two cells kept alike whose
+    statements differ, the first text's statement is not taken for it: the
+    edit is seen."""
+    _run_kept(kernel, "def task(a):\n    return a * len(C.K)\n", history)
+    _run_kept(kernel, 'class C:\n    K: str = """a\u2028b"""\n', history)
+    assert "__annotate_func__" in vars(kernel.ns["C"])
+    before = _own(kernel, "C")
+    _run_kept(kernel, 'class C:\n    K: str = """a\nb"""\n', history)
+    assert _own(kernel, "C") != before
+
+
+def test_a_split_cell_ending_in_blank_lines_is_read_as_compiled(kernel, history):
+    """The history strips a cell's trailing newlines; the kept lines keep
+    them: the two still match."""
+    _run_kept(kernel, TASK, history)
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, f"x = 1\f\ndef helper(a):\n    return a * {k}\n\n\n", history)
+        digests.append(_helper(kernel))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
 
 
 def test_a_split_cell_s_imports_count(kernel, history, cell_imports):
@@ -4923,35 +4965,92 @@ def test_a_history_without_such_a_character_is_not_split(monkeypatch):
 
 def test_the_watch_keeps_the_texts_of_split_cells(monkeypatch):
     """The cell watch keeps the text a cell holding such a character compiles
-    as (a cell run without being stored is in no history), each once, the
-    newest ``_SPLIT_TEXTS_MAX``; a state an older ``_resume`` made gets the
-    store on its first such cell."""
+    as (a cell run without being stored is in no history): the shell's own
+    (`transformed_cell`), else the static transform's; each once, the newest
+    ``_SPLIT_TEXTS_MAX``."""
     import mushin._resume as resume
 
     shell = _HistoryShell()
     monkeypatch.setattr(resume, "_shell", lambda: shell)
     monkeypatch.setattr(resume, "_SPLIT_TEXTS_MAX", 2)
     state = resume._cell_watch()
-    del state["texts"]  # as an older `_resume` made it
     pre = shell.events.callbacks["pre_run_cell"]
     post = shell.events.callbacks["post_run_cell"]
 
-    def run(raw):
-        info = types.SimpleNamespace(raw_cell=raw)
+    def run(raw, transformed=None):
+        info = types.SimpleNamespace(raw_cell=raw, transformed_cell=transformed)
         pre(info)
         post(types.SimpleNamespace(info=info))
 
     run("x = 1\n")
-    assert "texts" not in state  # a cell without one: nothing kept
+    assert state["texts"] == {}  # a cell without one: nothing kept
     run("a = 1\f\n\n")
     run("b = 1\f\n")
     run("a = 1\f\n")  # again: the newest
-    run("c = 1\f\n")
+    run("%magic\f\n", transformed="c = 1\f\n")  # the shell's text
     assert list(state["texts"]) == ["a = 1\f", "c = 1\f"]
     assert resume._compiled_texts() == {
         "a = 1": ["a = 1\f"],
         "c = 1": ["c = 1\f"],
     }
+
+
+def test_a_cell_whose_text_raises_still_starts(monkeypatch):
+    """An info whose `raw_cell` raises still starts a cell, with no text, so
+    a class made inside it is not pinned to the cell around it."""
+    import mushin._resume as resume
+
+    class Info:
+        @property
+        def raw_cell(self):
+            raise RuntimeError("no text")
+
+    shell = _FakeShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    info = Info()
+    shell.events.callbacks["pre_run_cell"](info)
+    assert state["running"] == [(info, None)]
+
+
+def test_a_watch_without_the_store_reads_the_history(kernel, monkeypatch):
+    """A watch an older `_resume` registered keeps no texts (its callbacks
+    stay registered across a reload): the history alone is read."""
+    import mushin._resume as resume
+
+    shell = _HistoryShell()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    state = resume._cell_watch()
+    del state["texts"]
+    history = shell.history_manager.input_hist_parsed
+    _run_kept(kernel, TASK, history)
+    digests = []
+    for k in (2, 3, 3):
+        _run_kept(kernel, f"x = 1\f\ndef helper(a):\n    return a * {k}\n", history)
+        digests.append(_helper(kernel))
+    assert digests[0] != digests[1]
+    assert digests[1] == digests[2]
+
+
+def test_a_history_that_cannot_be_read_leaves_the_scan(
+    kernel, monkeypatch, cell_imports
+):
+    """A shell whose history raises: a warning, and the kept cells' imports
+    are still read."""
+    import mushin._resume as resume
+
+    class Broken(_FakeShell):
+        @property
+        def history_manager(self):
+            raise RuntimeError("no history")
+
+    shell = Broken()
+    monkeypatch.setattr(resume, "_shell", lambda: shell)
+    kernel.run(f"import {SUBPKG}.sub\n")
+    kernel.run("def task(a):\n    return a\n")
+    with pytest.warns(UserWarning, match="input history could not be read"):
+        files = _files(kernel, "task", allow_failure=True)
+    assert f"{SUBPKG}.sub (file)" in files
 
 
 SPLIT_SCRIPT = """
