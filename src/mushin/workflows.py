@@ -148,55 +148,32 @@ def _unquote(value: Any) -> Any:
     return value
 
 
-def _check_sweeps_reach_their_jobs(overrides: list[str], axes: dict) -> None:
-    """Raise if a value of a sweep in ``axes`` (name -> its parsed values)
-    would reach its job as another value.
+def _choice_reaches_jobs(sweep: str, values: Sequence) -> bool:
+    """Whether each job of the ``choice(...)`` override ``sweep`` gets its
+    value unchanged.
 
-    Hydra's sweeper writes each job's value back into an override with
-    ``sweep_string_iterator()``, and the job parses that again. A string that
-    lost its quotes on the way, as in ``choice('true')``, is read back as the
-    bool ``True``: the task gets a value the user did not write, and its cell
-    keys no grid coordinate (#319). Values are compared by repr (which tells
-    ``'1'`` from ``1`` and ``1`` from ``1.0``), as a multiset, since
-    ``shuffle(...)`` reorders the jobs.
+    Hydra's ``choice()`` drops the quotes of a top-level string, and its
+    sweeper writes each job's override from the bare value, which the job
+    parses again: ``'true'`` arrives as the bool ``True`` and ``'1'`` as the
+    int ``1`` (#319). Each job's override is built and read back here as the
+    sweeper and the job will do it. Only a sweep with a top-level string can
+    change, so any other answers True without parsing.
     """
+    if not any(isinstance(v, str) for v in values):
+        return True
     parser = OverridesParser.create()
-    for override in parser.parse_overrides(overrides=overrides):
+    try:
+        override = parser.parse_override(sweep)
         key = override.get_key_element()
-        name = key.split("+")[-1]  # as `_parse_overrides` names it
-        if name not in axes or not override.is_sweep_override():
-            continue
-        grid = list(axes[name])
-        try:
-            written = list(override.sweep_string_iterator())
-            jobs = [parser.parse_override(f"{key}={s}").value() for s in written]
-        except Exception as e:  # noqa: BLE001 - any failure means a changed value
-            raise ValueError(
-                f"`{name}`: Hydra cannot write its sweep values back into the "
-                f"jobs' overrides ({type(e).__name__}: {e})."
-            ) from e
-
-        job_tags = [repr(j) for j in jobs]
-        grid_tags = [repr(g) for g in grid]
-        lost = [g for g, t in zip(grid, grid_tags, strict=True) if t not in job_tags]
-        if not lost:
-            continue
+        sent = [_unquote(v) for v in override.value().list]  # type: ignore[union-attr]
         got = [
-            (s, j)
-            for s, j, t in zip(written, jobs, job_tags, strict=True)
-            if t not in grid_tags
+            parser.parse_override(f"{key}={s}").value()
+            for s in override.sweep_string_iterator()
         ]
-        pairs = "; ".join(
-            f"{g!r} would reach the task as {j!r} (its job's override is `{key}={s}`)"
-            for g, (s, j) in zip(lost, got, strict=False)
-        )
-        raise ValueError(
-            f"`{name}`: a sweep value would reach the task changed: {pairs}. "
-            "Hydra drops the quotes of a string in `choice(...)`. For a single "
-            "value, pass it as a fixed value instead of a one-value multirun; "
-            "in a raw override, list the values with commas instead of "
-            "`choice(...)`."
-        )
+    except Exception:  # noqa: BLE001 - a string Hydra cannot write back bare
+        # (a quote, non-ASCII text) is a string that needs its quotes kept.
+        return False
+    return [repr(v) for v in sent] == [repr(v) for v in got]
 
 
 def _cfg_missing_or_none(cfg, key: str) -> bool:
@@ -1917,20 +1894,21 @@ class BaseWorkflow:
                         "distinct values, or add a separate axis (e.g. seed) for "
                         "repeat trials."
                     )
-                # Each element is serialized/quoted so that values containing
-                # commas, spaces, or '=' are not silently re-split by Hydra's
-                # override parser. Several values form a comma sweep, `k=a,b`:
-                # in `choice(a,b)` Hydra drops the quotes of a top-level string
-                # and writes it back bare into the job, which re-reads 'true'
-                # as a bool and '1' as an int (#319); a comma sweep keeps them.
-                # One value needs `choice(a)`, Hydra's only one-value sweep
-                # (so a length-1 multirun stays a swept dimension); the check
-                # in `run` refuses one whose job would get another value.
+                # Build a Hydra `choice(...)` sweep rather than a comma-joined
+                # string. `choice(...)` always yields a sweep – even for a
+                # single element (so length-1 multiruns remain swept dimensions)
+                # – and each element is serialized/quoted so that values
+                # containing commas, spaces, or '=' are not silently re-split by
+                # Hydra's override parser.
                 choices = ",".join(_to_override_element(item) for item in v)
-                if len(v) > 1:
-                    launch_overrides.append(f"{prefix}{k}={choices}")
-                else:
-                    launch_overrides.append(f"{prefix}{k}=choice({choices})")
+                sweep = f"{prefix}{k}=choice({choices})"
+                if len(v) > 1 and not _choice_reaches_jobs(sweep, v):
+                    # A comma sweep keeps each string quoted into its job
+                    # (#319). Only such sweeps use it, so every other sweep's
+                    # job overrides, and Hydra's `override_dirname` built from
+                    # them, stay as they were.
+                    sweep = f"{prefix}{k}={choices}"
+                launch_overrides.append(sweep)
             elif isinstance(v, hydra_list):
                 # hydra_list serializes itself to Hydra list syntax; a single
                 # non-swept list value passed to one job.
@@ -2019,13 +1997,6 @@ class BaseWorkflow:
                     "distinct values, or add a separate axis (e.g. seed) for "
                     "repeat trials."
                 )
-
-        # Each job gets its value as Hydra's sweeper writes it back into an
-        # override, which the job parses again. A value that reads back as
-        # something else reaches the task changed and keys no grid cell (#319),
-        # so refuse it before launch. This parses the overrides a second time:
-        # the check needs Hydra's `Override` objects, not their values.
-        _check_sweeps_reach_their_jobs(launch_overrides, axes)
 
         # `sample=` bounds what actually COMPUTES; the dry-run preview reports
         # that. The gate below still fires on the full grid: Hydra enumerates
