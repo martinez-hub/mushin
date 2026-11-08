@@ -10,21 +10,12 @@ attack in every document.
 
 from __future__ import annotations
 
-import importlib.util
 import re
-import sys
 import tempfile
 from pathlib import Path
 
+import prompt_injection_eval as inj
 import pytest
-
-_SPEC = importlib.util.spec_from_file_location(
-    "prompt_injection_eval",
-    Path(__file__).resolve().parent.parent / "examples" / "prompt_injection_eval.py",
-)
-inj = importlib.util.module_from_spec(_SPEC)
-sys.modules["prompt_injection_eval"] = inj
-_SPEC.loader.exec_module(inj)
 
 
 def test_every_document_actually_carries_an_attack():
@@ -77,17 +68,10 @@ def test_demo_runs_and_surfaces_the_blind_spot(capsys):
     assert flagged == ["authority"], out  # the one shape 'hardened' is weak against
     assert "would OTHER ATTACKS agree?" in out
 
-
-def test_demo_reports_the_few_clusters_warning_instead_of_hiding_it(capsys):
-    """Five attack shapes is a five-sample problem, and mushin says so.
-
-    The demo used to wrap compare_llms in a blanket `simplefilter("ignore")`. Once
-    `clusters=` was added that filter started swallowing mushin's own "this
-    interval is unreliable" warning — while the demo printed the interval.
-    """
-    pytest.importorskip("scipy")
-    assert inj.main(["--demo"]) == 0
-    out = capsys.readouterr().out
+    # Five attack shapes is a five-sample problem, and mushin says so. The demo
+    # used to wrap compare_llms in a blanket `simplefilter("ignore")`. Once
+    # `clusters=` was added that filter started swallowing mushin's own "this
+    # interval is unreliable" warning, while the demo printed the interval.
     assert "mushin warns" in out
     assert "only 5 clusters" in out
     assert "add attack SHAPES" in out

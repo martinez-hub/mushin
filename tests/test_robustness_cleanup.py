@@ -90,7 +90,7 @@ def test_resume_contextvar_not_leaked_when_status_write_fails(tmp_path, monkeypa
 
 
 # --- resource / robustness --------------------------------------------------
-def test_plot_does_not_leak_figure_on_exception():
+def test_plot_does_not_leak_figure_on_exception(tmp_path):
     import matplotlib.pyplot as plt
 
     from mushin.workflows import RobustnessCurve
@@ -101,7 +101,7 @@ def test_plot_does_not_leak_figure_on_exception():
             return dict(result=100 - epsilon**2)
 
     wf = RC()
-    wf.run(epsilon=[0, 1, 2])
+    wf.run(epsilon=[0, 1, 2], working_dir=str(tmp_path / "s"))
     before = len(plt.get_fignums())
     for _ in range(3):
         with pytest.raises(Exception):

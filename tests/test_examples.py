@@ -1,17 +1,26 @@
+import importlib
 from pathlib import Path
 
 import pytest
 
 
 @pytest.mark.usefixtures("cleandir")
-def test_build_dataset_returns_labeled_grid():
-    import sweep_to_dataset as ex
+@pytest.mark.parametrize(
+    ("module", "axis", "values"),
+    [
+        pytest.param("sweep_to_dataset", "lr", "LEARNING_RATES", id="sweep_to_dataset"),
+        # The framework-agnostic sweep layer wraps a scikit-learn model (no torch).
+        pytest.param("sklearn_sweep", "C", "C_VALUES", id="sklearn_sweep"),
+    ],
+)
+def test_build_dataset_returns_labeled_grid(module, axis, values):
+    ex = importlib.import_module(module)
 
     ds = ex.build_dataset()
 
     # dims are the swept parameters; data var is the returned metric
-    assert set(ds.dims) == {"lr", "seed"}
-    assert ds.sizes == {"lr": len(ex.LEARNING_RATES), "seed": len(ex.SEEDS)}
+    assert set(ds.dims) == {axis, "seed"}
+    assert ds.sizes == {axis: len(getattr(ex, values)), "seed": len(ex.SEEDS)}
     assert "accuracy" in ds.data_vars
     # accuracy is a probability in [0, 1]
     assert float(ds["accuracy"].min()) >= 0.0
@@ -24,20 +33,6 @@ def test_main_writes_plot():
 
     ex.main()
     assert Path("sweep_accuracy.png").exists()
-
-
-@pytest.mark.usefixtures("cleandir")
-def test_sklearn_sweep_returns_labeled_grid():
-    # The framework-agnostic sweep layer wraps a scikit-learn model (no torch).
-    import sklearn_sweep as ex
-
-    ds = ex.build_dataset()
-
-    assert set(ds.dims) == {"C", "seed"}
-    assert ds.sizes == {"C": len(ex.C_VALUES), "seed": len(ex.SEEDS)}
-    assert "accuracy" in ds.data_vars
-    assert float(ds["accuracy"].min()) >= 0.0
-    assert float(ds["accuracy"].max()) <= 1.0
 
 
 def test_compare_classifiers_example_runs_on_synthetic():
@@ -119,8 +114,6 @@ def test_parallel_sweep_runs_out_of_process(tmp_path):
     # decorated task cleanly (matching real usage, not an in-process import).
     import subprocess
     import sys
-
-    import pytest
 
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
 

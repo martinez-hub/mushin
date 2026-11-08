@@ -37,25 +37,34 @@ def test_submitit_slurm_config_rejects_bad_inputs():
         submitit_slurm_config(nodes=1, gpus_per_node=4, tasks_per_node=1)
 
 
-def test_seed_everything_per_rank_offsets_by_global_rank(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("env", "base", "expected"),
+    [
+        pytest.param({"SLURM_PROCID": "3"}, 1000, 1003, id="slurm-procid"),
+        # RANK takes precedence over SLURM_PROCID
+        pytest.param({"SLURM_PROCID": "3", "RANK": "5"}, 1000, 1005, id="rank-wins"),
+        pytest.param({}, 42, 42, id="defaults-to-rank-zero"),
+        # Plain single-node multi-GPU (HydraDDP) exports only LOCAL_RANK: the
+        # per-rank seed must still differ per process, not silently collapse to
+        # base+0 on every rank.
+        pytest.param({"LOCAL_RANK": "1"}, 100, 101, id="local-rank-fallback"),
+    ],
+)
+def test_seed_everything_per_rank_offsets_by_global_rank(
+    monkeypatch, tmp_path, env, base, expected
+):
     from mushin.lightning import seed_everything_per_rank
 
     monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
-    monkeypatch.delenv("RANK", raising=False)
-    monkeypatch.setenv("SLURM_PROCID", "3")
-    assert seed_everything_per_rank(1000) == 1003  # base + global rank
-
-    monkeypatch.setenv("RANK", "5")  # RANK takes precedence
-    assert seed_everything_per_rank(1000) == 1005
-
-
-def test_seed_everything_per_rank_defaults_rank_zero(monkeypatch, tmp_path):
-    from mushin.lightning import seed_everything_per_rank
-
-    monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
-    monkeypatch.delenv("RANK", raising=False)
-    monkeypatch.delenv("SLURM_PROCID", raising=False)
-    assert seed_everything_per_rank(42) == 42
+    for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    # Lightning's seed_everything writes these into os.environ; setting them
+    # through monkeypatch first restores them after the test.
+    monkeypatch.setenv("PL_GLOBAL_SEED", "0")
+    monkeypatch.setenv("PL_SEED_WORKERS", "0")
+    assert seed_everything_per_rank(base) == expected  # base + global rank
 
 
 @pytest.mark.cluster
@@ -93,19 +102,6 @@ def test_seed_everything_per_rank_persists_seed(monkeypatch, tmp_path):
     monkeypatch.setenv("RANK", "0")
     assert seed_everything_per_rank(1000) == 1000
     assert json.loads((tmp_path / "mushin_seed.json").read_text())["seed"] == 1000
-
-
-def test_seed_per_rank_falls_back_to_local_rank(monkeypatch, tmp_path):
-    """Plain single-node multi-GPU (HydraDDP) exports only LOCAL_RANK — the
-    per-rank seed must still differ per process, not silently collapse to
-    base+0 on every rank."""
-    from mushin.lightning._cluster import seed_everything_per_rank
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("RANK", raising=False)
-    monkeypatch.delenv("SLURM_PROCID", raising=False)
-    monkeypatch.setenv("LOCAL_RANK", "1")
-    assert seed_everything_per_rank(100) == 101
 
 
 def test_rank_from_env_survives_malformed_rank(monkeypatch):

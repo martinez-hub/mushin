@@ -47,27 +47,20 @@ def test_the_guide_ships_as_ascii_markdown():
 
 
 def test_python_m_mushin_guide(capsys):
-    from mushin.__main__ import _version, main
+    from mushin.__main__ import _version, guide_text, main
 
     assert main(["guide"]) == 0
-    assert capsys.readouterr().out == f"<!-- mushin {_version()} -->\n" + _text()
+    out = capsys.readouterr().out
+    assert out == f"<!-- mushin {_version()} -->\n" + _text()
+    # The MCP prompt and resource return guide_text(); it must be exactly what
+    # `python -m mushin guide` prints, so the two can never drift.
+    assert out == guide_text()
 
     assert main(["guide", "--path"]) == 0
     assert Path(capsys.readouterr().out.strip()).is_file()
 
     assert main([]) == 0
     assert "guide" in capsys.readouterr().out
-
-
-def test_guide_text_is_what_the_command_prints(capsys):
-    """The MCP prompt and resource return guide_text(); it must be exactly
-    what `python -m mushin guide` prints, so the two can never drift."""
-    from mushin.__main__ import guide_text, main
-
-    assert main(["guide"]) == 0
-    assert capsys.readouterr().out == guide_text()
-    assert guide_text().startswith("<!-- mushin ")
-    assert guide_text().endswith(_text())
 
 
 def test_the_guide_prints_on_a_cp1252_pipe():

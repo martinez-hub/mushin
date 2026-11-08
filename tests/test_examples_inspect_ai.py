@@ -10,23 +10,13 @@ questions rather than failing.
 
 from __future__ import annotations
 
-import importlib.util
 import re
-import sys
 import types
 import warnings
-from pathlib import Path
 
+import inspect_ai_compare as adapter
 import numpy as np
 import pytest
-
-_SPEC = importlib.util.spec_from_file_location(
-    "inspect_ai_compare",
-    Path(__file__).resolve().parent.parent / "examples" / "inspect_ai_compare.py",
-)
-adapter = importlib.util.module_from_spec(_SPEC)
-sys.modules["inspect_ai_compare"] = adapter
-_SPEC.loader.exec_module(adapter)
 
 
 def _log(model, rows, scorer="accuracy"):
@@ -40,6 +30,14 @@ def _log(model, rows, scorer="accuracy"):
     return types.SimpleNamespace(
         eval=types.SimpleNamespace(model=model), samples=samples
     )
+
+
+def _report_out(capsys, scores):
+    """What ``adapter.report(scores)`` prints, its warnings silenced."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adapter.report(scores)
+    return capsys.readouterr().out
 
 
 def test_samples_are_aligned_by_id_not_position():
@@ -162,10 +160,7 @@ def test_report_handles_a_single_run(capsys):
         "a": (rng.random((1, 40)) < 0.8).astype(float),
         "b": (rng.random((1, 40)) < 0.5).astype(float),
     }
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert "only one epoch" in out  # re-run question unanswerable
     assert "would OTHER QUESTIONS agree?" in out  # item question still answered
 
@@ -194,10 +189,7 @@ def test_ci_is_oriented_to_the_announced_lead(capsys):
     scores, _ = adapter.scores_from_logs(
         [_rows("weak", bonus=-0.25, seed=1), _rows("strong", bonus=0.25, seed=2)]
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert "strong leads weak" in out
     ci = out.split("95% CI [")[1].split("]")[0]
     assert not ci.strip().startswith("-"), f"interval contradicts the lead: {ci}"
@@ -224,8 +216,7 @@ def test_three_models_print_the_corrected_p_values_on_BOTH_axes(capsys):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         expected = compare_scores(scores)
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert out.count("Is that real?") == 3
 
     corrected = [
@@ -274,8 +265,7 @@ def test_two_models_leave_the_p_values_uncorrected_and_say_nothing(capsys):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         expected = compare_scores(scores)
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert "Holm-corrected" not in out
     row = expected.comparisons.iloc[0]
     assert row["item_p_corrected"] == pytest.approx(row["item_p"])
@@ -303,10 +293,7 @@ def test_non_fractional_scores_are_not_printed_as_percentages(capsys):
         "a": 7.0 + rng.normal(scale=0.4, size=(4, 30)),
         "b": 6.0 + rng.normal(scale=0.4, size=(4, 30)),
     }
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert "score units" in out
     assert "points" not in out
     # "95% CI" is the only legitimate percent sign; no SCORE may be rendered as one.
@@ -325,10 +312,7 @@ def test_an_unmeasurable_check_is_reported_as_unproven_not_as_a_refutation(capsy
         # ...but the item axis is decisive.
         "other": items + rng.normal(scale=0.01, size=(4, 40)),
     }
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert "no re-run distribution" in out
     assert "holds up" in out
     assert "UNPROVEN" in out
@@ -340,10 +324,8 @@ def test_a_degenerate_item_bootstrap_is_not_blamed_on_missing_scores(capsys):
     pytest.importorskip("scipy")
     rng = np.random.default_rng(2)
     base = rng.random((4, 30))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        adapter.report({"a": base + 0.1, "b": base})  # identical gap on every item
-    out = capsys.readouterr().out
+    # an identical gap on every item
+    out = _report_out(capsys, {"a": base + 0.1, "b": base})
     assert "every question shows the same gap" in out
     assert "per-question scores unavailable" not in out
 
@@ -353,10 +335,7 @@ def test_masked_seed_test_is_not_blamed_on_a_single_epoch(capsys):
     pytest.importorskip("scipy")
     const = _log("const", [(f"q{i}", ep, 1.0) for ep in (1, 2, 3) for i in range(30)])
     scores, _ = adapter.scores_from_logs([const, _rows("varies", seed=4)])
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        adapter.report(scores)
-    out = capsys.readouterr().out
+    out = _report_out(capsys, scores)
     assert "no re-run distribution" in out
     assert "only one epoch" not in out
 

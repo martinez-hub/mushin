@@ -26,6 +26,9 @@ def test_cache_dir_reuses_cells_across_working_dirs(tmp_path):
         x=multirun([1, 2, 3]), cache_dir=str(cache), working_dir=str(tmp_path / "a")
     )
     assert calls["n"] == 3
+    # the first run populated the cache: one entry per cell
+    entries = [d for d in cache.iterdir() if d.is_dir()]
+    assert len(entries) == 3
 
     calls["n"] = 0
     wf2 = W()  # fresh working_dir, same cache
@@ -98,18 +101,3 @@ def test_cache_dir_misses_on_changed_config(tmp_path):
     wf2.run(x=multirun([1, 2]), cache_dir=str(cache), working_dir=str(tmp_path / "b"))
     # x=2 recomputed at scale=2 -> 4.0, not the cached scale=1 result of 2.0
     assert float(wf2.to_xarray()["v"].sel(x=2)) == 4.0
-
-
-def test_cache_dir_is_populated_after_a_run(tmp_path):
-    cache = tmp_path / "cache"
-
-    class W(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(x):
-            return dict(v=float(x))
-
-    W().run(
-        x=multirun([1, 2, 3]), cache_dir=str(cache), working_dir=str(tmp_path / "a")
-    )
-    entries = [d for d in cache.iterdir() if d.is_dir()]
-    assert len(entries) == 3

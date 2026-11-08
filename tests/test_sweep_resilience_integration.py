@@ -226,9 +226,7 @@ def test_resume_of_legacy_sweep_without_status_sidecars(tmp_path):
     # manifest + metrics sidecars but NO per-cell status sidecars. Resume must
     # still skip completed cells (via the legacy-manifest seed), not recompute all.
 
-    from mushin import multirun
     from mushin._resume import STATUS_FILE
-    from mushin.workflows import MultiRunMetricsWorkflow
 
     calls = {"n": 0}
 
@@ -261,9 +259,6 @@ class _OOPWorkflow(MultiRunMetricsWorkflow):
 def test_sweep_runs_out_of_process_with_joblib(tmp_path):
     # The picklable _TaskRunner must survive being shipped to a separate worker
     # process by the joblib (loky) launcher, and fail-soft must still work.
-    import numpy as np
-    import pytest
-
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
 
     wf = _OOPWorkflow()
