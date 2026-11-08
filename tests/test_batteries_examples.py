@@ -33,54 +33,55 @@ def test_run_walkthrough():
     assert sig["p_value"].notna().any(), "significant rows have NaN p_value"
 
 
-@pytest.mark.parametrize(
-    ("toy", "metrics", "extras"),
-    [
-        pytest.param(
-            "run_classification",
-            ["accuracy", "f1", "precision", "recall", "auroc", "ece"],
-            [],
-            id="classification",
-        ),
-        pytest.param(
-            "run_segmentation",
-            ["miou", "dice", "pixel_acc", "precision", "recall"],
-            [],
-            id="segmentation",
-        ),
-        pytest.param(
-            "run_detection",
-            ["map", "map_50", "map_75", "mar_100", "iou", "giou", "ciou", "diou"],
-            ["torchvision", "pycocotools"],
-            id="detection",
-        ),
-        pytest.param(
-            "run_regression",
-            ["mse", "mae", "rmse", "r2", "pearson", "spearman"],
-            [],
-            id="regression",
-        ),
-        pytest.param(
-            "run_retrieval",
-            ["retrieval_map", "ndcg", "mrr", "precision", "recall"],
-            [],
-            id="retrieval",
-        ),
-        pytest.param(
-            "run_image_quality",
-            ["ssim", "psnr", "ms_ssim", "lpips"],
-            ["torchvision", "lpips"],
-            id="image_quality",
-        ),
-        pytest.param("run_audio", ["si_sdr", "si_snr", "stoi"], ["pystoi"], id="audio"),
-    ],
-)
-def test_run_battery_toy(toy, metrics, extras):
-    # In the body, not at module level: a module-level importorskip would skip
-    # every toy when one optional extra is absent.
-    for module in extras:
-        pytest.importorskip(module)
-    result = getattr(batteries, toy)()
+def test_run_classification():
+    result = batteries.run_classification()
     assert isinstance(result, BenchmarkResult)
-    for name in metrics:
+    for name in ["accuracy", "f1", "precision", "recall", "auroc", "ece"]:
+        assert name in result.data.data_vars
+
+
+def test_run_segmentation():
+    result = batteries.run_segmentation()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["miou", "dice", "pixel_acc", "precision", "recall"]:
+        assert name in result.data.data_vars
+
+
+def test_run_detection():
+    pytest.importorskip("torchvision")
+    pytest.importorskip("pycocotools")
+    result = batteries.run_detection()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["map", "map_50", "map_75", "mar_100", "iou", "giou", "ciou", "diou"]:
+        assert name in result.data.data_vars
+
+
+def test_run_regression():
+    result = batteries.run_regression()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["mse", "mae", "rmse", "r2", "pearson", "spearman"]:
+        assert name in result.data.data_vars
+
+
+def test_run_retrieval():
+    result = batteries.run_retrieval()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["retrieval_map", "ndcg", "mrr", "precision", "recall"]:
+        assert name in result.data.data_vars
+
+
+def test_run_image_quality():
+    pytest.importorskip("torchvision")
+    pytest.importorskip("lpips")
+    result = batteries.run_image_quality()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["ssim", "psnr", "ms_ssim", "lpips"]:
+        assert name in result.data.data_vars
+
+
+def test_run_audio():
+    pytest.importorskip("pystoi")
+    result = batteries.run_audio()
+    assert isinstance(result, BenchmarkResult)
+    for name in ["si_sdr", "si_snr", "stoi"]:
         assert name in result.data.data_vars
