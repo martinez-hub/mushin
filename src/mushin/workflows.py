@@ -20,7 +20,7 @@ from typing import (
 
 import numpy as np
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from hydra.core.override_parser.types import QuotedString
+from hydra.core.override_parser.types import Quote, QuotedString
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._launch import _NotSet
@@ -69,10 +69,10 @@ def _identity(x: T1) -> T1:
 def _to_override_element(item: Any) -> str:
     """Serialize a single multirun element to Hydra override-grammar syntax.
 
-    Booleans/numbers are emitted unquoted; strings are single-quoted (with
-    embedded single-quotes escaped) so that values containing commas, spaces,
-    or '=' round-trip exactly through Hydra's override parser; lists/tuples are
-    emitted recursively in Hydra's bracketed list syntax.
+    Booleans/numbers are emitted unquoted; strings are single-quoted so that
+    values containing commas, spaces, or '=' round-trip exactly through Hydra's
+    override parser; lists/tuples are emitted recursively in Hydra's bracketed
+    list syntax.
     """
     # Unwrap a NumPy/torch 0-d scalar (e.g. from ``np.arange`` or RobustnessCurve's
     # epsilon array) to its Python scalar first, so a swept number is emitted
@@ -88,9 +88,7 @@ def _to_override_element(item: Any) -> str:
     if isinstance(item, (int, float)):
         return str(item)
     if isinstance(item, str):
-        # Escape backslashes first (Hydra's quoted-string grammar treats '\' as
-        # an escape char), then single-quotes, so the value round-trips.
-        return "'" + item.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        return _quoted(item)
     if isinstance(item, (list, tuple)):
         return "[" + ",".join(_to_override_element(x) for x in item) + "]"
     if isinstance(item, Mapping):
@@ -103,7 +101,27 @@ def _to_override_element(item: Any) -> str:
             + "}"
         )
     # Fall back to a quoted string representation for any other type.
-    return "'" + str(item).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return _quoted(str(item))
+
+
+def _quoted(text: str) -> str:
+    """``text`` as a single-quoted Hydra string for an override.
+
+    Hydra's grammar unescapes a backslash only where it precedes a quote, so
+    doubling every backslash (as this did) reached the task doubled (#319):
+    ``C:\\data`` arrived as ``C:\\\\data``. Hydra's own writer escapes the
+    quotes and only the backslashes that precede one.
+
+    A string holding ``${`` is an interpolation, which OmegaConf parses again
+    with backslash escapes of its own: a backslash before ``${`` escapes it,
+    and inside one a backslash escapes the next character. The doubling undid
+    most of those, so a Windows
+    ``outputs\\${now:%Y}`` or a ``${oc.env:X,\\\\server\\share}`` default
+    resolved as written. Such a string keeps that form, exactly as before; the
+    task gets what it always did."""
+    if "${" in text:
+        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return QuotedString(text=text, quote=Quote.single).with_quotes()
 
 
 def _scalar_repr(item: Any) -> Any:
@@ -1444,7 +1462,7 @@ class BaseWorkflow:
         output = {}
 
         for override in parsed_overrides:
-            param_name = override.get_key_element()
+            param_name = override.get_key_element().split("+")[-1]
             val = override.value()
             if override.is_sweep_override():
                 if hasattr(val, "list"):  # ChoiceSweep (a Glob has no .list)
@@ -1452,18 +1470,18 @@ class BaseWorkflow:
                 elif hasattr(val, "range"):  # RangeSweep: discrete -> a grid axis
                     val = multirun(list(val.range()))  # type: ignore
                 else:
-                    # e.g. IntervalSweep: continuous Bayesian-sweeper syntax
-                    # cannot form the Cartesian grid to_xarray assembles.
+                    # An IntervalSweep (continuous, for Bayesian sweepers)
+                    # cannot form the Cartesian grid to_xarray assembles, and
+                    # a Glob picks config-group options this parser cannot see.
                     raise ValueError(
                         f"unsupported sweep override for {param_name!r}: "
                         f"{type(val).__name__}. mushin assembles a Cartesian "
-                        "grid, so sweep axes must be discrete: use "
+                        "grid from the values an override lists: use "
                         "`param=a,b,c`, `choice(...)`, or `range(...)`; "
-                        "`interval(...)`/adaptive-sweeper syntax is not "
-                        "supported."
+                        "`glob(...)`, `interval(...)` and adaptive-sweeper "
+                        "syntax are not supported."
                     )
 
-            param_name = param_name.split("+")[-1]
             output[param_name] = val
 
         return output

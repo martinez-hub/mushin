@@ -174,6 +174,73 @@ def test_a_base_workflow_sweep_passes_the_duplicate_check(tmp_path):
         W().run(a=multirun(["1", 1]), dry_run=True)
 
 
+class _Seen(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a, b=""):
+        return dict(a_repr=repr(a), b_repr=repr(b))
+
+
+def test_backslashes_reach_the_task_unchanged(tmp_path):
+    """A backslash in a string, swept or fixed, is not doubled on the way to
+    the task (#319)."""
+    wf = _run(tmp_path, _Seen, a=multirun(["a\\b", "C:\\dir\\"]), b="C:\\data")
+    ds = wf.to_xarray()
+    assert [str(c) for c in ds["a"].values] == ["a\\b", "C:\\dir\\"]
+    assert [str(r) for r in ds["a_repr"].values] == [repr("a\\b"), repr("C:\\dir\\")]
+    assert {str(r) for r in ds["b_repr"].values} == {repr("C:\\data")}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "out\\${now:%Y}",
+        "a\\\\${x}",
+        "${oc.env:X,\\\\fs\\share}",
+        "${x}\\y",
+        "${x}'s",
+    ],
+)
+def test_an_interpolation_string_is_written_as_before(text):
+    """A string holding ``${`` is parsed again by OmegaConf, with backslash
+    escapes of its own that doubling every backslash undid, so it keeps
+    exactly the form it always had; only other strings changed (#319)."""
+    from mushin.workflows import _to_override_element
+
+    before = "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    assert _to_override_element(text) == before
+
+
+def test_interpolations_with_backslashes_resolve_as_written(tmp_path, monkeypatch):
+    """A Windows working_dir ``runs\\${now:%Y}`` keeps its separator and its
+    interpolation (one backslash there would escape it, naming a directory
+    ``${now:%Y}``), a UNC default in ``${oc.env:...}`` keeps both leading
+    backslashes, and a path value that is not a str is quoted like one."""
+    from pathlib import PureWindowsPath
+
+    from mushin.workflows import _to_override_element
+
+    assert _to_override_element(PureWindowsPath("C:/data")) == "'C:\\data'"
+
+    monkeypatch.delenv("MUSHIN_TEST_UNSET", raising=False)
+    wf = _Seen()
+    wf.run(
+        a=multirun(["x", "y"]),
+        b="${oc.env:MUSHIN_TEST_UNSET,\\\\fileserver\\datasets}",
+        working_dir=str(tmp_path / "runs") + "\\${now:%Y}",
+    )
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == ["'x'", "'y'"]
+    assert {str(r) for r in ds["b_repr"].values} == {repr("\\\\fileserver\\datasets")}
+    assert not [p for p in tmp_path.rglob("*") if "${" in p.name]
+
+
+def test_a_glob_sweep_is_refused_by_name():
+    """A glob sweep picks config-group options; the error says glob is not
+    supported and names the param without its `+`."""
+    with pytest.raises(ValueError, match=r"for 'a': Glob\..*`glob\(\.\.\.\)`"):
+        MultiRunMetricsWorkflow._parse_overrides(["+a=glob(*)"])
+
+
 def test_combo_key_is_injective_across_delimiters():
     from mushin._sweep_io import combo_key
 

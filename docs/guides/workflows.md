@@ -140,12 +140,19 @@ list of values, and every combination is one cell.
   option *name*.
 - **`range(1,5)`-style overrides** (e.g. in a sweep dir you re-load) expand to
   their discrete values.
+- **A swept string that reads as another type**, such as `"true"`, `"null"` or
+  `"1"` in `multirun(["true", "false"])`, can reach the task as that type
+  (`True`, `None`, `1`), and its cell can be NaN in the dataset: Hydra writes
+  each job's value without its quotes. Sweep the values as the type they read
+  as (`multirun([True, False])`), or pass a single one as a fixed value
+  (`flag="true"`), which keeps its quotes.
 - **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
   than producing an all-NaN dataset. To use a searcher, run it as a separate
   step and feed the winners to a mushin grid; see
-  [Hyperparameter search](#hyperparameter-search).
+  [Hyperparameter search](#hyperparameter-search). A `glob(...)` sweep of
+  config-group options is not supported either; list the options instead.
 
 ## Using mushin alongside your experiment tracker
 
