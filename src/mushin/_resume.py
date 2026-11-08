@@ -179,9 +179,7 @@ def resolved_config_hash(data) -> str | None:
         payload = json.dumps(data, sort_keys=True, default=str)
     except Exception:  # noqa: BLE001 - unserializable config -> no guard
         return None
-    import hashlib
-
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return _short_hash(payload.encode())
 
 
 def code_fingerprint(fn) -> str | None:
@@ -203,9 +201,7 @@ def code_fingerprint(fn) -> str | None:
         src = inspect.getsource(target)
     except (OSError, TypeError):
         return None
-    import hashlib
-
-    return hashlib.sha256(src.encode()).hexdigest()[:16]
+    return _short_hash(src.encode())
 
 
 def _short_hash(data: bytes) -> str:
@@ -268,7 +264,6 @@ def _installed_roots() -> dict[str, tuple[Path, ...]]:
     reading the metadata of every one cost a fifth of a second in every
     process. Read once per process."""
     import importlib.metadata as md
-    import json
 
     interpreter = _foreign_roots()
     by_name: dict[str, set[Path]] = {}
@@ -554,9 +549,6 @@ def _strip_tree(tree, main_guards: bool = True):
     guards: in a driver script they run, in its helpers too."""
     import ast
 
-    def is_main_guard(node) -> bool:
-        return main_guards and _is_main_guard(node)
-
     def is_doc(node) -> bool:
         return (
             isinstance(node, ast.Expr)
@@ -567,7 +559,7 @@ def _strip_tree(tree, main_guards: bool = True):
     def clean(body: list) -> list:
         out = []
         for i, node in enumerate(body):
-            if is_main_guard(node):
+            if main_guards and _is_main_guard(node):
                 out.extend(clean(node.orelse))  # the else branch runs on import
                 continue
             if i == 0 and is_doc(node):
@@ -1122,12 +1114,10 @@ def _refs(objects) -> tuple:
     """Weak references to a load's identity objects where they allow one, so
     the baseline never keeps a script's namespace (its datasets, its models)
     alive after the user dropped it."""
-    import weakref
-
     out = []
     for obj in objects:
         try:
-            out.append(weakref.ref(obj))
+            out.append(_weakref.ref(obj))
         except TypeError:
             out.append(lambda obj=obj: obj)
     return tuple(out)
@@ -1209,8 +1199,6 @@ def _lazy_import_name(proxy) -> str | None:
     ``<lazy_import 'm.f'>``. That format is
     CPython's, pinned by a test on every supported version that has lazy
     imports."""
-    import re
-
     # Any text up to the quote: an identifier cannot hold one, and `\w` misses
     # identifier characters such as U+00B7 MIDDLE DOT and Indic vowel signs.
     match = re.fullmatch(r"<lazy_import '([^']+)'>", type(proxy).__repr__(proxy))
@@ -1530,12 +1518,10 @@ def _cell_imports(
     ran)."""
     import ast
 
-    modules: tuple[str, ...] = ()
-    bindings: tuple[tuple[str, str, bool], ...] = ()
     wanted = "import" in text or _CLASS_LINE.search(text) is not None
     tree = _parse_cell(text) if wanted else None
     if tree is None:
-        return modules, bindings, ()
+        return (), (), ()
     classes = tuple(sorted({qualname for _, qualname, _, _ in _class_nodes(tree)}))
     modules = tuple(sorted({n for n, level in _import_pairs(tree) if level == 0}))
     scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -1610,11 +1596,9 @@ def _scan_kept_cells(compiled: dict | None = None) -> list[tuple[str, tuple]]:
     return out
 
 
-def _kept_cell_reading(
-    scan=None,
-) -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
-    """What every cell the kernel keeps imports (``scan``, or
-    ``_scan_kept_cells``):
+def _kept_cell_reading(scan) -> tuple[set[str], dict[str, set[tuple[str, bool]]]]:
+    """What every cell the kernel keeps imports (``scan``, a
+    ``_scan_kept_cells`` result):
     ``(modules, bindings)``, ``bindings`` mapping a name to ``(dotted,
     lazy)`` for each import binding it to a dotted module starting with it.
     Every kept cell counts, an older version of a re-run cell too: a
@@ -1623,7 +1607,7 @@ def _kept_cell_reading(
     result, a local name the syntax cannot follow)."""
     modules: set[str] = set()
     bindings: dict[str, set[tuple[str, bool]]] = {}
-    for _, found in _scan_kept_cells() if scan is None else scan:
+    for _, found in scan:
         modules.update(found[0])
         for name, dotted, lazy in found[1]:
             bindings.setdefault(name, set()).add((dotted, lazy))
