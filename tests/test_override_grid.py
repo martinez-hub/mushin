@@ -190,6 +190,25 @@ def test_backslashes_reach_the_task_unchanged(tmp_path):
     assert {str(r) for r in ds["b_repr"].values} == {repr("C:\\data")}
 
 
+def test_a_backslash_before_an_interpolation_keeps_it_live(tmp_path):
+    """A backslash right before ``${...}``, as in a Windows working_dir
+    ``outputs\\${now:%Y}``, stays a backslash before a live interpolation.
+    OmegaConf reads one backslash there as escaping ``${`` (the directory would
+    be named ``${now:%Y}`` literally) and two as a backslash and a live one."""
+    from pathlib import PureWindowsPath
+
+    from mushin.workflows import _to_override_element
+
+    # A value that is not a str (here a path) is quoted the same way.
+    assert _to_override_element(PureWindowsPath("C:/data")) == "'C:\\data'"
+    assert _to_override_element("a\\${x}") == "'a\\\\${x}'"
+
+    wf = _Seen()
+    wf.run(a=multirun(["x", "y"]), working_dir=str(tmp_path / "runs") + "\\${now:%Y}")
+    assert [str(r) for r in wf.to_xarray()["a_repr"].values] == ["'x'", "'y'"]
+    assert not [p for p in tmp_path.rglob("*") if "${" in p.name]
+
+
 def test_a_glob_sweep_is_refused_by_name():
     """A glob sweep picks config-group options; the error says glob is not
     supported and names the param without its `+`."""
