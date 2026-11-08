@@ -18,34 +18,6 @@ from mushin import multirun
 from mushin.workflows import MultiRunMetricsWorkflow
 
 
-def test_budget_skips_remaining_cells(tmp_path):
-    calls = []
-
-    class W(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(seed):
-            calls.append(seed)
-            if seed == 0:
-                time.sleep(0.3)  # first cell blows the tiny budget
-            return dict(v=float(seed))
-
-    wf = W()
-    with pytest.warns(UserWarning, match="skip"):
-        wf.run(
-            seed=multirun([0, 1, 2, 3]),
-            max_total_seconds=0.1,
-            working_dir=str(tmp_path / "s"),
-        )
-
-    assert calls == [0]  # only the first cell ran; the rest were skipped
-    assert wf.is_complete is False
-    assert len(wf.skipped) == 3
-
-    ds = wf.to_xarray()
-    assert float(ds["v"].sel(seed=0)) == 0.0
-    assert bool(np.isnan(float(ds["v"].sel(seed=1))))
-
-
 def test_generous_budget_completes_all_cells(tmp_path):
     class W(MultiRunMetricsWorkflow):
         @staticmethod
@@ -76,7 +48,7 @@ def test_nonpositive_budget_rejected(tmp_path):
         )
 
 
-def test_skipped_cells_are_resumable(tmp_path):
+def test_budget_skips_remaining_cells_and_they_are_resumable(tmp_path):
     calls = []
 
     class W(MultiRunMetricsWorkflow):
@@ -90,12 +62,21 @@ def test_skipped_cells_are_resumable(tmp_path):
             return dict(v=float(seed))
 
     wd = str(tmp_path / "s")
+    wf = W()
     with pytest.warns(UserWarning, match="skip"):
-        W().run(
+        wf.run(
             seed=multirun([0, 1, 2, 3]),
-            max_total_seconds=0.1,
+            max_total_seconds=0.1,  # the slow first cell blows the tiny budget
             working_dir=wd,
         )
+
+    assert calls == [0]  # only the first cell ran; the rest were skipped
+    assert wf.is_complete is False
+    assert len(wf.skipped) == 3
+
+    ds = wf.to_xarray()
+    assert float(ds["v"].sel(seed=0)) == 0.0
+    assert bool(np.isnan(float(ds["v"].sel(seed=1))))
 
     W.SLOW = False
     calls.clear()

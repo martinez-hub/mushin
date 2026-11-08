@@ -37,49 +37,35 @@ def test_sample_runs_only_k_cells(tmp_path):
     assert int(np.isnan(ds["v"].values).sum()) == 11
 
 
+def _ran_cells(wd, **kwargs):
+    """The cells a `sample=5` run of a 16-cell grid computed."""
+    calls = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a, b):
+            calls.append((a, b))
+            return dict(v=float(a))
+
+    with pytest.warns(UserWarning, match="skip"):
+        W().run(
+            a=multirun([0, 1, 2, 3]),
+            b=multirun([0, 1, 2, 3]),
+            sample=5,
+            working_dir=str(wd),
+            **kwargs,
+        )
+    return set(calls)
+
+
 def test_sample_selection_is_deterministic(tmp_path):
-    def ran_cells(wd):
-        calls = []
-
-        class W(MultiRunMetricsWorkflow):
-            @staticmethod
-            def task(a, b):
-                calls.append((a, b))
-                return dict(v=float(a))
-
-        with pytest.warns(UserWarning, match="skip"):
-            W().run(
-                a=multirun([0, 1, 2, 3]),
-                b=multirun([0, 1, 2, 3]),
-                sample=5,
-                working_dir=str(wd),
-            )
-        return set(calls)
-
-    assert ran_cells(tmp_path / "s1") == ran_cells(tmp_path / "s2")
+    assert _ran_cells(tmp_path / "s1") == _ran_cells(tmp_path / "s2")
 
 
 def test_sample_seed_varies_the_subset(tmp_path):
-    def ran_cells(wd, seed):
-        calls = []
-
-        class W(MultiRunMetricsWorkflow):
-            @staticmethod
-            def task(a, b):
-                calls.append((a, b))
-                return dict(v=float(a))
-
-        with pytest.warns(UserWarning, match="skip"):
-            W().run(
-                a=multirun([0, 1, 2, 3]),
-                b=multirun([0, 1, 2, 3]),
-                sample=5,
-                sample_seed=seed,
-                working_dir=str(wd),
-            )
-        return set(calls)
-
-    assert ran_cells(tmp_path / "s1", 0) != ran_cells(tmp_path / "s2", 1)
+    assert _ran_cells(tmp_path / "s1", sample_seed=0) != _ran_cells(
+        tmp_path / "s2", sample_seed=1
+    )
 
 
 def test_sample_at_least_grid_runs_all(tmp_path):

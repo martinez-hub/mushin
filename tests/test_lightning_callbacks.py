@@ -123,10 +123,6 @@ def test_bug2_user_epoch_key_does_not_double_append():
 
 
 def test_metrics_callback_saves_only_on_global_zero(tmp_path):
-    import torch
-
-    from mushin.lightning.callbacks import MetricsCallback
-
     cb = MetricsCallback(save_dir=tmp_path)
     trainer = _make_fake_trainer(
         callback_metrics={"val_acc": torch.tensor(0.5)}, is_global_zero=False
@@ -146,10 +142,6 @@ def test_metrics_callback_saves_only_on_global_zero(tmp_path):
 
 
 def test_metrics_callback_test_end_saves_only_on_global_zero(tmp_path):
-    import torch
-
-    from mushin.lightning.callbacks import MetricsCallback
-
     cb = MetricsCallback(save_dir=tmp_path)
     cb.on_test_end(
         _make_fake_trainer(
@@ -164,10 +156,6 @@ def test_metrics_callback_standalone_validate_gets_own_file(tmp_path):
     """A standalone trainer.validate() run must write validate_metrics.pt —
     not masquerade as (or append onto) the fit-stage series."""
     from types import SimpleNamespace
-
-    import torch
-
-    from mushin.lightning.callbacks import MetricsCallback
 
     cb = MetricsCallback(save_dir=tmp_path)
     trainer = _make_fake_trainer(callback_metrics={"val_acc": torch.tensor(0.7)})

@@ -85,8 +85,6 @@ def test_user_param_starting_with_hydra_counts_in_grid(tmp_path):
     """A user axis whose name merely STARTS with 'hydra' (e.g. `hydraulic`)
     must count toward the grid — only real `hydra.*`/`hydra/*` plumbing is
     excluded from the preview/gate/sample cell count."""
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod
@@ -101,8 +99,6 @@ def test_user_param_starting_with_hydra_counts_in_grid(tmp_path):
 def test_dry_run_reports_sample(tmp_path):
     """With `sample=` set, the preview must say how many cells will actually
     compute, not just the full grid size."""
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod

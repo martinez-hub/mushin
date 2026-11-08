@@ -67,9 +67,6 @@ def task_fn_raises(cfg: Any):
         trainer.fit(module)
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to test"
-)
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 @pytest.mark.filterwarnings("ignore::UserWarning")
 @pytest.mark.parametrize(
@@ -101,9 +98,6 @@ def test_ddp_with_hydra_raises_misconfiguration():
         launch(Config, task_fn_raises, version_base="1.3")
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to test"
-)
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 @pytest.mark.filterwarnings("ignore::UserWarning")
 @pytest.mark.parametrize("subdir", [None, ".hydra", "dksa"])
@@ -126,9 +120,6 @@ def test_ddp_with_hydra_output_subdir(subdir):
     assert cfg_file.exists()
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to test"
-)
 @pytest.mark.filterwarnings("ignore::UserWarning")
 @pytest.mark.parametrize(
     "testing, predicting", [(True, False), (False, True), (False, False)]
@@ -177,9 +168,6 @@ def test_ddp_with_hydra_with_datamodule():
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to test"
-)
 @pytest.mark.usefixtures("cleandir")
 @pytest.mark.parametrize("num_jobs", [1, 2])
 def test_ddp_with_hydra_runjob(num_jobs):

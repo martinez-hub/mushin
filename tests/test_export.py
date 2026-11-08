@@ -41,6 +41,21 @@ def test_export_table_returns_csv_string(tmp_path):
     assert r["status"] == "completed"
     assert float(r["acc"]) == pytest.approx(1.2)
 
+    # path= writes the file (outside the sweep dir) and returns its Path
+    out = tmp_path / "table.csv"
+    ret = mushin.export.table(wd, path=out)
+    assert Path(ret) == out
+    assert out.exists()
+    rows = _parse(out.read_text())
+    assert len(rows) == 4
+    assert {"lr", "seed", "status", "acc", "loss"} <= set(rows[0].keys())
+
+    # metrics= limits the metric columns
+    rows = _parse(mushin.export.table(wd, metrics=["acc"]))
+    header = set(rows[0].keys())
+    assert "acc" in header
+    assert "loss" not in header
+
 
 def test_export_table_columns_keep_sweep_and_metric_order(tmp_path):
     """The swept params, then ``status``, then the metrics, each in the order
@@ -55,27 +70,6 @@ def test_export_table_columns_keep_sweep_and_metric_order(tmp_path):
     W().run(seed=multirun([0, 1]), lr=multirun([0.1]), working_dir=str(wd))
     header = next(csv.reader(io.StringIO(mushin.export.table(wd))))
     assert header == ["seed", "lr", "status", "loss", "acc"]
-
-
-def test_export_table_writes_file_and_returns_path(tmp_path):
-    wd = tmp_path / "s"
-    _run(wd)
-    out = tmp_path / "table.csv"
-    ret = mushin.export.table(wd, path=out)
-    assert Path(ret) == out
-    assert out.exists()
-    rows = _parse(out.read_text())
-    assert len(rows) == 4
-    assert {"lr", "seed", "status", "acc", "loss"} <= set(rows[0].keys())
-
-
-def test_export_table_metrics_filter(tmp_path):
-    wd = tmp_path / "s"
-    _run(wd)
-    rows = _parse(mushin.export.table(wd, metrics=["acc"]))
-    header = set(rows[0].keys())
-    assert "acc" in header
-    assert "loss" not in header
 
 
 def test_export_table_missing_dir_raises(tmp_path):

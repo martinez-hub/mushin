@@ -10,22 +10,14 @@ failing would still print a happy story while demonstrating nothing.
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import tempfile
 import warnings
 from pathlib import Path
 
+import llm_prompt_sweep as sweep_ex
 import numpy as np
 import pytest
-
-_SPEC = importlib.util.spec_from_file_location(
-    "llm_prompt_sweep",
-    Path(__file__).resolve().parent.parent / "examples" / "llm_prompt_sweep.py",
-)
-sweep_ex = importlib.util.module_from_spec(_SPEC)
-sys.modules["llm_prompt_sweep"] = sweep_ex
-_SPEC.loader.exec_module(sweep_ex)
 
 
 def test_score_config_returns_a_metric_dict():
@@ -50,26 +42,6 @@ def test_the_simulated_outage_actually_fails_sometimes():
     assert failures > 0, "no simulated failures — on_error/resume prove nothing"
 
 
-def test_on_error_nan_keeps_the_completed_cells():
-    """A transient failure must leave holes, not discard the whole grid."""
-    import mushin
-
-    sweep_ex._OUTAGE = True
-    wf = mushin.sweep(sweep_ex.score_config)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        wf.run(
-            prompt=mushin.multirun(["cot", "terse"]),
-            temperature=mushin.multirun([0.0]),
-            seed=mushin.multirun(list(range(8))),
-            working_dir=tempfile.mkdtemp(),
-            on_error="nan",
-        )
-    values = wf.workflow.to_xarray()["accuracy"].values
-    assert values.size == 16
-    assert np.isfinite(values).any()  # something survived the outage
-
-
 def test_resume_fills_the_holes_after_the_cause_is_fixed():
     import mushin
 
@@ -85,7 +57,12 @@ def test_resume_fills_the_holes_after_the_cause_is_fixed():
             working_dir=workdir,
             on_error="nan",
         )
-    holes = int(np.isnan(first.workflow.to_xarray()["accuracy"].values).sum())
+    accuracy = first.workflow.to_xarray()["accuracy"]
+    # A transient failure must leave holes, not discard the whole grid.
+    kept = accuracy.sel(prompt=["cot", "terse"]).values
+    assert kept.size == 16
+    assert np.isfinite(kept).any()  # something survived the outage
+    holes = int(np.isnan(accuracy.values).sum())
 
     sweep_ex._OUTAGE = False  # the cause is fixed
     try:
@@ -107,11 +84,17 @@ def test_resume_fills_the_holes_after_the_cause_is_fixed():
 
 def test_demo_runs_and_reports_a_winner(capsys):
     pytest.importorskip("scipy")
+    sweep_ex._OUTAGE = True
     assert sweep_ex.main(["--demo"]) == 0
     out = capsys.readouterr().out
     assert "after resume:" in out
     assert "best: prompt=" in out
     assert "would a re-run agree?" in out
+    # mushin says "N run(s) failed"; a blanket filter used to swallow it.
+    assert "run(s) failed" in out
+    assert "grid cells set to NaN" in out
+    # A second run in the same process must demonstrate the same thing.
+    assert sweep_ex._OUTAGE is True, "demo() leaked its outage flag"
 
 
 def test_cell_values_are_stable_across_processes():
@@ -232,20 +215,3 @@ def test_runner_up_selection_survives_a_tie_at_the_top(monkeypatch, capsys):
     line = [ln for ln in out.splitlines() if " vs " in ln][0]
     winner, rest = line.strip().split(" vs ")
     assert winner != rest.split(" at ")[0]
-
-
-def test_demo_reports_the_failed_cells_instead_of_hiding_them(capsys):
-    """mushin says "N run(s) failed"; a blanket filter used to swallow it."""
-    pytest.importorskip("scipy")
-    assert sweep_ex.main(["--demo"]) == 0
-    out = capsys.readouterr().out
-    assert "run(s) failed" in out
-    assert "grid cells set to NaN" in out
-
-
-def test_demo_restores_the_outage_flag():
-    """A second run in the same process must demonstrate the same thing."""
-    pytest.importorskip("scipy")
-    sweep_ex._OUTAGE = True
-    sweep_ex.main(["--demo"])
-    assert sweep_ex._OUTAGE is True, "demo() leaked its outage flag"

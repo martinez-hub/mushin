@@ -24,28 +24,34 @@ def test_num_gpus_must_be_positive():
         pin_gpu_round_robin(num_gpus=-1)
 
 
-def test_job_index_defaults_to_hydra_job_num(monkeypatch):
+def _fake_hydra(monkeypatch, cfg=None):
+    """Stand in for HydraConfig: initialized, returning `cfg`, iff one is given.
+
+    Uninitialized, the fake has no `get` at all, so a helper that reads the
+    config without checking `initialized()` first fails loudly.
+    """
     import hydra.core.hydra_config as hc
+
+    class _FakeHydraConfig:
+        @staticmethod
+        def initialized():
+            return cfg is not None
+
+    if cfg is not None:
+        _FakeHydraConfig.get = staticmethod(lambda: cfg)
+    # the helper does `from hydra.core.hydra_config import HydraConfig` at call
+    # time, so patching the attribute on the module is seen by the function.
+    monkeypatch.setattr(hc, "HydraConfig", _FakeHydraConfig)
+
+
+def test_job_index_defaults_to_hydra_job_num(monkeypatch):
     from omegaconf import OmegaConf
 
     from mushin._packing import pin_gpu_round_robin
 
     # HydraConfig.get() returns the HydraConf node itself, so the job is at the
     # top level (`.job.num`), not under a `.hydra` wrapper.
-    cfg = OmegaConf.create({"job": {"num": 3}})
-
-    class _FakeHydraConfig:
-        @staticmethod
-        def initialized():
-            return True
-
-        @staticmethod
-        def get():
-            return cfg
-
-    # the helper does `from hydra.core.hydra_config import HydraConfig` at call
-    # time, so patching the attribute on the module is seen by the function.
-    monkeypatch.setattr(hc, "HydraConfig", _FakeHydraConfig)
+    _fake_hydra(monkeypatch, OmegaConf.create({"job": {"num": 3}}))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     gpu = pin_gpu_round_robin(num_gpus=2)  # 3 % 2 == 1
@@ -53,41 +59,21 @@ def test_job_index_defaults_to_hydra_job_num(monkeypatch):
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
 
-def test_no_active_hydra_raises(monkeypatch):
-    import hydra.core.hydra_config as hc
-
-    from mushin._packing import pin_gpu_round_robin
-
-    class _NotInit:
-        @staticmethod
-        def initialized():
-            return False
-
-    monkeypatch.setattr(hc, "HydraConfig", _NotInit)
-    with pytest.raises(RuntimeError, match="job_index"):
-        pin_gpu_round_robin(num_gpus=2)
-
-
-def test_single_run_missing_job_num_raises(monkeypatch):
-    # single-run (plain @hydra.main): HydraConfig is initialized but job.num is
-    # MISSING. Must raise the friendly RuntimeError, not an OmegaConf error.
-    import hydra.core.hydra_config as hc
+@pytest.mark.parametrize(
+    "hydra_cfg",
+    [
+        pytest.param(None, id="no-active-hydra"),
+        # single-run (plain @hydra.main): HydraConfig is initialized but job.num
+        # is MISSING. Must raise the friendly RuntimeError, not an OmegaConf error.
+        pytest.param({"job": {"num": "???"}}, id="missing-job-num"),  # ??? == MISSING
+    ],
+)
+def test_no_job_index_raises(monkeypatch, hydra_cfg):
     from omegaconf import OmegaConf
 
     from mushin._packing import pin_gpu_round_robin
 
-    cfg = OmegaConf.create({"job": {"num": "???"}})  # ??? == MISSING
-
-    class _FakeHydraConfig:
-        @staticmethod
-        def initialized():
-            return True
-
-        @staticmethod
-        def get():
-            return cfg
-
-    monkeypatch.setattr(hc, "HydraConfig", _FakeHydraConfig)
+    _fake_hydra(monkeypatch, None if hydra_cfg is None else OmegaConf.create(hydra_cfg))
     with pytest.raises(RuntimeError, match="job_index"):
         pin_gpu_round_robin(num_gpus=2)
 

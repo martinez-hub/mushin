@@ -113,45 +113,38 @@ def _run_child(job: Path, tmp_path: Path, *, entry: str = "fit"):
     return subprocess.run(command, capture_output=True, text=True, timeout=600)
 
 
-def test_child_entry_point_runs_fit_on_cpu(tmp_path):
-    """The whole point: a fresh interpreter re-composes and trains from disk."""
-    proc = _run_child(_job_dir(tmp_path), tmp_path)
-    assert proc.returncode == 0, f"child failed:\n{proc.stderr[-3000:]}"
-    # This line is emitted through Hydra's job logging, so seeing it proves BOTH
-    # that the fit branch ran and that `configure_log` succeeded in the child —
-    # the logging path hydra 1.3.6's blocklist change touches.
-    assert "Launched subprocess using Training.fit" in (proc.stdout + proc.stderr)
-
-
 @pytest.mark.parametrize(
     ("entry", "expected"),
     [
-        ("test", "Launched subprocess using Training.test"),
-        ("predict", "Launched subprocess using Trainer.predict"),
-        ("validate", "Launched subprocess using Trainer.validate"),
+        # This line is emitted through Hydra's job logging, so seeing it proves
+        # BOTH that the branch ran and that `configure_log` succeeded in the
+        # child: the logging path hydra 1.3.6's blocklist change touches.
+        pytest.param("fit", "Launched subprocess using Training.fit", id="fit"),
+        pytest.param("test", "Launched subprocess using Training.test", id="test"),
+        pytest.param(
+            "predict", "Launched subprocess using Trainer.predict", id="predict"
+        ),
+        pytest.param(
+            "validate", "Launched subprocess using Trainer.validate", id="validate"
+        ),
     ],
 )
-def test_child_entry_point_selects_the_right_trainer_loop(tmp_path, entry, expected):
-    """`pl_testing`/`pl_predicting`/`pl_validating` pick the Trainer entry point.
+def test_child_entry_point_runs_the_right_trainer_loop(tmp_path, entry, expected):
+    """A fresh interpreter re-composes and runs from disk, on CPU.
 
+    `pl_testing`/`pl_predicting`/`pl_validating` pick the Trainer entry point.
     Getting this plumbing wrong would silently *train* on a rank that was asked
-    to evaluate — a wrong result rather than a crash, and invisible without
+    to evaluate: a wrong result rather than a crash, and invisible without
     running the real child.
     """
     proc = _run_child(_job_dir(tmp_path), tmp_path, entry=entry)
     assert proc.returncode == 0, f"child failed:\n{proc.stderr[-3000:]}"
     assert expected in (proc.stdout + proc.stderr)
 
-
-def test_child_writes_its_own_rank_scoped_hydra_dir(tmp_path):
-    """Ranks must not overwrite each other's Hydra output.
-
-    `_subprocess_call` passes `hydra.output_subdir=.pl_hydra_rank_<n>` for
-    exactly this reason; if the child ignored it, every rank would write to
-    `.hydra/` and clobber the parent's saved config.
-    """
-    proc = _run_child(_job_dir(tmp_path), tmp_path)
-    assert proc.returncode == 0, f"child failed:\n{proc.stderr[-3000:]}"
-    child_dir = tmp_path / "child_fit"
+    # Ranks must not overwrite each other's Hydra output. `_subprocess_call`
+    # passes `hydra.output_subdir=.pl_hydra_rank_<n>` for exactly this reason;
+    # if the child ignored it, every rank would write to `.hydra/` and clobber
+    # the parent's saved config.
+    child_dir = tmp_path / f"child_{entry}"
     assert (child_dir / ".pl_hydra_rank_0" / "config.yaml").is_file()
     assert not (child_dir / ".hydra").exists(), "child clobbered the default subdir"

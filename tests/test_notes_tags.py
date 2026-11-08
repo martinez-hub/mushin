@@ -20,37 +20,30 @@ class _W(MultiRunMetricsWorkflow):
         return dict(v=float(x))
 
 
-def test_notes_and_tags_exposed_on_workflow(tmp_path):
+def test_notes_and_tags_reach_workflow_manifest_dataset_and_reload(tmp_path):
+    wd = tmp_path / "s"
     wf = _W()
     wf.run(
         x=multirun([1, 2]),
         notes="baseline before the lr fix",
         tags=["baseline", "sprint-3"],
-        working_dir=str(tmp_path / "s"),
+        working_dir=str(wd),
     )
+    # exposed on the workflow
     assert wf.notes == "baseline before the lr fix"
     assert wf.tags == ["baseline", "sprint-3"]
-
-
-def test_notes_and_tags_persist_in_the_manifest(tmp_path):
-    wd = tmp_path / "s"
-    _W().run(x=multirun([1, 2]), notes="run A", tags=["exp"], working_dir=str(wd))
+    # persisted in the manifest
     manifest = json.loads((wd / MANIFEST_FILE).read_text())
-    assert manifest["notes"] == "run A"
-    assert manifest["tags"] == ["exp"]
-
-
-def test_notes_and_tags_on_dataset_attrs(tmp_path):
-    wf = _W()
-    wf.run(
-        x=multirun([1, 2]),
-        notes="carried",
-        tags=["t1", "t2"],
-        working_dir=str(tmp_path / "s"),
-    )
+    assert manifest["notes"] == "baseline before the lr fix"
+    assert manifest["tags"] == ["baseline", "sprint-3"]
+    # survive a reload from disk
+    loaded = MultiRunMetricsWorkflow(working_dir=wd)
+    assert loaded.notes == "baseline before the lr fix"
+    assert loaded.tags == ["baseline", "sprint-3"]
+    # carried on the dataset attrs
     ds = wf.to_xarray()
-    assert ds.attrs["mushin_notes"] == "carried"
-    assert json.loads(ds.attrs["mushin_tags"]) == ["t1", "t2"]
+    assert ds.attrs["mushin_notes"] == "baseline before the lr fix"
+    assert json.loads(ds.attrs["mushin_tags"]) == ["baseline", "sprint-3"]
 
 
 def test_defaults_are_empty(tmp_path):
@@ -73,19 +66,6 @@ def test_tags_must_be_a_list_of_strings(tmp_path):
 def test_notes_must_be_a_string(tmp_path):
     with pytest.raises(ValueError, match="notes"):
         _W().run(x=multirun([1, 2]), notes=123, working_dir=str(tmp_path / "s"))
-
-
-def test_notes_and_tags_survive_reload(tmp_path):
-    wd = tmp_path / "s"
-    _W().run(
-        x=multirun([1, 2]),
-        notes="original run",
-        tags=["baseline"],
-        working_dir=str(wd),
-    )
-    loaded = MultiRunMetricsWorkflow(working_dir=wd)
-    assert loaded.notes == "original run"
-    assert loaded.tags == ["baseline"]
 
 
 def test_notes_and_tags_survive_resume_without_repassing(tmp_path):

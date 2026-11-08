@@ -1,5 +1,8 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+import numpy as np
+import pytest
+
 import mushin
 from mushin import multirun
 from mushin.workflows import MultiRunMetricsWorkflow
@@ -46,8 +49,6 @@ def test_wraps_preserves_name_and_doc():
 
 
 def test_fresh_instance_per_run_no_state_leak(tmp_path):
-    import pytest
-
     @mushin.sweep
     def experiment(seed):
         if seed == 1:
@@ -64,9 +65,6 @@ def test_fresh_instance_per_run_no_state_leak(tmp_path):
 
 
 def test_decorated_sweep_resilience_and_resume(tmp_path):
-    import numpy as np
-    import pytest
-
     FAIL = {"on": True}
 
     @mushin.sweep
@@ -88,8 +86,6 @@ def test_decorated_sweep_resilience_and_resume(tmp_path):
 
 
 def test_decorated_sweep_receives_mushin_resume(tmp_path):
-    import pytest
-
     seen = {}
     FAIL = {"on": True}
 
@@ -115,8 +111,6 @@ def test_decorated_sweep_receives_mushin_resume(tmp_path):
 
 
 def test_decorated_sklearn_sweep_no_torch(tmp_path):
-    import pytest
-
     pytest.importorskip("sklearn")
     from sklearn.datasets import make_classification
     from sklearn.linear_model import LogisticRegression
@@ -134,8 +128,6 @@ def test_decorated_sklearn_sweep_no_torch(tmp_path):
 
 
 def test_decorated_sweep_out_of_process_joblib(tmp_path):
-    import pytest
-
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
     ds = _oop_experiment.run(
         seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), launcher="joblib"
@@ -167,9 +159,6 @@ def test_sweep_does_not_mutate_the_original_function():
 def test_workflow_attr_points_at_failed_run(tmp_path):
     """After a failing run, `.workflow` must expose THAT run's instance for
     debugging — not silently keep the previous (successful) run's workflow."""
-    import pytest
-
-    import mushin
 
     @mushin.sweep
     def exp(a):

@@ -31,11 +31,7 @@ def test_show_returns_one_row_per_cell(tmp_path):
     assert r["status"] == "completed"
     assert r["acc"] == pytest.approx(1.2)
     assert r["loss"] == pytest.approx(1.0)
-
-
-def test_show_table_lists_columns_and_values(tmp_path):
-    wd = tmp_path / "s"
-    _run_sweep(wd)
+    # the printed table lists every column and the values
     table = str(mushin.show(wd))
     for col in ("lr", "seed", "status", "acc", "loss"):
         assert col in table
@@ -66,6 +62,12 @@ def test_show_reports_incomplete_cells_mid_sweep(tmp_path):
 
 
 def test_show_metrics_filter_limits_columns(tmp_path):
+    """`metrics=` limits the columns. A typo'd entry must raise (like sort=
+    does), not silently drop the column; the requested order must be honored;
+    and a repeated entry must not emit a duplicated table/CSV column (a
+    duplicate CSV header makes pandas mangle it to acc/acc.1)."""
+    from mushin import export
+
     wd = tmp_path / "s"
     _run_sweep(wd)
     res = mushin.show(wd, metrics=["acc"])
@@ -74,6 +76,21 @@ def test_show_metrics_filter_limits_columns(tmp_path):
     assert "loss" not in table
     # rows still carry the swept params and status
     assert all("lr" in r and "status" in r for r in res.rows)
+
+    with pytest.raises(ValueError, match="wrong_metric"):
+        mushin.show(wd, metrics=["wrong_metric"])
+    with pytest.raises(ValueError, match="wrong_metric"):
+        export.table(wd, metrics=["wrong_metric"])
+
+    res = mushin.show(wd, metrics=["loss", "acc"])
+    cols = res.table.splitlines()[0].split()
+    assert cols.index("loss") < cols.index("acc")  # requested order wins
+
+    cols = mushin.show(wd, metrics=["acc", "acc"]).table.splitlines()[0].split()
+    assert cols.count("acc") == 1
+
+    header = export.table(wd, metrics=["acc", "acc"]).strip().splitlines()[0]
+    assert header.split(",").count("acc") == 1
 
 
 def test_show_missing_dir_raises(tmp_path):
@@ -197,39 +214,6 @@ def test_param_and_metric_sharing_a_name_do_not_collide(tmp_path):
     header = csv_lines[0].split(",")
     assert header.count("lr") == 1
     assert "lr (metric)" in header
-
-
-def test_unknown_metric_filter_raises(tmp_path):
-    """A typo'd metrics= entry must raise (like sort= does), not silently drop
-    the column; and the requested order must be honored."""
-    from mushin import export
-
-    wd = tmp_path / "s"
-    _run_sweep(wd)
-
-    with pytest.raises(ValueError, match="wrong_metric"):
-        mushin.show(wd, metrics=["wrong_metric"])
-    with pytest.raises(ValueError, match="wrong_metric"):
-        export.table(wd, metrics=["wrong_metric"])
-
-    res = mushin.show(wd, metrics=["loss", "acc"])
-    cols = res.table.splitlines()[0].split()
-    assert cols.index("loss") < cols.index("acc")  # requested order wins
-
-
-def test_metrics_filter_deduplicates_repeated_names(tmp_path):
-    """A repeated metrics= entry must not emit a duplicated table/CSV column
-    (a duplicate CSV header makes pandas mangle it to acc/acc.1)."""
-    from mushin import export
-
-    wd = tmp_path / "s"
-    _run_sweep(wd)
-
-    cols = mushin.show(wd, metrics=["acc", "acc"]).table.splitlines()[0].split()
-    assert cols.count("acc") == 1
-
-    header = export.table(wd, metrics=["acc", "acc"]).strip().splitlines()[0]
-    assert header.split(",").count("acc") == 1
 
 
 def test_show_sorts_an_int_metric_beyond_float_range(tmp_path):
