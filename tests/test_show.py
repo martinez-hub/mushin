@@ -220,12 +220,15 @@ def test_a_param_named_status_keeps_its_values(tmp_path):
     """A swept param named ``status`` must not be overwritten by the cell
     status (#306). It is the column ``status (param)``, a metric named
     ``status`` is ``status (metric)``, and ``status`` stays the cell status."""
+    import json
+
     from mushin import export
+    from mushin._resume import write_cell_status
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod
         def task(status):
-            return dict(status=float(len(status)))
+            return dict(status=-float(len(status)))
 
     wd = tmp_path / "s"
     W().run(status=multirun(["bb", "a"]), working_dir=str(wd))
@@ -234,35 +237,57 @@ def test_a_param_named_status_keeps_its_values(tmp_path):
     rows = mushin.show(wd).rows
     assert [r["status (param)"] for r in rows] == ["a", "bb"]
     assert [r["status"] for r in rows] == ["completed", "completed"]
-    assert [r["status (metric)"] for r in rows] == [1.0, 2.0]
+    assert [r["status (metric)"] for r in rows] == [-1.0, -2.0]
     by_metric = mushin.show(wd, sort="status (metric)").rows
-    assert [r["status (param)"] for r in by_metric] == ["a", "bb"]
+    assert [r["status (param)"] for r in by_metric] == ["bb", "a"]
 
     lines = export.table(wd).strip().splitlines()
     assert lines[0].split(",") == ["status (param)", "status", "status (metric)"]
     assert [line.split(",") for line in lines[1:]] == [
-        ["a", "completed", "1.0"],
-        ["bb", "completed", "2.0"],
+        ["a", "completed", "-1.0"],
+        ["bb", "completed", "-2.0"],
+    ]
+
+    # sort="status" sorts by the cell status, not by the param.
+    for d in wd.iterdir():
+        sidecar = d / "mushin_cell_status.json"
+        if sidecar.exists():
+            combo = json.loads(sidecar.read_text())["combo"]
+            if combo["status"] == "a":
+                write_cell_status(d, status="running", combo=combo, attempt=1)
+    by_status = mushin.show(wd, sort="status").rows
+    assert [(r["status"], r["status (param)"]) for r in by_status] == [
+        ("completed", "bb"),
+        ("running", "a"),
     ]
 
 
 def test_cell_rows_never_repeat_a_column():
-    """A metric is renamed against the param columns as shown, so not even a
-    metric named ``status (param)`` takes the renamed param's column."""
+    """No two columns share a name, whatever the metrics are called: a renamed
+    metric is kept clear of the param columns as shown and of every other
+    metric, so each value survives."""
     from mushin._show import _cell_rows
 
     cell = {
-        "combo": {"status": "a"},
+        "combo": {"status": "a", "lr": 0.1},
         "status": "completed",
-        "metrics": {"status": 1.0, "status (param)": 2.0},
+        "metrics": {
+            "status": 1.0,
+            "status (param)": 2.0,
+            "lr (metric)": 3.0,
+            "lr": 4.0,
+        },
     }
     _, columns, rows = _cell_rows([cell], None)
     assert rows == [
         {
             "status (param)": "a",
+            "lr": 0.1,
             "status": "completed",
             "status (metric)": 1.0,
             "status (param) (metric)": 2.0,
+            "lr (metric)": 3.0,
+            "lr (metric) (metric)": 4.0,
         }
     ]
     assert columns == list(rows[0])

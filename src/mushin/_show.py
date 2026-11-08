@@ -128,21 +128,30 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
     return cells, manifest_mtime
 
 
-def _param_column(name: str, reserved: str) -> str:
-    """The column of swept param ``name`` in a row that also holds ``reserved``
-    (``status`` in ``show``, ``deltas`` in ``diff``): a param of that name would
-    be overwritten (#306), so it becomes ``"<name> (param)"``. A Hydra key
-    cannot hold a space or parentheses, so no param is named that already."""
-    return f"{name} (param)" if name == reserved else name
+def _free_name(name: str, taken: set, suffix: str) -> str:
+    """``name``, with ``" <suffix>"`` appended until no name in ``taken`` is
+    the same: a row is a dict, so two columns of one name keep one value and
+    the header repeats (#306)."""
+    while name in taken:
+        name = f"{name} {suffix}"
+    return name
 
 
 def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
-    """Column name per metric; a metric colliding with a swept-param column (or
-    ``status``) is disambiguated as ``"<name> (metric)"`` so both values
-    survive; e.g. a task reporting the effective ``lr`` alongside a swept
-    ``lr``."""
-    taken = set(param_cols) | {"status"}
-    return {m: (f"{m} (metric)" if m in taken else m) for m in metric_cols}
+    """Column name per metric. A metric named like a swept-param column or
+    ``status`` becomes ``"<name> (metric)"`` (e.g. a task reporting the
+    effective ``lr`` alongside a swept ``lr``), and that name is kept clear of
+    every other column, so even a metric already named ``"lr (metric)"``
+    keeps its value."""
+    reserved = set(param_cols) | {"status"}
+    taken = reserved | set(metric_cols)
+    names = {}
+    for m in metric_cols:
+        names[m] = (
+            _free_name(f"{m} (metric)", taken, "(metric)") if m in reserved else m
+        )
+        taken.add(names[m])
+    return names
 
 
 def _apply_metric_filter(
@@ -164,9 +173,11 @@ def _apply_metric_filter(
 
 
 class ShowResult:
-    """The result of ``show``: ``rows`` (one dict per cell, with raw swept
-    params, ``status``, and metric values, keyed by the table's column names)
-    plus a rendered ``table``. ``str()`` returns the table."""
+    """The result of ``show``: ``rows`` (one dict per cell, keyed by the
+    table's column names: the swept params, ``status`` and the metrics) plus a
+    rendered ``table``. ``str()`` returns the table. ``status`` is the cell
+    status: a swept param of that name is ``"status (param)"``, and a metric
+    named like a param or ``status`` is ``"<name> (metric)"``."""
 
     def __init__(self, rows: list[dict], table: str):
         self.rows = rows
@@ -193,7 +204,9 @@ def _cell_rows(
     and the metric columns ``metrics`` selects (``show`` and
     ``export.table``). ``param_cols`` are the params' column names."""
     params = _ordered_union([c["combo"] for c in cells])
-    param_col = {p: _param_column(p, "status") for p in params}
+    # Hydra keys hold no space or parentheses, so params cannot clash with
+    # each other or with a renamed column; only ``status`` is taken.
+    param_col = {p: _free_name(p, {"status"}, "(param)") for p in params}
     param_cols = list(param_col.values())
     metric_cols = _ordered_union([c["metrics"] for c in cells])
     metric_cols = _apply_metric_filter(metrics, metric_cols)
@@ -707,10 +720,12 @@ def _diff_provenance(a: dict | None, b: dict | None) -> dict:
 
 
 class DiffResult:
-    """The result of ``diff``: ``rows`` (one per shared cell, each with a
-    ``deltas`` map of ``metric -> (a, b, b - a)``), ``only_in_a`` / ``only_in_b``
-    (combos unique to each sweep), the ``provenance`` delta, and the rendered
-    ``table``. ``str()`` returns the table."""
+    """The result of ``diff``: ``rows`` (one per shared cell, each with its
+    swept params and a ``deltas`` map of ``metric -> (a, b, b - a)``; a param
+    named ``deltas`` is ``"deltas (param)"``), ``only_in_a`` / ``only_in_b``
+    (combos unique to each sweep, with the params' own names), the
+    ``provenance`` delta, and the rendered ``table``. ``str()`` returns the
+    table."""
 
     def __init__(self, rows, only_in_a, only_in_b, provenance, table):
         self.rows = rows
@@ -769,8 +784,9 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
             vb = cb["metrics"].get(name)
             if _finite_number(va) and _finite_number(vb):
                 deltas[name] = (va, vb, vb - va)
+        # A swept param named ``deltas`` would be overwritten by the deltas.
         row: dict[str, Any] = {
-            _param_column(p, "deltas"): v for p, v in ca["combo"].items()
+            _free_name(p, {"deltas"}, "(param)"): v for p, v in ca["combo"].items()
         }
         row["deltas"] = deltas
         rows.append(row)
