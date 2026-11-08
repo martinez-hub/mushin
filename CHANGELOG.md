@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.18.1] - 2026-11-08
+
+### Fixed
+
+- `mushin.show` and `mushin.export.table` no longer lose the values of a swept parameter named `status`: the cell status overwrote them, and the column appeared twice. The parameter is now the column `status (param)`, as a metric that clashes is already `<name> (metric)`; `status` is always the cell status. Likewise `mushin.diff` keeps a swept parameter named `deltas`, as `deltas (param)` in its rows and table. (#317)
+- A sweep over lists or dicts of strings (`a=multirun([["x"], ["yy"]])`), or a raw comma sweep of quoted strings (`overrides=["+a='x','yy'"]`), no longer gives an all-NaN dataset: Hydra kept those strings quoted, so no cell matched its grid coordinate. The coordinates and the dry-run preview now show the plain values. Sweep values that would share a cell are now refused as duplicates, as two equal values already were: two spellings of one string (`'x',"x"`), or a string and a number of one text. `multirun(["1", 1])`, for one, ran before with one cell's result overwriting the other's. (#318)
+- A backslash in a string passed to `run`, swept or fixed (`"C:\data"`, `multirun(["a\\b", "c"])`), no longer reaches the task doubled: mushin escaped every backslash, but Hydra unescapes only one that precedes a quote. A string holding an interpolation (`${...}`), which OmegaConf parses with escapes of its own, is written as before. A glob sweep's error now says `glob(...)` is not supported and names the parameter without its `+`. (#320)
+- On Python 3.12+, a top-level generic definition in a driver script (`def task[T](x: T)`, `class task[T](Base[T])`, `type Vec[T] = list[T]`) no longer counts its own type parameter as a read of a module-level name of the same name. Editing such a binding (a leftover `T = TypeVar("T")`) recomputed every cell on `resume=True` or `cache_dir=`, though the task never read it. A script with such a binding recomputes once after upgrading. (#322)
+
+### Misc
+
+- #312, #313, #314, #316
+
+
 ## [0.18.0] - 2026-11-07
 
 ### Changed
@@ -724,7 +738,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/martinez-hub/mushin/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/martinez-hub/mushin/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/martinez-hub/mushin/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/martinez-hub/mushin/compare/v0.17.0...v0.17.1
