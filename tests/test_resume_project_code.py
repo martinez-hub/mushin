@@ -1984,8 +1984,10 @@ def test_a_generic_helper_in_a_script_counts_what_it_reads(tmp_path):
         "T = {v}\n\n\nclass M(type):\n    def __new__(m, n, b, ns, **k):\n"
         "        return super().__new__(m, n, b, ns)\n\n\n"
         "class task[T](metaclass=M, flag=T):\n    pass\n",
+        "P = {v}\n\n\ndef task[**P](*a: P.args, **k: P.kwargs):\n    return a\n",
+        "Ts = {v}\n\n\ndef task[*Ts](*a: *Ts) -> tuple[*Ts]:\n    return a\n",
     ],
-    ids=["def", "class", "type-alias", "class-keyword"],
+    ids=["def", "class", "type-alias", "class-keyword", "paramspec", "typevartuple"],
 )
 def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, text):
     """In a generic function's annotations, a generic class's bases and a
@@ -2020,6 +2022,14 @@ def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, tex
             "list",
             "tuple",
         ),
+        (
+            # Under string annotations the symbol table sees no annotation
+            # reads, so only the syntax walk counts `Alias`.
+            "from __future__ import annotations\n\nAlias = {v}\n\n\n"
+            "def task[T](x: Alias[T]) -> T:\n    return x\n",
+            "list",
+            "tuple",
+        ),
         ("Base = {v}\n\n\ndef task[T: Base](x: T) -> T:\n    return x\n", "int", "str"),
         (
             "E = {v}\n\n\ntype Vec[T] = list[T] | E\n\n\ndef task(x: Vec):\n    return x\n",
@@ -2033,6 +2043,7 @@ def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, tex
         "kw-only-default",
         "class-decorator",
         "annotation",
+        "annotation-future",
         "bound",
         "type-alias",
     ],
