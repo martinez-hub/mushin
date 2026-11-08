@@ -1975,6 +1975,92 @@ def test_a_generic_helper_in_a_script_counts_what_it_reads(tmp_path):
     assert one != two
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "T = {v}\n\n\ndef task[T](x: T) -> T:\n    return x\n",
+        "T = {v}\n\n\nclass Base[T]:\n    pass\n\n\nclass task[T](Base[T]):\n    pass\n",
+        "T = {v}\n\n\ntype Vec[T] = list[T]\n\n\ndef task(x: Vec) -> Vec:\n    return x\n",
+        "T = {v}\n\n\nclass M(type):\n    def __new__(m, n, b, ns, **k):\n"
+        "        return super().__new__(m, n, b, ns)\n\n\n"
+        "class task[T](metaclass=M, flag=T):\n    pass\n",
+        "P = {v}\n\n\ndef task[**P](*a: P.args, **k: P.kwargs):\n    return a\n",
+        "Ts = {v}\n\n\ndef task[*Ts](*a: *Ts) -> tuple[*Ts]:\n    return a\n",
+    ],
+    ids=["def", "class", "type-alias", "class-keyword", "paramspec", "typevartuple"],
+)
+def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, text):
+    """In a generic function's annotations, a generic class's bases and a
+    `type` alias's value (3.12+), `T` is the definition's type parameter, so
+    editing a module-level `T` is not an edit of the task (#315)."""
+    if sys.version_info < (3, 12):
+        pytest.skip("PEP 695 syntax")
+    one = _digest_of_script(tmp_path, "tp1", text.format(v=1), {"task"})
+    two = _digest_of_script(tmp_path, "tp2", text.format(v=2), {"task"})
+    assert one == two
+
+
+@pytest.mark.parametrize(
+    "text, a, b",
+    [
+        (
+            "T = {v}\n\n\ndef deco(f):\n    return f\n\n\n"
+            "@deco if T else deco\ndef task[T](x: T) -> T:\n    return x\n",
+            "0",
+            "1",
+        ),
+        ("T = {v}\n\n\ndef task[T](x=T):\n    return x\n", "1", "2"),
+        ("T = {v}\n\n\ndef task[T](*, x=T):\n    return x\n", "1", "2"),
+        (
+            "T = {v}\n\n\ndef d(c):\n    return c\n\n\n"
+            "@d if T else d\nclass task[T]:\n    pass\n",
+            "0",
+            "1",
+        ),
+        (
+            "Alias = {v}\n\n\ndef task[T](x: Alias[T]) -> T:\n    return x\n",
+            "list",
+            "tuple",
+        ),
+        (
+            # Under string annotations the symbol table sees no annotation
+            # reads, so only the syntax walk counts `Alias`.
+            "from __future__ import annotations\n\nAlias = {v}\n\n\n"
+            "def task[T](x: Alias[T]) -> T:\n    return x\n",
+            "list",
+            "tuple",
+        ),
+        ("Base = {v}\n\n\ndef task[T: Base](x: T) -> T:\n    return x\n", "int", "str"),
+        (
+            "E = {v}\n\n\ntype Vec[T] = list[T] | E\n\n\ndef task(x: Vec):\n    return x\n",
+            "int",
+            "str",
+        ),
+    ],
+    ids=[
+        "decorator",
+        "default",
+        "kw-only-default",
+        "class-decorator",
+        "annotation",
+        "annotation-future",
+        "bound",
+        "type-alias",
+    ],
+)
+def test_what_a_generic_definition_reads_outside_its_type_parameters_counts(
+    tmp_path, text, a, b
+):
+    """A generic definition's decorators and parameter defaults run outside its
+    type-parameter scope, so `T` there is the module's; other names in its
+    annotations, bounds and `type` aliases are module reads too (#315)."""
+    if sys.version_info < (3, 12):
+        pytest.skip("PEP 695 syntax")
+    one = _digest_of_script(tmp_path, "tq1", text.format(v=a), {"task"})
+    two = _digest_of_script(tmp_path, "tq2", text.format(v=b), {"task"})
+    assert one != two
+
+
 def test_a_second_sweep_in_the_script_is_not_the_firsts_code(tmp_path):
     """Two `@mushin.sweep` functions in one script: the task reads `mushin`
     through its own decorator, which does not make the other sweep its code."""

@@ -814,26 +814,41 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return hit
 
     def _reads(node) -> set[str]:
+        # A generic definition's own type parameters (3.12+, `def f[T]`) are
+        # what `T` names in the parts evaluated in its type-parameter scope,
+        # not the module's `T` (#315). The symbol table knows; this syntax
+        # walk does not, so it drops them there.
+        own = {p.name for p in getattr(node, "type_params", ())}
         if isinstance(node, defs):
-            # Evaluated where it is defined: decorators, defaults, bases.
+            # Evaluated where it is defined: decorators, defaults.
             outer = list(node.decorator_list)
             if isinstance(node, ast.ClassDef):
-                outer += node.bases + [k.value for k in node.keywords]
+                # A generic class's bases and keywords are in its
+                # type-parameter scope.
+                inner = node.bases + [k.value for k in node.keywords]
             else:
                 outer += node.args.defaults + [
                     d for d in node.args.kw_defaults if d is not None
                 ]
                 a = node.args
                 params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-                outer += [arg.annotation for arg in params if arg and arg.annotation]
+                # A generic function's annotations are in its type-parameter
+                # scope.
+                inner = [arg.annotation for arg in params if arg and arg.annotation]
                 if node.returns is not None:
-                    outer.append(node.returns)
-            return scope_reads.get(node.name, set()) | loads(outer)
-        return loads([node])
+                    inner.append(node.returns)
+            return (
+                scope_reads.get(node.name, set()) | loads(outer) | (loads(inner) - own)
+            )
+        # A `type X[T] = ...` statement (3.12+) is all in its type-parameter
+        # scope.
+        return loads([node]) - own
 
     def run_here(node) -> list:
         """What a definition evaluates where it is defined, but annotations:
-        decorators and defaults, or decorators, bases and keywords."""
+        decorators and defaults, or decorators, bases and keywords. A generic
+        class's bases and keywords are in its type-parameter scope instead,
+        but a walrus is a syntax error there, so they bind nothing here."""
         if isinstance(node, ast.ClassDef):
             return [
                 *node.decorator_list,
