@@ -324,7 +324,6 @@ def _attach_item_bootstrap(
             meth: np.asarray(per_items[meth][m], dtype=float).mean(axis=0)
             for meth in methods
         }
-    cols = {c: [] for c in ("item_diff", "item_ci_low", "item_ci_high", "item_p")}
     # One bootstrap pass per metric: its pairs share one eval set, so they
     # resample the same indices, drawn once (paired_item_bootstraps).
     rows = list(comparisons.itertuples(index=False))
@@ -346,16 +345,15 @@ def _attach_item_bootstrap(
         )
         for i, stats_row in zip(where, batch, strict=True):
             stats_rows[i] = stats_row
-    for stats_row in stats_rows:
-        for c, v in zip(cols, stats_row, strict=True):
-            cols[c].append(v)
+    # (len(rows), 4) even with no rows, so the columns slice out alike.
+    table = np.asarray(stats_rows, dtype=float).reshape(len(rows), 4)
     out = comparisons.copy()
-    for c, v in cols.items():
-        out[c] = v
+    for j, c in enumerate(("item_diff", "item_ci_low", "item_ci_high", "item_p")):
+        out[c] = table[:, j]
     # Correct within metric, matching the family compare_methods uses for the
     # seed axis. A single comparison is left untouched (nothing to correct for).
     correct = _CORRECTIONS[correction]
-    item_p = np.asarray(cols["item_p"], dtype=float)
+    item_p = table[:, 3]
     corrected = np.full(item_p.shape, np.nan)
     for where in by_metric.values():
         family = item_p[where]

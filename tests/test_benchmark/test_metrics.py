@@ -1,6 +1,15 @@
 import torch
 
+from mushin.benchmark._inference import accumulate_metric
 from mushin.benchmark._metrics import classification_battery
+
+
+def _one_shot(battery, preds, targets) -> dict[str, float]:
+    """Each metric of ``battery`` called once on the whole batch."""
+    out: dict[str, float] = {}
+    for name, metric in battery.items():
+        accumulate_metric(out, name, metric(preds, targets))
+    return out
 
 
 def test_battery_has_expected_metrics():
@@ -9,25 +18,25 @@ def test_battery_has_expected_metrics():
 
 
 def test_segmentation_battery_perfect_masks():
-    from mushin.benchmark._metrics import compute_battery, segmentation_battery
+    from mushin.benchmark._metrics import segmentation_battery
 
     battery = segmentation_battery(num_classes=3)
     assert set(battery) == {"miou", "dice", "pixel_acc", "precision", "recall"}
     preds = torch.randint(0, 3, (2, 8, 8))
-    out = compute_battery(battery, preds, preds, prob_metrics=frozenset())
+    out = _one_shot(battery, preds, preds)
     assert out["miou"] == 1.0
     assert out["dice"] == 1.0
     assert out["pixel_acc"] == 1.0
 
 
 def test_segmentation_battery_ignore_index():
-    from mushin.benchmark._metrics import compute_battery, segmentation_battery
+    from mushin.benchmark._metrics import segmentation_battery
 
     battery = segmentation_battery(num_classes=3, ignore_index=255)
     pred = torch.zeros(1, 4, 4, dtype=torch.long)
     tgt = torch.zeros(1, 4, 4, dtype=torch.long)
     tgt[0, 0, 0] = 255  # one void pixel, excluded
-    out = compute_battery(battery, pred, tgt, prob_metrics=frozenset())
+    out = _one_shot(battery, pred, tgt)
     assert out["pixel_acc"] == 1.0
 
 
@@ -40,11 +49,9 @@ def test_classification_battery_warns_on_ignore_index():
         classification_battery(3, ignore_index=0)
 
 
-def test_compute_battery_expands_dict_metric():
+def test_a_dict_metric_expands_to_one_value_per_key():
     import torch
     from torchmetrics import Metric
-
-    from mushin.benchmark._metrics import compute_battery
 
     class DictMetric(Metric):
         def __init__(self):
@@ -57,12 +64,7 @@ def test_compute_battery_expands_dict_metric():
         def compute(self):
             return {"x": self.v, "y": self.v + 1}
 
-    out = compute_battery(
-        {"m": DictMetric()},
-        preds=torch.tensor([1.0]),
-        targets=torch.tensor([1.0]),
-        prob_metrics=frozenset(),
-    )
+    out = _one_shot({"m": DictMetric()}, torch.tensor([1.0]), torch.tensor([1.0]))
     # the dict expands to one data var per key; no metric-agnostic sentinel here
     assert out == {"x": 1.0, "y": 2.0}
 

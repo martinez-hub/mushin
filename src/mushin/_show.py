@@ -10,6 +10,7 @@ before committing to the full ``to_xarray`` load."""
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -398,8 +399,6 @@ def _best_group(
     there is nothing to average, and raises. Skipped groups, and cells whose combo lacks an
     ``over`` param (another grid in flight in a reused ``working_dir``), are
     reported with a warning; no complete group raises."""
-    import warnings
-
     from ._sweep_io import combo_key
 
     def over_key(c: dict) -> str:
@@ -653,7 +652,11 @@ def _read_provenance(root) -> dict | None:
 _PROV_VOLATILE = frozenset({"timestamp", "config"})
 
 
-def _flatten(d: dict, prefix: str = "") -> dict:
+def _flatten(d: Any, prefix: str = "") -> dict:
+    """A nested dict flattened into dotted keys; anything else is one value
+    (keyed ``""`` at the top)."""
+    if not isinstance(d, dict):
+        return {prefix: d}
     out: dict[str, Any] = {}
     for k, v in d.items():
         key = f"{prefix}{k}"

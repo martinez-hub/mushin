@@ -55,10 +55,9 @@ def _mtime(path: Path) -> float:
 
 
 def _sort_x_by_k(x: T, k: Iterable[Any]) -> T:
-    k = tuple(k)
-    assert len(x) == len(k)
-    sorted_, _ = zip(*sorted(zip(x, k, strict=True), key=lambda x: x[1]), strict=True)
-    return type(x)(sorted_)
+    # Stable: items with equal keys keep their order.
+    pairs = sorted(zip(k, x, strict=True), key=lambda pair: pair[0])
+    return type(x)(item for _, item in pairs)
 
 
 def _identity(x: T1) -> T1:
@@ -148,7 +147,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
     n = summary.get("num_cells", 0)
     lines = [f"Dry run: {n} cell{'s' if n != 1 else ''}, no jobs launched."]
     wd = summary.get("working_dir")
-    lines.append(f"  working_dir: {wd if wd else '(Hydra default)'}")
+    lines.append(f"  working_dir: {wd or '(Hydra default)'}")
     if "sample" in summary:
         lines.append(f"  sample: only {summary['sample']} cell(s) would compute")
     if axes:
@@ -191,7 +190,7 @@ def _config_field_names(cfg) -> set[str]:
     try:
         from omegaconf import OmegaConf
 
-        return {str(k) for k in OmegaConf.structured(cfg).keys()}
+        return {str(k) for k in OmegaConf.structured(cfg)}
     except Exception:  # noqa: BLE001 - unreadable cfg -> no fields known
         import dataclasses
 
@@ -3546,8 +3545,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 if coord_from_metrics and n < len(metric_coords):
                     # Assume the first coordinate of the metric is the metric coordinate dimension
                     k_coords += list(metric_coords.keys())
-                    for mk, mv in metric_coords.items():
-                        coords[mk] = mv
+                    coords.update(metric_coords)
                 else:
                     # Create additional arbitrary coordinates as-needed for non-scalar
                     # metrics

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -85,8 +86,6 @@ def seed_everything_per_rank(base: int, workers: bool = True) -> int:
     # read-only cwd must not break training); rank in the filename so DDP
     # ranks sharing a dir don't clobber rank 0's record.
     try:
-        import json
-
         name = "mushin_seed.json" if rank == 0 else f"mushin_seed_rank{rank}.json"
         Path(name).write_text(
             json.dumps({"seed": seed, "rank": rank}), encoding="utf-8"
