@@ -8,6 +8,9 @@ that already exists must not crash; and a batching sweeper's nested job list
 must be flattened.
 """
 
+import re
+
+import numpy as np
 import pytest
 
 from mushin import multirun
@@ -58,6 +61,30 @@ def test_duplicate_sweep_axis_value_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="duplicate"):
         W().run(working_dir=str(tmp_path / "s"), a=multirun([0.0, 1.0, 0.0]))
+
+
+@pytest.mark.parametrize(
+    "values, shown",
+    [
+        ([1, 2, 1], "1"),
+        ([np.float64(0.5), 0.5], "0.5, np.float64(0.5)"),
+        (["a,b", "a,b"], "'a,b'"),
+    ],
+)
+def test_duplicate_sweep_value_is_rejected_before_a_dry_run(values, shown):
+    """Two values that would share a cell are refused before the dry-run
+    preview returns, whatever their spelling (a numpy scalar and the float it
+    holds are one value; a string with a comma stays one value)."""
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=0.0)
+
+    with pytest.raises(
+        ValueError, match=rf"`a` has duplicate sweep values {re.escape(shown)};"
+    ):
+        W().run(a=multirun(values), dry_run=True)
 
 
 def test_combo_key_is_injective_across_delimiters():
