@@ -421,11 +421,6 @@ def _valid_interpolation(text: str) -> bool:
     return _check_interpolation(text)
 
 
-@functools.lru_cache(maxsize=256)
-def _valid_interpolation_cached(text: str) -> bool:
-    return _check_interpolation(text)
-
-
 def _check_interpolation(text: str) -> bool:
     try:
         from omegaconf._utils import get_value_kind
@@ -434,3 +429,6 @@ def _check_interpolation(text: str) -> bool:
     except Exception:  # noqa: BLE001 - a syntax error, or the helper moved
         return False
     return True
+
+
+_valid_interpolation_cached = functools.lru_cache(maxsize=256)(_check_interpolation)
