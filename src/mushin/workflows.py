@@ -148,34 +148,6 @@ def _unquote(value: Any) -> Any:
     return value
 
 
-def _choice_reaches_jobs(sweep: str, values: Sequence) -> bool:
-    """Whether each job of the ``choice(...)`` override ``sweep`` gets its
-    value unchanged.
-
-    Hydra's ``choice()`` drops the quotes of a top-level string, and its
-    sweeper writes each job's override from the bare value, which the job
-    parses again: ``'true'`` arrives as the bool ``True`` and ``'1'`` as the
-    int ``1`` (#319). Each job's override is built and read back here as the
-    sweeper and the job will do it. Only a sweep with a top-level string can
-    change, so any other answers True without parsing.
-    """
-    if not any(isinstance(v, str) for v in values):
-        return True
-    parser = OverridesParser.create()
-    try:
-        override = parser.parse_override(sweep)
-        key = override.get_key_element()
-        sent = [_unquote(v) for v in override.value().list]  # type: ignore[union-attr]
-        got = [
-            parser.parse_override(f"{key}={s}").value()
-            for s in override.sweep_string_iterator()
-        ]
-    except Exception:  # noqa: BLE001 - a string Hydra cannot write back bare
-        # (a quote, non-ASCII text) is a string that needs its quotes kept.
-        return False
-    return [repr(v) for v in sent] == [repr(v) for v in got]
-
-
 def _cfg_missing_or_none(cfg, key: str) -> bool:
     """True if ``key`` (possibly a dotted path) is absent from ``cfg`` or None.
 
@@ -1901,14 +1873,7 @@ class BaseWorkflow:
                 # containing commas, spaces, or '=' are not silently re-split by
                 # Hydra's override parser.
                 choices = ",".join(_to_override_element(item) for item in v)
-                sweep = f"{prefix}{k}=choice({choices})"
-                if len(v) > 1 and not _choice_reaches_jobs(sweep, v):
-                    # A comma sweep keeps each string quoted into its job
-                    # (#319). Only such sweeps use it, so every other sweep's
-                    # job overrides, and Hydra's `override_dirname` built from
-                    # them, stay as they were.
-                    sweep = f"{prefix}{k}={choices}"
-                launch_overrides.append(sweep)
+                launch_overrides.append(f"{prefix}{k}=choice({choices})")
             elif isinstance(v, hydra_list):
                 # hydra_list serializes itself to Hydra list syntax; a single
                 # non-swept list value passed to one job.

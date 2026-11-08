@@ -140,11 +140,12 @@ list of values, and every combination is one cell.
   option *name*.
 - **`range(1,5)`-style overrides** (e.g. in a sweep dir you re-load) expand to
   their discrete values.
-- **A one-value sweep of a string that reads as another type**, such as
-  `multirun(["true"])` or `multirun(["1"])`, can reach the task as that type
-  (`True`, `1`): Hydra writes a one-value sweep without its quotes. Pass such
-  a value as a fixed value (`flag="true"`) instead. A sweep of two or more
-  values gets each string as written.
+- **A swept string that reads as another type**, such as `"true"`, `"null"` or
+  `"1"` in `multirun(["true", "false"])`, can reach the task as that type
+  (`True`, `None`, `1`), and its cell can be NaN in the dataset: Hydra writes
+  each job's value without its quotes. Sweep the values as the type they read
+  as (`multirun([True, False])`), or pass a single one as a fixed value
+  (`flag="true"`), which keeps its quotes.
 - **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather

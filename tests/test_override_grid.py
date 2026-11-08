@@ -180,30 +180,6 @@ class _Seen(MultiRunMetricsWorkflow):
         return dict(a_repr=repr(a), b_repr=repr(b))
 
 
-@pytest.mark.parametrize(
-    "values",
-    [
-        ["true", "null", "1", "x"],
-        ["it's", "x"],
-        ["\u00e9", "x"],
-        ["a,b=c", " padded ", ""],
-    ],
-)
-def test_swept_strings_reach_the_task_as_written(tmp_path, values):
-    """A swept string reaches the task as written, and its cell keys its grid
-    coordinate (#319). Hydra re-read a string that reads as another type
-    ("true", "1") without its quotes, and could not write some ("it's", a
-    non-ASCII one) back bare at all."""
-    wd = tmp_path / "s"
-    wf = _Seen()
-    wf.run(a=multirun(values), working_dir=str(wd))
-    loaded = _Seen().load_from_dir(wd, "mushin_metrics.json")
-    for w in (wf, loaded):
-        ds = w.to_xarray()
-        assert [str(c) for c in ds["a"].values] == [str(v) for v in values]
-        assert [str(r) for r in ds["a_repr"].values] == [repr(v) for v in values]
-
-
 def test_backslashes_reach_the_task_unchanged(tmp_path):
     """A backslash in a string, swept or fixed, is not doubled on the way to
     the task (#319)."""
@@ -212,29 +188,6 @@ def test_backslashes_reach_the_task_unchanged(tmp_path):
     assert [str(c) for c in ds["a"].values] == ["a\\b", "C:\\dir\\"]
     assert [str(r) for r in ds["a_repr"].values] == [repr("a\\b"), repr("C:\\dir\\")]
     assert {str(r) for r in ds["b_repr"].values} == {repr("C:\\data")}
-
-
-@pytest.mark.parametrize(
-    "values, launched, job0",
-    [
-        (["small", "big"], "+a=choice('small','big')", "+a=small"),
-        (["true", "x"], "+a='true','x'", "+a='true'"),
-    ],
-)
-def test_only_a_sweep_hydra_would_change_is_written_otherwise(
-    tmp_path, values, launched, job0
-):
-    """A sweep is written as `choice(...)`, as before, unless a string in it
-    would reach its job changed; only then is it a comma sweep, which keeps
-    the quotes. So every other sweep's job overrides, and Hydra's
-    `override_dirname` built from them, stay as they were."""
-    import yaml
-
-    _run(tmp_path, _Seen, a=multirun(values))
-    wd = tmp_path / "s"
-    task = yaml.safe_load((wd / "multirun.yaml").read_text())["hydra"]["overrides"]
-    assert launched in task["task"]
-    assert job0 in yaml.safe_load((wd / "0" / ".hydra" / "overrides.yaml").read_text())
 
 
 def test_a_glob_sweep_is_refused_by_name():
