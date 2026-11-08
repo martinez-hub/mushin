@@ -87,6 +87,49 @@ def test_duplicate_sweep_value_is_rejected_before_a_dry_run(values, shown):
         W().run(a=multirun(values), dry_run=True)
 
 
+@pytest.mark.parametrize(
+    "sweep, coords",
+    [
+        (dict(a=multirun([["x"], ["yy"]])), ["['x']", "['yy']"]),
+        (dict(a=multirun([{"k": "x"}, {"k": "yy"}])), ["{'k': 'x'}", "{'k': 'yy'}"]),
+        (dict(overrides=["+a='x','yy'"]), ["x", "yy"]),
+    ],
+)
+def test_strings_inside_sweep_values_key_their_cells(tmp_path, sweep, coords):
+    """Hydra keeps a quoted string inside a list or dict, or in a raw comma
+    sweep, as a ``QuotedString``. The grid must hold the plain string, as each
+    cell's config does, or no cell matches and every result is NaN (#308)."""
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            s = a if isinstance(a, str) else (a["k"] if "k" in a else a[0])
+            return dict(v=float(len(s)))
+
+    wd = tmp_path / "s"
+    wf = W()
+    wf.run(working_dir=str(wd), **sweep)
+    loaded = W().load_from_dir(wd, "mushin_metrics.json")
+    for w in (wf, loaded):
+        ds = w.to_xarray()
+        assert [str(c) for c in ds["a"].values] == coords
+        assert ds["v"].values.tolist() == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("raw", ["+a='x',\"x\"", "+a=choice(['x'],[\"x\"])"])
+def test_a_raw_sweep_repeating_a_quoted_value_is_rejected(raw):
+    """Two spellings of one string (single or double quotes) are one value,
+    so a raw sweep that lists both is refused before launch (#308)."""
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=0.0)
+
+    with pytest.raises(ValueError, match=r"`a` has duplicate sweep values"):
+        W().run(overrides=[raw], dry_run=True)
+
+
 def test_combo_key_is_injective_across_delimiters():
     from mushin._sweep_io import combo_key
 

@@ -20,6 +20,7 @@ from typing import (
 
 import numpy as np
 from hydra.core.override_parser.overrides_parser import OverridesParser
+from hydra.core.override_parser.types import QuotedString
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._launch import _NotSet
@@ -116,6 +117,26 @@ def _scalar_repr(item: Any) -> Any:
         item = item.item()
     # repr keeps the key hashable (list-valued elements) and type-aware.
     return (type(item).__name__, repr(item))
+
+
+def _unquote(value: Any) -> Any:
+    """``value`` with every Hydra ``QuotedString`` in it replaced by its text.
+
+    A sweep keeps the quoted strings it holds: ``choice(['x'])`` gives
+    ``[QuotedString('x')]``, and a comma sweep ``'x','y'`` quotes even its
+    top-level values. The grid's coordinates come from those values while each
+    cell's config holds the plain strings, so no cell matched its grid key
+    (#308). ``Override.value()`` does the same conversion for a value that is
+    not a sweep; its helper is private, hence this copy.
+    """
+    if isinstance(value, QuotedString):
+        return value.text
+    if isinstance(value, list):
+        return [_unquote(v) for v in value]
+    if isinstance(value, dict):
+        # Keys need no unquoting: Hydra's grammar rejects a quoted dict key.
+        return {k: _unquote(v) for k, v in value.items()}
+    return value
 
 
 def _cfg_missing_or_none(cfg, key: str) -> bool:
@@ -1426,7 +1447,7 @@ class BaseWorkflow:
             val = override.value()
             if override.is_sweep_override():
                 if hasattr(val, "list"):  # ChoiceSweep (also glob results)
-                    val = multirun(val.list)  # type: ignore
+                    val = multirun(_unquote(val.list))  # type: ignore
                 elif hasattr(val, "range"):  # RangeSweep: discrete -> a grid axis
                     val = multirun(list(val.range()))  # type: ignore
                 else:
