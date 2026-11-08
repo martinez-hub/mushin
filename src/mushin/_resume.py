@@ -816,8 +816,36 @@ def _script_digest(path: Path, roots: frozenset[str]):
     def _reads(node) -> set[str]:
         if isinstance(node, defs):
             # Evaluated where it is defined: decorators, defaults, bases.
-            return scope_reads.get(node.name, set()) | loads(_outer_parts(node))
+            outer = list(node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                outer += node.bases + [k.value for k in node.keywords]
+            else:
+                outer += node.args.defaults + [
+                    d for d in node.args.kw_defaults if d is not None
+                ]
+                a = node.args
+                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                outer += [arg.annotation for arg in params if arg and arg.annotation]
+                if node.returns is not None:
+                    outer.append(node.returns)
+            return scope_reads.get(node.name, set()) | loads(outer)
         return loads([node])
+
+    def run_here(node) -> list:
+        """What a definition evaluates where it is defined, but annotations:
+        decorators and defaults, or decorators, bases and keywords."""
+        if isinstance(node, ast.ClassDef):
+            return [
+                *node.decorator_list,
+                *node.bases,
+                *(k.value for k in node.keywords),
+            ]
+        args = node.args
+        return [
+            *getattr(node, "decorator_list", ()),
+            *args.defaults,
+            *(d for d in args.kw_defaults if d is not None),
+        ]
 
     def declared_global(node) -> set[str]:
         """The names a definition, or a definition nested in it (a method, an
@@ -883,10 +911,22 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     names.update(declared_global(sub))
                 # Its body binds its own names; what it evaluates here (a
                 # walrus in a default or an annotation) binds the module's.
-                stack.extend((e, in_comp) for e in _outer_parts(sub))
+                stack.extend((e, in_comp) for e in run_here(sub))
+                if not isinstance(sub, ast.ClassDef):
+                    a = sub.args
+                    params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                    stack.extend(
+                        (p.annotation, in_comp) for p in params if p and p.annotation
+                    )
+                    if sub.returns is not None:
+                        stack.append((sub.returns, in_comp))
                 continue
             if isinstance(sub, ast.Lambda):
-                stack.extend((e, in_comp) for e in _outer_parts(sub))
+                args = sub.args
+                stack.extend(
+                    (e, in_comp)
+                    for e in (*args.defaults, *(d for d in args.kw_defaults if d))
+                )
                 continue
             if isinstance(sub, ast.NamedExpr):
                 if isinstance(sub.target, ast.Name):
