@@ -265,7 +265,7 @@ def test_a_param_named_status_keeps_its_values(tmp_path):
 def test_cell_rows_never_repeat_a_column():
     """No two columns share a name, whatever the metrics are called: a renamed
     metric is kept clear of the param columns as shown and of every other
-    metric, so each value survives."""
+    metric, even one found after it (``lr`` comes before ``lr (metric)``)."""
     from mushin._show import _cell_rows
 
     cell = {
@@ -274,8 +274,8 @@ def test_cell_rows_never_repeat_a_column():
         "metrics": {
             "status": 1.0,
             "status (param)": 2.0,
-            "lr (metric)": 3.0,
             "lr": 4.0,
+            "lr (metric)": 3.0,
         },
     }
     _, columns, rows = _cell_rows([cell], None)
@@ -286,8 +286,8 @@ def test_cell_rows_never_repeat_a_column():
             "status": "completed",
             "status (metric)": 1.0,
             "status (param) (metric)": 2.0,
-            "lr (metric)": 3.0,
             "lr (metric) (metric)": 4.0,
+            "lr (metric)": 3.0,
         }
     ]
     assert columns == list(rows[0])
