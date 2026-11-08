@@ -330,7 +330,8 @@ def _attach_item_bootstrap(
     by_metric: dict[str, list[int]] = {}
     for i, row in enumerate(rows):
         by_metric.setdefault(str(row.metric), []).append(i)
-    stats_rows: list[tuple] = [(float("nan"),) * 4] * len(rows)
+    # One row per comparison: item_diff, item_ci_low, item_ci_high, item_p.
+    table = np.full((len(rows), 4), np.nan)
     for metric, where in by_metric.items():
         vals = reduced.get(metric)
         if vals is None:
@@ -344,9 +345,7 @@ def _attach_item_bootstrap(
             seed=0,
         )
         for i, stats_row in zip(where, batch, strict=True):
-            stats_rows[i] = stats_row
-    # (len(rows), 4) even with no rows, so the columns slice out alike.
-    table = np.asarray(stats_rows, dtype=float).reshape(len(rows), 4)
+            table[i] = stats_row
     out = comparisons.copy()
     for j, c in enumerate(("item_diff", "item_ci_low", "item_ci_high", "item_p")):
         out[c] = table[:, j]

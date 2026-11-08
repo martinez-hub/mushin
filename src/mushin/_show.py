@@ -652,11 +652,7 @@ def _read_provenance(root) -> dict | None:
 _PROV_VOLATILE = frozenset({"timestamp", "config"})
 
 
-def _flatten(d: Any, prefix: str = "") -> dict:
-    """A nested dict flattened into dotted keys; anything else is one value
-    (keyed ``""`` at the top)."""
-    if not isinstance(d, dict):
-        return {prefix: d}
+def _flatten(d: dict, prefix: str = "") -> dict:
     out: dict[str, Any] = {}
     for k, v in d.items():
         key = f"{prefix}{k}"

@@ -22,7 +22,6 @@ from omegaconf import OmegaConf
 from mushin.__main__ import guide_text
 from mushin._hydra_yaml import read_hydra_job
 from mushin._resume import STATUS_FILE, sidecar_job_fields
-from mushin._show import _flatten
 from mushin._sweep_io import (
     MANIFEST_FILE,
     METRICS_FILE,
@@ -137,6 +136,17 @@ def _safe_load_pt(path: Path):
         except Exception:
             pass
     return _data_only_load(path)
+
+
+def _flatten(value: Any, prefix: str = "") -> dict:
+    """Flatten a nested (already JSON-able) dict into dotted keys."""
+    out: dict[str, Any] = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out.update(_flatten(v, f"{prefix}{k}."))
+    else:
+        out[prefix.rstrip(".")] = value
+    return out
 
 
 def _job_sort_key(hydra_dir: Path, root: Path | None = None):
