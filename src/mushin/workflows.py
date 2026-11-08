@@ -5,7 +5,6 @@
 import dataclasses
 import functools
 import json
-import re
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -106,19 +105,22 @@ def _to_override_element(item: Any) -> str:
 
 
 def _quoted(text: str) -> str:
-    """``text`` as a single-quoted Hydra string that parses back to ``text``.
+    """``text`` as a single-quoted Hydra string for an override.
 
     Hydra's grammar unescapes a backslash only where it precedes a quote, so
     doubling every backslash (as this did) reached the task doubled (#319):
     ``C:\\data`` arrived as ``C:\\\\data``. Hydra's own writer escapes the
     quotes and only the backslashes that precede one.
 
-    OmegaConf, which resolves the value next, reads one backslash before
-    ``${`` as escaping the interpolation, and two as a literal backslash before
-    a live one. A run of backslashes right before ``${`` is doubled, as it
-    always was, so a Windows ``outputs\\${now:%Y}`` keeps its separator and its
-    interpolation."""
-    text = re.sub(r"(\\+)(?=\$\{)", lambda m: m.group(1) * 2, text)
+    A string holding ``${`` is an interpolation, which OmegaConf parses again
+    with backslash escapes of its own: a backslash before ``${`` escapes it,
+    and inside one a backslash escapes the next character. The doubling undid
+    most of those, so a Windows
+    ``outputs\\${now:%Y}`` or a ``${oc.env:X,\\\\server\\share}`` default
+    resolved as written. Such a string keeps that form, exactly as before; the
+    task gets what it always did."""
+    if "${" in text:
+        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
     return QuotedString(text=text, quote=Quote.single).with_quotes()
 
 

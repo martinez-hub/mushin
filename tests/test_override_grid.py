@@ -190,22 +190,47 @@ def test_backslashes_reach_the_task_unchanged(tmp_path):
     assert {str(r) for r in ds["b_repr"].values} == {repr("C:\\data")}
 
 
-def test_a_backslash_before_an_interpolation_keeps_it_live(tmp_path):
-    """A backslash right before ``${...}``, as in a Windows working_dir
-    ``outputs\\${now:%Y}``, stays a backslash before a live interpolation.
-    OmegaConf reads one backslash there as escaping ``${`` (the directory would
-    be named ``${now:%Y}`` literally) and two as a backslash and a live one."""
+@pytest.mark.parametrize(
+    "text",
+    [
+        "out\\${now:%Y}",
+        "a\\\\${x}",
+        "${oc.env:X,\\\\fs\\share}",
+        "${x}\\y",
+        "${x}'s",
+    ],
+)
+def test_an_interpolation_string_is_written_as_before(text):
+    """A string holding ``${`` is parsed again by OmegaConf, with backslash
+    escapes of its own that doubling every backslash undid, so it keeps
+    exactly the form it always had; only other strings changed (#319)."""
+    from mushin.workflows import _to_override_element
+
+    before = "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    assert _to_override_element(text) == before
+
+
+def test_interpolations_with_backslashes_resolve_as_written(tmp_path, monkeypatch):
+    """A Windows working_dir ``runs\\${now:%Y}`` keeps its separator and its
+    interpolation (one backslash there would escape it, naming a directory
+    ``${now:%Y}``), a UNC default in ``${oc.env:...}`` keeps both leading
+    backslashes, and a path value that is not a str is quoted like one."""
     from pathlib import PureWindowsPath
 
     from mushin.workflows import _to_override_element
 
-    # A value that is not a str (here a path) is quoted the same way.
     assert _to_override_element(PureWindowsPath("C:/data")) == "'C:\\data'"
-    assert _to_override_element("a\\${x}") == "'a\\\\${x}'"
 
+    monkeypatch.delenv("MUSHIN_TEST_UNSET", raising=False)
     wf = _Seen()
-    wf.run(a=multirun(["x", "y"]), working_dir=str(tmp_path / "runs") + "\\${now:%Y}")
-    assert [str(r) for r in wf.to_xarray()["a_repr"].values] == ["'x'", "'y'"]
+    wf.run(
+        a=multirun(["x", "y"]),
+        b="${oc.env:MUSHIN_TEST_UNSET,\\\\fileserver\\datasets}",
+        working_dir=str(tmp_path / "runs") + "\\${now:%Y}",
+    )
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == ["'x'", "'y'"]
+    assert {str(r) for r in ds["b_repr"].values} == {repr("\\\\fileserver\\datasets")}
     assert not [p for p in tmp_path.rglob("*") if "${" in p.name]
 
 
