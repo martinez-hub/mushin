@@ -96,9 +96,6 @@ def test_budget_immune_to_wall_clock_jumps(tmp_path, monkeypatch):
     frozen = _time.time()
     monkeypatch.setattr(_time, "time", lambda: frozen)
 
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
-
     class W(MultiRunMetricsWorkflow):
         @staticmethod
         def task(a):
@@ -123,9 +120,6 @@ def test_budget_disabled_under_multi_rank_launch(tmp_path, monkeypatch):
     not its siblings — the skipped rank would leave the others hanging at NCCL
     rendezvous. The budget must be disabled with a warning instead."""
     import time as _time
-
-    from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
 
     # a real external rank has both the world size and a per-rank marker
     monkeypatch.setenv("WORLD_SIZE", "2")

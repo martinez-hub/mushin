@@ -115,8 +115,6 @@ def test_parallel_sweep_runs_out_of_process(tmp_path):
     import subprocess
     import sys
 
-    import pytest
-
     pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
 
     repo = Path(__file__).resolve().parent.parent

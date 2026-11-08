@@ -32,7 +32,7 @@ def test_show_returns_one_row_per_cell(tmp_path):
     assert r["acc"] == pytest.approx(1.2)
     assert r["loss"] == pytest.approx(1.0)
     # the printed table lists every column and the values
-    table = str(mushin.show(wd))
+    table = str(res)
     for col in ("lr", "seed", "status", "acc", "loss"):
         assert col in table
     assert "completed" in table

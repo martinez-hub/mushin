@@ -141,10 +141,11 @@ def test_child_entry_point_runs_the_right_trainer_loop(tmp_path, entry, expected
     assert proc.returncode == 0, f"child failed:\n{proc.stderr[-3000:]}"
     assert expected in (proc.stdout + proc.stderr)
 
-    # Ranks must not overwrite each other's Hydra output. `_subprocess_call`
-    # passes `hydra.output_subdir=.pl_hydra_rank_<n>` for exactly this reason;
-    # if the child ignored it, every rank would write to `.hydra/` and clobber
-    # the parent's saved config.
+    # Ranks must not overwrite each other's Hydra output: the child honours the
+    # `hydra.output_subdir=.pl_hydra_rank_<n>` override (passed here by
+    # `_run_child`; that `_subprocess_call` passes it is pinned by
+    # test_lightning_launchers.py::test_subprocess_call_argv). If it ignored
+    # it, every rank would write to `.hydra/` and clobber the parent's config.
     child_dir = tmp_path / f"child_{entry}"
     assert (child_dir / ".pl_hydra_rank_0" / "config.yaml").is_file()
     assert not (child_dir / ".hydra").exists(), "child clobbered the default subdir"

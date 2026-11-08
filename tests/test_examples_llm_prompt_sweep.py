@@ -57,12 +57,12 @@ def test_resume_fills_the_holes_after_the_cause_is_fixed():
             working_dir=workdir,
             on_error="nan",
         )
-    accuracy = first.workflow.to_xarray()["accuracy"]
+    accuracy = first.workflow.to_xarray()["accuracy"].values
     # A transient failure must leave holes, not discard the whole grid.
-    kept = accuracy.sel(prompt=["cot", "terse"]).values
-    assert kept.size == 16
-    assert np.isfinite(kept).any()  # something survived the outage
-    holes = int(np.isnan(accuracy.values).sum())
+    assert accuracy.size == 24
+    assert np.isfinite(accuracy).any()  # something survived the outage
+    holes = int(np.isnan(accuracy).sum())
+    assert holes > 0, "the outage failed no cell: resume would prove nothing"
 
     sweep_ex._OUTAGE = False  # the cause is fixed
     try:
@@ -79,7 +79,8 @@ def test_resume_fills_the_holes_after_the_cause_is_fixed():
     finally:
         sweep_ex._OUTAGE = True
     after = second.workflow.to_xarray()["accuracy"].values
-    assert np.isfinite(after).all(), f"{holes} holes were not filled by resume"
+    left = int(np.isnan(after).sum())
+    assert left == 0, f"{left} of {holes} holes were not filled by resume"
 
 
 def test_demo_runs_and_reports_a_winner(capsys):

@@ -60,6 +60,10 @@ def test_seed_everything_per_rank_offsets_by_global_rank(
         monkeypatch.delenv(var, raising=False)
     for var, value in env.items():
         monkeypatch.setenv(var, value)
+    # Lightning's seed_everything writes these into os.environ; setting them
+    # through monkeypatch first restores them after the test.
+    monkeypatch.setenv("PL_GLOBAL_SEED", "0")
+    monkeypatch.setenv("PL_SEED_WORKERS", "0")
     assert seed_everything_per_rank(base) == expected  # base + global rank
 
 
