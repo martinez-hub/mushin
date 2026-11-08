@@ -156,8 +156,9 @@ def _check_sweeps_reach_their_jobs(overrides: list[str], axes: dict) -> None:
     ``sweep_string_iterator()``, and the job parses that again. A string that
     lost its quotes on the way, as in ``choice('true')``, is read back as the
     bool ``True``: the task gets a value the user did not write, and its cell
-    keys no grid coordinate (#319). Values are compared by type and repr, as
-    a multiset, since ``shuffle(...)`` reorders the jobs.
+    keys no grid coordinate (#319). Values are compared by repr (which tells
+    ``'1'`` from ``1`` and ``1`` from ``1.0``), as a multiset, since
+    ``shuffle(...)`` reorders the jobs.
     """
     parser = OverridesParser.create()
     for override in parser.parse_overrides(overrides=overrides):
@@ -175,11 +176,8 @@ def _check_sweeps_reach_their_jobs(overrides: list[str], axes: dict) -> None:
                 f"jobs' overrides ({type(e).__name__}: {e})."
             ) from e
 
-        def tag(v):
-            return type(v), repr(v)
-
-        job_tags = [tag(j) for j in jobs]
-        grid_tags = [tag(g) for g in grid]
+        job_tags = [repr(j) for j in jobs]
+        grid_tags = [repr(g) for g in grid]
         lost = [g for g, t in zip(grid, grid_tags, strict=True) if t not in job_tags]
         if not lost:
             continue
