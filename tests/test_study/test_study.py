@@ -1,28 +1,10 @@
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
+from _study_checkpoints import loader as _loader
+from _study_checkpoints import save_models as _save
 from mushin import Study
 from mushin.benchmark import BenchmarkResult
-
-
-def _loader(n=40, d=4, num_classes=3):
-    g = torch.Generator().manual_seed(0)
-    x = torch.randn(n, d, generator=g)
-    y = torch.randint(0, num_classes, (n,), generator=g)
-    return DataLoader(TensorDataset(x, y), batch_size=16)
-
-
-def _save(tmp_path, names, n_seeds=2, d=4, num_classes=3):
-    ckpts = {}
-    for name in names:
-        paths = []
-        for s in range(n_seeds):
-            torch.manual_seed(hash((name, s)) % 1000)
-            p = tmp_path / f"{name}_{s}.pt"
-            torch.save(torch.nn.Linear(d, num_classes), p)
-            paths.append(str(p))
-        ckpts[name] = paths
-    return ckpts
 
 
 def test_from_checkpoints_runs_and_compares(tmp_path):

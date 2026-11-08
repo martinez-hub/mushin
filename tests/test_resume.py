@@ -129,9 +129,8 @@ def test_sidecar_job_fields_accepts_what_hydra_writes(tmp_path, job_num, choices
     assert sidecar_job_fields(tmp_path) == (job_num, choices)
 
 
-def test_sidecar_job_fields_without_a_sidecar(tmp_path):
-    assert sidecar_job_fields(tmp_path) is None
-    (tmp_path / STATUS_FILE).write_text("{not json")
+def test_no_sidecar_reads_as_none(tmp_path):
+    assert read_cell_status(tmp_path) is None
     assert sidecar_job_fields(tmp_path) is None
 
 
@@ -158,13 +157,14 @@ def test_sidecar_job_fields_defers_to_a_newer_hydra_yaml(tmp_path):
 @pytest.mark.parametrize(
     "content",
     [
+        b"{not json",
         b"\xff\xfe{}",  # not UTF-8
         b'{"job_num": ' + b"9" * 5000 + b"}",  # past Python's int digit limit
         b"[" * 100_000,  # nested past the recursion limit
     ],
     # pytest would otherwise name the cases after the bytes themselves (5,000
     # and 100,000 characters), which the Windows CI jobs could not handle.
-    ids=["not-utf8", "huge-int", "deep-nesting"],
+    ids=["not-json", "not-utf8", "huge-int", "deep-nesting"],
 )
 def test_read_cell_status_treats_any_unreadable_file_as_corrupt(tmp_path, content):
     """The MCP server lists directories it did not write; one planted or
@@ -172,12 +172,6 @@ def test_read_cell_status_treats_any_unreadable_file_as_corrupt(tmp_path, conten
     (tmp_path / STATUS_FILE).write_bytes(content)
     assert read_cell_status(tmp_path) is None
     assert sidecar_job_fields(tmp_path) is None
-
-
-def test_read_cell_status_missing_or_corrupt_returns_none(tmp_path):
-    assert read_cell_status(tmp_path) is None
-    (tmp_path / STATUS_FILE).write_text("{not json")
-    assert read_cell_status(tmp_path) is None
 
 
 def test_discover_last_ckpt_prefers_last_then_newest(tmp_path):

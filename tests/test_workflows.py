@@ -2080,9 +2080,10 @@ def test_resume_reruns_completed_cells_when_config_changed(tmp_path):
     assert float(ds["val"].sel(a=2)) == 4.0  # new config's result, not stale
 
 
-def test_resume_reuses_legacy_sidecars_without_config_hash(tmp_path):
-    """Sweeps recorded before the config-hash existed must still resume
-    (reuse) their completed cells."""
+@pytest.mark.parametrize("legacy_key", ["config_hash", "code_hash"])
+def test_resume_reuses_legacy_sidecars(tmp_path, legacy_key):
+    """Sweeps recorded before the config hash (or the code hash) existed must
+    still resume (reuse) their completed cells rather than re-run them."""
     import json as _json
 
     from mushin import multirun
@@ -2099,10 +2100,12 @@ def test_resume_reuses_legacy_sidecars_without_config_hash(tmp_path):
 
     wd = tmp_path / "s"
     W().run(a=multirun([1, 2]), working_dir=str(wd))
-    # Simulate a pre-hash sweep: strip config_hash from every status sidecar.
-    for status_file in wd.glob(f"*/{STATUS_FILE}"):
+    # Simulate an older sweep: strip the key from every status sidecar.
+    status_files = list(wd.glob(f"*/{STATUS_FILE}"))
+    assert len(status_files) == 2
+    for status_file in status_files:
         d = _json.loads(status_file.read_text())
-        d.pop("config_hash", None)
+        assert d.pop(legacy_key) is not None
         status_file.write_text(_json.dumps(d))
 
     CALLS["n"] = 0
@@ -2227,35 +2230,6 @@ def test_resume_reuses_when_task_code_unchanged(tmp_path):
         warnings.simplefilter("error")  # any resume warning would fail here
         W().run(a=multirun([1, 2]), working_dir=wd, resume=True)
     assert CALLS["n"] == 0  # both cells reused
-
-
-def test_resume_reuses_legacy_sidecars_without_code_hash(tmp_path):
-    # Sweeps recorded before the code-hash existed must still resume (reuse)
-    # their completed cells rather than spuriously re-running.
-    import json
-
-    from mushin import multirun
-    from mushin._resume import STATUS_FILE
-    from mushin.workflows import MultiRunMetricsWorkflow
-
-    CALLS = {"n": 0}
-
-    class W(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(a):
-            CALLS["n"] += 1
-            return dict(v=float(a))
-
-    wd = tmp_path / "s"
-    W().run(a=multirun([1, 2]), working_dir=str(wd))
-    for sf in wd.glob(f"*/{STATUS_FILE}"):
-        d = json.loads(sf.read_text())
-        d.pop("code_hash", None)  # simulate a pre-code-hash sweep
-        sf.write_text(json.dumps(d))
-
-    CALLS["n"] = 0
-    W().run(a=multirun([1, 2]), working_dir=str(wd), resume=True)
-    assert CALLS["n"] == 0  # legacy cells reused
 
 
 def test_resume_reruns_full_grid_when_axis_added(tmp_path):
