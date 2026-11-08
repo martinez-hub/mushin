@@ -8,6 +8,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.18.0] - 2026-11-07
+
+### Changed
+
+- `Study.from_checkpoints` now builds the study through the constructor, so a `Study` subclass's `__init__` runs, receiving `methods=None` and `seeds=None`. (#305)
+- A `test=` or `correction=` that is not a string (such as a list) is now reported as an unknown name with `ValueError` by every compare function, where `compare_methods` raised `TypeError`. (#305)
+
+### Fixed
+
+- Taking the project-code record (each cell's status record, and the one `resume=True` and `cache_dir=` compare) no longer imports a module loaded through `importlib.util.LazyLoader` (as `lazy_loader.load` does). In a notebook it imported each such module a notebook name held, even one the task does not use, and in a script one the task imports or a `functools.partial` binds; an error from that import was hidden, and the module was left half loaded, so the user's next read of it raised an `AttributeError` instead of the error. The record now reads these modules without running them and records the same files. Provenance no longer imports a lazily loaded `torch` that the task did not use. Hydra's launch can still import such a module, so one that fails to import can now make a notebook's `run()` raise its error, as a script's already could: import such a module yourself before `run()`. (#304)
+
+### Removed
+
+- `mushin.BaseWorkflow` and `mushin.RobustnessCurve`, deprecated since 0.4.0, are removed from the top level. Import them from `mushin.workflows`: `from mushin.workflows import BaseWorkflow, RobustnessCurve`. (#309)
+- `run()` no longer reads a workflow's legacy `evaluation_task` method for its pre-launch checks (parameter names, required parameters). Each cell always ran `task`, so a workflow that defined only `evaluation_task` never ran; define `task` instead. (#307)
+
+### Misc
+
+- #302, #310
+
+
 ## [0.17.2] - 2026-11-07
 
 ### Fixed
@@ -703,7 +724,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/martinez-hub/mushin/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/martinez-hub/mushin/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/martinez-hub/mushin/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/martinez-hub/mushin/compare/v0.16.0...v0.17.0
