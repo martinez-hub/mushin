@@ -846,7 +846,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     def run_here(node) -> list:
         """What a definition evaluates where it is defined, but annotations:
-        decorators and defaults, or decorators, bases and keywords."""
+        decorators and defaults, or decorators, bases and keywords. A generic
+        class's bases and keywords are in its type-parameter scope instead,
+        but a walrus is a syntax error there, so they bind nothing here."""
         if isinstance(node, ast.ClassDef):
             return [
                 *node.decorator_list,

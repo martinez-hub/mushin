@@ -1981,8 +1981,11 @@ def test_a_generic_helper_in_a_script_counts_what_it_reads(tmp_path):
         "T = {v}\n\n\ndef task[T](x: T) -> T:\n    return x\n",
         "T = {v}\n\n\nclass Base[T]:\n    pass\n\n\nclass task[T](Base[T]):\n    pass\n",
         "T = {v}\n\n\ntype Vec[T] = list[T]\n\n\ndef task(x: Vec) -> Vec:\n    return x\n",
+        "T = {v}\n\n\nclass M(type):\n    def __new__(m, n, b, ns, **k):\n"
+        "        return super().__new__(m, n, b, ns)\n\n\n"
+        "class task[T](metaclass=M, flag=T):\n    pass\n",
     ],
-    ids=["def", "class", "type-alias"],
+    ids=["def", "class", "type-alias", "class-keyword"],
 )
 def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, text):
     """In a generic function's annotations, a generic class's bases and a
@@ -2005,6 +2008,13 @@ def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, tex
             "1",
         ),
         ("T = {v}\n\n\ndef task[T](x=T):\n    return x\n", "1", "2"),
+        ("T = {v}\n\n\ndef task[T](*, x=T):\n    return x\n", "1", "2"),
+        (
+            "T = {v}\n\n\ndef d(c):\n    return c\n\n\n"
+            "@d if T else d\nclass task[T]:\n    pass\n",
+            "0",
+            "1",
+        ),
         (
             "Alias = {v}\n\n\ndef task[T](x: Alias[T]) -> T:\n    return x\n",
             "list",
@@ -2017,7 +2027,15 @@ def test_a_generic_definitions_type_parameter_is_not_a_module_read(tmp_path, tex
             "str",
         ),
     ],
-    ids=["decorator", "default", "annotation", "bound", "type-alias"],
+    ids=[
+        "decorator",
+        "default",
+        "kw-only-default",
+        "class-decorator",
+        "annotation",
+        "bound",
+        "type-alias",
+    ],
 )
 def test_what_a_generic_definition_reads_outside_its_type_parameters_counts(
     tmp_path, text, a, b
