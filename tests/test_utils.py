@@ -69,7 +69,7 @@ def test_multirun_layout(tmp_path):
 
     results = load_experiment(tmp_path)
 
-    assert isinstance(results, list)
+    assert isinstance(results, list) and len(results) == 2
     assert {e.working_dir: float(e.cfg.lr) for e in results} == pytest.approx(
         {str(tmp_path / "0"): 0.01, str(tmp_path / "1"): 0.001}
     )

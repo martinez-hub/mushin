@@ -15,7 +15,6 @@ import hashlib
 import importlib
 import json
 import linecache
-import pathlib
 import subprocess
 import sys
 import textwrap
@@ -27,6 +26,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import mushin._resume
+from _modules_written import _new_modules_are_found  # noqa: F401 - autouse fixture
 from mushin._resume import cell_project_record, project_fingerprints
 
 #: The scan of the kept cells' imports, kept here so a fixture can turn it
@@ -72,25 +72,6 @@ class Kernel:
         for name in self.names:
             linecache.cache.pop(name, None)
             linecache.__dict__.get("_ipython_cache", {}).pop(name, None)
-
-
-@pytest.fixture(autouse=True)
-def _new_modules_are_found(monkeypatch):
-    """Tests here write a module and then import it or look it up. The import
-    system caches each directory's listing and rescans it only when the
-    directory's mtime moves, which on Windows can lag a file written a moment
-    ago, so the module is not found. ``importlib.invalidate_caches`` is the
-    documented remedy; every ``.py`` written here calls it (as in
-    test_resume_project_code.py)."""
-    write_text = pathlib.Path.write_text
-
-    def write_and_invalidate(self, *args, **kwargs):
-        n = write_text(self, *args, **kwargs)
-        if self.suffix == ".py":
-            importlib.invalidate_caches()
-        return n
-
-    monkeypatch.setattr(pathlib.Path, "write_text", write_and_invalidate)
 
 
 @pytest.fixture
@@ -948,45 +929,6 @@ NOTEBOOK_NOT_EDITS = {
         ],
         ["task(1)\n"],
     ),
-    # Only one branch runs, and which is a value: the cell's statements
-    # count together, so an unchanged re-run keeps the record.
-    "a class in two branches of an if, re-run": (
-        [
-            "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\nelse:\n\n    class Config:\n        LR = 2\n",
-            "def task(a):\n    return a * Config.LR\n",
-        ],
-        [
-            "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\nelse:\n\n    class Config:\n        LR = 2\n"
-        ],
-    ),
-    "a class in two branches of an elif, re-run": (
-        [
-            "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\nelif FLAG == 1:\n\n    class Config:\n        LR = 1\n",
-            "def task(a):\n    return a * Config.LR\n",
-        ],
-        [
-            "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\nelif FLAG == 1:\n\n    class Config:\n        LR = 1\n"
-        ],
-    ),
-    "a class in two branches of a match, re-run": (
-        [
-            "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n",
-            "def task(a):\n    return a * Config.LR\n",
-        ],
-        [
-            "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n"
-        ],
-    ),
-    # Inside a function's body two statements run as one step.
-    "a factory stating its class twice, re-run": (
-        [
-            "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n    return C\n\n\nC = make()\n",
-            "def task(a):\n    return a * C.K\n",
-        ],
-        [
-            "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n    return C\n\n\nC = make()\n"
-        ],
-    ),
 }
 
 
@@ -997,7 +939,11 @@ def test_a_notebook_edit_is_seen(kernel, case):
     first = _record(kernel, "task")
     assert first, "the notebook entries are empty"
     _run_cells(kernel, after)
-    assert _record(kernel, "task") != first
+    second = _record(kernel, "task")
+    # A scan that raised gives no entries, which would differ vacuously; an
+    # edit changes a digest, it does not drop an entry.
+    assert first.keys() <= second.keys()
+    assert second != first
 
 
 @pytest.mark.parametrize("case", sorted(NOTEBOOK_NOT_EDITS))
@@ -1406,7 +1352,6 @@ def test_a_target_in_a_module_without_a_file_keeps_mains_entries(tmp_path, monke
     (root / "mushin_t_extpkg").mkdir(parents=True)
     (root / "mushin_t_extpkg" / "__init__.py").write_text("X = 1\n")
     monkeypatch.syspath_prepend(str(root))
-    import importlib
 
     pkg = importlib.import_module("mushin_t_extpkg")
     ext = types.ModuleType("mushin_t_extpkg.ext")
@@ -1439,7 +1384,6 @@ def lazy_project(tmp_path, monkeypatch):
     The scan of the kept cells' imports is off: these tests pin how the
     namespace's proxies are read, and the cell's statement would record the
     module anyway."""
-    import importlib
 
     monkeypatch.setattr(
         mushin._resume, "_kept_cell_reading", lambda *scan: (set(), {}), raising=False
@@ -1505,7 +1449,6 @@ def test_a_resume_after_editing_a_lazily_imported_module_reruns(
 ):
     """The failure this guards: a restarted kernel binds the proxy again, so
     a record that skipped it would compare nothing and reuse every cell."""
-    import importlib
 
     cells = [
         "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
@@ -1889,7 +1832,6 @@ def sub_project(tmp_path, monkeypatch):
     cells' imports is off: most tests here pin how the reached code names a
     module, and a cell's `import pkg.sub` would record it anyway
     (``cell_imports`` turns it back on)."""
-    import importlib
 
     monkeypatch.setattr(
         mushin._resume, "_kept_cell_reading", lambda *scan: (set(), {}), raising=False
@@ -2366,7 +2308,6 @@ def test_a_resume_after_editing_a_submodule_named_through_its_package_reruns(
 ):
     """The failure this guards: the record held only `pkg`, so an edit to
     `pkg/sub.py` and a restart reused every cell."""
-    import importlib
 
     cells = [
         "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
@@ -2740,7 +2681,6 @@ def test_a_project_namespace_package_named_like_a_stdlib_module_stays_the_projec
 ):
     """A loaded package with no file is judged module by module, as on main,
     though the standard library lists its name (one this platform lacks)."""
-    import importlib
     import importlib.util
 
     name = next(
@@ -2994,7 +2934,6 @@ def test_a_resume_after_editing_a_module_a_cell_imports_reruns(
     """The task reaches the submodule through a local name its syntax cannot
     follow; the cell's import still counts, so an edit and a restart re-run
     the cells."""
-    import importlib
 
     cells = [
         "import mushin\nfrom mushin import multirun\n\nCALLS = []\n",
@@ -4362,6 +4301,40 @@ def test_a_method_less_class_s_statement_is_read_exactly(cell):
         finally:
             k.close()
     assert digests[0] == digests[1] != digests[2]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "FLAG = True\n\nif FLAG:\n\n    class Config:\n        LR = 1\n\n"
+        "else:\n\n    class Config:\n        LR = 2\n",
+        "FLAG = 1\n\nif FLAG == 0:\n\n    class Config:\n        LR = 0\n\n"
+        "elif FLAG == 1:\n\n    class Config:\n        LR = 1\n",
+        "FLAG = 1\n\nmatch FLAG:\n    case 1:\n\n        class Config:\n"
+        "            LR = 1\n\n    case _:\n\n        class Config:\n            LR = 2\n",
+    ],
+    ids=["if", "elif", "match"],
+)
+def test_a_class_in_two_branches_of_an_if_is_stable(kernel, cell):
+    """Only one branch runs, and which is a value: the cell's statements
+    count together, so an unchanged re-run keeps the digest."""
+    _run_cells(kernel, [cell, "def task(a):\n    return a * Config.LR\n"])
+    first = _own(kernel)
+    kernel.run(cell)
+    assert _own(kernel) == first
+
+
+def test_a_factory_stating_its_class_twice_is_stable(kernel):
+    """Inside a function's body two statements run as one step: an unchanged
+    re-run of the factory keeps the digest."""
+    factory = (
+        "def make():\n    class C:\n        K = 1\n\n    class C(C):\n        K = 2\n\n"
+        "    return C\n\n\nC = make()\n"
+    )
+    _run_cells(kernel, [factory, "def task(a):\n    return a * C.K\n"])
+    first = _own(kernel, "C")
+    kernel.run(factory)
+    assert _own(kernel, "C") == first
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,7 @@ import warnings
 
 import pytest
 
+from _modules_written import _new_modules_are_found  # noqa: F401 - autouse fixture
 from mushin import multirun
 from mushin._resume import (
     STATUS_FILE,
@@ -37,24 +38,6 @@ from mushin._resume import (
 HELPERS = "mushin_t_helpers"
 EXP = "mushin_t_exp"
 PY = f"{sys.version_info[0]}.{sys.version_info[1]}"
-
-
-@pytest.fixture(autouse=True)
-def _new_modules_are_found(monkeypatch):
-    """Tests here write a module and then import it or look it up. The import
-    system caches each directory's listing and rescans it only when the
-    directory's mtime moves, which on Windows can lag a file written a moment
-    ago, so the module is not found. ``importlib.invalidate_caches`` is the
-    documented remedy; every ``.py`` written here calls it."""
-    write_text = pathlib.Path.write_text
-
-    def write_and_invalidate(self, *args, **kwargs):
-        n = write_text(self, *args, **kwargs)
-        if self.suffix == ".py":
-            importlib.invalidate_caches()
-        return n
-
-    monkeypatch.setattr(pathlib.Path, "write_text", write_and_invalidate)
 
 
 def _write(root, scale: int = 10, offset: int = 0, comment: str = ""):
@@ -551,7 +534,10 @@ def test_changed_project_code_compares_the_keys_both_records_have():
     assert changed_project_code(a, {"python": "3.11", "code": {"other": "2"}}) == []
     # File digests read alike on every supported Python, so an edit made
     # around an interpreter upgrade is still seen.
-    assert changed_project_code(a, {"python": "3.12", "code": {"m:f": "2"}}) == ["m:f"]
+    f = {"python": "3.11", "code": {"m (file)": "1"}}
+    assert changed_project_code(f, {"python": "3.12", "code": {"m (file)": "2"}}) == [
+        "m (file)"
+    ]
     assert changed_project_code(None, a) is None  # a sidecar from before the field
     assert changed_project_code(a, None) is None  # not fingerprinted this run
 
@@ -2641,6 +2627,16 @@ def test_only_a_completed_status_carries_the_record(project):
         assert "code_deps" not in seen["skipped"][0]
     finally:
         sys.modules.pop("mushin_t_probe", None)
+
+
+def test_sidecar_records_the_project_code(project):
+    root, exp = project
+    wd = root / "sweep"
+    exp.W().run(a=multirun([1]), working_dir=str(wd))
+    (status,) = wd.rglob(STATUS_FILE)
+    assert json.loads(status.read_text())["code_deps"] == project_fingerprints(
+        exp.W.task
+    )
 
 
 def test_a_cache_hit_and_a_resume_reuse_record_the_code(project):

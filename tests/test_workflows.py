@@ -2044,7 +2044,9 @@ def test_resume_reuses_legacy_sidecars(tmp_path, legacy_key):
     wd = tmp_path / "s"
     W().run(a=multirun([1, 2]), working_dir=str(wd))
     # Simulate an older sweep: strip the key from every status sidecar.
-    for status_file in wd.glob(f"*/{STATUS_FILE}"):
+    status_files = list(wd.glob(f"*/{STATUS_FILE}"))
+    assert len(status_files) == 2
+    for status_file in status_files:
         d = _json.loads(status_file.read_text())
         assert d.pop(legacy_key) is not None
         status_file.write_text(_json.dumps(d))

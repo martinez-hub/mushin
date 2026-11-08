@@ -1,8 +1,8 @@
 import pytest
 import torch
-from _checkpoints import loader as _loader
-from _checkpoints import save_models as _save_models
 
+from _study_checkpoints import loader as _loader
+from _study_checkpoints import save_models as _save_models
 from mushin.benchmark import BenchmarkResult
 from mushin.study._load import evaluate_checkpoints
 

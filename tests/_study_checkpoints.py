@@ -3,6 +3,8 @@
 """A small evaluation loader and saved linear models, shared by the Study
 tests."""
 
+import zlib
+
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -20,7 +22,9 @@ def save_models(tmp_path, names, n_seeds=2, d=4, num_classes=3):
     for name in names:
         paths = []
         for s in range(n_seeds):
-            torch.manual_seed(hash((name, s)) % 1000)
+            # crc32, not hash(): a str's hash is salted per process, so the
+            # weights would differ on every run.
+            torch.manual_seed(zlib.crc32(f"{name}:{s}".encode()) % 1000)
             p = tmp_path / f"{name}_{s}.pt"
             torch.save(torch.nn.Linear(d, num_classes), p)
             paths.append(str(p))

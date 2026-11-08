@@ -1,8 +1,8 @@
 import torch
-from _checkpoints import loader as _loader
-from _checkpoints import save_models as _save
 from torch.utils.data import DataLoader, TensorDataset
 
+from _study_checkpoints import loader as _loader
+from _study_checkpoints import save_models as _save
 from mushin import Study
 from mushin.benchmark import BenchmarkResult
 
