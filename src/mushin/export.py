@@ -41,7 +41,9 @@ def table(root, *, path=None, metrics: list[str] | None = None):
     metrics : list[str] | None
         Restrict the metric columns to these names, in this order (default:
         every metric found, discovery order); repeats are deduplicated. A
-        metric sharing a swept param's name is emitted as ``"<name> (metric)"``.
+        metric sharing a swept param's name, or ``status``, is emitted as
+        ``"<name> (metric)"``, and a swept param named ``status`` as
+        ``"status (param)"`` (``status`` is the cell status).
 
     Raises
     ------

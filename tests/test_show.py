@@ -216,6 +216,58 @@ def test_param_and_metric_sharing_a_name_do_not_collide(tmp_path):
     assert "lr (metric)" in header
 
 
+def test_a_param_named_status_keeps_its_values(tmp_path):
+    """A swept param named ``status`` must not be overwritten by the cell
+    status (#306). It is the column ``status (param)``, a metric named
+    ``status`` is ``status (metric)``, and ``status`` stays the cell status."""
+    from mushin import export
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(status):
+            return dict(status=float(len(status)))
+
+    wd = tmp_path / "s"
+    W().run(status=multirun(["bb", "a"]), working_dir=str(wd))
+
+    # The default sort is by the swept value, so "a" comes before "bb".
+    rows = mushin.show(wd).rows
+    assert [r["status (param)"] for r in rows] == ["a", "bb"]
+    assert [r["status"] for r in rows] == ["completed", "completed"]
+    assert [r["status (metric)"] for r in rows] == [1.0, 2.0]
+    by_metric = mushin.show(wd, sort="status (metric)").rows
+    assert [r["status (param)"] for r in by_metric] == ["a", "bb"]
+
+    lines = export.table(wd).strip().splitlines()
+    assert lines[0].split(",") == ["status (param)", "status", "status (metric)"]
+    assert [line.split(",") for line in lines[1:]] == [
+        ["a", "completed", "1.0"],
+        ["bb", "completed", "2.0"],
+    ]
+
+
+def test_cell_rows_never_repeat_a_column():
+    """A metric is renamed against the param columns as shown, so not even a
+    metric named ``status (param)`` takes the renamed param's column."""
+    from mushin._show import _cell_rows
+
+    cell = {
+        "combo": {"status": "a"},
+        "status": "completed",
+        "metrics": {"status": 1.0, "status (param)": 2.0},
+    }
+    _, columns, rows = _cell_rows([cell], None)
+    assert rows == [
+        {
+            "status (param)": "a",
+            "status": "completed",
+            "status (metric)": 1.0,
+            "status (param) (metric)": 2.0,
+        }
+    ]
+    assert columns == list(rows[0])
+
+
 def test_show_sorts_an_int_metric_beyond_float_range(tmp_path):
     """JSON carries ints of any size; float() of one raises OverflowError, so
     sorting by that metric must place it at the far end instead of crashing."""

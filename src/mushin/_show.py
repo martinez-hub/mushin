@@ -128,6 +128,14 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
     return cells, manifest_mtime
 
 
+def _param_column(name: str, reserved: str) -> str:
+    """The column of swept param ``name`` in a row that also holds ``reserved``
+    (``status`` in ``show``, ``deltas`` in ``diff``): a param of that name would
+    be overwritten (#306), so it becomes ``"<name> (param)"``. A Hydra key
+    cannot hold a space or parentheses, so no param is named that already."""
+    return f"{name} (param)" if name == reserved else name
+
+
 def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
     """Column name per metric; a metric colliding with a swept-param column (or
     ``status``) is disambiguated as ``"<name> (metric)"`` so both values
@@ -157,8 +165,8 @@ def _apply_metric_filter(
 
 class ShowResult:
     """The result of ``show``: ``rows`` (one dict per cell, with raw swept
-    params, ``status``, and metric values) plus a rendered ``table``. ``str()``
-    returns the table."""
+    params, ``status``, and metric values, keyed by the table's column names)
+    plus a rendered ``table``. ``str()`` returns the table."""
 
     def __init__(self, rows: list[dict], table: str):
         self.rows = rows
@@ -183,14 +191,16 @@ def _cell_rows(
     """``(param_cols, columns, rows)`` of the cells ``_read_cells`` returns:
     one row per cell, in ``cells`` order, with its swept params, ``status``
     and the metric columns ``metrics`` selects (``show`` and
-    ``export.table``)."""
-    param_cols = _ordered_union([c["combo"] for c in cells])
+    ``export.table``). ``param_cols`` are the params' column names."""
+    params = _ordered_union([c["combo"] for c in cells])
+    param_col = {p: _param_column(p, "status") for p in params}
+    param_cols = list(param_col.values())
     metric_cols = _ordered_union([c["metrics"] for c in cells])
     metric_cols = _apply_metric_filter(metrics, metric_cols)
     colname = _metric_column_names(param_cols, metric_cols)
     rows: list[dict] = []
     for c in cells:
-        row: dict[str, Any] = {p: c["combo"].get(p) for p in param_cols}
+        row: dict[str, Any] = {param_col[p]: c["combo"].get(p) for p in params}
         row["status"] = c["status"]
         for m in metric_cols:
             row[colname[m]] = c["metrics"].get(m)
@@ -214,8 +224,10 @@ def show(
         ``ValueError`` (like ``sort=``); repeats are deduplicated.
     sort : str | None
         Column to sort rows by (a swept param, ``"status"``, or a metric).
-        Defaults to the swept params in grid order. A metric that shares a
-        swept param's name is shown (and sorted) as ``"<name> (metric)"``.
+        Defaults to the swept params in grid order. ``"status"`` is always the
+        cell status: a swept param named ``status`` is shown (and sorted) as
+        ``"status (param)"``, and a metric that shares a swept param's name,
+        or ``status``, as ``"<name> (metric)"``.
 
     Returns
     -------
@@ -728,7 +740,9 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     Returns
     -------
     DiffResult
-        ``.rows`` (shared-cell deltas), ``.only_in_a`` / ``.only_in_b`` (combos),
+        ``.rows`` (one per shared cell: its swept params and a ``deltas`` dict
+        of ``(a, b, b - a)`` per metric; a swept param named ``deltas`` is
+        ``"deltas (param)"``), ``.only_in_a`` / ``.only_in_b`` (combos),
         ``.provenance`` (``{field: (a, b)}``), and ``.table``; the table prints.
     """
     from ._sweep_io import combo_key
@@ -755,7 +769,9 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
             vb = cb["metrics"].get(name)
             if _finite_number(va) and _finite_number(vb):
                 deltas[name] = (va, vb, vb - va)
-        row: dict[str, Any] = dict(ca["combo"])
+        row: dict[str, Any] = {
+            _param_column(p, "deltas"): v for p, v in ca["combo"].items()
+        }
         row["deltas"] = deltas
         rows.append(row)
 
