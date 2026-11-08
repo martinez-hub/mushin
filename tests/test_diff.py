@@ -45,6 +45,32 @@ def test_diff_reports_cells_unique_to_each(tmp_path):
     assert len(d.rows) == 2  # shared cells only
 
 
+def test_diff_keeps_a_param_named_deltas(tmp_path):
+    """A swept param named ``deltas`` must not be overwritten by the row's
+    deltas (the #306 clash in ``diff``): it is the column ``deltas (param)``."""
+
+    def run(wd, bump, values):
+        class W(MultiRunMetricsWorkflow):
+            @staticmethod
+            def task(deltas):
+                return dict(acc=float(len(deltas)) + bump)
+
+        W().run(deltas=multirun(values), working_dir=str(wd))
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    run(a, 0.0, ["a", "bb"])
+    run(b, 10.0, ["a", "bb", "ccc"])
+    d = mushin.diff(a, b)
+    assert [r["deltas (param)"] for r in d.rows] == ["a", "bb"]
+    assert [r["deltas"]["acc"] for r in d.rows] == [
+        (1.0, 11.0, 10.0),
+        (2.0, 12.0, 10.0),
+    ]
+    assert "deltas (param)" in d.table.splitlines()[0]
+    # The cells unique to one side are combos, under the param's own name.
+    assert d.only_in_b == [{"deltas": "ccc"}]
+
+
 def test_diff_identical_env_has_no_provenance_change(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     _run(a)

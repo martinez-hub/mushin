@@ -128,13 +128,30 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
     return cells, manifest_mtime
 
 
+def _free_name(name: str, taken: set, suffix: str) -> str:
+    """``name``, with ``" <suffix>"`` appended until no name in ``taken`` is
+    the same: a row is a dict, so two columns of one name keep one value and
+    the header repeats (#306)."""
+    while name in taken:
+        name = f"{name} {suffix}"
+    return name
+
+
 def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
-    """Column name per metric; a metric colliding with a swept-param column (or
-    ``status``) is disambiguated as ``"<name> (metric)"`` so both values
-    survive; e.g. a task reporting the effective ``lr`` alongside a swept
-    ``lr``."""
-    taken = set(param_cols) | {"status"}
-    return {m: (f"{m} (metric)" if m in taken else m) for m in metric_cols}
+    """Column name per metric. A metric named like a swept-param column or
+    ``status`` becomes ``"<name> (metric)"`` (e.g. a task reporting the
+    effective ``lr`` alongside a swept ``lr``), and that name is kept clear of
+    every other column, so even a metric already named ``"lr (metric)"``
+    keeps its value."""
+    reserved = set(param_cols) | {"status"}
+    taken = reserved | set(metric_cols)
+    names = {}
+    for m in metric_cols:
+        names[m] = (
+            _free_name(f"{m} (metric)", taken, "(metric)") if m in reserved else m
+        )
+        taken.add(names[m])
+    return names
 
 
 def _apply_metric_filter(
@@ -156,9 +173,11 @@ def _apply_metric_filter(
 
 
 class ShowResult:
-    """The result of ``show``: ``rows`` (one dict per cell, with raw swept
-    params, ``status``, and metric values) plus a rendered ``table``. ``str()``
-    returns the table."""
+    """The result of ``show``: ``rows`` (one dict per cell, keyed by the
+    table's column names: the swept params, ``status`` and the metrics) plus a
+    rendered ``table``. ``str()`` returns the table. ``status`` is the cell
+    status: a swept param of that name is ``"status (param)"``, and a metric
+    named like a param or ``status`` is ``"<name> (metric)"``."""
 
     def __init__(self, rows: list[dict], table: str):
         self.rows = rows
@@ -183,14 +202,18 @@ def _cell_rows(
     """``(param_cols, columns, rows)`` of the cells ``_read_cells`` returns:
     one row per cell, in ``cells`` order, with its swept params, ``status``
     and the metric columns ``metrics`` selects (``show`` and
-    ``export.table``)."""
-    param_cols = _ordered_union([c["combo"] for c in cells])
+    ``export.table``). ``param_cols`` are the params' column names."""
+    params = _ordered_union([c["combo"] for c in cells])
+    # Hydra keys hold no space or parentheses, so params cannot clash with
+    # each other or with a renamed column; only ``status`` is taken.
+    param_col = {p: _free_name(p, {"status"}, "(param)") for p in params}
+    param_cols = list(param_col.values())
     metric_cols = _ordered_union([c["metrics"] for c in cells])
     metric_cols = _apply_metric_filter(metrics, metric_cols)
     colname = _metric_column_names(param_cols, metric_cols)
     rows: list[dict] = []
     for c in cells:
-        row: dict[str, Any] = {p: c["combo"].get(p) for p in param_cols}
+        row: dict[str, Any] = {param_col[p]: c["combo"].get(p) for p in params}
         row["status"] = c["status"]
         for m in metric_cols:
             row[colname[m]] = c["metrics"].get(m)
@@ -214,8 +237,10 @@ def show(
         ``ValueError`` (like ``sort=``); repeats are deduplicated.
     sort : str | None
         Column to sort rows by (a swept param, ``"status"``, or a metric).
-        Defaults to the swept params in grid order. A metric that shares a
-        swept param's name is shown (and sorted) as ``"<name> (metric)"``.
+        Defaults to the swept params in grid order. ``"status"`` is always the
+        cell status: a swept param named ``status`` is shown (and sorted) as
+        ``"status (param)"``, and a metric that shares a swept param's name,
+        or ``status``, as ``"<name> (metric)"``.
 
     Returns
     -------
@@ -695,10 +720,12 @@ def _diff_provenance(a: dict | None, b: dict | None) -> dict:
 
 
 class DiffResult:
-    """The result of ``diff``: ``rows`` (one per shared cell, each with a
-    ``deltas`` map of ``metric -> (a, b, b - a)``), ``only_in_a`` / ``only_in_b``
-    (combos unique to each sweep), the ``provenance`` delta, and the rendered
-    ``table``. ``str()`` returns the table."""
+    """The result of ``diff``: ``rows`` (one per shared cell, each with its
+    swept params and a ``deltas`` map of ``metric -> (a, b, b - a)``; a param
+    named ``deltas`` is ``"deltas (param)"``), ``only_in_a`` / ``only_in_b``
+    (combos unique to each sweep, with the params' own names), the
+    ``provenance`` delta, and the rendered ``table``. ``str()`` returns the
+    table."""
 
     def __init__(self, rows, only_in_a, only_in_b, provenance, table):
         self.rows = rows
@@ -728,7 +755,9 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
     Returns
     -------
     DiffResult
-        ``.rows`` (shared-cell deltas), ``.only_in_a`` / ``.only_in_b`` (combos),
+        ``.rows`` (one per shared cell: its swept params and a ``deltas`` dict
+        of ``(a, b, b - a)`` per metric; a swept param named ``deltas`` is
+        ``"deltas (param)"``), ``.only_in_a`` / ``.only_in_b`` (combos),
         ``.provenance`` (``{field: (a, b)}``), and ``.table``; the table prints.
     """
     from ._sweep_io import combo_key
@@ -755,7 +784,10 @@ def diff(a, b, *, metrics: list[str] | None = None) -> DiffResult:
             vb = cb["metrics"].get(name)
             if _finite_number(va) and _finite_number(vb):
                 deltas[name] = (va, vb, vb - va)
-        row: dict[str, Any] = dict(ca["combo"])
+        # A swept param named ``deltas`` would be overwritten by the deltas.
+        row: dict[str, Any] = {
+            _free_name(p, {"deltas"}, "(param)"): v for p, v in ca["combo"].items()
+        }
         row["deltas"] = deltas
         rows.append(row)
 
