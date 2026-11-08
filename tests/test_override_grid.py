@@ -174,6 +174,83 @@ def test_a_base_workflow_sweep_passes_the_duplicate_check(tmp_path):
         W().run(a=multirun(["1", 1]), dry_run=True)
 
 
+class _Seen(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a, b=""):
+        return dict(
+            a_type=type(a).__name__, a_len=float(len(str(a))), b_len=float(len(b))
+        )
+
+
+def test_swept_strings_reach_the_task_as_written(tmp_path):
+    """A swept string that reads as another type in an override ("true",
+    "null", "1") reaches the task as that string, and its cell keys its grid
+    coordinate (#319): Hydra re-read it without its quotes before."""
+    wd = tmp_path / "s"
+    wf = _Seen()
+    wf.run(a=multirun(["true", "null", "1", "x"]), working_dir=str(wd))
+    loaded = _Seen().load_from_dir(wd, "mushin_metrics.json")
+    for w in (wf, loaded):
+        ds = w.to_xarray()
+        assert [str(c) for c in ds["a"].values] == ["true", "null", "1", "x"]
+        assert [str(t) for t in ds["a_type"].values] == ["str"] * 4
+
+
+def test_backslashes_and_quotes_reach_the_task_unchanged(tmp_path):
+    """A backslash in a string, swept or fixed, is not doubled on the way to
+    the task (#319), and a quote inside one survives."""
+    wf = _run(tmp_path, _Seen, a=multirun(["a\\b", "C:\\dir\\", "it's"]), b="C:\\data")
+    ds = wf.to_xarray()
+    assert [str(c) for c in ds["a"].values] == ["a\\b", "C:\\dir\\", "it's"]
+    assert ds["a_len"].values.tolist() == [3.0, 7.0, 4.0]
+    assert ds["b_len"].values.tolist() == [7.0, 7.0, 7.0]
+
+
+@pytest.mark.parametrize(
+    "sweep, shown",
+    [
+        (dict(a=multirun(["true"])), "'true' would reach the task as True"),
+        (dict(a=multirun(["1"])), "'1' would reach the task as 1"),
+        (dict(overrides=["+a=choice('true','x')"]), "`+a=true`"),
+    ],
+)
+def test_a_value_its_job_would_read_back_changed_is_refused(sweep, shown):
+    """A sweep value whose job would get another value is refused before
+    launch: a one-value multirun of such a string (Hydra's one-value sweep,
+    `choice(...)`, drops its quotes), or a raw `choice(...)` of one (#319)."""
+    with pytest.raises(ValueError, match=re.escape(shown)):
+        _Seen().run(dry_run=True, **sweep)
+
+
+@pytest.mark.parametrize(
+    "sweep",
+    [
+        dict(a=multirun([1e-5, float("nan"), float("inf"), 2])),
+        dict(a=multirun([True, False, None])),
+        dict(a=multirun([[1, 2], ["x"], {"k": "y"}])),
+        dict(a=multirun(["a,b=c", " padded ", ""])),
+        dict(a=multirun(["a b"])),
+        dict(a=multirun(list(np.arange(2)))),
+        dict(overrides=["+a=range(0,1,0.25)"]),
+        dict(overrides=["+a=shuffle(1,2,3)"]),
+        dict(overrides=["+a='true','x'"]),
+    ],
+)
+def test_values_their_jobs_read_back_unchanged_pass_the_check(sweep):
+    """The check refuses only a value that its job would read back changed:
+    numbers, bools, None, containers, strings with delimiters or spaces, a
+    one-value sweep of a plain string, a range, a shuffle (jobs reordered) and
+    a raw comma sweep of quoted strings all pass."""
+    _Seen().run(dry_run=True, **sweep)
+
+
+def test_a_glob_sweep_is_refused_by_name():
+    """A glob sweep picks config-group options; the error says glob is not
+    supported and names the param without its `+`."""
+    with pytest.raises(ValueError, match=r"for 'a': Glob\..*`glob\(\.\.\.\)`"):
+        MultiRunMetricsWorkflow._parse_overrides(["+a=glob(*)"])
+
+
 def test_combo_key_is_injective_across_delimiters():
     from mushin._sweep_io import combo_key
 

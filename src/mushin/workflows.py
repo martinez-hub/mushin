@@ -20,7 +20,7 @@ from typing import (
 
 import numpy as np
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from hydra.core.override_parser.types import QuotedString
+from hydra.core.override_parser.types import Quote, QuotedString
 from hydra.core.utils import JobReturn, JobStatus
 from hydra_zen import hydra_list, launch, load_from_yaml, make_config, multirun, zen
 from hydra_zen._launch import _NotSet
@@ -69,10 +69,10 @@ def _identity(x: T1) -> T1:
 def _to_override_element(item: Any) -> str:
     """Serialize a single multirun element to Hydra override-grammar syntax.
 
-    Booleans/numbers are emitted unquoted; strings are single-quoted (with
-    embedded single-quotes escaped) so that values containing commas, spaces,
-    or '=' round-trip exactly through Hydra's override parser; lists/tuples are
-    emitted recursively in Hydra's bracketed list syntax.
+    Booleans/numbers are emitted unquoted; strings are single-quoted so that
+    values containing commas, spaces, or '=' round-trip exactly through Hydra's
+    override parser; lists/tuples are emitted recursively in Hydra's bracketed
+    list syntax.
     """
     # Unwrap a NumPy/torch 0-d scalar (e.g. from ``np.arange`` or RobustnessCurve's
     # epsilon array) to its Python scalar first, so a swept number is emitted
@@ -88,9 +88,7 @@ def _to_override_element(item: Any) -> str:
     if isinstance(item, (int, float)):
         return str(item)
     if isinstance(item, str):
-        # Escape backslashes first (Hydra's quoted-string grammar treats '\' as
-        # an escape char), then single-quotes, so the value round-trips.
-        return "'" + item.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        return _quoted(item)
     if isinstance(item, (list, tuple)):
         return "[" + ",".join(_to_override_element(x) for x in item) + "]"
     if isinstance(item, Mapping):
@@ -103,7 +101,17 @@ def _to_override_element(item: Any) -> str:
             + "}"
         )
     # Fall back to a quoted string representation for any other type.
-    return "'" + str(item).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return _quoted(str(item))
+
+
+def _quoted(text: str) -> str:
+    """``text`` as a single-quoted Hydra string that parses back to ``text``.
+
+    Hydra's grammar unescapes a backslash only where it precedes a quote, so
+    doubling every backslash (as this did) reached the task doubled (#319):
+    ``C:\\data`` arrived as ``C:\\\\data``. Hydra's own writer escapes the
+    quotes and only the backslashes that precede one."""
+    return QuotedString(text=text, quote=Quote.single).with_quotes()
 
 
 def _scalar_repr(item: Any) -> Any:
@@ -138,6 +146,59 @@ def _unquote(value: Any) -> Any:
     if isinstance(value, dict):
         return {_unquote(k): _unquote(v) for k, v in value.items()}
     return value
+
+
+def _check_sweeps_reach_their_jobs(overrides: list[str], axes: dict) -> None:
+    """Raise if a value of a sweep in ``axes`` (name -> its parsed values)
+    would reach its job as another value.
+
+    Hydra's sweeper writes each job's value back into an override with
+    ``sweep_string_iterator()``, and the job parses that again. A string that
+    lost its quotes on the way, as in ``choice('true')``, is read back as the
+    bool ``True``: the task gets a value the user did not write, and its cell
+    keys no grid coordinate (#319). Values are compared by type and repr, as
+    a multiset, since ``shuffle(...)`` reorders the jobs.
+    """
+    parser = OverridesParser.create()
+    for override in parser.parse_overrides(overrides=overrides):
+        key = override.get_key_element()
+        name = key.split("+")[-1]  # as `_parse_overrides` names it
+        if name not in axes or not override.is_sweep_override():
+            continue
+        grid = list(axes[name])
+        try:
+            written = list(override.sweep_string_iterator())
+            jobs = [parser.parse_override(f"{key}={s}").value() for s in written]
+        except Exception as e:  # noqa: BLE001 - any failure means a changed value
+            raise ValueError(
+                f"`{name}`: Hydra cannot write its sweep values back into the "
+                f"jobs' overrides ({type(e).__name__}: {e})."
+            ) from e
+
+        def tag(v):
+            return type(v), repr(v)
+
+        job_tags = [tag(j) for j in jobs]
+        grid_tags = [tag(g) for g in grid]
+        lost = [g for g, t in zip(grid, grid_tags, strict=True) if t not in job_tags]
+        if not lost:
+            continue
+        got = [
+            (s, j)
+            for s, j, t in zip(written, jobs, job_tags, strict=True)
+            if t not in grid_tags
+        ]
+        pairs = "; ".join(
+            f"{g!r} would reach the task as {j!r} (its job's override is `{key}={s}`)"
+            for g, (s, j) in zip(lost, got, strict=False)
+        )
+        raise ValueError(
+            f"`{name}`: a sweep value would reach the task changed: {pairs}. "
+            "Hydra drops the quotes of a string in `choice(...)`. For a single "
+            "value, pass it as a fixed value instead of a one-value multirun; "
+            "in a raw override, list the values with commas instead of "
+            "`choice(...)`."
+        )
 
 
 def _cfg_missing_or_none(cfg, key: str) -> bool:
@@ -1444,7 +1505,7 @@ class BaseWorkflow:
         output = {}
 
         for override in parsed_overrides:
-            param_name = override.get_key_element()
+            param_name = override.get_key_element().split("+")[-1]
             val = override.value()
             if override.is_sweep_override():
                 if hasattr(val, "list"):  # ChoiceSweep (a Glob has no .list)
@@ -1452,18 +1513,18 @@ class BaseWorkflow:
                 elif hasattr(val, "range"):  # RangeSweep: discrete -> a grid axis
                     val = multirun(list(val.range()))  # type: ignore
                 else:
-                    # e.g. IntervalSweep: continuous Bayesian-sweeper syntax
-                    # cannot form the Cartesian grid to_xarray assembles.
+                    # An IntervalSweep (continuous, for Bayesian sweepers)
+                    # cannot form the Cartesian grid to_xarray assembles, and
+                    # a Glob picks config-group options this parser cannot see.
                     raise ValueError(
                         f"unsupported sweep override for {param_name!r}: "
                         f"{type(val).__name__}. mushin assembles a Cartesian "
-                        "grid, so sweep axes must be discrete: use "
+                        "grid from the values an override lists: use "
                         "`param=a,b,c`, `choice(...)`, or `range(...)`; "
-                        "`interval(...)`/adaptive-sweeper syntax is not "
-                        "supported."
+                        "`glob(...)`, `interval(...)` and adaptive-sweeper "
+                        "syntax are not supported."
                     )
 
-            param_name = param_name.split("+")[-1]
             output[param_name] = val
 
         return output
@@ -1858,14 +1919,20 @@ class BaseWorkflow:
                         "distinct values, or add a separate axis (e.g. seed) for "
                         "repeat trials."
                     )
-                # Build a Hydra `choice(...)` sweep rather than a comma-joined
-                # string. `choice(...)` always yields a sweep – even for a
-                # single element (so length-1 multiruns remain swept dimensions)
-                # – and each element is serialized/quoted so that values
-                # containing commas, spaces, or '=' are not silently re-split by
-                # Hydra's override parser.
+                # Each element is serialized/quoted so that values containing
+                # commas, spaces, or '=' are not silently re-split by Hydra's
+                # override parser. Several values form a comma sweep, `k=a,b`:
+                # in `choice(a,b)` Hydra drops the quotes of a top-level string
+                # and writes it back bare into the job, which re-reads 'true'
+                # as a bool and '1' as an int (#319); a comma sweep keeps them.
+                # One value needs `choice(a)`, Hydra's only one-value sweep
+                # (so a length-1 multirun stays a swept dimension); the check
+                # in `run` refuses one whose job would get another value.
                 choices = ",".join(_to_override_element(item) for item in v)
-                launch_overrides.append(f"{prefix}{k}=choice({choices})")
+                if len(v) > 1:
+                    launch_overrides.append(f"{prefix}{k}={choices}")
+                else:
+                    launch_overrides.append(f"{prefix}{k}=choice({choices})")
             elif isinstance(v, hydra_list):
                 # hydra_list serializes itself to Hydra list syntax; a single
                 # non-swept list value passed to one job.
@@ -1954,6 +2021,13 @@ class BaseWorkflow:
                     "distinct values, or add a separate axis (e.g. seed) for "
                     "repeat trials."
                 )
+
+        # Each job gets its value as Hydra's sweeper writes it back into an
+        # override, which the job parses again. A value that reads back as
+        # something else reaches the task changed and keys no grid cell (#319),
+        # so refuse it before launch. This parses the overrides a second time:
+        # the check needs Hydra's `Override` objects, not their values.
+        _check_sweeps_reach_their_jobs(launch_overrides, axes)
 
         # `sample=` bounds what actually COMPUTES; the dry-run preview reports
         # that. The gate below still fires on the full grid: Hydra enumerates
