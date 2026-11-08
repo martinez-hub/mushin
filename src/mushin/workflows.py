@@ -148,7 +148,7 @@ def _format_dry_run(summary: Mapping[str, Any]) -> str:
     n = summary.get("num_cells", 0)
     lines = [f"Dry run: {n} cell{'s' if n != 1 else ''}, no jobs launched."]
     wd = summary.get("working_dir")
-    lines.append(f"  working_dir: {wd if wd else '(Hydra default)'}")
+    lines.append(f"  working_dir: {wd or '(Hydra default)'}")
     if "sample" in summary:
         lines.append(f"  sample: only {summary['sample']} cell(s) would compute")
     if axes:
@@ -2402,8 +2402,6 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # are decoded before the check (the encoding json detects consumes a
         # byte-order mark), so a JSON file with one or in UTF-16/32, as
         # Windows tools write, is not taken for a pickle.
-        import json
-
         try:
             with open(file_path, "rb") as f:
                 head = f.read(64)
@@ -3546,8 +3544,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 if coord_from_metrics and n < len(metric_coords):
                     # Assume the first coordinate of the metric is the metric coordinate dimension
                     k_coords += list(metric_coords.keys())
-                    for mk, mv in metric_coords.items():
-                        coords[mk] = mv
+                    coords.update(metric_coords)
                 else:
                     # Create additional arbitrary coordinates as-needed for non-scalar
                     # metrics
@@ -3557,7 +3554,6 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             data[k] = (k_coords, datum)
 
         coords.update(metric_coords)
-        import json as _json
 
         # Record fail-soft failures (combo keys of NaN-filled cells) on the
         # dataset. Only set when a fail-soft run actually recorded failures so a
@@ -3566,24 +3562,24 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # netCDF attr (the scipy engine rejects it, and netCDF4 collapses a
         # 1-element list to a bare str on reload).
         if self.failures:
-            attrs["mushin_failures"] = _json.dumps([f["combo"] for f in self.failures])
+            attrs["mushin_failures"] = json.dumps([f["combo"] for f in self.failures])
         # Budget-skipped cells (NaN-filled, not errors) carry their own signal so
         # a reloaded dataset knows the sweep is incomplete-by-budget, distinct
         # from failures.
         if getattr(self, "skipped", None):
-            attrs["mushin_skipped"] = _json.dumps([s["combo"] for s in self.skipped])
+            attrs["mushin_skipped"] = json.dumps([s["combo"] for s in self.skipped])
         # Lineage annotations travel with the dataset (tags as a JSON string:
         # netCDF attrs cannot portably hold a list of strings).
         if self.notes is not None:
             attrs["mushin_notes"] = self.notes
         if self.tags:
-            attrs["mushin_tags"] = _json.dumps(self.tags)
+            attrs["mushin_tags"] = json.dumps(self.tags)
         # Attach best-effort per-run provenance (git/versions/config) from one
         # job's sidecar, so a saved/re-loaded dataset carries its lineage. Stored
         # as a JSON string (nested dicts are not valid netCDF-serializable attrs).
         prov = self.provenance
         if prov is not None:
-            attrs["provenance"] = _json.dumps(prov)
+            attrs["provenance"] = json.dumps(prov)
         out = xr.Dataset(coords=coords, data_vars=data, attrs=attrs)
 
         if self._JOBDIR_NAME in set(out.coords):

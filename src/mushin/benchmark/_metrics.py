@@ -6,7 +6,6 @@ quality, audio, retrieval), delegated to torchmetrics."""
 from __future__ import annotations
 
 import warnings
-from collections.abc import Collection
 
 import torch
 from torchmetrics import Metric
@@ -254,22 +253,3 @@ def audio_battery(
             "the audio battery requires the optional audio extra; install it with "
             "`pip install mushin-py[audio]` (pystoi)."
         ) from e
-
-
-def compute_battery(
-    battery: dict[str, Metric],
-    preds: torch.Tensor,
-    targets: torch.Tensor,
-    prob_metrics: Collection[str],
-    probs: torch.Tensor | None = None,
-) -> dict[str, float]:
-    """One-shot metric computation: reset, update once, compute. Metrics named in
-    ``prob_metrics`` are fed ``probs`` (required if non-empty); the rest ``preds``."""
-    from ._inference import accumulate_metric
-
-    out: dict[str, float] = {}
-    for name, metric in battery.items():
-        metric.reset()
-        inp = probs if name in prob_metrics else preds
-        accumulate_metric(out, name, metric(inp, targets))
-    return out

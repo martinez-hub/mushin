@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import json
 import math
 import pickle
 import statistics
@@ -257,7 +258,7 @@ def _describe_experiment(path: str | Path, root: str | Path | None = None) -> di
     flats = [_flatten(_to_jsonable(e.cfg)) for e in exps if e.cfg is not None]
     swept: dict[str, list] = {}
     if flats:
-        for k in sorted(set().union(*(set(f) for f in flats))):
+        for k in sorted(set().union(*flats)):
             uniq: list = []
             for f in flats:
                 v = f.get(k)
@@ -302,7 +303,7 @@ def _reduce_metrics(per_run: list[dict], how: str) -> dict:
         raise ValueError(f"unknown reduce '{how}'; use 'mean' or 'std'")
     flats = [_flatten(r) for r in per_run]
     out: dict[str, float] = {}
-    for k in sorted(set().union(*(set(f) for f in flats))) if flats else []:
+    for k in sorted(set().union(*flats)):
         vals = [s for f in flats if (s := _as_scalar(f.get(k))) is not None]
         if not vals:
             continue
@@ -366,7 +367,6 @@ def _read_traceback(path: Path) -> str:
 def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     """Failed sweep cells from the manifest, with each cell's on-disk
     traceback (``mushin_error.txt``) when present."""
-    import json as _json
 
     p = _resolve(path, root)
     if not p.exists():
@@ -379,7 +379,7 @@ def _get_failures(path: str | Path, root: str | Path | None = None) -> dict:
     cells: dict = {}
     if mf.exists() and _within_root(mf, rootp):
         try:
-            loaded = _json.loads(mf.read_text(encoding="utf-8"))
+            loaded = json.loads(mf.read_text(encoding="utf-8"))
             raw = loaded.get("cells", {}) if isinstance(loaded, dict) else {}
             cells = raw if isinstance(raw, dict) else {}
         except (ValueError, OSError):
@@ -408,7 +408,6 @@ def _get_provenance(
 
     The per-run resolved config is omitted unless ``include_config``; it is
     the bulky part and ``get_config`` already serves it."""
-    import json as _json
 
     p = _resolve(path, root)
     if not p.exists():
@@ -419,7 +418,7 @@ def _get_provenance(
         if not _within_root(f, rootp):
             continue
         try:
-            rec = _json.loads(f.read_text(encoding="utf-8"))
+            rec = json.loads(f.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             continue
         if not isinstance(rec, dict):

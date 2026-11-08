@@ -108,6 +108,18 @@ def test_describe_experiment_reports_sweep(tmp_path):
     assert "seed" not in out["swept_params"]  # constant across runs
 
 
+def test_describe_experiment_reads_a_list_rooted_config(tmp_path):
+    """A run whose config.yaml is a YAML list (not a mapping) flattens to one
+    value under the key "" instead of failing the whole describe."""
+    from mushin.mcp.server import _describe_experiment
+
+    base = _make_experiment(tmp_path / "exp")
+    OmegaConf.save(OmegaConf.create([1, 2]), base / "0" / ".hydra" / "config.yaml")
+    out = _describe_experiment(base)
+    assert out["num_runs"] == 2
+    assert out["swept_params"][""] == [[1, 2], None]
+
+
 def test_get_metrics_per_run_and_reduce(tmp_path):
     from mushin.mcp.server import _get_metrics
 

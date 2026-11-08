@@ -38,7 +38,7 @@ def test_evaluate_with_dict_output_model_and_custom_predict_fn():
 
 def test_evaluate_segmentation_ignores_void_across_batches():
     # ignore_index must exclude void pixels through the *streaming* evaluate path
-    # (the existing test only covers the one-shot compute_battery). Model is
+    # (the existing test only covers a one-shot computation). Model is
     # correct on every non-void pixel; its arbitrary void prediction must not
     # count because the void label is excluded.
     import torch
@@ -82,8 +82,8 @@ def test_evaluate_streams_and_matches_one_shot():
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
-    from mushin.benchmark._inference import evaluate
-    from mushin.benchmark._metrics import classification_battery, compute_battery
+    from mushin.benchmark._inference import accumulate_metric, evaluate
+    from mushin.benchmark._metrics import classification_battery
     from mushin.benchmark._predict import default_classification_predict_fn
 
     g = torch.Generator().manual_seed(0)
@@ -102,9 +102,12 @@ def test_evaluate_streams_and_matches_one_shot():
     )
     with torch.no_grad():
         preds, probs = default_classification_predict_fn(model, x)
-    one_shot = compute_battery(
-        classification_battery(3), preds, y, frozenset({"auroc", "ece"}), probs=probs
-    )
+    # Each metric called once on the whole set, probabilities for the two that
+    # take them.
+    one_shot: dict[str, float] = {}
+    for name, metric in classification_battery(3).items():
+        inp = probs if name in {"auroc", "ece"} else preds
+        accumulate_metric(one_shot, name, metric(inp, y))
     assert streamed.keys() == one_shot.keys()
     for k in streamed:
         assert abs(streamed[k] - one_shot[k]) < 1e-5
