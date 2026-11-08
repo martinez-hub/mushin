@@ -69,6 +69,8 @@ def test_duplicate_sweep_axis_value_is_rejected(tmp_path):
         ([1, 2, 1], "1"),
         ([np.float64(0.5), 0.5], "0.5, np.float64(0.5)"),
         (["a,b", "a,b"], "'a,b'"),
+        # One text, two types: the cells would share a key (#308 review).
+        (["1", 1], "'1', 1"),
     ],
 )
 def test_duplicate_sweep_value_is_rejected_before_a_dry_run(values, shown):
@@ -116,10 +118,12 @@ def test_strings_inside_sweep_values_key_their_cells(tmp_path, sweep, coords):
         assert ds["v"].values.tolist() == [1.0, 2.0]
 
 
-@pytest.mark.parametrize("raw", ["+a='x',\"x\"", "+a=choice(['x'],[\"x\"])"])
+@pytest.mark.parametrize(
+    "raw", ["+a='x',\"x\"", "+a=choice(['x'],[\"x\"])", "+a='1',1"]
+)
 def test_a_raw_sweep_repeating_a_quoted_value_is_rejected(raw):
-    """Two spellings of one string (single or double quotes) are one value,
-    so a raw sweep that lists both is refused before launch (#308)."""
+    """Values that would share a cell are refused before launch (#308): two
+    spellings of one string, or a quoted string and a number of one text."""
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod
@@ -128,6 +132,46 @@ def test_a_raw_sweep_repeating_a_quoted_value_is_rejected(raw):
 
     with pytest.raises(ValueError, match=r"`a` has duplicate sweep values"):
         W().run(overrides=[raw], dry_run=True)
+
+
+@pytest.mark.parametrize(
+    "values, v", [([1, 1.0], [0.0, 1.0]), ([["1"], [1]], [1.0, 0.0])]
+)
+def test_values_that_key_apart_still_run(tmp_path, values, v):
+    """The duplicate check refuses only values that share a cell key: 1 and
+    1.0, or ['1'] and [1], are two cells, each with its own result."""
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            x = a if isinstance(a, int | float) else a[0]
+            return dict(v=float(isinstance(x, str | float)))
+
+    wd = tmp_path / "s"
+    wf = W()
+    wf.run(a=multirun(values), working_dir=str(wd))
+    loaded = W().load_from_dir(wd, "mushin_metrics.json")
+    for w in (wf, loaded):
+        assert w.to_xarray()["v"].values.tolist() == v
+
+
+def test_a_base_workflow_sweep_passes_the_duplicate_check(tmp_path):
+    """The check runs in ``BaseWorkflow.run``, which has no
+    ``_sanitize_coordinate_for_xarray``: a subclass of it still sweeps, and
+    still has its duplicates refused."""
+    from mushin.workflows import BaseWorkflow
+
+    class W(BaseWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(v=float(a))
+
+        def jobs_post_process(self):
+            return
+
+    W().run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    with pytest.raises(ValueError, match=r"`a` has duplicate sweep values '1', 1;"):
+        W().run(a=multirun(["1", 1]), dry_run=True)
 
 
 def test_combo_key_is_injective_across_delimiters():

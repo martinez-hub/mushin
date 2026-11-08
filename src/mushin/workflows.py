@@ -110,8 +110,9 @@ def _scalar_repr(item: Any) -> Any:
     """A stable, type-aware key for detecting duplicate sweep-axis values.
 
     Unwraps 0-d numpy/torch scalars (as ``_to_override_element`` does) and
-    tags the value with its type so ``1`` and ``"1"`` (distinct coordinates)
-    do not compare equal while ``1`` and ``1`` do.
+    tags the value with its type so ``1`` and ``"1"`` do not compare equal
+    while ``1`` and ``1`` do. Those two still key one cell; the check over the
+    parsed grid in ``run`` refuses them.
     """
     if hasattr(item, "item") and getattr(item, "ndim", None) == 0:
         item = item.item()
@@ -127,15 +128,15 @@ def _unquote(value: Any) -> Any:
     top-level values. The grid's coordinates come from those values while each
     cell's config holds the plain strings, so no cell matched its grid key
     (#308). ``Override.value()`` does the same conversion for a value that is
-    not a sweep; its helper is private, hence this copy.
+    not a sweep; its helper, ``Override._convert_value``, is private, hence
+    this copy of it.
     """
     if isinstance(value, QuotedString):
         return value.text
     if isinstance(value, list):
         return [_unquote(v) for v in value]
     if isinstance(value, dict):
-        # Keys need no unquoting: Hydra's grammar rejects a quoted dict key.
-        return {k: _unquote(v) for k, v in value.items()}
+        return {_unquote(k): _unquote(v) for k, v in value.items()}
     return value
 
 
@@ -1446,7 +1447,7 @@ class BaseWorkflow:
             param_name = override.get_key_element()
             val = override.value()
             if override.is_sweep_override():
-                if hasattr(val, "list"):  # ChoiceSweep (also glob results)
+                if hasattr(val, "list"):  # ChoiceSweep (a Glob has no .list)
                     val = multirun(_unquote(val.list))  # type: ignore
                 elif hasattr(val, "range"):  # RangeSweep: discrete -> a grid axis
                     val = multirun(list(val.range()))  # type: ignore
@@ -1930,9 +1931,15 @@ class BaseWorkflow:
 
         # Duplicate-value guard over the PARSED grid, so a sweep supplied via raw
         # `overrides=["+a=1,1"]` is rejected like a duplicate multirun kwarg is
-        # (two cells sharing a combo key silently collapse to the last).
+        # (two cells sharing a combo key silently collapse to the last). Values
+        # are keyed by `combo_key`, which holds their text, so two that differ
+        # only in type, such as '1' and 1, are caught too. On parsed values it
+        # gives the key of the base `_sanitize_coordinate_for_xarray`; that is
+        # not called here, as `BaseWorkflow` does not define it.
+        from ._sweep_io import combo_key
+
         for k, vals in axes.items():
-            keys = [_scalar_repr(item) for item in vals]
+            keys = [combo_key({k: v}) for v in vals]
             if len(set(keys)) != len(keys):
                 dupes = sorted(
                     {
