@@ -3177,11 +3177,6 @@ SCRIPT_NOT_EDITS = {
         "cfg = {{'grid': 2}}\ngrid = [1, {k}]\n\n\n"
         "def task(a):\n    return a * cfg['grid']\n\n\nds = run(a=grid)\n"
     ),
-    "a NewType name spelling the run's grid": (
-        "import typing\n\ngrid = [1, {k}]\n\n\n"
-        "def task(a: typing.NewType('grid', int)):\n    return a\n\n\n"
-        "ds = run(a=grid)\n"
-    ),
     "a NewType alias spelling the run's grid": (
         "import typing\n\ngrid = [1, {k}]\nGrid = typing.NewType('grid', int)\n\n\n"
         "def task(a: Grid):\n    return a\n\n\nds = run(a=grid)\n"
@@ -3561,12 +3556,6 @@ SCRIPT_NOT_EDITS = {
     "a conditional alias whose test names a value that spells the run's grid": (
         "grid = [1, {k}]\nMODE = 'grid'\nAlias = int if MODE else float\n\n\n"
         "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
-    ),
-    "a make_dataclass field's default in an annotation spelling the run's grid": (
-        "import dataclasses\n\ngrid = [1, {k}]\n\n\n"
-        "def task(\n    a: dataclasses.make_dataclass(\n"
-        "        'Cfg', [('mode', str, dataclasses.field(default='grid'))]\n    ),\n):\n"
-        "    return a\n\n\nds = run(a=grid)\n"
     ),
     "a make_dataclass's names given by the fields keyword spelling the run's grid": (
         "import dataclasses\n\ngrid = [1, {k}]\n"

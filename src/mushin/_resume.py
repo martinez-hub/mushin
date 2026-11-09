@@ -784,13 +784,14 @@ def _script_digest(path: Path, roots: frozenset[str]):
     generic class ``Box['T']``, a typing form's call (a functional
     ``NamedTuple``'s field types, a ``TypeVar``'s bound), a union, through
     other aliases too, and a string only beside ``|``, in one declared
-    ``TypeAlias`` or in a ``type`` statement. A ``Literal`` value, ``Annotated``'s notes and what
-    a typing form takes as a value (``NewType('grid', int)``'s name, a
-    field's name) are values, read as none, and so is anything in an
-    alias's value that is no type expression (a dict, a lookup
-    ``SAMPLERS[MODE]``, a plain call ``namedtuple('Result', ['lr'])``, a
-    bare string ``MODE = 'grid'``); in an annotation a string given to a
-    call is a reference (``opt('T')``), as main read it. Not followed: an
+    ``TypeAlias`` or in a ``type`` statement. A ``Literal`` value and
+    ``Annotated``'s notes are values, read as none. In an alias's value, so
+    is what a typing form takes as a value (``NewType('grid', int)``'s
+    name, a field's name) and anything that is no type expression (a dict,
+    a lookup ``SAMPLERS[MODE]``, a plain call ``namedtuple('Result',
+    ['lr'])``, a bare string ``MODE = 'grid'``); in an annotation every
+    other string is a reference, a call's included (``opt('T')``,
+    ``NewType('grid', int)``), as main read it. Not followed: an
     alias or a typing form only code reaches (pydantic's
     ``TypeAdapter(Alias)``, ``get_type_hints(Row)`` in the task's body), an
     alias reached as an attribute (``Outer.Alias``), built by a call
@@ -872,7 +873,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
     field_forms = ("NamedTuple", "TypedDict", "make_dataclass")
     forms = frozenset({"ForwardRef", "NewType", *var_forms, *field_forms})
 
-    def spec_parts(kind: str, node, opaque: bool) -> list:
+    def spec_parts(kind: str, node) -> list:
         """The parts (as ``call_parts`` gives them) of field spec ``node`` of
         ``kind``: ``fields`` (a functional ``NamedTuple``'s or
         ``make_dataclass``'s list), ``field`` (one of its items: ``(name,
@@ -883,17 +884,16 @@ def _script_digest(path: Path, roots: frozenset[str]):
         the form is called has that shape. Any other expression there (a
         name, ``*BASE``, ``**BASE``, a comprehension, a call) names no
         alias, so what a name holds is not followed (#334 review: following
-        it as a spec failed three review rounds); its strings are read as a
-        call's are (``call_parts``): references in an annotation, values in
-        an alias's value (``opaque``)."""
+        it as a spec failed three review rounds), and its strings are
+        values. A form is read by place only in an alias's value
+        (``call_parts``)."""
         if kind == "fields" and isinstance(node, (ast.List, ast.Tuple)):
-            return [p for item in node.elts for p in spec_parts("field", item, opaque)]
+            return [p for item in node.elts for p in spec_parts("field", item)]
         if kind == "field":
             if isinstance(node, (ast.Tuple, ast.List)) and node.elts:
                 if any(isinstance(e, ast.Starred) for e in node.elts):
-                    # An unpacked item moves the type out of its place:
-                    # read as a call's argument is (`(*['a', 'T'],)`).
-                    return [(node, not opaque, False)]
+                    # An unpacked item moves the type out of its place.
+                    return [(node, False, False)]
                 return [(e, j == 1, j == 1) for j, e in enumerate(node.elts)]
             if isinstance(node, ast.Constant):
                 return [(node, False, False)]  # make_dataclass's bare name
@@ -901,23 +901,25 @@ def _script_digest(path: Path, roots: frozenset[str]):
             parts: list = []
             for key, value in zip(node.keys, node.values, strict=True):
                 if key is None:  # `**BASE`
-                    parts += spec_parts("dict", value, opaque)
+                    parts += spec_parts("dict", value)
                 else:
                     parts += [(key, False, False), (value, True, True)]
             return parts
-        return [(node, not opaque, False)]
+        return [(node, False, False)]
 
     def call_parts(call, opaque: bool) -> list:
         """``(argument, whether its strings are references, whether its names
         can name a type alias)`` for each argument of ``call``. In an
-        annotation a string a call is given can come back a forward
-        reference a hint reader resolves against the module (``opt('T')``
-        returning ``Optional['T']``), so it is one, as main read it; in a
-        type alias's value (``opaque``) such a call is a value, its names
-        naming no alias (``Result = namedtuple('Result', ['lr'])``, an
-        ``Enum``'s members; #334 review). A typing form's arguments are read
-        by their place in both: the name ``NewType``, a ``TypeVar`` or a
-        functional ``NamedTuple``,
+        annotation every string a call is given is a reference, as main read
+        it: a call can return a forward reference a hint reader resolves
+        (``opt('T')`` returning ``Optional['T']``), and reading a typing
+        form's value positions there would make each call taken for a form
+        by mistake a missed edit (#334 review). In a type alias's value
+        (``opaque``), where main read nothing, a call that is no typing form
+        is a value, its names naming no alias (``Result =
+        namedtuple('Result', ['lr'])``, an ``Enum``'s members), and a typing
+        form's arguments are read by their place: the name ``NewType``, a
+        ``TypeVar`` or a functional ``NamedTuple``,
         ``TypedDict`` or ``make_dataclass`` is given, a field's name, a
         ``TypedDict`` key, and the options and flags of each are values
         (#323, #329), and name nothing a type could either. Its types (field
@@ -927,7 +929,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         can know, so every string in such a call is a reference. A callable
         of a form's name that is not the typing form (``def NewType``, an
         import from elsewhere) is a plain call (``form_of``)."""
-        form = form_of(call)
+        form = form_of(call) if opaque else None
         args, keywords = call.args, call.keywords
         everything = [*args, *(k.value for k in keywords)]
         if form is None:
@@ -953,7 +955,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
             kind = "dict" if form == "TypedDict" else "fields"
             for i, a in enumerate(args):
                 if i == 1:
-                    parts += spec_parts(kind, a, opaque)
+                    parts += spec_parts(kind, a)
                 else:
                     parts.append((a, False, False))  # the class's name
             for k in keywords:
@@ -961,14 +963,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     # NamedTuple's and TypedDict's keyword fields.
                     parts.append((k.value, True, True))
                 elif k.arg == "fields":
-                    parts += spec_parts(kind, k.value, opaque)
+                    parts += spec_parts(kind, k.value)
                 elif k.arg == "bases":  # types, a generated base's fields too
                     parts.append((k.value, True, True))
-                elif k.arg == "namespace":
-                    # It can hold `__annotations__`: read as a call's argument
-                    # is, a reference in an annotation (as main read it).
-                    parts.append((k.value, not opaque, False))
-                else:  # its options (`module=`, `frozen=`)
+                else:  # its options (`namespace=`, `module=`)
                     parts.append((k.value, False, False))
         return parts
 
