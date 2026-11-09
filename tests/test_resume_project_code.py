@@ -2356,6 +2356,12 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-optional",
         ),
         pytest.param(
+            # A class body binding `Optional` is that class's own name only.
+            "from typing import Optional\n\nT = {v}\nAlias = Optional['T']\n\n\n"
+            "class Other:\n    Optional = None\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-beside-a-class-rebinding-its-head",
+        ),
+        pytest.param(
             "import typing\n\nT = {v}\nAlias = list['T']\n\n\n"
             "def task(x: typing.Annotated[Alias, 'meta']):\n    return x\n",
             id="alias-in-annotated",
@@ -3409,6 +3415,25 @@ SCRIPT_NOT_EDITS = {
         "class Meta(type):\n    def __getitem__(cls, name):\n        return int\n\n\n"
         "class Samplers(Generic[T], metaclass=Meta):\n    pass\n\n\n"
         "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a union built by a comprehension over keys spelling the run's grid": (
+        "from typing import Union\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "SAMPLERS = {{'grid': GridSampler, 'random': RandomSampler}}\n"
+        "AnySampler = Union[*(SAMPLERS[k] for k in ('grid', 'random'))]\n\n\n"
+        "def task(a, s: AnySampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a class body's singleton lookup by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\ngrid = [1, {k}]\n\n\n"
+        "class Registry(Generic[T]):\n    def __getitem__(self, k):\n        return int\n\n\n"
+        "class Samplers:\n    Registry = Registry()\n    Default = Registry['grid']\n\n"
+        "    def pick(self, s: Default = None):\n        return s\n\n\n"
+        "def task(a, s: Samplers = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a class body's rebound typing name's lookup by the run's grid name": (
+        "from typing import Optional\n\ngrid = [1, {k}]\n\n\nclass task:\n"
+        "    Optional = {{'grid': int}}\n    Alias = Optional['grid']\n    x: Alias = None\n\n\n"
         "ds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (

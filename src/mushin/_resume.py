@@ -959,7 +959,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return parts
 
     def annotation_names(
-        exprs, own: set[str], as_text: bool | None = None, alias: bool = False
+        exprs,
+        own: set[str],
+        as_text: bool | None = None,
+        alias: bool = False,
+        shadow: frozenset = frozenset(),
     ) -> tuple[set[str], set[str]]:
         """``(read, named)`` for annotations ``exprs`` (each a node, or a
         ``call_parts`` part), or with ``alias`` for a type alias's value,
@@ -1056,7 +1060,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((t, text, refs, typed, depth) for t in types)
                     stack.extend((v, text, False, False, depth) for v in values)
                     continue
-                if alias and not type_subscript(node):
+                if alias and not type_subscript(node, shadow):
                     # A lookup in a type alias's value is no type, at any
                     # depth (`list[TYPES['grid']]`; #334 review).
                     stack.extend(
@@ -1064,6 +1068,13 @@ def _script_digest(path: Path, roots: frozenset[str]):
                         for c in ast.iter_child_nodes(node)
                     )
                     continue
+            if alias and isinstance(node, ast.comprehension):
+                # What a comprehension iterates over is no type
+                # (`Union[*(SAMPLERS[k] for k in ('grid', 'random'))]`).
+                stack.extend(
+                    (c, text, False, False, depth) for c in (node.iter, *node.ifs)
+                )
+                continue
             if alias and isinstance(node, ast.IfExp):
                 # Its test holds no type (`A if MODE == 'grid' else B`).
                 stack.append((node.test, text, False, False, depth))
@@ -1271,21 +1282,23 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return func.attr
         return None
 
-    def type_subscript(node) -> bool:
+    def type_subscript(node, shadow: frozenset = frozenset()) -> bool:
         """Whether subscript ``node`` subscripts a type head (``list['T']``,
         ``typing.Optional['T']``, a generic script class ``Box['T']``), not
-        a value (``TYPES['grid']``, ``SAMPLERS[MODE]``, an Enum member)."""
+        a value (``TYPES['grid']``, ``SAMPLERS[MODE]``, an Enum member).
+        ``shadow``: the names the class body around it binds, which there
+        are its own, not the module's heads (``Registry = Registry()``)."""
         head = node.value
         root = head
         while isinstance(root, ast.Attribute):
             root = root.value
         if isinstance(head, ast.Name):
-            return head.id in type_heads
+            return head.id in type_heads and head.id not in shadow
         return (
             head is not root and isinstance(root, ast.Name) and root.id in type_modules
         )
 
-    def type_parts(value, declared: bool) -> list:
+    def type_parts(value, declared: bool, shadow: frozenset = frozenset()) -> list:
         """The parts of a bound value written as a type expression, which the
         alias walk reads (#334 review): a subscript of a type head
         (``list['T']``, ``typing.Optional['T']``, a generic script class
@@ -1306,7 +1319,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         while stack:
             v, strings = stack.pop()
             if isinstance(v, ast.Subscript):
-                if type_subscript(v):
+                if type_subscript(v, shadow):
                     out.append(v)
             elif isinstance(v, ast.Call):
                 if form_of(v) is not None:
@@ -1348,15 +1361,18 @@ def _script_digest(path: Path, roots: frozenset[str]):
         alias only code reaches (pydantic's ``TypeAdapter(Alias)``), or a
         function's own (a function nested in it can name one; #334 review)."""
         found: list = []
-        # (statement, the type parameters of the classes around it)
-        stack: list = [(node, frozenset())]
+        # (statement, the type parameters of the classes around it, the
+        # names the innermost class body around it binds)
+        stack: list = [(node, frozenset(), frozenset())]
         while stack:
-            n, own = stack.pop()
+            n, own, shadow = stack.pop()
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue  # its body's names are its own
             if isinstance(n, ast.ClassDef):
                 # A generic class's `T` in its body is its own (`class C[T]`).
                 own = own | {p.name for p in getattr(n, "type_params", ())}
+                # A name its body binds is its own there, not a module head.
+                shadow = frozenset(name for s in n.body for name in scope_binds(s))
             if isinstance(n, ast.Assign):
                 names: set[str] = set()
                 targets = list(n.targets)
@@ -1370,17 +1386,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
                         targets.extend(target.elts)
                     elif isinstance(target, ast.Name):
                         names.add(target.id)
-                found.append((names, n.value, set(own), False))
+                found.append((names, n.value, set(own), False, shadow))
             elif isinstance(n, ast.AnnAssign) and n.value is not None:
                 names = {n.target.id} if isinstance(n.target, ast.Name) else set()
                 declared = spelled(n.annotation) == "TypeAlias"
-                found.append((names, n.value, set(own), declared))
+                found.append((names, n.value, set(own), declared, shadow))
             elif isinstance(n, getattr(ast, "TypeAlias", ())):  # `type A = ...`
                 params = {p.name for p in n.type_params}
-                found.append(({n.name.id}, n.value, params | own, True))
+                found.append(({n.name.id}, n.value, params | own, True, shadow))
             # Statements only: a definition cannot sit in an expression.
             stack.extend(
-                (c, own)
+                (c, own, shadow)
                 for c in ast.iter_child_nodes(n)
                 if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
             )
@@ -1681,13 +1697,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
     while True:
         grew = False
         for n in kept:
-            for i, (names, value, own, declared) in enumerate(pairs(n)):
+            for i, (names, value, own, declared, shadow) in enumerate(pairs(n)):
                 if (id(n), i) in walked or not (declared or names & typed):
                     continue
                 walked.add((id(n), i))
                 # Its bare names are evaluated where it stands: code reads.
                 more, more_named = annotation_names(
-                    type_parts(value, declared), own, as_text=False, alias=True
+                    type_parts(value, declared, shadow),
+                    own,
+                    as_text=False,
+                    alias=True,
+                    shadow=shadow,
                 )
                 if not (more <= read and more_named <= typed):
                     grew = True
