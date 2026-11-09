@@ -2360,6 +2360,11 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-union",
         ),
         pytest.param(
+            "T = {v}\nFAST = True\nAlias = dict[str, list['T'] if FAST else int]\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-conditional-type-argument",
+        ),
+        pytest.param(
             "import typing as t\n\nT = {v}\nAlias = t.Optional['T']\n\n\n"
             "def task(x: Alias):\n    return x\n",
             id="alias-of-a-renamed-typing-module",
@@ -3200,6 +3205,16 @@ SCRIPT_NOT_EDITS = {
         "import typing\n\ngrid = [1, {k}]\nEXTRA = []\n"
         "Row = typing.NamedTuple('Row', [('grid', float)] + EXTRA)\n\n\n"
         "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a conditional type argument whose test indexes by the run's grid": (
+        "grid = [1, {k}]\nFLAGS = {{'grid': True}}\n"
+        "Alias = dict[str, int if FLAGS['grid'] else float]\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a factory call in a type argument spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\ndef make_type(n):\n    return int\n\n\n"
+        "Alias = typing.Optional[make_type('grid')]\n\n\ndef task(a: Alias):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
