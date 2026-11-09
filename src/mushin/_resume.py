@@ -948,7 +948,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     parts.append((k.value, True, True))
                 elif k.arg == "fields":
                     parts += spec_parts(kind, k.value, opaque)
-                else:  # its options (`bases=`, `namespace=`)
+                elif k.arg == "bases":  # types, a generated base's fields too
+                    parts.append((k.value, True, True))
+                else:  # its options (`namespace=`, `module=`)
                     parts.append((k.value, False, False))
         return parts
 
@@ -1050,6 +1052,14 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((t, text, refs, typed, depth) for t in types)
                     stack.extend((v, text, False, False, depth) for v in values)
                     continue
+                if alias and not type_subscript(node):
+                    # A lookup in a type alias's value is no type, at any
+                    # depth (`list[TYPES['grid']]`; #334 review).
+                    stack.extend(
+                        (c, text, False, False, depth)
+                        for c in ast.iter_child_nodes(node)
+                    )
+                    continue
             if alias and isinstance(node, ast.IfExp):
                 # Its test holds no type (`A if MODE == 'grid' else B`).
                 stack.append((node.test, text, False, False, depth))
@@ -1135,6 +1145,20 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if alias.name in typing_modules
             )
 
+    def type_subscript(node) -> bool:
+        """Whether subscript ``node`` subscripts a type head (``list['T']``,
+        ``typing.Optional['T']``, a script class ``Box['T']``), not a value
+        (``TYPES['grid']``, ``SAMPLERS[MODE]``)."""
+        head = node.value
+        root = head
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(head, ast.Name):
+            return head.id in type_heads
+        return (
+            head is not root and isinstance(root, ast.Name) and root.id in type_modules
+        )
+
     def type_parts(value, declared: bool) -> list:
         """The parts of a bound value written as a type expression, which the
         alias walk reads (#334 review): a subscript of a type head
@@ -1153,15 +1177,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         while stack:
             v = stack.pop()
             if isinstance(v, ast.Subscript):
-                head = v.value
-                root = head
-                while isinstance(root, ast.Attribute):
-                    root = root.value
-                if (isinstance(head, ast.Name) and head.id in type_heads) or (
-                    head is not root
-                    and isinstance(root, ast.Name)
-                    and root.id in type_modules
-                ):
+                if type_subscript(v):
                     out.append(v)
             elif isinstance(v, ast.Call):
                 if spelled(v.func) in forms:
@@ -1195,16 +1211,21 @@ def _script_digest(path: Path, roots: frozenset[str]):
         for ``REG``): an annotation reading ``REG['a']`` gets what it stores;
         an attribute set counts for none, nor do the names in an index. Of
         a value, only what is written as a type expression is read
-        (``type_parts``). ``own``: a ``type`` statement's type parameters,
-        which is ``declared`` a type alias. Not followed: an
+        (``type_parts``). ``own``: a ``type`` statement's type parameters
+        (it is ``declared`` a type alias), and those of the generic classes
+        around an assignment. Not followed: an
         alias only code reaches (pydantic's ``TypeAdapter(Alias)``), or a
         function's own (a function nested in it can name one; #334 review)."""
         found: list = []
-        stack = [node]
+        # (statement, the type parameters of the classes around it)
+        stack: list = [(node, frozenset())]
         while stack:
-            n = stack.pop()
+            n, own = stack.pop()
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue  # its body's names are its own
+            if isinstance(n, ast.ClassDef):
+                # A generic class's `T` in its body is its own (`class C[T]`).
+                own = own | {p.name for p in getattr(n, "type_params", ())}
             if isinstance(n, ast.Assign):
                 names: set[str] = set()
                 targets = list(n.targets)
@@ -1218,17 +1239,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
                         targets.extend(target.elts)
                     elif isinstance(target, ast.Name):
                         names.add(target.id)
-                found.append((names, n.value, set(), False))
+                found.append((names, n.value, set(own), False))
             elif isinstance(n, ast.AnnAssign) and n.value is not None:
                 names = {n.target.id} if isinstance(n.target, ast.Name) else set()
                 declared = spelled(n.annotation) == "TypeAlias"
-                found.append((names, n.value, set(), declared))
+                found.append((names, n.value, set(own), declared))
             elif isinstance(n, getattr(ast, "TypeAlias", ())):  # `type A = ...`
-                own = {p.name for p in n.type_params}
-                found.append(({n.name.id}, n.value, own, True))
+                params = {p.name for p in n.type_params}
+                found.append(({n.name.id}, n.value, params | own, True))
             # Statements only: a definition cannot sit in an expression.
             stack.extend(
-                c
+                (c, own)
                 for c in ast.iter_child_nodes(n)
                 if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
             )

@@ -2270,6 +2270,11 @@ def test_a_name_an_annotation_reads_as_text_counts(tmp_path, text):
             marks=_OWN_RESOLVES,
         ),
         pytest.param(
+            "T = {v}\n\n\nclass task[T]:\n    Alias = list['T']\n    x: Alias = None\n",
+            id="generic-class-body-alias",
+            marks=_OWN_RESOLVES,
+        ),
+        pytest.param(
             "T = {v}\n\n\ndef task(x: 'not python'):\n    return x\n",
             id="string-not-python",
         ),
@@ -2513,6 +2518,14 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "Cfg = dataclasses.make_dataclass('Cfg', fields=[('x', 'T')])\n\n\n"
             "def task(a: Cfg):\n    return a\n",
             id="make-dataclass-fields-keyword",
+        ),
+        pytest.param(
+            # A generated base's field types are read through `bases=`.
+            "import dataclasses\n\nT = {v}\n\n\n"
+            "def task(\n    x: dataclasses.make_dataclass(\n        'Child', [],\n"
+            "        bases=(dataclasses.make_dataclass('Base', [('x', 'T')]),),\n    ),\n):\n"
+            "    return x\n",
+            id="make-dataclass-generated-base",
         ),
         pytest.param(
             "import typing\n\nT = {v}\n\n\n"
@@ -3215,6 +3228,10 @@ SCRIPT_NOT_EDITS = {
         "import typing\n\ngrid = [1, {k}]\n\n\ndef make_type(n):\n    return int\n\n\n"
         "Alias = typing.Optional[make_type('grid')]\n\n\ndef task(a: Alias):\n    return a\n\n\n"
         "ds = run(a=grid)\n"
+    ),
+    "a registry lookup nested in a type alias spelling the run's grid": (
+        "grid = [1, {k}]\nTYPES = {{'grid': int}}\nAlias = list[TYPES['grid']]\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
