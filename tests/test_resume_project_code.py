@@ -2061,6 +2061,268 @@ def test_what_a_generic_definition_reads_outside_its_type_parameters_counts(
     assert one != two
 
 
+_FUTURE = "from __future__ import annotations\n\n"
+_PEP695 = pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax")
+# 3.12.0 to 3.12.4 resolve a text annotation's `T` to the module's `T`, not
+# the definition's type parameter, so there it counts.
+_OWN_RESOLVES = pytest.mark.skipif(
+    sys.version_info < (3, 12, 5), reason="type parameters in text annotations"
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n"
+            "    def __init__(self, x: T):\n        self.x = x\n",
+            id="future-method",
+        ),
+        pytest.param(
+            _FUTURE
+            + "T = {v}\n\n\nclass task:\n    def run(self) -> T:\n        return 1\n",
+            id="future-method-return",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n"
+            "    async def run(self, x: T):\n        return x\n",
+            id="future-async-method",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    def run(self, x, /, *a: T):\n"
+            "        return a\n",
+            id="future-varargs",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    def run(self, **k: T):\n"
+            "        return k\n",
+            id="future-kwargs",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    def run(self, *, k: T):\n"
+            "        return k\n",
+            id="future-kw-only",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    def run(self, k: T, /):\n"
+            "        return k\n",
+            id="future-positional-only",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\ndef task():\n    def inner(x: T):\n"
+            "        return x\n\n    return inner\n",
+            id="future-nested-function",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    x: T = 1\n",
+            id="future-class-body",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    if True:\n        x: T = 1\n",
+            id="future-class-body-block",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\ndef task():\n    class Cfg:\n        lr: T = 1\n\n"
+            "    return Cfg\n",
+            id="future-class-in-function",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass Cfg:\n    lr: T = 1\n\n\n"
+            "def task():\n    return Cfg()\n",
+            id="future-helper-class-body",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task[T]:\n"
+            "    def __init__(self, x: T):\n        self.x = x\n",
+            id="future-generic-class-method",
+            marks=_PEP695,
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\ndef task[T]():\n    def inner(x: T):\n"
+            "        return x\n\n    return inner\n",
+            id="future-in-generic-function",
+            marks=_PEP695,
+        ),
+        pytest.param("T = {v}\n\n\ndef task(x: 'T'):\n    return x\n", id="string"),
+        pytest.param(
+            "T = {v}\n\n\ndef task(x: list['T']):\n    return x\n",
+            id="string-in-subscript",
+        ),
+        pytest.param(
+            "T = {v}\n\n\ndef task(x: \"list['T']\"):\n    return x\n",
+            id="string-in-string",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass task:\n    def __init__(self, x: 'T'):\n"
+            "        self.x = x\n",
+            id="string-method",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass task:\n    x: 'T' = 1\n", id="string-class-body"
+        ),
+        pytest.param(
+            "T = {v}\n\n\ntry:\n    def task(x: 'T'):\n        return x\n"
+            "except ImportError:\n    pass\n",
+            id="string-in-block",
+        ),
+        pytest.param(
+            "T = {v}\n\n\ntry:\n    import mushin_t_no_such_module\n"
+            "except ImportError:\n    def task(x: 'T'):\n        return x\n",
+            id="string-in-except-handler",
+        ),
+        pytest.param(
+            "import sys\n\nT = {v}\n\nmatch sys.platform:\n    case _:\n"
+            "        def task(x: 'T'):\n            return x\n",
+            id="string-in-match-case",
+        ),
+        pytest.param(
+            "T = {v}\ncfg: 'T' = 1\n\n\ndef task():\n    return cfg\n",
+            id="string-module-annotation",
+        ),
+        pytest.param(
+            # PEP 646: `ForwardRef` reads `'*Ts'` as `(*Ts,)`.
+            "Ts = {v}\n\n\ndef task(*a: '*Ts'):\n    return a\n",
+            id="string-starred",
+        ),
+        pytest.param(
+            "from typing import Annotated\n\nT = {v}\n\n\n"
+            "def task(x: Annotated['T', 'note']):\n    return x\n",
+            id="string-annotated-type",
+        ),
+        pytest.param(
+            # A name in a `Literal` is evaluated (`Literal[Color.RED]`).
+            _FUTURE + "from typing import Literal\n\nT = {v}\n\n\nclass task:\n"
+            "    def run(self, m: Literal[T]):\n        return m\n",
+            id="future-literal-name",
+        ),
+        pytest.param(
+            _FUTURE + "from typing import Annotated\n\nT = {v}\n\n\nclass task:\n"
+            "    def run(self, m: Annotated[int, T]):\n        return m\n",
+            id="future-annotated-metadata-name",
+        ),
+    ],
+)
+def test_a_name_an_annotation_reads_as_text_counts(tmp_path, text):
+    """A string annotation, or any annotation under future annotations, is
+    evaluated later against the module (`typing.get_type_hints`, hydra-zen's
+    `builds`, a dataclass's fields), so a module name it reads is the
+    task's code, in a method, a nested function or a class body too (#324)."""
+    one = _digest_of_script(tmp_path, "an1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "an2", text.format(v="str"), {"task"})
+    assert one != two
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\ndef task():\n    y: T = 1\n    return y\n",
+            id="future-local",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task:\n    def run(self):\n"
+            "        y: T = 1\n        return y\n",
+            id="future-method-local",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass task:\n    T = int\n\n"
+            "    def __init__(self, x: T):\n        self.x = x\n",
+            id="class-scope",
+            # 3.14+'s symbol table counts the module's `T` here (main too).
+            marks=pytest.mark.skipif(
+                sys.version_info >= (3, 14), reason="annotation scopes"
+            ),
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\ndef task[T](x: T) -> T:\n    return x\n",
+            id="future-generic-function",
+            marks=_OWN_RESOLVES,
+        ),
+        pytest.param(
+            _FUTURE + "U = {v}\n\n\nclass task:\n"
+            "    def run[U](self, x: U) -> U:\n        return x\n",
+            id="future-generic-method",
+            marks=_OWN_RESOLVES,
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\n\n\nclass task[T]:\n    x: T\n",
+            id="future-generic-class-body",
+            marks=_OWN_RESOLVES,
+        ),
+        pytest.param(
+            "T = {v}\n\n\ndef task[T](x: 'T'):\n    return x\n",
+            id="string-generic-function",
+            marks=_OWN_RESOLVES,
+        ),
+        pytest.param(
+            "T = {v}\n\n\ndef task(x: 'not python'):\n    return x\n",
+            id="string-not-python",
+        ),
+        pytest.param(
+            # A lone surrogate: parsing it raises UnicodeEncodeError, a
+            # ValueError, not a SyntaxError.
+            "T = {v}\n\n\ndef task(x: 'T\\ud800'):\n    return x\n",
+            id="string-surrogate",
+        ),
+    ],
+)
+def test_a_name_no_annotation_reads_as_text_does_not_count(tmp_path, text):
+    """A function's local annotation is never evaluated; a definition's own
+    type parameter is what its annotations name (as `typing.get_type_hints`
+    resolves it); without future annotations a bare annotation is evaluated
+    where it stands, here the class body's `T`; and a string that is not
+    Python names nothing, and does not fail the record."""
+    one = _digest_of_script(tmp_path, "nn1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "nn2", text.format(v="str"), {"task"})
+    assert one == two
+
+
+@_PEP695
+@pytest.mark.parametrize(
+    "text",
+    [
+        _FUTURE + "T = {v}\n\n\ndef task[T](x: T) -> T:\n    return x\n",
+        _FUTURE + "U = {v}\n\n\nclass task:\n"
+        "    def run[U](self, x: U) -> U:\n        return x\n",
+        _FUTURE + "T = {v}\n\n\nclass task[T]:\n    x: T\n",
+        "T = {v}\n\n\ndef task[T](x: 'T'):\n    return x\n",
+    ],
+    ids=[
+        "future-generic-function",
+        "future-generic-method",
+        "future-generic-class-body",
+        "string-generic-function",
+    ],
+)
+def test_before_3_12_5_a_text_annotations_type_parameter_is_the_modules(
+    tmp_path, monkeypatch, text
+):
+    """3.12.0 to 3.12.4 resolve a text annotation's `T` to the module's `T`,
+    so the record counts it there (#328 review). CI runs a later 3.12, so the
+    gate is set as those versions set it."""
+    import mushin._resume
+
+    monkeypatch.setattr(mushin._resume, "_OWN_TYPE_PARAMS_RESOLVE", False)
+    one = _digest_of_script(tmp_path, "op1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "op2", text.format(v="str"), {"task"})
+    assert one != two
+
+
+def test_reading_an_annotations_text_does_not_warn(tmp_path):
+    """The record parses a string annotation's text for its names; an escape
+    in a literal inside that text (`'\\d'`) must not warn, from no file the
+    user can find (#328 review). The names still count."""
+    text = "T = {v}\n\n\ndef task(x: \"dict[T, '\\\\d']\"):\n    return x\n"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        one = _digest_of_script(tmp_path, "w1", text.format(v="int"), {"task"})
+        two = _digest_of_script(tmp_path, "w2", text.format(v="str"), {"task"})
+    assert not [
+        w for w in caught if issubclass(w.category, (SyntaxWarning, DeprecationWarning))
+    ]
+    assert one != two
+
+
 def test_a_second_sweep_in_the_script_is_not_the_firsts_code(tmp_path):
     """Two `@mushin.sweep` functions in one script: the task reads `mushin`
     through its own decorator, which does not make the other sweep its code."""
@@ -2233,6 +2495,13 @@ SCRIPT_EDITS = {
         "        return items[k]\n\n    return add, get\n\n\nadd, get = make_registry()\n\n\n"
         "@add\ndef lin(x):\n    return x * {k}\n\n\ndef task(a):\n    return get('lin')(a)\n"
     ),
+    # #277 pinned this as no edit while the task read only `Model.x`; the
+    # record cannot tell that task from this one, which reads the hint (#324).
+    "a class annotation left as a string, read as a hint": (
+        "from __future__ import annotations\n\nimport typing\n\nTensor = {k}\n\n\n"
+        "class Model:\n    x: Tensor = 1\n\n\n"
+        "def task(a):\n    return typing.get_type_hints(Model)['x']\n"
+    ),
     "an annotation a dataclass in the task reads": (
         "import dataclasses\n\nHint = {k}\n\n\ndef task(a):\n    @dataclasses.dataclass\n"
         "    class Row:\n        x: Hint = 0\n\n    return Row\n"
@@ -2375,9 +2644,36 @@ SCRIPT_NOT_EDITS = {
         "SCALE = 2\nif True:\n\n    def timer(fn):\n        return fn\n\n    @timer\n"
         "    def plot():\n        return SCALE + {k}\n\n\ndef task(a):\n    return a * SCALE\n"
     ),
-    "a class annotation left as a string": (
-        "from __future__ import annotations\n\nTensor = {k}\n\n\nclass Model:\n"
-        "    x: Tensor = 1\n\n\ndef task(a):\n    return a * Model.x\n"
+    # A decorator's own annotations register nothing, though the task's
+    # annotations name `dict` too (#328 review).
+    "a decorator whose wrapper's annotation names what the task's does": (
+        "from __future__ import annotations\n\n\ndef timer(fn):\n"
+        "    def wrapper(*a) -> dict:\n        return fn(*a)\n\n    return wrapper\n\n\n"
+        "@timer\ndef plot():\n    return {k}\n\n\n"
+        "def task(a) -> dict:\n    return {{'v': a}}\n"
+    ),
+    "a decorator whose code reads what only the task's annotation names": (
+        "from __future__ import annotations\n\nimport collections\n\n\n"
+        "def timer(fn):\n    collections.Counter()\n    return fn\n\n\n"
+        "@timer\ndef plot():\n    return {k}\n\n\n"
+        "class task:\n    def run(self, x: collections.OrderedDict):\n        return x\n"
+    ),
+    # A `Literal` value is no reference: extending the grid stays no edit
+    # (#328 review).
+    "a Literal value spelling the run's grid": (
+        "from typing import Literal\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a, mode: Literal['grid', 'random'] = 'grid'):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a Literal value spelling the run's grid, in a string": (
+        "from typing import Literal\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a, mode: \"Literal['grid']\" = 'grid'):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "an Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a: typing.Annotated[int, 'grid']):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
     ),
     "a definition decorated by a function the task calls": (
         "def ident(fn):\n    return fn\n\n\ndef task(a):\n    return ident(a)\n\n\n"

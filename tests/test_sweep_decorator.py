@@ -1,5 +1,8 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+import sys
+import typing
+
 import numpy as np
 import pytest
 
@@ -154,6 +157,53 @@ def test_sweep_does_not_mutate_the_original_function():
     # the synthesized task is a distinct copy carrying the mangled qualname
     assert handle.workflow_cls().task is not _pristine_task
     assert handle.workflow_cls().task.__qualname__ == before + ".__mushin_task__"
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax")
+def test_the_task_copy_keeps_its_type_parameters():
+    """Under string annotations, `typing.get_type_hints` resolves a type
+    parameter through `__type_params__`: without it the copy's `T` would be
+    the module's `T` (#324)."""
+    ns: dict = {"__name__": "mushin_t_typeparams"}
+    exec(
+        "from __future__ import annotations\n\nT = int\n\n\n"
+        "def task[T](x: T) -> dict:\n    return {'v': 1.0}\n",
+        ns,
+    )
+    fn = ns["task"]
+    copy = mushin.sweep(fn).__mushin_task__
+    assert copy.__type_params__ == fn.__type_params__
+    assert typing.get_type_hints(copy) == typing.get_type_hints(fn)
+    if sys.version_info >= (3, 12, 5):  # before, the module's `T` wins
+        assert typing.get_type_hints(copy)["x"] is fn.__type_params__[0]
+
+
+def test_the_task_copy_keeps_an_annotation_edited_in_place():
+    """The copy takes fn's annotations as they are, an edit made before the
+    decorator included, not as their expressions evaluate again (#328 review)."""
+
+    def fn(a: int) -> dict:
+        return {"v": float(a)}
+
+    fn.__annotations__["a"] = float
+    copy = mushin.sweep(fn).__mushin_task__
+    assert copy.__annotations__ == {"a": float, "return": dict}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="PEP 649: lazy annotations")
+def test_a_task_annotation_can_name_what_is_defined_below_it(tmp_path):
+    """3.14+ evaluates an annotation when it is first read, so a task may name
+    a class defined below it, as plain Python allows (#326)."""
+    ns: dict = {"__name__": "mushin_t_forward", "mushin": mushin}
+    exec(
+        "@mushin.sweep\ndef task(a: int, h: Later = None) -> dict:\n"
+        "    return {'v': float(a)}\n\n\nclass Later:\n    pass\n",
+        ns,
+    )
+    copy = ns["task"].__mushin_task__
+    assert copy.__annotations__ == {"a": int, "h": ns["Later"], "return": dict}
+    ds = ns["task"].run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
+    assert ds["v"].values.tolist() == [1.0, 2.0]
 
 
 def test_workflow_attr_points_at_failed_run(tmp_path):

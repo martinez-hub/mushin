@@ -12,6 +12,7 @@ import hashlib
 import itertools
 import json
 import re
+import sys
 import weakref as _weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -744,6 +745,14 @@ def _file_entries(
     return out, any(p not in seen for p in pending)
 
 
+#: Whether ``typing.get_type_hints`` resolves a definition's own type
+#: parameter in its text annotations (a string, or under future annotations)
+#: to that parameter: from 3.12.5 on. 3.12.0 to 3.12.4 resolve the module's
+#: name of the same name there (#328 review), so the script record counts it,
+#: and such a script's digest differs between those versions and later ones.
+_OWN_TYPE_PARAMS_RESOLVE = sys.version_info >= (3, 12, 5)
+
+
 def _script_digest(path: Path, roots: frozenset[str]):
     """``(digest, imports)`` for a driver script whose top-level names
     ``roots`` define the task (the class or function holding it,
@@ -765,11 +774,15 @@ def _script_digest(path: Path, roots: frozenset[str]):
     comprehension's variable, a nested function's local and an annotation
     without a value do not). Not counted: statements that
     only do something (a call, the run call, an attribute or item set) and
-    what only they read (``GRID``, ``ds = exp.run(...)``). ``imports`` are
-    those of what counts."""
+    what only they read (``GRID``, ``ds = exp.run(...)``). An annotation
+    kept as text (a string, or any under ``from __future__ import
+    annotations``) reads the names in it, since whatever reads type hints
+    evaluates that text against the module; a function's local annotation,
+    never evaluated, reads none. ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
+    import warnings
 
     source, content = _content_key(path)
     cache_key = (*content, tuple(sorted(roots)))
@@ -805,12 +818,139 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
         }
 
+    # Under `from __future__ import annotations` every annotation is kept as
+    # its text, so the symbol table sees no annotation read at all.
+    future_annotations = any(
+        isinstance(n, ast.ImportFrom)
+        and n.module == "__future__"
+        and any(alias.name == "annotations" for alias in n.names)
+        for n in tree.body
+    )
+
+    def annotation_names(exprs, own: set[str]) -> set[str]:
+        """The names annotations ``exprs`` read when something evaluates
+        their text later, against the module's globals
+        (``typing.get_type_hints``, hydra-zen's ``builds``, a dataclass's
+        field types; #324): every name inside a string (``'T'``,
+        ``list['T']``), parsed as that evaluation parses it, and under future
+        annotations every name outside one too. Without future annotations a
+        name outside a string is evaluated where it stands, and the symbol
+        table counts it there, scope-aware. ``own`` are the type parameters
+        of the definition they belong to, which the text names instead
+        (``_OWN_TYPE_PARAMS_RESOLVE``).
+
+        A string in ``Literal[...]``, or in ``Annotated[...]`` after its
+        type, is a value no reader resolves, so it names nothing: counting
+        `Literal['grid']` would make the run's `grid` the task's code, and
+        extending the grid an edit. A name there is still read
+        (``Literal[Color.RED]``). Spelled otherwise (an alias of
+        ``Literal``), its strings are read: a recompute too many at most."""
+        found: set[str] = set()
+        # (node, whether its bare names are read as text, whether its
+        # strings are references, strings parsed to reach it): a string can
+        # hold a string (`"list['T']"`).
+        stack = [(e, future_annotations, True, 0) for e in exprs if e is not None]
+        while stack:
+            node, as_text, refs, depth = stack.pop()
+            if isinstance(node, ast.Name):
+                if as_text and isinstance(node.ctx, ast.Load):
+                    found.add(node.id)
+                continue
+            if isinstance(node, ast.Constant):
+                if refs and isinstance(node.value, str) and depth < 8:
+                    text = node.value.strip()
+                    # `'*Ts'` (PEP 646) is read as `ForwardRef` reads it:
+                    # `(*Ts,)`.
+                    source = f"({text},)" if text.startswith("*") else text
+                    try:
+                        with warnings.catch_warnings():
+                            # Only its names matter: an escape in a literal
+                            # inside it (`'\d'`) would warn, from no file.
+                            warnings.simplefilter("ignore")
+                            parsed = ast.parse(source, mode="eval")
+                    except (SyntaxError, ValueError, RecursionError):
+                        continue  # not Python: it names nothing
+                    stack.append((parsed.body, True, True, depth + 1))
+                continue
+            if isinstance(node, ast.Subscript):
+                head = node.value
+                if isinstance(head, ast.Attribute):
+                    spelled = head.attr
+                else:
+                    spelled = getattr(head, "id", None)
+                types, values = [head], []
+                if spelled == "Literal":
+                    values = [node.slice]
+                elif (
+                    spelled == "Annotated"
+                    and isinstance(node.slice, ast.Tuple)
+                    and len(node.slice.elts) > 1
+                ):
+                    types.append(node.slice.elts[0])
+                    values = node.slice.elts[1:]
+                if values:
+                    stack.extend((t, as_text, refs, depth) for t in types)
+                    stack.extend((v, as_text, False, depth) for v in values)
+                    continue
+            stack.extend((c, as_text, refs, depth) for c in ast.iter_child_nodes(node))
+        return found - own if _OWN_TYPE_PARAMS_RESOLVE else found
+
+    def annotation_reads(node) -> set[str]:
+        """``annotation_names`` of every annotation that statement ``node``
+        keeps: each function's parameters and return, at any depth (a
+        method, a nested function), and the annotated names of a class body
+        or of the module. Not a function body's own annotated names, which
+        are never evaluated. Each counts the type parameters of its own
+        definition as its own only, as ``typing.get_type_hints`` does (3.12.5+):
+        a generic class's `T` in a method's annotation is the module's `T`."""
+        found: set[str] = set()
+        # (node, whether it is in a function body, the type parameters of
+        # the class whose body it is in)
+        stack: list = [(node, False, set())]
+        while stack:
+            n, in_function, own = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                a = n.args
+                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                found |= annotation_names(
+                    [p.annotation for p in params if p is not None] + [n.returns],
+                    {p.name for p in getattr(n, "type_params", ())},
+                )
+                stack.extend((s, True, set()) for s in n.body)
+                continue
+            if isinstance(n, ast.ClassDef):
+                body_own = {p.name for p in getattr(n, "type_params", ())}
+                stack.extend((s, False, body_own) for s in n.body)
+                continue
+            if isinstance(n, ast.AnnAssign) and not in_function:
+                found |= annotation_names([n.annotation], own)
+            # Statements only: a definition cannot sit in an expression.
+            stack.extend(
+                (c, in_function, own)
+                for c in ast.iter_child_nodes(n)
+                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
+        return found
+
     read_cache: dict[int, set[str]] = {}
+    full_cache: dict[int, set[str]] = {}
 
     def reads(node) -> set[str]:
         hit = read_cache.get(id(node))
         if hit is None:
             hit = read_cache[id(node)] = _reads(node)
+        return hit
+
+    def full_reads(node) -> set[str]:
+        """``reads`` and what the statement's annotations read as text
+        (``annotation_reads``): what the record follows. Neither the symbol
+        table nor ``_reads``'s walk reads an annotation kept as text (future
+        annotations, or a string), a method's, a nested function's or a
+        class body's. The registering-decorator rule compares code only
+        (``reads``): a wrapper's `-> dict` registers nothing."""
+        hit = full_cache.get(id(node))
+        if hit is None:
+            hit = full_cache[id(node)] = reads(node) | annotation_reads(node)
         return hit
 
     def _reads(node) -> set[str]:
@@ -1059,22 +1199,27 @@ def _script_digest(path: Path, roots: frozenset[str]):
     ]
     kept_ids = {id(n) for n in kept}
     pending = [(n, names) for n, names in candidates if names and id(n) not in kept_ids]
+    # What counted code reads, its annotations' text included (#324), and
+    # what its code alone reads, for the registering-decorator rule.
     read: set[str] = set()
+    read_code: set[str] = set()
     for n in kept:
-        read |= reads(n)
+        read |= full_reads(n)
+        read_code |= reads(n)
     while True:
         add = [
             (n, names)
             for n, names in pending
             if names & read
-            or (isinstance(n, defs) and n.decorator_list and registers(n, read))
+            or (isinstance(n, defs) and n.decorator_list and registers(n, read_code))
         ]
         if not add:
             break
         added = {id(n) for n, _ in add}
         for n, _ in add:
             kept.append(n)
-            read |= reads(n)
+            read |= full_reads(n)
+            read_code |= reads(n)
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
 
@@ -4000,7 +4145,11 @@ def changed_project_code(prior, current) -> list[str] | None:
     records, compared on the keys both have (a key one run has and the other
     lacks is not an edit: a module imported lazily in one process only). File
     digests read alike on every supported Python (syntax trees, not
-    bytecode), so records from two versions compare too. None when either is
+    bytecode), so records from two versions compare too. A script entry does
+    too, but for one where a generic definition's text annotation names its
+    own type parameter and a module binding shares that name: it differs
+    between 3.12.0-3.12.4 and later (``_OWN_TYPE_PARAMS_RESOLVE``), so a
+    resume across that upgrade re-runs its cells once. None when either is
     missing or malformed (a sidecar from before the field)."""
     if not isinstance(prior, dict) or not isinstance(current, dict):
         return None
