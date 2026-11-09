@@ -2529,6 +2529,28 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-name-star-imported-over-typing",
         ),
         pytest.param(
+            # The star import may rebind `typing` itself.
+            "import typing\nfrom mushin_t_helpers import *\n\nT = {v}\n\n\n"
+            "def task(x: typing.NewType('T')):\n    return x\n",
+            id="form-root-star-imported-over-typing",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "def NewType(t):\n    return typing.Optional[t]\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-redefined-after-import",
+        ),
+        pytest.param(
+            "from typing import NewType\nfrom mushin_t_helpers import NewType\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-reimported-from-elsewhere",
+        ),
+        pytest.param(
+            "import typing\nimport mushin_t_helpers as typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.NewType('T')):\n    return x\n",
+            id="form-root-reimported-from-elsewhere",
+        ),
+        pytest.param(
             "import mushin_t_helpers as helpers\n\nT = {v}\n\n\n"
             "def task(x: helpers.NewType('T')):\n    return x\n",
             id="form-name-on-another-module",

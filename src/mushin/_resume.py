@@ -1254,12 +1254,21 @@ def _script_digest(path: Path, roots: frozenset[str]):
     form_names: set[str] = set()
     plain_names: set[str] = set()
     form_roots: set[str] = set()
+    # A star import from another module may bind any name, a typing
+    # module's name included (#334 review).
+    foreign_star = False
+    type_param_nodes = tuple(
+        getattr(ast, kind)
+        for kind in ("TypeVar", "ParamSpec", "TypeVarTuple")
+        if hasattr(ast, kind)
+    )
     for sub in ast.walk(tree):
         if isinstance(sub, ast.ImportFrom):
             from_typing = sub.level == 0 and sub.module in form_modules
             for alias in sub.names:
                 if alias.name == "*":
                     (form_names if from_typing else plain_names).update(forms)
+                    foreign_star = foreign_star or not from_typing
                 elif from_typing and alias.name in forms and not alias.asname:
                     form_names.add(alias.name)
                 else:
@@ -1283,6 +1292,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
             plain_names.add(sub.name)  # `case NewType:`
         elif isinstance(sub, ast.MatchMapping) and sub.rest:
             plain_names.add(sub.rest)
+        elif type_param_nodes and isinstance(sub, type_param_nodes):
+            plain_names.add(sub.name)  # `def f[NewType]()`
+    if foreign_star:
+        plain_names |= form_roots
 
     def form_of(call) -> str | None:
         """The typing form ``call`` calls, or None (see ``form_names``)."""
