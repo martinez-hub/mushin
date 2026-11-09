@@ -2499,6 +2499,13 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-name-bound-by-assignment",
         ),
         pytest.param(
+            # Imported from typing, then rebound: no longer the typing form.
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "def opt(t):\n    return typing.Optional[t]\n\n\nNewType = opt\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-rebound-after-import",
+        ),
+        pytest.param(
             "from typing import NamedTuple\n\nT = {v}\nRow = NamedTuple('Row', [('x', 'T')])\n\n\n"
             "def task(a) -> Row:\n    return a\n",
             id="form-imported-by-name",
