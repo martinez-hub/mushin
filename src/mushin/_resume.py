@@ -1376,22 +1376,23 @@ def _script_digest(path: Path, roots: frozenset[str]):
         an attribute set counts for none, nor do the names in an index. Of
         a value, only what is written as a type expression is read
         (``type_parts``). ``own``: a ``type`` statement's type parameters
-        (it is ``declared`` a type alias), and those of the generic classes
-        around an assignment. Not followed: an
+        (it is ``declared`` a type alias); a generic class's are not its
+        body's aliases' own, as a method's annotation reads them against the
+        module. Not followed: an
         alias only code reaches (pydantic's ``TypeAdapter(Alias)``), or a
         function's own (a function nested in it can name one; #334 review)."""
         found: list = []
-        # (statement, the type parameters of the classes around it, the
-        # names the innermost class body around it binds)
-        stack: list = [(node, frozenset(), frozenset())]
+        # (statement, the names the innermost class body around it binds)
+        stack: list = [(node, frozenset())]
         while stack:
-            n, own, shadow = stack.pop()
+            n, shadow = stack.pop()
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue  # its body's names are its own
             if isinstance(n, ast.ClassDef):
-                # A generic class's `T` in its body is its own (`class C[T]`).
-                own = own | {p.name for p in getattr(n, "type_params", ())}
-                # A name its body binds is its own there, not a module head.
+                # Not its type parameters: a method's annotation naming an
+                # alias of its body resolves the alias's `T` against the
+                # module (`get_type_hints(cls.method)`; #334 review). A name
+                # its body binds is its own there, not a module head.
                 shadow = frozenset(name for s in n.body for name in scope_binds(s))
             if isinstance(n, ast.Assign):
                 names: set[str] = set()
@@ -1406,17 +1407,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
                         targets.extend(target.elts)
                     elif isinstance(target, ast.Name):
                         names.add(target.id)
-                found.append((names, n.value, set(own), False, shadow))
+                found.append((names, n.value, set(), False, shadow))
             elif isinstance(n, ast.AnnAssign) and n.value is not None:
                 names = {n.target.id} if isinstance(n.target, ast.Name) else set()
                 declared = spelled(n.annotation) == "TypeAlias"
-                found.append((names, n.value, set(own), declared, shadow))
+                found.append((names, n.value, set(), declared, shadow))
             elif isinstance(n, getattr(ast, "TypeAlias", ())):  # `type A = ...`
                 params = {p.name for p in n.type_params}
-                found.append(({n.name.id}, n.value, params | own, True, shadow))
+                found.append(({n.name.id}, n.value, params, True, shadow))
             # Statements only: a definition cannot sit in an expression.
             stack.extend(
-                (c, own, shadow)
+                (c, shadow)
                 for c in ast.iter_child_nodes(n)
                 if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
             )

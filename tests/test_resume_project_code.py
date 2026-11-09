@@ -2270,11 +2270,6 @@ def test_a_name_an_annotation_reads_as_text_counts(tmp_path, text):
             marks=_OWN_RESOLVES,
         ),
         pytest.param(
-            "T = {v}\n\n\nclass task[T]:\n    Alias = list['T']\n    x: Alias = None\n",
-            id="generic-class-body-alias",
-            marks=_OWN_RESOLVES,
-        ),
-        pytest.param(
             "T = {v}\n\n\ndef task(x: 'not python'):\n    return x\n",
             id="string-not-python",
         ),
@@ -2380,6 +2375,14 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "T = {v}\n\n\nclass Box[V]:\n    pass\n\n\nAlias = Box['T']\n\n\n"
             "def task(x: Alias):\n    return x\n",
             id="alias-pep695-generic",
+            marks=_PEP695,
+        ),
+        pytest.param(
+            # A method's annotation reads its class body's alias against the
+            # module: the class's `T` is not the alias's (#334 review).
+            "T = {v}\n\n\nclass task[T]:\n    Alias = list['T']\n\n"
+            "    def run(self, x: Alias):\n        return x\n",
+            id="alias-of-a-generic-class-in-a-method",
             marks=_PEP695,
         ),
         pytest.param(
