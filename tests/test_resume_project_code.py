@@ -3391,6 +3391,26 @@ SCRIPT_NOT_EDITS = {
         "list = {{'grid': int}}\ngrid = [1, {k}]\nAlias = list['grid']\n\n\n"
         "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
     ),
+    "a generic lookup class's member picked by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\ngrid = [1, {k}]\n\n\n"
+        "class GridSampler:\n    pass\n\n\nclass Samplers(Generic[T]):\n"
+        "    _by_name = {{'grid': GridSampler}}\n\n    def __class_getitem__(cls, name):\n"
+        "        return cls._by_name[name]\n\n\nSampler = Samplers['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a generic class's assigned lookup picked by the run's grid name": (
+        "grid = [1, {k}]\n\n\ndef _look(cls, name):\n    return int\n\n\n"
+        "class Samplers(dict[str, type]):\n    __class_getitem__ = classmethod(_look)\n\n\n"
+        "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a generic class's metaclass lookup picked by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\ngrid = [1, {k}]\n\n\n"
+        "class Meta(type):\n    def __getitem__(cls, name):\n        return int\n\n\n"
+        "class Samplers(Generic[T], metaclass=Meta):\n    pass\n\n\n"
+        "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
         "class RandomSampler:\n    pass\n\n\n"

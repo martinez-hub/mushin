@@ -1158,11 +1158,23 @@ def _script_digest(path: Path, roots: frozenset[str]):
             # A class a subscript specializes: generic by its type
             # parameters or a subscripted base (`Generic[V]`); not an Enum,
             # whose `Samplers['grid']` is a member, nor a class whose own
-            # `__class_getitem__` may be a lookup too (#334 review).
+            # `__class_getitem__`, or a metaclass's `__getitem__`, may be a
+            # lookup too (#334 review).
             generic = getattr(sub, "type_params", ()) or any(
                 isinstance(b, ast.Subscript) for b in sub.bases
             )
-            if generic and not sub.decorator_list:
+            body_names: set[str] = set()
+            for s in sub.body:
+                if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body_names.add(s.name)
+                elif isinstance(s, ast.Assign):
+                    body_names.update(
+                        x.id for x in s.targets if isinstance(x, ast.Name)
+                    )
+                elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                    body_names.add(s.target.id)
+            own_getitem = "__class_getitem__" in body_names
+            if generic and not (sub.decorator_list or sub.keywords or own_getitem):
                 type_heads.add(sub.name)
             else:
                 rebound.add(sub.name)
