@@ -785,11 +785,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
     field types, a ``TypeVar``'s bound). A ``Literal`` value,
     ``Annotated``'s notes and what a typing form takes as a value
     (``NewType('grid', int)``'s name, a field's name) are values, read as
-    none. Not followed: an alias or a typing form only code reaches
-    (pydantic's ``TypeAdapter(Alias)``, ``get_type_hints(Row)`` in the
-    task's body), a form's field spec given through a name
-    (``NamedTuple('Row', FIELDS)``), or a typing form spelled through an
-    alias of its name. ``imports`` are those of what counts."""
+    none, and so is a call in an alias's value that is no typing form
+    (``Result = namedtuple('Result', ['lr'])``); in an annotation a string
+    given to a call is a reference (``opt('T')``), as main read it. Not
+    followed: an alias or a typing form only code reaches (pydantic's
+    ``TypeAdapter(Alias)``, ``get_type_hints(Row)`` in the task's body), an
+    alias reached as an attribute (``Outer.Alias``) or built by a call
+    (``Alias = opt('T')``), a functional form a counted class only
+    inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
+    though a ``class Base(TypedDict)`` statement counts), a form's field
+    spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
+    form spelled through an alias of its name. ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
@@ -877,23 +883,33 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return parts
         return [(node, False, False)]
 
-    def call_parts(call) -> list:
+    def call_parts(call, opaque: bool) -> list:
         """``(argument, whether its strings are references, whether its names
-        can name a type alias)`` for each argument of ``call``. A string a
-        call is given can come back a forward reference a hint
-        reader resolves against the module (``opt('T')`` returning
-        ``Optional['T']``), so it is one, but where a typing form takes a
-        value (#323, #329): the name ``NewType``, a ``TypeVar`` (or
+        can name a type alias)`` for each argument of ``call``. In an
+        annotation a string a call is given can come back a forward
+        reference a hint reader resolves against the module (``opt('T')``
+        returning ``Optional['T']``), so it is one, as main read it; in a
+        type alias's value (``opaque``) such a call is a value, its names
+        naming no alias (``Result = namedtuple('Result', ['lr'])``, an
+        ``Enum``'s members; #334 review). A typing form's arguments are read
+        by their place in both: the name ``NewType``, a ``TypeVar`` (or
         ``ParamSpec``, ``TypeVarTuple``) or a functional ``NamedTuple``,
         ``TypedDict`` or ``make_dataclass`` is given, a field's name, a
-        ``TypedDict`` key, and the options and flags of each. Those name
-        nothing a type could either. Its types (field types, a ``TypeVar``'s
-        constraints, ``bound=`` and ``default=``, ``ForwardRef``'s argument,
-        ``NewType``'s supertype) are references."""
+        ``TypedDict`` key, and the options and flags of each are values
+        (#323, #329), and name nothing a type could either. Its types (field
+        types, a ``TypeVar``'s constraints, ``bound=`` and ``default=``,
+        ``ForwardRef``'s argument, ``NewType``'s supertype) are references.
+        An unpacked argument (``*args``, ``**kw``) has no place the record
+        can know, so every string in such a call is a reference."""
         form = spelled(call.func)
         args, keywords = call.args, call.keywords
+        everything = [*args, *(k.value for k in keywords)]
         if form not in forms:
-            return [(a, True, True) for a in (*args, *(k.value for k in keywords))]
+            return [(a, not opaque, not opaque) for a in everything]
+        if any(isinstance(a, ast.Starred) for a in args) or any(
+            k.arg is None for k in keywords
+        ):
+            return [(a, True, True) for a in everything]
         parts: list = []
         if form == "ForwardRef":
             parts += [(a, i == 0, i == 0) for i, a in enumerate(args)]
@@ -925,10 +941,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return parts
 
     def annotation_names(
-        exprs, own: set[str], as_text: bool | None = None
+        exprs, own: set[str], as_text: bool | None = None, alias: bool = False
     ) -> tuple[set[str], set[str]]:
         """``(read, named)`` for annotations ``exprs`` (each a node, or a
-        ``call_parts`` part). ``read``: the names
+        ``call_parts`` part), or with ``alias`` for a type alias's value,
+        where a call that is no typing form is opaque. ``read``: the names
         they read when something evaluates their text later, against the
         module's globals (``typing.get_type_hints``, hydra-zen's ``builds``,
         a dataclass's field types; #324): every name inside a string
@@ -937,9 +954,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
         outside one too. Without it a name outside a string is evaluated
         where it stands, and the symbol table counts it there, scope-aware.
         ``named``: every name they name, evaluated or as text, but in a
-        value, and the last attribute of a dotted name (``Outer.Alias``, not
-        ``nn`` of ``torch.nn.Module``): the type aliases whose own strings a
-        hint reader resolves too (``alias_pairs``, #329). ``own`` are the
+        value or a dotted name (``os`` of ``os.PathLike``): the type aliases
+        whose own strings a hint reader resolves too (``alias_pairs``,
+        #329). ``own`` are the
         type parameters of the definition they belong to, which the text
         names instead (``_OWN_TYPE_PARAMS_RESOLVE``).
 
@@ -991,10 +1008,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.append((parsed.body, True, True, typed, depth + 1))
                 continue
             if isinstance(node, ast.Call):
-                stack.append((node.func, text, refs, typed, depth))
+                opaque = alias and spelled(node.func) not in forms
+                stack.append((node.func, text, refs, typed and not opaque, depth))
                 stack.extend(
                     (part, text, refs and is_ref, typed and is_type, depth)
-                    for part, is_ref, is_type in call_parts(node)
+                    for part, is_ref, is_type in call_parts(node, alias)
                 )
                 continue
             if isinstance(node, ast.Subscript):
@@ -1014,13 +1032,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((t, text, refs, typed, depth) for t in types)
                     stack.extend((v, text, False, False, depth) for v in values)
                     continue
-            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
-                if typed:
-                    # An alias a class body binds (`Outer.Alias`).
-                    named.add(node.attr)
-                # The chain's last name only: `torch.nn.Module` names no `nn`.
-                inner = isinstance(node.value, ast.Attribute)
-                stack.append((node.value, text, refs, typed and not inner, depth))
+            if isinstance(node, ast.Attribute):
+                # A dotted name names no alias: not `Outer.Alias` (not
+                # followed), nor `os` of `os.PathLike` (#334 review).
+                stack.append((node.value, text, refs, False, depth))
                 continue
             stack.extend(
                 (c, text, refs, typed, depth) for c in ast.iter_child_nodes(node)
@@ -1415,7 +1430,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     continue
                 walked.add((id(n), i))
                 # Its bare names are evaluated where it stands: code reads.
-                more, more_named = annotation_names([value], own, as_text=False)
+                more, more_named = annotation_names(
+                    [value], own, as_text=False, alias=True
+                )
                 if not (more <= read and more_named <= typed):
                     grew = True
                     read |= more

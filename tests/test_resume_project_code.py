@@ -2153,6 +2153,15 @@ _OWN_RESOLVES = pytest.mark.skipif(
             id="string-in-string",
         ),
         pytest.param(
+            "class Holder:\n    T = {v}\n\n\ndef task(x: 'Holder.T'):\n    return x\n",
+            id="string-dotted",
+        ),
+        pytest.param(
+            _FUTURE + "class Holder:\n    T = {v}\n\n\nclass task:\n"
+            "    def run(self, x: Holder.T):\n        return x\n",
+            id="future-dotted",
+        ),
+        pytest.param(
             "T = {v}\n\n\nclass task:\n    def __init__(self, x: 'T'):\n"
             "        self.x = x\n",
             id="string-method",
@@ -2357,6 +2366,16 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="type-alias-declared-read-by-code",
         ),
         pytest.param(
+            # Not declared `TypeAlias` (a string here): followed by its name.
+            "T = {v}\nAlias: 'TypeAlias' = list['T']\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-annotated-not-declared",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\nclass task:\n"
+            "    Alias: typing.ClassVar = list['T']\n    x: Alias = None\n",
+            id="alias-annotated-class-var",
+        ),
+        pytest.param(
             "import typing\n\nT = {v}\nB = typing.Optional['T']\nA = list[B]\n\n\n"
             "def task(x: A):\n    return x\n",
             id="alias-chain",
@@ -2414,11 +2433,6 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "import typing\n\nT = {v}\n\n\ndef opt(t):\n"
             "    return typing.Optional[t]\n\n\ndef task(x: opt('T')):\n    return x\n",
             id="string-given-to-a-call",
-        ),
-        pytest.param(
-            "T = {v}\n\n\nclass Outer:\n    Alias = list['T']\n\n\n"
-            "def task(x: Outer.Alias):\n    return x\n",
-            id="alias-of-a-class-by-attribute",
         ),
         pytest.param(
             # What the item set stores is what `REG['a']` reads.
@@ -2481,6 +2495,17 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "import typing\n\nT = {v}\n\n\n"
             "def task(x: typing.ForwardRef(arg='T')):\n    return x\n",
             id="forward-ref-keyword",
+        ),
+        pytest.param(
+            # An unpacked argument has no place to read it by.
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.ForwardRef(**{{'arg': 'T'}})):\n    return x\n",
+            id="forward-ref-unpacked",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.NewType(*('N', 'T'))):\n    return x\n",
+            id="new-type-unpacked",
         ),
         pytest.param(
             # The edit is to the function a string annotation calls.
@@ -2988,6 +3013,58 @@ SCRIPT_NOT_EDITS = {
         "from typing import Annotated\n\ngrid = [1, {k}]\nDESC = 'grid'\n\n\n"
         "def note(**kw):\n    return kw\n\n\n"
         "def task(a: Annotated[int, note(description=DESC)]):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    # In a type alias's value, a call that is no typing form is a value
+    # (#334 review).
+    "a call in an alias spelling the run's grid": (
+        "grid = [1, {k}]\n\n\ndef kind(name, label=''):\n    return int\n\n\n"
+        "Alias = kind('grid', label='grid')\n\n\ndef task(a: Alias):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a call in an alias naming a value that spells the run's grid": (
+        "grid = [1, {k}]\nCFG = {{'mode': 'grid'}}\n\n\ndef build(cfg):\n    return int\n\n\n"
+        "Alias = build(CFG)\n\n\ndef task(x: Alias):\n    return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a builder from a registry in an alias spelling the run's grid": (
+        "grid = [1, {k}]\nBUILDERS = {{'grid': lambda: int}}\nmake = BUILDERS['grid']\n"
+        "Alias = make()\n\n\ndef task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a namedtuple's field names spelling the run's grid": (
+        "import collections\n\nlr = [1, {k}]\n"
+        "Result = collections.namedtuple('Result', ['lr', 'loss'])\n\n\n"
+        "def task(lr: float) -> Result:\n    return Result(lr, 0.0)\n\n\nds = run(lr=lr)\n"
+    ),
+    "a namedtuple's field string spelling the run's grid": (
+        "import collections\n\nlr = [1, {k}]\n"
+        "Result = collections.namedtuple('Result', 'lr, loss')\n\n\n"
+        "def task(lr: float) -> Result:\n    return Result(lr, 0.0)\n\n\nds = run(lr=lr)\n"
+    ),
+    "an Enum's members spelling the run's grid": (
+        "import enum\n\ngrid = [1, {k}]\nSearch = enum.Enum('Search', ['grid', 'random'])\n\n\n"
+        "def task(a, s: Search = Search.grid):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an annotated class field's default spelling the run's grid": (
+        "grid = [1, {k}]\n\n\nclass task:\n    mode: str = 'grid'\n    x: int = 1\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a dataclass field's default spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n\n\n@dataclasses.dataclass\nclass task:\n"
+        "    mode: str = 'grid'\n    x: int = 1\n\n\nds = run(a=grid)\n"
+    ),
+    "an annotated module name's default spelling the run's grid": (
+        "grid = [1, {k}]\nmode: str = 'grid'\n\n\ndef task(a):\n    return a, mode\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a make_dataclass field's default spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\nCfg = dataclasses.make_dataclass(\n"
+        "    'Cfg', [('mode', str, dataclasses.field(default='grid'))]\n)\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an environment set under a two-part dotted annotation spelling the run's grid": (
+        "import os\n\ngrid = [1, {k}]\n\n\n"
+        "def task(out: os.PathLike):\n    os.environ['SEARCH'] = 'grid'\n    return out\n\n\n"
         "ds = run(a=grid)\n"
     ),
     "a task local named like a dotted annotation's inner name": (
