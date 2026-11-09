@@ -2706,6 +2706,27 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="forward-ref-unpacked",
         ),
         pytest.param(
+            "import typing\n\nT = {v}\nREF = typing.ForwardRef(arg='T')\n\n\n"
+            "def task(a: REF):\n    return a\n",
+            id="alias-forward-ref-keyword",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nNT = typing.NewType(*('N', 'T'))\n\n\n"
+            "def task(x: NT):\n    return x\n",
+            id="alias-new-type-unpacked",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nTD = typing.TypedDict('TD', {{**{{'a': 'T'}}}})\n\n\n"
+            "def task(x: TD):\n    return x\n",
+            id="alias-typed-dict-spread",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\nCfg = dataclasses.make_dataclass(\n"
+            "    'Cfg', [], bases=(dataclasses.make_dataclass('Base', [('x', 'T')]),)\n)\n\n\n"
+            "def task(a: Cfg):\n    return a\n",
+            id="alias-make-dataclass-generated-base",
+        ),
+        pytest.param(
             # A spec computed in an annotation: its strings are read, as main
             # read every string in an annotation (#334 review).
             "import typing\n\nEXTRA = []\nT = {v}\n\n\n"
@@ -2813,6 +2834,77 @@ def test_a_string_nested_past_the_parsers_depth_names_nothing(tmp_path):
     one = _digest_of_script(tmp_path, "deep1", text.format(v="int"), {"task"})
     two = _digest_of_script(tmp_path, "deep2", text.format(v="str"), {"task"})
     assert one != two
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\nNewType = opt\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-assignment",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\ndef NewType(name, tp):\n    return typing.Optional[name]\n\n\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-def",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\nclass NewType:\n    def __init__(self, name, tp):\n        self.name = name\n\n\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-class",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\nfrom mushin_t_helpers import NewType\n\nT = {v}\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-another-import",
+        ),
+        pytest.param(
+            "import typing\nimport mushin_t_helpers as typing\n\nT = {v}\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="module-rebound-by-another-import",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef helper(typing=None):\n    return typing\n\n\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="module-shadowed-by-a-parameter",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\ntry:\n    pass\nexcept Exception as NewType:\n    pass\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-an-except-name",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\nmatch 1:\n    case NewType:\n        pass\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-a-match-capture",
+        ),
+        pytest.param(
+            "import typing\nfrom mushin_t_helpers import *\n\nT = {v}\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="star-imported-from-elsewhere",
+        ),
+        pytest.param(
+            "import typing\nfrom mushin_t_helpers import *\n\nT = {v}\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="module-under-a-star-import",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\nglobals()['X'] = 1\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="after-a-globals-store",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\ntyping.X = 1\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="after-a-store-into-typing",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\ntyping.X = 1\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="bare-after-a-store-into-typing",
+        ),
+    ],
+)
+def test_a_plain_call_named_like_a_typing_form_in_an_alias_reads_nothing(
+    tmp_path, text
+):
+    """In an alias's value, a call of a typing form's name that the script
+    binds otherwise (a def, an assignment, another import, a parameter, an
+    except or match name, a star import, a store into a namespace) is a
+    plain call, a value: its strings are not read, though the typing form
+    would read `NewType`'s supertype (#334 review). In an annotation every
+    string is read as main reads it, so this is the alias path only."""
+    one = _digest_of_script(tmp_path, "pc1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "pc2", text.format(v="str"), {"task"})
+    assert one == two
 
 
 def test_a_second_sweep_in_the_script_is_not_the_firsts_code(tmp_path):
