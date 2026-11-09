@@ -801,7 +801,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     generic imported from another library, or stored in a container
     (``D = {'a': list['T']}``), subscripting a class generic only through
     its own ``__class_getitem__``, a decorated or rebound one, or a typing
-    name imported under another name, a functional form a counted class only
+    name imported under another name or by a star import, a functional form
+    a counted class only
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
