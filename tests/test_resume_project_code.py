@@ -2488,6 +2488,12 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="string-given-to-a-call",
         ),
         pytest.param(
+            # The script's own `NewType` is a plain call: main read its string.
+            "import typing\n\nT = {v}\n\n\ndef NewType(t):\n    return typing.Optional[t]\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="function-named-like-a-form",
+        ),
+        pytest.param(
             # What the item set stores is what `REG['a']` reads.
             "T = {v}\n\n\nclass task:\n    REG = {{}}\n    REG['a'] = list['T']\n"
             "    x: REG['a'] = None\n",
@@ -3266,6 +3272,12 @@ SCRIPT_NOT_EDITS = {
     "a conditional type argument whose test compares to the run's grid": (
         "grid = [1, {k}]\nMODE = 'x'\nAlias = dict[str, int if MODE == 'grid' else float]\n\n\n"
         "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a function's generic class named like a registry spelling the run's grid": (
+        "import typing\n\nV = typing.TypeVar('V')\ngrid = [1, {k}]\nTYPES = {{'grid': int}}\n"
+        "Alias = TYPES['grid']\n\n\ndef helper():\n    class TYPES(typing.Generic[V]):\n"
+        "        pass\n\n    return TYPES\n\n\ndef task(x: Alias):\n    return x\n\n\n"
+        "ds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"

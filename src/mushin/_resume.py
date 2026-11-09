@@ -912,11 +912,13 @@ def _script_digest(path: Path, roots: frozenset[str]):
         types, a ``TypeVar``'s constraints, ``bound=`` and ``default=``,
         ``ForwardRef``'s argument, ``NewType``'s supertype) are references.
         An unpacked argument (``*args``, ``**kw``) has no place the record
-        can know, so every string in such a call is a reference."""
+        can know, so every string in such a call is a reference. A typing
+        form the script redefines by a ``def`` or ``class`` of its name is a
+        plain call."""
         form = spelled(call.func)
         args, keywords = call.args, call.keywords
         everything = [*args, *(k.value for k in keywords)]
-        if form not in forms:
+        if form not in forms or (isinstance(call.func, ast.Name) and form in shadowed):
             return [(a, not opaque, not opaque) for a in everything]
         if any(isinstance(a, ast.Starred) for a in args) or any(
             k.arg is None for k in keywords
@@ -1133,7 +1135,24 @@ def _script_digest(path: Path, roots: frozenset[str]):
     typing_modules = ("typing", "typing_extensions", "collections", "collections.abc")
     type_heads = {"list", "dict", "tuple", "set", "frozenset", "type"}
     type_modules: set[str] = set()
-    for sub in ast.walk(tree):
+    # The typing forms the script redefines by a `def` or `class` of their
+    # name: a call of that bare name is a plain call (`call_parts`).
+    shadowed: set[str] = set()
+    # By the scope that binds them: a function's own class or typing import
+    # is no head for the module's names (#334 review).
+    scan: list = [tree]
+    while scan:
+        sub = scan.pop()
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if sub.name in forms:
+                shadowed.add(sub.name)
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue  # its body's names are its own
+        scan.extend(
+            c
+            for c in ast.iter_child_nodes(sub)
+            if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+        )
         if isinstance(sub, ast.ClassDef):
             # A class a subscript specializes: generic by its type
             # parameters, a subscripted base (`Generic[V]`) or its own
