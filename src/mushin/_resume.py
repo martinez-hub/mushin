@@ -783,8 +783,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     type expression: ``Alias = list['T']``, ``typing.Optional['T']``, a
     generic class ``Box['T']``, a typing form's call (a functional
     ``NamedTuple``'s field types, a ``TypeVar``'s bound), a union, through
-    other aliases too, and a string only in one declared ``TypeAlias`` or a
-    ``type`` statement. A ``Literal`` value, ``Annotated``'s notes and what
+    other aliases too, and a string only beside ``|``, in one declared
+    ``TypeAlias`` or in a ``type`` statement. A ``Literal`` value, ``Annotated``'s notes and what
     a typing form takes as a value (``NewType('grid', int)``'s name, a
     field's name) are values, read as none, and so is anything in an
     alias's value that is no type expression (a dict, a lookup
@@ -799,8 +799,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     string (``Alias = 'list[T]'`` without ``TypeAlias``), subscripting a
     generic imported from another library, or stored in a container
     (``D = {'a': list['T']}``), subscripting a class generic only through
-    its own ``__class_getitem__`` or a typing name imported under another
-    name, a functional form a counted class only
+    its own ``__class_getitem__``, a decorated or rebound one, or a typing
+    name imported under another name, a functional form a counted class only
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
@@ -1140,6 +1140,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     # By the scope that binds them: the module's, in its blocks too, not a
     # function's or a class's own (a nested class, a class-level import), which
     # is no head for the module's names (#334 review).
+    # A head the module also binds another way (`Registry = Registry()`, a
+    # decorator that returns an instance, `list = {...}`) may be a lookup:
+    # the names so bound are no heads.
+    rebound: set[str] = set()
+    comps = (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
     scan: list = [tree]
     while scan:
         sub = scan.pop()
@@ -1157,8 +1162,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
             generic = getattr(sub, "type_params", ()) or any(
                 isinstance(b, ast.Subscript) for b in sub.bases
             )
-            if generic:
+            if generic and not sub.decorator_list:
                 type_heads.add(sub.name)
+            else:
+                rebound.add(sub.name)
         elif (
             isinstance(sub, ast.ImportFrom)
             and sub.level == 0
@@ -1166,13 +1173,41 @@ def _script_digest(path: Path, roots: frozenset[str]):
         ):
             # Under its own name only: `Literal as L` would make `L[...]` a
             # type whose values are read (#334 review).
-            type_heads.update(alias.name for alias in sub.names if alias.asname is None)
-        elif isinstance(sub, ast.Import):
-            type_modules.update(
-                alias.asname or alias.name.partition(".")[0]
-                for alias in sub.names
-                if alias.name in typing_modules
-            )
+            for alias in sub.names:
+                if alias.asname is None:
+                    type_heads.add(alias.name)
+                else:
+                    rebound.add(alias.asname)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            for alias in sub.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                if isinstance(sub, ast.Import) and alias.name in typing_modules:
+                    type_modules.add(bound)
+                elif alias.name != "*":
+                    rebound.add(bound)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            rebound.add(sub.name)
+        elif isinstance(sub, ast.excepthandler):
+            if sub.name:
+                rebound.add(sub.name)
+        else:
+            exprs = [
+                c
+                for c in ast.iter_child_nodes(sub)
+                if not isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            ]
+            while exprs:
+                e = exprs.pop()
+                if isinstance(e, comps):
+                    continue  # its names are its own
+                if isinstance(e, ast.Name) and not isinstance(e.ctx, ast.Load):
+                    rebound.add(e.id)
+                elif isinstance(e, (ast.MatchAs, ast.MatchStar)) and e.name:
+                    rebound.add(e.name)
+                elif isinstance(e, ast.MatchMapping) and e.rest:
+                    rebound.add(e.rest)
+                exprs.extend(ast.iter_child_nodes(e))
+    type_heads -= rebound
 
     # A typing form by how the script binds its name, not by its spelling
     # (#334 review): a bare name only when every binding of it in the script
@@ -1244,8 +1279,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
         (``list['T']``, ``typing.Optional['T']``, a generic script class
         ``Box['T']``), a typing form's call, each operand of a union, a name or a
         dotted name, each item of a tuple or list, the branches of an ``if``
-        expression, and a string only where the binding is ``declared`` a
-        type alias (``Alias: TypeAlias = 'T'``, a ``type`` statement). Any
+        expression, and a string only beside ``|`` (``List[int] | 'T'``) or
+        where the binding is ``declared`` a type alias (``Alias: TypeAlias =
+        'T'``, a ``type`` statement). Any
         other value (a dict, a lookup ``SAMPLERS[MODE]``, a plain call, a
         bare string ``MODE = 'grid'``) is not a type, and its strings are
         not read: whatever spells the run's grid there stays a value. Not

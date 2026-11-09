@@ -2510,6 +2510,16 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-name-imported-from-elsewhere",
         ),
         pytest.param(
+            "from mushin_t_helpers import *\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-star-imported-from-elsewhere",
+        ),
+        pytest.param(
+            "from typing import NewType\nfrom mushin_t_helpers import *\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-star-imported-over-typing",
+        ),
+        pytest.param(
             "import mushin_t_helpers as helpers\n\nT = {v}\n\n\n"
             "def task(x: helpers.NewType('T')):\n    return x\n",
             id="form-name-on-another-module",
@@ -3358,6 +3368,28 @@ SCRIPT_NOT_EDITS = {
     "a renamed Literal alias spelling the run's grid": (
         "from typing import Literal as L\n\ngrid = [1, {k}]\nMode = L['grid', 'random']\n\n\n"
         "def task(a, mode: Mode = 'grid'):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a generic singleton's lookup by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\n\n\n"
+        "class Registry(Generic[T]):\n    def __getitem__(self, k):\n        return object\n\n\n"
+        "Registry = Registry()\ngrid = [1, {k}]\nSampler = Registry['grid']\n\n\n"
+        "def task(x: Sampler):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a decorated generic singleton's lookup by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\n\n\n"
+        "def singleton(cls):\n    return cls()\n\n\n@singleton\n"
+        "class Registry(Generic[T]):\n    def __getitem__(self, k):\n        return object\n\n\n"
+        "grid = [1, {k}]\nSampler = Registry['grid']\n\n\n"
+        "def task(x: Sampler):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a rebound typing name's lookup by the run's grid name": (
+        "from typing import Optional\n\nOptional = {{'grid': int}}\ngrid = [1, {k}]\n"
+        "Alias = Optional['grid']\n\n\ndef task(x: Alias):\n    return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a rebound builtin's lookup by the run's grid name": (
+        "list = {{'grid': int}}\ngrid = [1, {k}]\nAlias = list['grid']\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
