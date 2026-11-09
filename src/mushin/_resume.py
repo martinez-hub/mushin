@@ -782,7 +782,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
     outside an annotation (#329): in a type alias an annotation names
     (``Alias = list['T']``, through other aliases too), one declared a
     ``TypeAlias``, and what a typing form makes a forward reference (a
-    functional ``NamedTuple``'s field types, a ``TypeVar``'s bound). A
+    functional ``NamedTuple``'s field types, a ``TypeVar``'s bound), its
+    field specs keeping their shape when given through a name
+    (``NamedTuple('Row', FIELDS)``: a field's name is not a type). A
     ``Literal`` value, ``Annotated``'s notes and what a typing form takes as
     a value (``NewType('grid', int)``'s name, a field's name) are values,
     read as none. Not followed: an alias only code reaches (pydantic's
@@ -849,11 +851,52 @@ def _script_digest(path: Path, roots: frozenset[str]):
     field_forms = ("NamedTuple", "TypedDict", "make_dataclass")
     forms = frozenset({"ForwardRef", "NewType", *var_forms, *field_forms})
 
-    def call_parts(call) -> list:
-        """``(argument, whether its strings are references, whether its names
-        can name a type alias)`` for each argument of ``call``. A string a
-        call is given can come back a forward reference a hint reader
-        resolves against the module (``opt('T')`` returning
+    def spec_parts(kind: str, node) -> tuple[list, list]:
+        """``(parts, specs)`` of field spec ``node`` of ``kind``: ``fields``
+        (a functional ``NamedTuple``'s or ``make_dataclass``'s list),
+        ``field`` (one of its items: ``(name, type)``, ``(name, type,
+        field)``, or make_dataclass's bare name) or ``dict`` (a
+        ``TypedDict``'s). ``parts`` as ``call_parts`` gives them: a field's
+        type and a dict's values are references, a field's name, its
+        ``field(...)`` and a key are values. A spec keeps its shape when it
+        is given through a name: ``specs`` holds ``(name, kind)`` for each
+        name in a spec's place (``NamedTuple('Row', FIELDS)``, ``[*BASE,
+        PAIR]``, ``{**BASE}``), whose value the record then reads as that
+        kind of spec, not as a type alias, so a field's name never counts.
+        Any other expression there (a comprehension, a call) is not
+        followed."""
+        if isinstance(node, ast.Name):
+            return [], [(node.id, kind)]
+        parts: list = []
+        specs: list = []
+        if kind == "fields" and isinstance(node, (ast.List, ast.Tuple)):
+            for item in node.elts:
+                if isinstance(item, ast.Starred):
+                    more = spec_parts("fields", item.value)
+                else:
+                    more = spec_parts("field", item)
+                parts += more[0]
+                specs += more[1]
+        elif kind == "field" and isinstance(node, ast.Tuple) and node.elts:
+            parts = [(e, j == 1, j == 1) for j, e in enumerate(node.elts)]
+        elif kind == "dict" and isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if key is None:  # `**BASE`
+                    more = spec_parts("dict", value)
+                    parts += more[0]
+                    specs += more[1]
+                else:
+                    parts += [(key, False, False), (value, True, True)]
+        else:
+            parts = [(node, False, False)]
+        return parts, specs
+
+    def call_parts(call) -> tuple[list, list]:
+        """``(parts, specs)`` of ``call``: ``(argument, whether its strings are
+        references, whether its names can name a type alias)`` for each
+        argument, and the names given as a field spec (``spec_parts``). A
+        string a call is given can come back a forward reference a hint
+        reader resolves against the module (``opt('T')`` returning
         ``Optional['T']``), so it is one, but where a typing form takes a
         value (#323, #329): the name ``NewType``, a ``TypeVar`` (or
         ``ParamSpec``, ``TypeVarTuple``) or a functional ``NamedTuple``,
@@ -865,11 +908,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
         form = spelled(call.func)
         args, keywords = call.args, call.keywords
         if form not in forms:
-            return [(a, True, True) for a in (*args, *(k.value for k in keywords))]
+            return [(a, True, True) for a in (*args, *(k.value for k in keywords))], []
         parts: list = []
+        specs: list = []
         if form == "ForwardRef":
             parts += [(a, i == 0, i == 0) for i, a in enumerate(args)]
-            parts += [(k.value, False, False) for k in keywords]
+            parts += [(k.value, k.arg == "arg", k.arg == "arg") for k in keywords]
         elif form == "NewType":
             parts += [(a, i > 0, i > 0) for i, a in enumerate(args)]
             parts += [(k.value, k.arg == "tp", k.arg == "tp") for k in keywords]
@@ -880,36 +924,31 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 for k in keywords
             ]
         else:
+            kind = "dict" if form == "TypedDict" else "fields"
             for i, a in enumerate(args):
-                if i == 0:
-                    parts.append((a, False, False))  # the class's name
-                elif i == 1 and form == "TypedDict" and isinstance(a, ast.Dict):
-                    for key, value in zip(a.keys, a.values, strict=True):
-                        if key is not None:
-                            parts.append((key, False, False))
-                        parts.append((value, key is not None, True))
-                elif i == 1 and isinstance(a, (ast.List, ast.Tuple)):
-                    # `[(name, type), ...]`; make_dataclass's may be a bare
-                    # name, or `(name, type, field)`.
-                    for field in a.elts:
-                        if isinstance(field, ast.Tuple) and field.elts:
-                            parts += [
-                                (e, j == 1, j == 1) for j, e in enumerate(field.elts)
-                            ]
-                        else:
-                            parts.append((field, False, False))
+                if i == 1:
+                    more = spec_parts(kind, a)
+                    parts += more[0]
+                    specs += more[1]
                 else:
-                    parts.append((a, False, True))
-            # NamedTuple's and TypedDict's keyword fields; make_dataclass's
-            # keywords are options (`bases=`, `namespace=`).
-            fields = form != "make_dataclass"
-            parts += [(k.value, fields, True) for k in keywords]
-        return parts
+                    parts.append((a, False, False))  # the class's name
+            for k in keywords:
+                if form != "make_dataclass":
+                    # NamedTuple's and TypedDict's keyword fields.
+                    parts.append((k.value, True, True))
+                elif k.arg == "fields":
+                    more = spec_parts(kind, k.value)
+                    parts += more[0]
+                    specs += more[1]
+                else:  # its options (`bases=`, `namespace=`)
+                    parts.append((k.value, False, False))
+        return parts, specs
 
     def annotation_names(
         exprs, own: set[str], as_text: bool | None = None
-    ) -> tuple[set[str], set[str]]:
-        """``(read, named)`` for annotations ``exprs``. ``read``: the names
+    ) -> tuple[set[str], set[str], set[tuple[str, str]]]:
+        """``(read, named, specs)`` for annotations ``exprs`` (each a node,
+        or a ``call_parts`` part). ``read``: the names
         they read when something evaluates their text later, against the
         module's globals (``typing.get_type_hints``, hydra-zen's ``builds``,
         a dataclass's field types; #324): every name inside a string
@@ -920,8 +959,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
         ``named``: every name they name, evaluated or as text, but in a
         value, and the attribute a dotted name ends with (``Outer.Alias``):
         the type aliases whose own strings a hint reader resolves too
-        (``alias_pairs``, #329). ``own`` are the type parameters of the
-        definition they belong to, which the text names instead
+        (``alias_pairs``, #329). ``specs``: the names a typing form is given
+        as a field spec (``spec_parts``). ``own`` are the type parameters of
+        the definition they belong to, which the text names instead
         (``_OWN_TYPE_PARAMS_RESOLVE``).
 
         A string in ``Literal[...]``, in ``Annotated[...]`` after its type,
@@ -935,12 +975,17 @@ def _script_digest(path: Path, roots: frozenset[str]):
         most."""
         found: set[str] = set()
         named: set[str] = set()
+        specs: set[tuple[str, str]] = set()
         start = future_annotations if as_text is None else as_text
         # (node, whether its bare names are read as text, whether its
         # strings are references, whether its names can name an alias,
         # strings parsed to reach it): a string can hold a string
         # (`"list['T']"`).
-        stack = [(e, start, True, True, 0) for e in exprs if e is not None]
+        stack = []
+        for e in exprs:
+            node, is_ref, is_type = e if isinstance(e, tuple) else (e, True, True)
+            if node is not None:
+                stack.append((node, start, is_ref, is_type, 0))
         while stack:
             node, text, refs, typed, depth = stack.pop()
             if isinstance(node, ast.Name):
@@ -969,10 +1014,13 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 continue
             if isinstance(node, ast.Call):
                 stack.append((node.func, text, refs, typed, depth))
+                parts, call_specs = call_parts(node)
                 stack.extend(
                     (part, text, refs and is_ref, typed and is_type, depth)
-                    for part, is_ref, is_type in call_parts(node)
+                    for part, is_ref, is_type in parts
                 )
+                if refs and typed:  # not in a value (`Literal`, a note)
+                    specs.update(call_specs)
                 continue
             if isinstance(node, ast.Subscript):
                 head = node.value
@@ -999,10 +1047,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 (c, text, refs, typed, depth) for c in ast.iter_child_nodes(node)
             )
         if _OWN_TYPE_PARAMS_RESOLVE:
-            return found - own, named - own
-        return found, named
+            return found - own, named - own, specs
+        return found, named, specs
 
-    def hint_reads(node) -> tuple[set[str], set[str]]:
+    def hint_reads(node) -> tuple[set[str], set[str], set[tuple[str, str]]]:
         """``annotation_names`` of every annotation that statement ``node``
         keeps: each function's parameters and return, at any depth (a
         method, a nested function), and the annotated names of a class body
@@ -1010,11 +1058,19 @@ def _script_digest(path: Path, roots: frozenset[str]):
         are never evaluated. Each counts the type parameters of its own
         definition as its own only, as ``typing.get_type_hints`` does (3.12.5+):
         a generic class's `T` in a method's annotation is the module's `T`.
-        With them, the strings a typing form's call anywhere in ``node``
-        (the task's body too) makes forward references (``call_parts``):
-        ``get_type_hints(Row)`` resolves them against the module."""
+        With them, the strings a typing form's call in ``node``'s code (the
+        task's body too, not an annotation) makes forward references
+        (``call_parts``): ``get_type_hints(Row)`` resolves them against the
+        module."""
         found: set[str] = set()
         named: set[str] = set()
+        specs: set[tuple[str, str]] = set()
+
+        def take(result) -> None:
+            found.update(result[0])
+            named.update(result[1])
+            specs.update(result[2])
+
         # (node, whether it is in a function body, the type parameters of
         # the class whose body it is in)
         stack: list = [(node, False, set())]
@@ -1023,12 +1079,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 a = n.args
                 params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-                more, more_named = annotation_names(
-                    [p.annotation for p in params if p is not None] + [n.returns],
-                    {p.name for p in getattr(n, "type_params", ())},
+                take(
+                    annotation_names(
+                        [p.annotation for p in params if p is not None] + [n.returns],
+                        {p.name for p in getattr(n, "type_params", ())},
+                    )
                 )
-                found |= more
-                named |= more_named
                 stack.extend((s, True, set()) for s in n.body)
                 continue
             if isinstance(n, ast.ClassDef):
@@ -1036,24 +1092,32 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 stack.extend((s, False, body_own) for s in n.body)
                 continue
             if isinstance(n, ast.AnnAssign) and not in_function:
-                more, more_named = annotation_names([n.annotation], own)
-                found |= more
-                named |= more_named
+                take(annotation_names([n.annotation], own))
             # Statements only: a definition cannot sit in an expression.
             stack.extend(
                 (c, in_function, own)
                 for c in ast.iter_child_nodes(n)
                 if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
             )
-        for sub in ast.walk(node):
+        # A typing form's call in code. Not in an annotation: the walk above
+        # reads an evaluated one in its context (a form in `Annotated`'s notes
+        # is a value), and a function's local one never runs.
+        scan = [node]
+        while scan:
+            sub = scan.pop()
             if isinstance(sub, ast.Call) and spelled(sub.func) in forms:
                 # Its names are evaluated where the call stands: code reads.
-                # Field specs given as a name (`NamedTuple('Row', FIELDS)`)
-                # name an alias.
-                more, more_named = annotation_names([sub], set(), as_text=False)
-                found |= more
-                named |= more_named
-        return found, named
+                take(annotation_names([sub], set(), as_text=False))
+            if isinstance(sub, ast.arg):
+                skip = sub.annotation
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                skip = sub.returns
+            elif isinstance(sub, ast.AnnAssign):
+                skip = sub.annotation
+            else:
+                skip = None
+            scan.extend(c for c in ast.iter_child_nodes(sub) if c is not skip)
+        return found, named, specs
 
     def alias_pairs(node) -> list:
         """``(names, value, own, declared)`` for each assignment statement
@@ -1069,10 +1133,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
         walked, under a tuple target too, and a function's local named like
         an alias: a recompute too many at most. An item or attribute set
         counts for the names in its target (``REG['a'] = list['T']`` for
-        ``REG``): an annotation reading ``REG['a']`` gets what it stores.
-        ``own``: a ``type`` statement's type parameters. Not
-        followed: an alias only code reaches (pydantic's
-        ``TypeAdapter(Alias)``)."""
+        ``REG``): an annotation reading ``REG['a']`` gets what it stores. A
+        value given to a typing form as a field spec through a name is read
+        as that spec instead (``spec_parts``). ``own``: a ``type``
+        statement's type parameters. Not followed: an alias only code
+        reaches (pydantic's ``TypeAdapter(Alias)``)."""
         found: list = []
         stack = [node]
         while stack:
@@ -1102,7 +1167,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     read_cache: dict[int, set[str]] = {}
     full_cache: dict[int, set[str]] = {}
-    hint_cache: dict[int, tuple[set[str], set[str]]] = {}
+    hint_cache: dict[int, tuple[set[str], set[str], set[tuple[str, str]]]] = {}
     pair_cache: dict[int, list] = {}
 
     def reads(node) -> set[str]:
@@ -1111,7 +1176,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
             hit = read_cache[id(node)] = _reads(node)
         return hit
 
-    def hints(node) -> tuple[set[str], set[str]]:
+    def hints(node) -> tuple[set[str], set[str], set[tuple[str, str]]]:
         hit = hint_cache.get(id(node))
         if hit is None:
             hit = hint_cache[id(node)] = hint_reads(node)
@@ -1382,29 +1447,45 @@ def _script_digest(path: Path, roots: frozenset[str]):
     kept_ids = {id(n) for n in kept}
     pending = [(n, names) for n, names in candidates if names and id(n) not in kept_ids]
     # What counted code reads, its hints' text included (#324), what its code
-    # alone reads, for the registering-decorator rule, and the names its
-    # hints name, whose aliases' strings a hint reader resolves too (#329).
+    # alone reads, for the registering-decorator rule, the names its hints
+    # name, whose aliases' strings a hint reader resolves too (#329), and the
+    # names a typing form is given as a field spec, read as that spec.
     read: set[str] = set()
     read_code: set[str] = set()
     typed: set[str] = set()
+    specs: set[tuple[str, str]] = set()
     for n in kept:
         read |= full_reads(n)
         read_code |= reads(n)
         typed |= hints(n)[1]
-    walked: set[tuple[int, int]] = set()  # (statement, its alias pair)
+        specs |= hints(n)[2]
+    walked: set[tuple[int, int, str]] = set()  # (statement, its pair, as what)
     while True:
         grew = False
         for n in kept:
             for i, (names, value, own, declared) in enumerate(pairs(n)):
-                if (id(n), i) in walked or not (declared or names & typed):
-                    continue
-                walked.add((id(n), i))
-                # Its bare names are evaluated where it stands: code reads.
-                more, more_named = annotation_names([value], own, as_text=False)
-                if not (more <= read and more_named <= typed):
-                    grew = True
-                    read |= more
-                    typed |= more_named
+                ways = {kind for name, kind in specs if name in names}
+                if declared or names & typed:
+                    ways.add("alias")
+                for way in sorted(ways):
+                    if (id(n), i, way) in walked:
+                        continue
+                    walked.add((id(n), i, way))
+                    # Its bare names are evaluated where it stands: code reads.
+                    if way == "alias":
+                        walk = annotation_names([value], own, as_text=False)
+                    else:
+                        parts, more_specs = spec_parts(way, value)
+                        walk = annotation_names(parts, own, as_text=False)
+                        walk[2].update(more_specs)
+                    more, more_named, found_specs = walk
+                    if not (
+                        more <= read and more_named <= typed and found_specs <= specs
+                    ):
+                        grew = True
+                        read |= more
+                        typed |= more_named
+                        specs |= found_specs
         add = [
             (n, names)
             for n, names in pending
@@ -1419,6 +1500,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
             read |= full_reads(n)
             read_code |= reads(n)
             typed |= hints(n)[1]
+            specs |= hints(n)[2]
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
 

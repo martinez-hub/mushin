@@ -2467,6 +2467,47 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="named-tuple-fields-in-a-name",
         ),
         pytest.param(
+            "import typing\n\nT = {v}\nPAIR = ('y', 'T')\n"
+            "Row = typing.NamedTuple('Row', [PAIR, ('x', float)])\n\n\n"
+            "def task(a):\n    return typing.get_type_hints(Row)\n",
+            id="named-tuple-field-in-a-name",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nBASE = [('x', 'T')]\n"
+            "Row = typing.NamedTuple('Row', [*BASE, ('y', float)])\n\n\n"
+            "def task(a):\n    return typing.get_type_hints(Row)\n",
+            id="named-tuple-fields-starred",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nSPEC = {{'x': 'T'}}\n"
+            "Row = typing.TypedDict('Row', SPEC)\n\n\n"
+            "def task(a):\n    return typing.get_type_hints(Row)\n",
+            id="typed-dict-spec-in-a-name",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nBASE = {{'x': 'T'}}\n"
+            "Row = typing.TypedDict('Row', {{**BASE, 'y': float}})\n\n\n"
+            "def task(a):\n    return typing.get_type_hints(Row)\n",
+            id="typed-dict-spec-spread",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\n"
+            "Cfg = dataclasses.make_dataclass('Cfg', fields=[('x', 'T')])\n\n\n"
+            "def task(a):\n    return Cfg\n",
+            id="make-dataclass-fields-keyword",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.ForwardRef(arg='T')):\n    return x\n",
+            id="forward-ref-keyword",
+        ),
+        pytest.param(
+            # The edit is to the function a string annotation calls.
+            "import typing\n\n\ndef make(t):\n    return typing.Optional[{v}]\n\n\n"
+            "def task(x: 'make(int)'):\n    return x\n",
+            id="call-in-a-string-annotation",
+        ),
+        pytest.param(
             "import typing\n\nT = {v}\nRow = typing.TypedDict('Row', {{'x': 'T'}})\n\n\n"
             "def task(a):\n    return typing.get_type_hints(Row)\n",
             id="typed-dict",
@@ -2921,6 +2962,78 @@ SCRIPT_NOT_EDITS = {
     "a TypeVar's name spelling the run's grid": (
         "import typing\n\ngrid = [1, {k}]\nV = typing.TypeVar('grid')\n\n\n"
         "def task(a: V):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypeVar's name given by keyword spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nV = typing.TypeVar(name='grid')\n\n\n"
+        "def task(a: V):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ParamSpec's name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nP = typing.ParamSpec('grid')\n\n\n"
+        "def task(f: typing.Callable[P, int]):\n    return f\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypeVarTuple's name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nTs = typing.TypeVarTuple('grid')\n\n\n"
+        "def task(*a: typing.Unpack[Ts]):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NewType's name given by keyword spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nGrid = typing.NewType(name='grid', tp=int)\n\n\n"
+        "def task(a: Grid):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef's module spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nREF = typing.ForwardRef('int', module='grid')\n\n\n"
+        "def task(a):\n    return REF\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef in an Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a: typing.Annotated[int, typing.ForwardRef('grid')]):\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef in a return's Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a) -> typing.Annotated[int, typing.ForwardRef('grid')]:\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a field spec in an Annotated note whose type spells the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nFIELDS = [('x', 'grid')]\n\n\n"
+        "def task(a: typing.Annotated[int, typing.NamedTuple('R', FIELDS)]):\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef in a local annotation spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a):\n    y: typing.ForwardRef('grid') = a\n    return y\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    # A field spec given through a name keeps its shape: a field's name is
+    # not a type (#334 review).
+    "a NamedTuple's field names given through a name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nFIELDS = [('grid', float)]\n"
+        "Row = typing.NamedTuple('Row', FIELDS)\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NamedTuple's field names given starred spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nBASE = [('grid', float)]\n"
+        "Row = typing.NamedTuple('Row', [*BASE, ('lr', float)])\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypedDict's keys given through a name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nSPEC = {{'grid': int}}\n"
+        "Row = typing.TypedDict('Row', SPEC)\n\n\n"
+        "def task(a):\n    return typing.get_type_hints(Row)\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypedDict's keys given spread spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nBASE = {{'grid': int}}\n"
+        "Row = typing.TypedDict('Row', {{**BASE, 'lr': float}})\n\n\n"
+        "def task(a):\n    return typing.get_type_hints(Row)\n\n\nds = run(a=grid)\n"
+    ),
+    "a make_dataclass's names given through a name spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\nFIELDS = ['grid', ('lr', float)]\n"
+        "Cfg = dataclasses.make_dataclass('Cfg', FIELDS)\n\n\n"
+        "def task(a):\n    return Cfg\n\n\nds = run(a=grid)\n"
+    ),
+    "a NamedTuple's field names made by a comprehension spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nNAMES = ['grid', 'lr']\n"
+        "Row = typing.NamedTuple('Row', [(n, float) for n in NAMES])\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
     ),
     "a class attribute spelling the run's grid": (
         "grid = [1, {k}]\n\n\nclass task:\n    label = 'grid'\n    x: int = 1\n\n\n"
