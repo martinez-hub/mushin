@@ -809,10 +809,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
     form spelled through an alias of its name, or rebound at run time by
     no store the script holds (``setattr(typing, 'NewType', f)``, ``exec``),
     which is read as the typing form; a store into a typing module or into
-    ``globals()`` makes every form a plain call. And a subscript the record
-    cannot tell from a type (a class or import rebound in a scope it does
-    not track, a lookup the class itself defines) may have its key read: a
-    recompute too many, never a stale reuse. ``imports`` are those of what counts."""
+    ``globals()`` makes every form a plain call. And a value nested in a
+    type that the record cannot tell from one (a subscript of a class or
+    import rebound in a scope it does not track, a lookup the class itself
+    defines, an inline dict's method call) may have its key read: a
+    recompute too many, never a stale reuse. ``imports`` are those of what
+    counts."""
     import ast
     import copy
     import symtable
