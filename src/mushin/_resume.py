@@ -12,6 +12,7 @@ import hashlib
 import itertools
 import json
 import re
+import sys
 import weakref as _weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -744,6 +745,14 @@ def _file_entries(
     return out, any(p not in seen for p in pending)
 
 
+#: Whether ``typing.get_type_hints`` resolves a definition's own type
+#: parameter in its text annotations (a string, or under future annotations)
+#: to that parameter: from 3.12.5 on. 3.12.0 to 3.12.4 resolve the module's
+#: name of the same name there (#328 review), so the script record counts it,
+#: and such a script's digest differs between those versions and later ones.
+_OWN_TYPE_PARAMS_RESOLVE = sys.version_info >= (3, 12, 5)
+
+
 def _script_digest(path: Path, roots: frozenset[str]):
     """``(digest, imports)`` for a driver script whose top-level names
     ``roots`` define the task (the class or function holding it,
@@ -773,7 +782,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
     import ast
     import copy
     import symtable
-    import sys
     import warnings
 
     source, content = _content_key(path)
@@ -818,10 +826,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
         and any(alias.name == "annotations" for alias in n.names)
         for n in tree.body
     )
-    # `typing.get_type_hints` resolves a definition's own type parameter in
-    # its text annotations from 3.12.5 on; 3.12.0 to 3.12.4 resolve the
-    # module's name of the same name there (#328 review), so it counts.
-    own_resolves = sys.version_info >= (3, 12, 5)
 
     def annotation_names(exprs, own: set[str]) -> set[str]:
         """The names annotations ``exprs`` read when something evaluates
@@ -833,7 +837,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         name outside a string is evaluated where it stands, and the symbol
         table counts it there, scope-aware. ``own`` are the type parameters
         of the definition they belong to, which the text names instead
-        (``own_resolves``).
+        (``_OWN_TYPE_PARAMS_RESOLVE``).
 
         A string in ``Literal[...]``, or in ``Annotated[...]`` after its
         type, is a value no reader resolves, so it names nothing: counting
@@ -889,7 +893,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((v, as_text, False, depth) for v in values)
                     continue
             stack.extend((c, as_text, refs, depth) for c in ast.iter_child_nodes(node))
-        return found - own if own_resolves else found
+        return found - own if _OWN_TYPE_PARAMS_RESOLVE else found
 
     def annotation_reads(node) -> set[str]:
         """``annotation_names`` of every annotation that statement ``node``
@@ -4141,7 +4145,11 @@ def changed_project_code(prior, current) -> list[str] | None:
     records, compared on the keys both have (a key one run has and the other
     lacks is not an edit: a module imported lazily in one process only). File
     digests read alike on every supported Python (syntax trees, not
-    bytecode), so records from two versions compare too. None when either is
+    bytecode), so records from two versions compare too. A script entry does
+    too, but for one where a generic definition's text annotation names its
+    own type parameter and a module binding shares that name: it differs
+    between 3.12.0-3.12.4 and later (``_OWN_TYPE_PARAMS_RESOLVE``), so a
+    resume across that upgrade re-runs its cells once. None when either is
     missing or malformed (a sidecar from before the field)."""
     if not isinstance(prior, dict) or not isinstance(current, dict):
         return None

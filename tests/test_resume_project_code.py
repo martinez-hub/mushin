@@ -2277,6 +2277,37 @@ def test_a_name_no_annotation_reads_as_text_does_not_count(tmp_path, text):
     assert one == two
 
 
+@_PEP695
+@pytest.mark.parametrize(
+    "text",
+    [
+        _FUTURE + "T = {v}\n\n\ndef task[T](x: T) -> T:\n    return x\n",
+        _FUTURE + "U = {v}\n\n\nclass task:\n"
+        "    def run[U](self, x: U) -> U:\n        return x\n",
+        _FUTURE + "T = {v}\n\n\nclass task[T]:\n    x: T\n",
+        "T = {v}\n\n\ndef task[T](x: 'T'):\n    return x\n",
+    ],
+    ids=[
+        "future-generic-function",
+        "future-generic-method",
+        "future-generic-class-body",
+        "string-generic-function",
+    ],
+)
+def test_before_3_12_5_a_text_annotations_type_parameter_is_the_modules(
+    tmp_path, monkeypatch, text
+):
+    """3.12.0 to 3.12.4 resolve a text annotation's `T` to the module's `T`,
+    so the record counts it there (#328 review). CI runs a later 3.12, so the
+    gate is set as those versions set it."""
+    import mushin._resume
+
+    monkeypatch.setattr(mushin._resume, "_OWN_TYPE_PARAMS_RESOLVE", False)
+    one = _digest_of_script(tmp_path, "op1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "op2", text.format(v="str"), {"task"})
+    assert one != two
+
+
 def test_reading_an_annotations_text_does_not_warn(tmp_path):
     """The record parses a string annotation's text for its names; an escape
     in a literal inside that text (`'\\d'`) must not warn, from no file the

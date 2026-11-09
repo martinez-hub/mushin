@@ -891,7 +891,8 @@ class _TaskRunner:
 
         payload = f"{config_hash}:{self.code_hash}"
         if deps.get("code"):
-            # The code only: its digests read alike on every Python version.
+            # The code only: its digests read alike on every Python version
+            # (for one exception, see `changed_project_code`).
             payload += ":" + json.dumps(deps["code"], sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
@@ -1034,7 +1035,8 @@ class _TaskRunner:
                     and self.code_hash is not None
                     and prior_code != self.code_hash
                 )
-                # Judged on the files both records have, on any Python version;
+                # Judged on the files both records have, on any Python version
+                # (for one exception, see its docstring);
                 # None when they cannot be compared (a sidecar from before the
                 # field, an unknown record).
                 changed_deps = changed_project_code(prior_deps, deps)
