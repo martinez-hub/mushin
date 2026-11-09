@@ -23,7 +23,18 @@ def _mangled_task_copy(fn):
     )
     task.__dict__.update(fn.__dict__)
     task.__kwdefaults__ = fn.__kwdefaults__
-    task.__annotations__ = dict(fn.__annotations__)
+    annotate = getattr(fn, "__annotate__", None)
+    if annotate is not None:
+        # 3.14+ evaluates annotations when first read (PEP 649): reading
+        # `fn.__annotations__` here would raise for a name defined below the
+        # task (#326).
+        task.__annotate__ = annotate
+    else:
+        task.__annotations__ = dict(fn.__annotations__)
+    if hasattr(fn, "__type_params__"):  # 3.12+: `def task[T](x: T)`
+        # A string annotation's `T` is the type parameter, not the module's
+        # `T`, only where the copy keeps it (#324).
+        task.__type_params__ = fn.__type_params__
     task.__module__ = fn.__module__
     task.__doc__ = fn.__doc__
     task.__qualname__ = fn.__qualname__ + ".__mushin_task__"

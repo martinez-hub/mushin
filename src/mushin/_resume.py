@@ -765,8 +765,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     comprehension's variable, a nested function's local and an annotation
     without a value do not). Not counted: statements that
     only do something (a call, the run call, an attribute or item set) and
-    what only they read (``GRID``, ``ds = exp.run(...)``). ``imports`` are
-    those of what counts."""
+    what only they read (``GRID``, ``ds = exp.run(...)``). An annotation
+    kept as text (a string, or any under ``from __future__ import
+    annotations``) reads the names in it, since whatever reads type hints
+    evaluates that text against the module; a function's local annotation,
+    never evaluated, reads none. ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
@@ -805,6 +808,88 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
         }
 
+    # Under `from __future__ import annotations` every annotation is kept as
+    # its text, so the symbol table sees no annotation read at all.
+    future_annotations = any(
+        isinstance(n, ast.ImportFrom)
+        and n.module == "__future__"
+        and any(alias.name == "annotations" for alias in n.names)
+        for n in tree.body
+    )
+
+    def annotation_names(exprs, own: set[str]) -> set[str]:
+        """The names annotations ``exprs`` read when something evaluates
+        their text later, against the module's globals
+        (``typing.get_type_hints``, hydra-zen's ``builds``, a dataclass's
+        field types; #324): every name inside a string (``'T'``,
+        ``list['T']``), parsed as that evaluation parses it, and under future
+        annotations every name outside one too. Without future annotations a
+        name outside a string is evaluated where it stands, and the symbol
+        table counts it there, scope-aware. ``own`` are the type parameters
+        of the definition they belong to, which the text names instead."""
+        found: set[str] = set()
+        # (expression, whether its names are read as text, strings parsed
+        # to reach it): a string can hold a string (`"list['T']"`).
+        stack = [(e, future_annotations, 0) for e in exprs if e is not None]
+        while stack:
+            expr, as_text, depth = stack.pop()
+            for sub in ast.walk(expr):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                    if as_text:
+                        found.add(sub.id)
+                elif (
+                    isinstance(sub, ast.Constant)
+                    and isinstance(sub.value, str)
+                    and depth < 8
+                ):
+                    # Every string, a `Literal['x']` value's too: reading one
+                    # that is not a reference costs a recompute at most when
+                    # a module binding has that name; skipping one that is
+                    # would miss an edit.
+                    try:
+                        parsed = ast.parse(sub.value.strip(), mode="eval")
+                    except (SyntaxError, ValueError, RecursionError):
+                        continue  # not Python: it names nothing
+                    stack.append((parsed.body, True, depth + 1))
+        return found - own
+
+    def annotation_reads(node) -> set[str]:
+        """``annotation_names`` of every annotation that statement ``node``
+        keeps: each function's parameters and return, at any depth (a
+        method, a nested function), and the annotated names of a class body
+        or of the module. Not a function body's own annotated names, which
+        are never evaluated. Each counts the type parameters of its own
+        definition as its own only, as ``typing.get_type_hints`` does: a
+        generic class's `T` in a method's annotation is the module's `T`."""
+        found: set[str] = set()
+        # (node, whether it is in a function body, the type parameters of
+        # the class whose body it is in)
+        stack: list = [(node, False, set())]
+        while stack:
+            n, in_function, own = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                a = n.args
+                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                found |= annotation_names(
+                    [p.annotation for p in params if p is not None] + [n.returns],
+                    {p.name for p in getattr(n, "type_params", ())},
+                )
+                stack.extend((s, True, set()) for s in n.body)
+                continue
+            if isinstance(n, ast.ClassDef):
+                body_own = {p.name for p in getattr(n, "type_params", ())}
+                stack.extend((s, False, body_own) for s in n.body)
+                continue
+            if isinstance(n, ast.AnnAssign) and not in_function:
+                found |= annotation_names([n.annotation], own)
+            # Statements only: a definition cannot sit in an expression.
+            stack.extend(
+                (c, in_function, own)
+                for c in ast.iter_child_nodes(n)
+                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
+        return found
+
     read_cache: dict[int, set[str]] = {}
 
     def reads(node) -> set[str]:
@@ -837,12 +922,19 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 inner = [arg.annotation for arg in params if arg and arg.annotation]
                 if node.returns is not None:
                     inner.append(node.returns)
+            # Neither the symbol table nor this walk reads an annotation kept
+            # as text (future annotations, or a string): a method's, a nested
+            # function's or a class body's is not read at all.
             return (
-                scope_reads.get(node.name, set()) | loads(outer) | (loads(inner) - own)
+                scope_reads.get(node.name, set())
+                | loads(outer)
+                | (loads(inner) - own)
+                | annotation_reads(node)
             )
         # A `type X[T] = ...` statement (3.12+) is all in its type-parameter
-        # scope.
-        return loads([node]) - own
+        # scope. Any other statement's walk already reads every name in it,
+        # its annotations' included, so only their strings add.
+        return (loads([node]) - own) | annotation_reads(node)
 
     def run_here(node) -> list:
         """What a definition evaluates where it is defined, but annotations:
