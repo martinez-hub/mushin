@@ -34,8 +34,8 @@ def _mangled_task_copy(fn):
             raise
         task.__annotate__ = annotate
     if hasattr(fn, "__type_params__"):  # 3.12+: `def task[T](x: T)`
-        # A string annotation's `T` is the type parameter, not the module's
-        # `T`, only where the copy keeps it (#324).
+        # From 3.12.5, a string annotation's `T` is the type parameter, not
+        # the module's `T`, only where the copy keeps it (#324).
         task.__type_params__ = fn.__type_params__
     task.__module__ = fn.__module__
     task.__doc__ = fn.__doc__

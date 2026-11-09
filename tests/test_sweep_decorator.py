@@ -174,7 +174,8 @@ def test_the_task_copy_keeps_its_type_parameters():
     copy = mushin.sweep(fn).__mushin_task__
     assert copy.__type_params__ == fn.__type_params__
     assert typing.get_type_hints(copy) == typing.get_type_hints(fn)
-    assert typing.get_type_hints(copy)["x"] is fn.__type_params__[0]
+    if sys.version_info >= (3, 12, 5):  # before, the module's `T` wins
+        assert typing.get_type_hints(copy)["x"] is fn.__type_params__[0]
 
 
 def test_the_task_copy_keeps_an_annotation_edited_in_place():

@@ -773,6 +773,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     import ast
     import copy
     import symtable
+    import sys
+    import warnings
 
     source, content = _content_key(path)
     cache_key = (*content, tuple(sorted(roots)))
@@ -816,6 +818,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
         and any(alias.name == "annotations" for alias in n.names)
         for n in tree.body
     )
+    # `typing.get_type_hints` resolves a definition's own type parameter in
+    # its text annotations from 3.12.5 on; 3.12.0 to 3.12.4 resolve the
+    # module's name of the same name there (#328 review), so it counts.
+    own_resolves = sys.version_info >= (3, 12, 5)
 
     def annotation_names(exprs, own: set[str]) -> set[str]:
         """The names annotations ``exprs`` read when something evaluates
@@ -826,7 +832,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
         annotations every name outside one too. Without future annotations a
         name outside a string is evaluated where it stands, and the symbol
         table counts it there, scope-aware. ``own`` are the type parameters
-        of the definition they belong to, which the text names instead.
+        of the definition they belong to, which the text names instead
+        (``own_resolves``).
 
         A string in ``Literal[...]``, or in ``Annotated[...]`` after its
         type, is a value no reader resolves, so it names nothing: counting
@@ -852,7 +859,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     # `(*Ts,)`.
                     source = f"({text},)" if text.startswith("*") else text
                     try:
-                        parsed = ast.parse(source, mode="eval")
+                        with warnings.catch_warnings():
+                            # Only its names matter: an escape in a literal
+                            # inside it (`'\d'`) would warn, from no file.
+                            warnings.simplefilter("ignore")
+                            parsed = ast.parse(source, mode="eval")
                     except (SyntaxError, ValueError, RecursionError):
                         continue  # not Python: it names nothing
                     stack.append((parsed.body, True, True, depth + 1))
@@ -878,7 +889,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((v, as_text, False, depth) for v in values)
                     continue
             stack.extend((c, as_text, refs, depth) for c in ast.iter_child_nodes(node))
-        return found - own
+        return found - own if own_resolves else found
 
     def annotation_reads(node) -> set[str]:
         """``annotation_names`` of every annotation that statement ``node``
@@ -886,8 +897,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
         method, a nested function), and the annotated names of a class body
         or of the module. Not a function body's own annotated names, which
         are never evaluated. Each counts the type parameters of its own
-        definition as its own only, as ``typing.get_type_hints`` does: a
-        generic class's `T` in a method's annotation is the module's `T`."""
+        definition as its own only, as ``typing.get_type_hints`` does (3.12.5+):
+        a generic class's `T` in a method's annotation is the module's `T`."""
         found: set[str] = set()
         # (node, whether it is in a function body, the type parameters of
         # the class whose body it is in)

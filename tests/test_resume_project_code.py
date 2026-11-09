@@ -2063,6 +2063,11 @@ def test_what_a_generic_definition_reads_outside_its_type_parameters_counts(
 
 _FUTURE = "from __future__ import annotations\n\n"
 _PEP695 = pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax")
+# 3.12.0 to 3.12.4 resolve a text annotation's `T` to the module's `T`, not
+# the definition's type parameter, so there it counts.
+_OWN_RESOLVES = pytest.mark.skipif(
+    sys.version_info < (3, 12, 5), reason="type parameters in text annotations"
+)
 
 
 @pytest.mark.parametrize(
@@ -2161,6 +2166,20 @@ _PEP695 = pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax"
             id="string-in-block",
         ),
         pytest.param(
+            "T = {v}\n\n\ntry:\n    import mushin_t_no_such_module\n"
+            "except ImportError:\n    def task(x: 'T'):\n        return x\n",
+            id="string-in-except-handler",
+        ),
+        pytest.param(
+            "import sys\n\nT = {v}\n\nmatch sys.platform:\n    case _:\n"
+            "        def task(x: 'T'):\n            return x\n",
+            id="string-in-match-case",
+        ),
+        pytest.param(
+            "T = {v}\ncfg: 'T' = 1\n\n\ndef task():\n    return cfg\n",
+            id="string-module-annotation",
+        ),
+        pytest.param(
             # PEP 646: `ForwardRef` reads `'*Ts'` as `(*Ts,)`.
             "Ts = {v}\n\n\ndef task(*a: '*Ts'):\n    return a\n",
             id="string-starred",
@@ -2217,23 +2236,23 @@ def test_a_name_an_annotation_reads_as_text_counts(tmp_path, text):
         pytest.param(
             _FUTURE + "T = {v}\n\n\ndef task[T](x: T) -> T:\n    return x\n",
             id="future-generic-function",
-            marks=_PEP695,
+            marks=_OWN_RESOLVES,
         ),
         pytest.param(
             _FUTURE + "U = {v}\n\n\nclass task:\n"
             "    def run[U](self, x: U) -> U:\n        return x\n",
             id="future-generic-method",
-            marks=_PEP695,
+            marks=_OWN_RESOLVES,
         ),
         pytest.param(
             _FUTURE + "T = {v}\n\n\nclass task[T]:\n    x: T\n",
             id="future-generic-class-body",
-            marks=_PEP695,
+            marks=_OWN_RESOLVES,
         ),
         pytest.param(
             "T = {v}\n\n\ndef task[T](x: 'T'):\n    return x\n",
             id="string-generic-function",
-            marks=_PEP695,
+            marks=_OWN_RESOLVES,
         ),
         pytest.param(
             "T = {v}\n\n\ndef task(x: 'not python'):\n    return x\n",
@@ -2256,6 +2275,21 @@ def test_a_name_no_annotation_reads_as_text_does_not_count(tmp_path, text):
     one = _digest_of_script(tmp_path, "nn1", text.format(v="int"), {"task"})
     two = _digest_of_script(tmp_path, "nn2", text.format(v="str"), {"task"})
     assert one == two
+
+
+def test_reading_an_annotations_text_does_not_warn(tmp_path):
+    """The record parses a string annotation's text for its names; an escape
+    in a literal inside that text (`'\\d'`) must not warn, from no file the
+    user can find (#328 review). The names still count."""
+    text = "T = {v}\n\n\ndef task(x: \"dict[T, '\\\\d']\"):\n    return x\n"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        one = _digest_of_script(tmp_path, "w1", text.format(v="int"), {"task"})
+        two = _digest_of_script(tmp_path, "w2", text.format(v="str"), {"task"})
+    assert not [
+        w for w in caught if issubclass(w.category, (SyntaxWarning, DeprecationWarning))
+    ]
+    assert one != two
 
 
 def test_a_second_sweep_in_the_script_is_not_the_firsts_code(tmp_path):
