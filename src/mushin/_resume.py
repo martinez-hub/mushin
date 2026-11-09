@@ -781,7 +781,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
     never evaluated, reads none. So does a string a hint reader resolves in
     a type alias an annotation names (#329), where its value is written as a
     type expression: ``Alias = list['T']``, ``typing.Optional['T']``, a
-    script class ``Box['T']``, a typing form's call (a functional
+    generic class ``Box['T']``, a typing form's call (a functional
     ``NamedTuple``'s field types, a ``TypeVar``'s bound), a union, through
     other aliases too, and a string only in one declared ``TypeAlias`` or a
     ``type`` statement. A ``Literal`` value, ``Annotated``'s notes and what
@@ -1128,14 +1128,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     # What a type expression can subscript or be dotted from: the builtin
     # generics, what the script imports from the typing modules, the classes
-    # it defines (a user generic `Box['T']`), and the typing modules it
+    # the generic classes it defines (`Box['T']`), and the typing modules it
     # imports (`typing.Optional['T']`, `t.List['T']`).
     typing_modules = ("typing", "typing_extensions", "collections", "collections.abc")
     type_heads = {"list", "dict", "tuple", "set", "frozenset", "type"}
     type_modules: set[str] = set()
     for sub in ast.walk(tree):
         if isinstance(sub, ast.ClassDef):
-            type_heads.add(sub.name)
+            # A class a subscript specializes: generic by its type
+            # parameters, a subscripted base (`Generic[V]`) or its own
+            # `__class_getitem__`; not an Enum, whose `Samplers['grid']` is
+            # a member (#334 review).
+            generic = (
+                getattr(sub, "type_params", ())
+                or any(isinstance(b, ast.Subscript) for b in sub.bases)
+                or any(
+                    isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and s.name == "__class_getitem__"
+                    for s in sub.body
+                )
+            )
+            if generic:
+                type_heads.add(sub.name)
         elif isinstance(sub, ast.ImportFrom) and sub.module in typing_modules:
             type_heads.update(alias.asname or alias.name for alias in sub.names)
         elif isinstance(sub, ast.Import):
@@ -1147,8 +1161,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     def type_subscript(node) -> bool:
         """Whether subscript ``node`` subscripts a type head (``list['T']``,
-        ``typing.Optional['T']``, a script class ``Box['T']``), not a value
-        (``TYPES['grid']``, ``SAMPLERS[MODE]``)."""
+        ``typing.Optional['T']``, a generic script class ``Box['T']``), not
+        a value (``TYPES['grid']``, ``SAMPLERS[MODE]``, an Enum member)."""
         head = node.value
         root = head
         while isinstance(root, ast.Attribute):
@@ -1162,8 +1176,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     def type_parts(value, declared: bool) -> list:
         """The parts of a bound value written as a type expression, which the
         alias walk reads (#334 review): a subscript of a type head
-        (``list['T']``, ``typing.Optional['T']``, a script class
-        ``Box['T']``), a typing form's call, a union ``A | B``, a name or a
+        (``list['T']``, ``typing.Optional['T']``, a generic script class
+        ``Box['T']``), a typing form's call, each operand of a union, a name or a
         dotted name, each item of a tuple or list, the branches of an ``if``
         expression, and a string only where the binding is ``declared`` a
         type alias (``Alias: TypeAlias = 'T'``, a ``type`` statement). Any
@@ -1173,9 +1187,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
         followed so: a generic imported from elsewhere (``Box['T']`` with
         ``from lib import Box``), or a type stored in a container."""
         out: list = []
-        stack = [value]
+        # (part, whether a string there is a type): a union's operand is
+        # (`List[int] | 'T'`), as is a declared alias's whole value.
+        stack = [(value, declared)]
         while stack:
-            v = stack.pop()
+            v, strings = stack.pop()
             if isinstance(v, ast.Subscript):
                 if type_subscript(v):
                     out.append(v)
@@ -1183,17 +1199,19 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if spelled(v.func) in forms:
                     out.append(v)
             elif isinstance(v, ast.BinOp):
+                # Each operand of a union, checked alone: a dict merged with
+                # `|` is no type (`BASE | {'search': 'grid'}`).
                 if isinstance(v.op, ast.BitOr):
-                    out.append(v)
+                    stack.extend(((v.left, True), (v.right, True)))
             elif isinstance(v, (ast.Name, ast.Attribute)):
                 out.append(v)
             elif isinstance(v, ast.Constant):
-                if declared and isinstance(v.value, str):
+                if strings and isinstance(v.value, str):
                     out.append(v)
             elif isinstance(v, (ast.Tuple, ast.List)):
-                stack.extend(v.elts)
+                stack.extend((e, strings) for e in v.elts)
             elif isinstance(v, ast.IfExp):
-                stack.extend((v.body, v.orelse))
+                stack.extend(((v.body, strings), (v.orelse, strings)))
         return out
 
     def alias_pairs(node) -> list:

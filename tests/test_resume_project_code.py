@@ -2365,6 +2365,24 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-union",
         ),
         pytest.param(
+            # A string beside `|` is a type: `List[int] | 'T'` is a Union.
+            "import typing\n\nT = {v}\nAlias = typing.List[int] | 'T'\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-union-string",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass Box:\n    def __class_getitem__(cls, item):\n"
+            "        return list[item]\n\n\nAlias = Box['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-class-getitem",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass Box[V]:\n    pass\n\n\nAlias = Box['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-pep695-generic",
+            marks=_PEP695,
+        ),
+        pytest.param(
             "T = {v}\nFAST = True\nAlias = dict[str, list['T'] if FAST else int]\n\n\n"
             "def task(x: Alias):\n    return x\n",
             id="alias-conditional-type-argument",
@@ -3232,6 +3250,22 @@ SCRIPT_NOT_EDITS = {
     "a registry lookup nested in a type alias spelling the run's grid": (
         "grid = [1, {k}]\nTYPES = {{'grid': int}}\nAlias = list[TYPES['grid']]\n\n\n"
         "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "an Enum member picked by the run's grid name": (
+        "import enum\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\nclass Samplers(enum.Enum):\n"
+        "    grid = GridSampler\n    random = RandomSampler\n\n\n"
+        "Sampler = Samplers['grid'].value\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a dict merged with | spelling the run's grid": (
+        "BASE = {{'lr': 0.1}}\nDEFAULTS = BASE | {{'search': 'grid'}}\ngrid = [1, {k}]\n\n\n"
+        "def make(d):\n    return int\n\n\ndef task(a: make(DEFAULTS)):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a conditional type argument whose test compares to the run's grid": (
+        "grid = [1, {k}]\nMODE = 'x'\nAlias = dict[str, int if MODE == 'grid' else float]\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
