@@ -3483,6 +3483,11 @@ SCRIPT_NOT_EDITS = {
         "typing = Registry\nAlias = typing.TYPES['grid']\n\n\n"
         "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
     ),
+    "a class body's rebound typing module's lookup by the run's grid name": (
+        "import typing\n\ngrid = [1, {k}]\n\n\nclass Registry:\n    TYPES = {{'grid': int}}\n\n\n"
+        "class task:\n    typing = Registry\n    Alias = typing.TYPES['grid']\n"
+        "    x: Alias = None\n\n\nds = run(a=grid)\n"
+    ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
         "class RandomSampler:\n    pass\n\n\n"
