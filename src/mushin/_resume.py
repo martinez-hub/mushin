@@ -826,31 +826,58 @@ def _script_digest(path: Path, roots: frozenset[str]):
         annotations every name outside one too. Without future annotations a
         name outside a string is evaluated where it stands, and the symbol
         table counts it there, scope-aware. ``own`` are the type parameters
-        of the definition they belong to, which the text names instead."""
+        of the definition they belong to, which the text names instead.
+
+        A string in ``Literal[...]``, or in ``Annotated[...]`` after its
+        type, is a value no reader resolves, so it names nothing: counting
+        `Literal['grid']` would make the run's `grid` the task's code, and
+        extending the grid an edit. A name there is still read
+        (``Literal[Color.RED]``). Spelled otherwise (an alias of
+        ``Literal``), its strings are read: a recompute too many at most."""
         found: set[str] = set()
-        # (expression, whether its names are read as text, strings parsed
-        # to reach it): a string can hold a string (`"list['T']"`).
-        stack = [(e, future_annotations, 0) for e in exprs if e is not None]
+        # (node, whether its bare names are read as text, whether its
+        # strings are references, strings parsed to reach it): a string can
+        # hold a string (`"list['T']"`).
+        stack = [(e, future_annotations, True, 0) for e in exprs if e is not None]
         while stack:
-            expr, as_text, depth = stack.pop()
-            for sub in ast.walk(expr):
-                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
-                    if as_text:
-                        found.add(sub.id)
-                elif (
-                    isinstance(sub, ast.Constant)
-                    and isinstance(sub.value, str)
-                    and depth < 8
-                ):
-                    # Every string, a `Literal['x']` value's too: reading one
-                    # that is not a reference costs a recompute at most when
-                    # a module binding has that name; skipping one that is
-                    # would miss an edit.
+            node, as_text, refs, depth = stack.pop()
+            if isinstance(node, ast.Name):
+                if as_text and isinstance(node.ctx, ast.Load):
+                    found.add(node.id)
+                continue
+            if isinstance(node, ast.Constant):
+                if refs and isinstance(node.value, str) and depth < 8:
+                    text = node.value.strip()
+                    # `'*Ts'` (PEP 646) is read as `ForwardRef` reads it:
+                    # `(*Ts,)`.
+                    source = f"({text},)" if text.startswith("*") else text
                     try:
-                        parsed = ast.parse(sub.value.strip(), mode="eval")
+                        parsed = ast.parse(source, mode="eval")
                     except (SyntaxError, ValueError, RecursionError):
                         continue  # not Python: it names nothing
-                    stack.append((parsed.body, True, depth + 1))
+                    stack.append((parsed.body, True, True, depth + 1))
+                continue
+            if isinstance(node, ast.Subscript):
+                head = node.value
+                if isinstance(head, ast.Attribute):
+                    spelled = head.attr
+                else:
+                    spelled = getattr(head, "id", None)
+                types, values = [head], []
+                if spelled == "Literal":
+                    values = [node.slice]
+                elif (
+                    spelled == "Annotated"
+                    and isinstance(node.slice, ast.Tuple)
+                    and len(node.slice.elts) > 1
+                ):
+                    types.append(node.slice.elts[0])
+                    values = node.slice.elts[1:]
+                if values:
+                    stack.extend((t, as_text, refs, depth) for t in types)
+                    stack.extend((v, as_text, False, depth) for v in values)
+                    continue
+            stack.extend((c, as_text, refs, depth) for c in ast.iter_child_nodes(node))
         return found - own
 
     def annotation_reads(node) -> set[str]:
@@ -891,11 +918,24 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return found
 
     read_cache: dict[int, set[str]] = {}
+    full_cache: dict[int, set[str]] = {}
 
     def reads(node) -> set[str]:
         hit = read_cache.get(id(node))
         if hit is None:
             hit = read_cache[id(node)] = _reads(node)
+        return hit
+
+    def full_reads(node) -> set[str]:
+        """``reads`` and what the statement's annotations read as text
+        (``annotation_reads``): what the record follows. Neither the symbol
+        table nor ``_reads``'s walk reads an annotation kept as text (future
+        annotations, or a string), a method's, a nested function's or a
+        class body's. The registering-decorator rule compares code only
+        (``reads``): a wrapper's `-> dict` registers nothing."""
+        hit = full_cache.get(id(node))
+        if hit is None:
+            hit = full_cache[id(node)] = reads(node) | annotation_reads(node)
         return hit
 
     def _reads(node) -> set[str]:
@@ -922,19 +962,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 inner = [arg.annotation for arg in params if arg and arg.annotation]
                 if node.returns is not None:
                     inner.append(node.returns)
-            # Neither the symbol table nor this walk reads an annotation kept
-            # as text (future annotations, or a string): a method's, a nested
-            # function's or a class body's is not read at all.
             return (
-                scope_reads.get(node.name, set())
-                | loads(outer)
-                | (loads(inner) - own)
-                | annotation_reads(node)
+                scope_reads.get(node.name, set()) | loads(outer) | (loads(inner) - own)
             )
         # A `type X[T] = ...` statement (3.12+) is all in its type-parameter
-        # scope. Any other statement's walk already reads every name in it,
-        # its annotations' included, so only their strings add.
-        return (loads([node]) - own) | annotation_reads(node)
+        # scope.
+        return loads([node]) - own
 
     def run_here(node) -> list:
         """What a definition evaluates where it is defined, but annotations:
@@ -1151,22 +1184,27 @@ def _script_digest(path: Path, roots: frozenset[str]):
     ]
     kept_ids = {id(n) for n in kept}
     pending = [(n, names) for n, names in candidates if names and id(n) not in kept_ids]
+    # What counted code reads, its annotations' text included (#324), and
+    # what its code alone reads, for the registering-decorator rule.
     read: set[str] = set()
+    read_code: set[str] = set()
     for n in kept:
-        read |= reads(n)
+        read |= full_reads(n)
+        read_code |= reads(n)
     while True:
         add = [
             (n, names)
             for n, names in pending
             if names & read
-            or (isinstance(n, defs) and n.decorator_list and registers(n, read))
+            or (isinstance(n, defs) and n.decorator_list and registers(n, read_code))
         ]
         if not add:
             break
         added = {id(n) for n, _ in add}
         for n, _ in add:
             kept.append(n)
-            read |= reads(n)
+            read |= full_reads(n)
+            read_code |= reads(n)
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
 

@@ -2160,6 +2160,27 @@ _PEP695 = pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax"
             "except ImportError:\n    pass\n",
             id="string-in-block",
         ),
+        pytest.param(
+            # PEP 646: `ForwardRef` reads `'*Ts'` as `(*Ts,)`.
+            "Ts = {v}\n\n\ndef task(*a: '*Ts'):\n    return a\n",
+            id="string-starred",
+        ),
+        pytest.param(
+            "from typing import Annotated\n\nT = {v}\n\n\n"
+            "def task(x: Annotated['T', 'note']):\n    return x\n",
+            id="string-annotated-type",
+        ),
+        pytest.param(
+            # A name in a `Literal` is evaluated (`Literal[Color.RED]`).
+            _FUTURE + "from typing import Literal\n\nT = {v}\n\n\nclass task:\n"
+            "    def run(self, m: Literal[T]):\n        return m\n",
+            id="future-literal-name",
+        ),
+        pytest.param(
+            _FUTURE + "from typing import Annotated\n\nT = {v}\n\n\nclass task:\n"
+            "    def run(self, m: Annotated[int, T]):\n        return m\n",
+            id="future-annotated-metadata-name",
+        ),
     ],
 )
 def test_a_name_an_annotation_reads_as_text_counts(tmp_path, text):
@@ -2557,6 +2578,37 @@ SCRIPT_NOT_EDITS = {
     "a definition decorated in the block that defines its decorator": (
         "SCALE = 2\nif True:\n\n    def timer(fn):\n        return fn\n\n    @timer\n"
         "    def plot():\n        return SCALE + {k}\n\n\ndef task(a):\n    return a * SCALE\n"
+    ),
+    # A decorator's own annotations register nothing, though the task's
+    # annotations name `dict` too (#328 review).
+    "a decorator whose wrapper's annotation names what the task's does": (
+        "from __future__ import annotations\n\n\ndef timer(fn):\n"
+        "    def wrapper(*a) -> dict:\n        return fn(*a)\n\n    return wrapper\n\n\n"
+        "@timer\ndef plot():\n    return {k}\n\n\n"
+        "def task(a) -> dict:\n    return {{'v': a}}\n"
+    ),
+    "a decorator whose code reads what only the task's annotation names": (
+        "from __future__ import annotations\n\nimport collections\n\n\n"
+        "def timer(fn):\n    collections.Counter()\n    return fn\n\n\n"
+        "@timer\ndef plot():\n    return {k}\n\n\n"
+        "class task:\n    def run(self, x: collections.OrderedDict):\n        return x\n"
+    ),
+    # A `Literal` value is no reference: extending the grid stays no edit
+    # (#328 review).
+    "a Literal value spelling the run's grid": (
+        "from typing import Literal\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a, mode: Literal['grid', 'random'] = 'grid'):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a Literal value spelling the run's grid, in a string": (
+        "from typing import Literal\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a, mode: \"Literal['grid']\" = 'grid'):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "an Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a: typing.Annotated[int, 'grid']):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
     ),
     "a definition decorated by a function the task calls": (
         "def ident(fn):\n    return fn\n\n\ndef task(a):\n    return ident(a)\n\n\n"

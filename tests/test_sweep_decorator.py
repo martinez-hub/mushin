@@ -177,6 +177,18 @@ def test_the_task_copy_keeps_its_type_parameters():
     assert typing.get_type_hints(copy)["x"] is fn.__type_params__[0]
 
 
+def test_the_task_copy_keeps_an_annotation_edited_in_place():
+    """The copy takes fn's annotations as they are, an edit made before the
+    decorator included, not as their expressions evaluate again (#328 review)."""
+
+    def fn(a: int) -> dict:
+        return {"v": float(a)}
+
+    fn.__annotations__["a"] = float
+    copy = mushin.sweep(fn).__mushin_task__
+    assert copy.__annotations__ == {"a": float, "return": dict}
+
+
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="PEP 649: lazy annotations")
 def test_a_task_annotation_can_name_what_is_defined_below_it(tmp_path):
     """3.14+ evaluates an annotation when it is first read, so a task may name
