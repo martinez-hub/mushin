@@ -2441,13 +2441,6 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-an-item-set-stores",
         ),
         pytest.param(
-            # `get_type_hints(inner)` resolves `'T'` against the module.
-            "import typing\n\nT = {v}\n\n\ndef task(x):\n    Alias = list['T']\n\n"
-            "    def inner(y: Alias):\n        return y\n\n"
-            "    return typing.get_type_hints(inner)\n",
-            id="alias-local-to-the-task",
-        ),
-        pytest.param(
             "import typing\n\nV = typing.TypeVar('V')\nT = {v}\n\n\n"
             "class Box(typing.Generic[V]):\n    pass\n\n\nAlias = Box['T']\n\n\n"
             "def task(x: Alias):\n    return x\n",
@@ -2501,6 +2494,18 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "import typing\n\nT = {v}\n\n\n"
             "def task(x: typing.ForwardRef(**{{'arg': 'T'}})):\n    return x\n",
             id="forward-ref-unpacked",
+        ),
+        pytest.param(
+            # A spec computed in an annotation: its strings are read, as main
+            # read every string in an annotation (#334 review).
+            "import typing\n\nEXTRA = []\nT = {v}\n\n\n"
+            "def task(x: typing.NamedTuple('Row', [('a', 'T')] + EXTRA)):\n    return x\n",
+            id="computed-spec-in-an-annotation",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.TypedDict('TD', dict(a='T'))):\n    return x\n",
+            id="computed-dict-spec-in-an-annotation",
         ),
         pytest.param(
             "import typing\n\nT = {v}\n\n\n"
@@ -3061,6 +3066,51 @@ SCRIPT_NOT_EDITS = {
         "import dataclasses\n\ngrid = [1, {k}]\nCfg = dataclasses.make_dataclass(\n"
         "    'Cfg', [('mode', str, dataclasses.field(default='grid'))]\n)\n\n\n"
         "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    # A function's own assignments are no aliases the record follows; nor is
+    # an index or an attribute set (#334 review).
+    "a task's local named like an alias its annotation names": (
+        "cfg = {{'grid': 2}}\ngrid = [1, {k}]\nUnit = int\n\n\n"
+        "def task(a: Unit):\n    Unit = cfg['grid']\n    return a * Unit\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a task's item set under a typed index spelling the run's grid": (
+        "lr = [1, {k}]\n\n\ndef task(lr: float, seed: int) -> dict:\n    results = {{}}\n"
+        "    results[int(seed)] = {{'lr': lr, 'loss': 0.0}}\n    return results\n\n\n"
+        "ds = run(lr=lr, seed=[0, 1])\n"
+    ),
+    "a class body's item set under a typed index spelling the run's grid": (
+        "lr = [1, {k}]\n\n\nclass task:\n    seed: int = 0\n    results = {{}}\n"
+        "    results[int(seed)] = {{'name': 'lr'}}\n\n\nds = run(lr=lr)\n"
+    ),
+    "an attribute set in a counted class body spelling the run's grid": (
+        "grid = [1, {k}]\n\n\nclass Config:\n    pass\n\n\nclass task:\n"
+        "    x: Config = None\n    Config.search = 'grid'\n\n\nds = run(a=grid)\n"
+    ),
+    "a conditional alias whose test spells the run's grid": (
+        "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "Sampler = GridSampler if sys.argv[-1] == 'grid' else RandomSampler\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a conditional alias whose test names a value that spells the run's grid": (
+        "grid = [1, {k}]\nMODE = 'grid'\nAlias = int if MODE else float\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a make_dataclass field's default in an annotation spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n\n\n"
+        "def task(\n    a: dataclasses.make_dataclass(\n"
+        "        'Cfg', [('mode', str, dataclasses.field(default='grid'))]\n    ),\n):\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a make_dataclass's names given by the fields keyword spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n"
+        "Cfg = dataclasses.make_dataclass('Cfg', fields=['grid', ('lr', float)])\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef's module given by place spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nREF = typing.ForwardRef('int', False, 'grid')\n\n\n"
+        "def task(a: REF):\n    return a\n\n\nds = run(a=grid)\n"
     ),
     "an environment set under a two-part dotted annotation spelling the run's grid": (
         "import os\n\ngrid = [1, {k}]\n\n\n"

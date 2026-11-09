@@ -790,8 +790,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     given to a call is a reference (``opt('T')``), as main read it. Not
     followed: an alias or a typing form only code reaches (pydantic's
     ``TypeAdapter(Alias)``, ``get_type_hints(Row)`` in the task's body), an
-    alias reached as an attribute (``Outer.Alias``) or built by a call
-    (``Alias = opt('T')``), a functional form a counted class only
+    alias reached as an attribute (``Outer.Alias``), built by a call
+    (``Alias = opt('T')``, ``TypeAliasType(...)``) or bound in a function's
+    body (a nested function's annotation can name one), a functional form a
+    counted class only
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
@@ -853,11 +855,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     # The typing forms that take some strings as values (a name, a field's
     # name, a key) and some as types (``call_parts``).
-    var_forms = ("TypeVar", "ParamSpec", "TypeVarTuple")
+    var_forms = ("TypeVar",)
     field_forms = ("NamedTuple", "TypedDict", "make_dataclass")
     forms = frozenset({"ForwardRef", "NewType", *var_forms, *field_forms})
 
-    def spec_parts(kind: str, node) -> list:
+    def spec_parts(kind: str, node, opaque: bool) -> list:
         """The parts (as ``call_parts`` gives them) of field spec ``node`` of
         ``kind``: ``fields`` (a functional ``NamedTuple``'s or
         ``make_dataclass``'s list), ``field`` (one of its items: ``(name,
@@ -865,23 +867,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
         make_dataclass's bare name) or ``dict`` (a ``TypedDict``'s). A
         field's type and a dict's values are references; a field's name, its
         ``field(...)`` and a key are values. Only a spec written out where
-        the form is called has that shape. One given through a name
-        (``NamedTuple('Row', FIELDS)``, ``*BASE``, ``**BASE``), or any other
-        expression there (a comprehension, a call), is a value: its names
-        are read, not what it holds (#334 review: following it as a spec
-        failed three review rounds)."""
+        the form is called has that shape. Any other expression there (a
+        name, ``*BASE``, ``**BASE``, a comprehension, a call) names no
+        alias, so what a name holds is not followed (#334 review: following
+        it as a spec failed three review rounds); its strings are read as a
+        call's are (``call_parts``): references in an annotation, values in
+        an alias's value (``opaque``)."""
         if kind == "fields" and isinstance(node, (ast.List, ast.Tuple)):
-            return [p for item in node.elts for p in spec_parts("field", item)]
-        if kind == "field" and isinstance(node, (ast.Tuple, ast.List)) and node.elts:
-            return [(e, j == 1, j == 1) for j, e in enumerate(node.elts)]
+            return [p for item in node.elts for p in spec_parts("field", item, opaque)]
+        if kind == "field":
+            if isinstance(node, (ast.Tuple, ast.List)) and node.elts:
+                return [(e, j == 1, j == 1) for j, e in enumerate(node.elts)]
+            if isinstance(node, ast.Constant):
+                return [(node, False, False)]  # make_dataclass's bare name
         if kind == "dict" and isinstance(node, ast.Dict):
             parts: list = []
             for key, value in zip(node.keys, node.values, strict=True):
-                if key is not None:
-                    parts.append((key, False, False))
-                parts.append((value, key is not None, key is not None))
+                if key is None:  # `**BASE`
+                    parts += spec_parts("dict", value, opaque)
+                else:
+                    parts += [(key, False, False), (value, True, True)]
             return parts
-        return [(node, False, False)]
+        return [(node, not opaque, False)]
 
     def call_parts(call, opaque: bool) -> list:
         """``(argument, whether its strings are references, whether its names
@@ -892,8 +899,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
         type alias's value (``opaque``) such a call is a value, its names
         naming no alias (``Result = namedtuple('Result', ['lr'])``, an
         ``Enum``'s members; #334 review). A typing form's arguments are read
-        by their place in both: the name ``NewType``, a ``TypeVar`` (or
-        ``ParamSpec``, ``TypeVarTuple``) or a functional ``NamedTuple``,
+        by their place in both: the name ``NewType``, a ``TypeVar`` or a
+        functional ``NamedTuple``,
         ``TypedDict`` or ``make_dataclass`` is given, a field's name, a
         ``TypedDict`` key, and the options and flags of each are values
         (#323, #329), and name nothing a type could either. Its types (field
@@ -927,7 +934,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
             kind = "dict" if form == "TypedDict" else "fields"
             for i, a in enumerate(args):
                 if i == 1:
-                    parts += spec_parts(kind, a)
+                    parts += spec_parts(kind, a, opaque)
                 else:
                     parts.append((a, False, False))  # the class's name
             for k in keywords:
@@ -935,7 +942,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     # NamedTuple's and TypedDict's keyword fields.
                     parts.append((k.value, True, True))
                 elif k.arg == "fields":
-                    parts += spec_parts(kind, k.value)
+                    parts += spec_parts(kind, k.value, opaque)
                 else:  # its options (`bases=`, `namespace=`)
                     parts.append((k.value, False, False))
         return parts
@@ -1032,6 +1039,18 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((t, text, refs, typed, depth) for t in types)
                     stack.extend((v, text, False, False, depth) for v in values)
                     continue
+            if alias and isinstance(node, ast.IfExp):
+                # Its test holds no type (`A if MODE == 'grid' else B`).
+                stack.append((node.test, text, False, False, depth))
+                stack.extend(
+                    (c, text, refs, typed, depth) for c in (node.body, node.orelse)
+                )
+                continue
+            if alias and isinstance(node, ast.Compare):
+                stack.extend(
+                    (c, text, False, False, depth) for c in ast.iter_child_nodes(node)
+                )
+                continue
             if isinstance(node, ast.Attribute):
                 # A dotted name names no alias: not `Outer.Alias` (not
                 # followed), nor `os` of `os.PathLike` (#334 review).
@@ -1088,32 +1107,40 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     def alias_pairs(node) -> list:
         """``(names, value, own, declared)`` for each assignment statement
-        ``node`` makes, at any depth (in a block, a class body, a function's
-        body): a type alias is a name bound to a type, so a hint reader
-        resolves the strings in its value as in an annotation
-        (``Alias = list['T']``, ``Alias = 'list[T]'``; #329). The record walks
-        a value once an annotation, or an alias's value, names one of its
-        ``names`` (``named`` of ``annotation_names``), or always when it is
-        ``declared`` one (``Alias: TypeAlias = ...``). A class body's counts:
-        ``get_type_hints(cls)`` reads the class's namespace first; so does a
-        function's, which a function nested in it can name. All the value is
-        walked, under a tuple target too, and a function's local named like
-        an alias: a recompute too many at most. An item or attribute set
-        counts for the names in its target (``REG['a'] = list['T']`` for
-        ``REG``): an annotation reading ``REG['a']`` gets what it stores.
+        ``node`` makes in a block or a class body, not in a function's body:
+        a type alias is a name bound to a type, so a hint reader resolves the
+        strings in its value as in an annotation (``Alias = list['T']``,
+        ``Alias = 'list[T]'``; #329). The record walks a value once an
+        annotation, or an alias's value, names one of its ``names`` (``named``
+        of ``annotation_names``), or always when it is ``declared`` one
+        (``Alias: TypeAlias = ...``). A class body's counts:
+        ``get_type_hints(cls)`` reads the class's namespace first. All the
+        value is walked, under a tuple target too: a recompute too many at
+        most. An item set counts for its container (``REG['a'] = list['T']``
+        for ``REG``): an annotation reading ``REG['a']`` gets what it stores;
+        an attribute set counts for none, nor do the names in an index.
         ``own``: a ``type`` statement's type parameters. Not followed: an
-        alias only code reaches (pydantic's ``TypeAdapter(Alias)``)."""
+        alias only code reaches (pydantic's ``TypeAdapter(Alias)``), or a
+        function's own (a function nested in it can name one; #334 review)."""
         found: list = []
         stack = [node]
         while stack:
             n = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue  # its body's names are its own
             if isinstance(n, ast.Assign):
-                names = {
-                    sub.id
-                    for target in n.targets
-                    for sub in ast.walk(target)
-                    if isinstance(sub, ast.Name)
-                }
+                names: set[str] = set()
+                targets = list(n.targets)
+                while targets:
+                    target = targets.pop()
+                    while isinstance(target, ast.Subscript):
+                        target = target.value  # an item set: its container
+                    if isinstance(target, ast.Starred):
+                        targets.append(target.value)
+                    elif isinstance(target, (ast.Tuple, ast.List)):
+                        targets.extend(target.elts)
+                    elif isinstance(target, ast.Name):
+                        names.add(target.id)
                 found.append((names, n.value, set(), False))
             elif isinstance(n, ast.AnnAssign) and n.value is not None:
                 names = {n.target.id} if isinstance(n.target, ast.Name) else set()
