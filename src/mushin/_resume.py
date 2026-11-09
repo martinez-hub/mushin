@@ -805,8 +805,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
     form spelled through an alias of its name, or rebound at run time by
-    no statement the script holds (``setattr(typing, 'NewType', f)``,
-    ``exec``), which is read as the typing form. And a subscript the record
+    no store the script holds (``setattr(typing, 'NewType', f)``, ``exec``),
+    which is read as the typing form; a store into a typing module or into
+    ``globals()`` makes every form a plain call. And a subscript the record
     cannot tell from a type (a class or import rebound in a scope it does
     not track, a lookup the class itself defines) may have its key read: a
     recompute too many, never a stale reuse. ``imports`` are those of what counts."""
@@ -1259,7 +1260,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
     # A star import from another module may bind any name, a typing
     # module's name included (#334 review).
     foreign_star = False
-    attribute_roots: set[str] = set()
+    store_roots: set[str] = set()
+    namespace_store = False
     type_param_nodes = tuple(
         getattr(ast, kind)
         for kind in ("TypeVar", "ParamSpec", "TypeVarTuple")
@@ -1297,26 +1299,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
             plain_names.add(sub.rest)
         elif type_param_nodes and isinstance(sub, type_param_nodes):
             plain_names.add(sub.name)  # `def f[NewType]()`
-        elif isinstance(sub, ast.Attribute) and not isinstance(sub.ctx, ast.Load):
-            # `typing.NewType = opt` replaces the form on its module.
+        elif isinstance(sub, (ast.Attribute, ast.Subscript)) and not isinstance(
+            sub.ctx, ast.Load
+        ):
+            # A store into a namespace: onto a module's attribute or item
+            # (`typing.NewType = f`, `typing.__dict__[k] = f`), or into
+            # `globals()`, `locals()` or `vars(...)`.
             root = sub.value
-            while isinstance(root, ast.Attribute):
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
                 root = root.value
             if isinstance(root, ast.Name):
-                attribute_roots.add(root.id)
-        elif (
-            isinstance(sub, ast.Subscript)
-            and not isinstance(sub.ctx, ast.Load)
-            and isinstance(sub.value, ast.Call)
-            and spelled(sub.value.func) in ("globals", "vars")
-        ):
-            # `globals()['NewType'] = opt` binds the name too.
-            key = sub.slice
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                plain_names.add(key.value)
-            else:
-                plain_names.update(forms)
-    plain_names |= attribute_roots & form_roots
+                store_roots.add(root.id)
+            elif isinstance(root, ast.Call) and spelled(root.func) in (
+                "globals",
+                "locals",
+                "vars",
+            ):
+                namespace_store = True
+    # A store into a typing module, or into a namespace by key, may replace a
+    # form under any of its names: every form is then a plain call, read as
+    # main read it (#334 review).
+    if namespace_store or store_roots & form_roots:
+        plain_names |= form_roots | forms
     if foreign_star:
         plain_names |= form_roots
 

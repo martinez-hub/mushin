@@ -2559,6 +2559,30 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-name-set-in-globals",
         ),
         pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\ntyping.NewType = opt\nfrom typing import NewType  # noqa: E402\n\n\ndef task(x: NewType('T', int)):\n    return x\n",
+            id="form-imported-after-its-module-is-patched",
+        ),
+        pytest.param(
+            "import typing\nimport typing as t\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\nt.NewType = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-on-a-module-patched-through-another-name",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\nvars(typing)['NewType'] = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-set-in-its-modules-vars",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\ntyping.__dict__['NewType'] = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-set-in-its-modules-dict",
+        ),
+        pytest.param(
+            "from typing import NewType, Optional\n\nT = {v}\n\n\ndef opt(name, tp):\n    return Optional[name]\n\n\nlocals()['NewType'] = opt\n\n\ndef task(x: NewType('T', int)):\n    return x\n",
+            id="form-name-set-in-locals",
+        ),
+        pytest.param(
+            "from typing import NewType, Optional\n\nT = {v}\n\n\ndef opt(name, tp):\n    return Optional[name]\n\n\nKEY = 'NewType'\nglobals()[KEY] = opt\n\n\ndef task(x: NewType('T', int)):\n    return x\n",
+            id="form-name-set-in-globals-by-a-computed-key",
+        ),
+        pytest.param(
             "from typing import NewType\nfrom mushin_t_helpers import NewType\n\nT = {v}\n\n\n"
             "def task(x: NewType('T')):\n    return x\n",
             id="form-name-reimported-from-elsewhere",
