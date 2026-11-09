@@ -2509,6 +2509,21 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
         ),
         pytest.param(
             "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.TypedDict('TD', {{**{{'a': 'T'}}}})):\n    return x\n",
+            id="spread-dict-spec-in-an-annotation",
+        ),
+        pytest.param(
+            "import sys\n\nT = {v}\nAlias = list['T'] if sys.argv else dict\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-conditional",
+        ),
+        pytest.param(
+            "T = {v}\nif True:\n\n    class Holder:\n        Alias = list['T']\n"
+            "        x: Alias = None\n\n\ndef task():\n    return Holder\n",
+            id="alias-in-a-class-in-a-block",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
             "def task(x: typing.NewType(*('N', 'T'))):\n    return x\n",
             id="new-type-unpacked",
         ),
@@ -3086,6 +3101,15 @@ SCRIPT_NOT_EDITS = {
     "an attribute set in a counted class body spelling the run's grid": (
         "grid = [1, {k}]\n\n\nclass Config:\n    pass\n\n\nclass task:\n"
         "    x: Config = None\n    Config.search = 'grid'\n\n\nds = run(a=grid)\n"
+    ),
+    "a dotted annotation's base picked by the run's grid name": (
+        "import types\n\ngrid = [1, {k}]\n"
+        "NAMESPACES = {{'grid': types.SimpleNamespace(Row=int)}}\nns = NAMESPACES['grid']\n\n\n"
+        "def task(x: ns.Row):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a dispatch alias whose key compares to the run's grid": (
+        "grid = [1, {k}]\nMODE = 'x'\nAlias = {{True: int, False: float}}[MODE == 'grid']\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
