@@ -783,11 +783,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     (``Alias = list['T']``, through other aliases too), one declared a
     ``TypeAlias``, and what a typing form makes a forward reference (a
     functional ``NamedTuple``'s field types, a ``TypeVar``'s bound). A
-    ``Literal`` value, ``Annotated``'s notes and another call's string
-    arguments (``NewType('grid', int)``) are values, read as none. Not
-    followed: an alias only code reaches (pydantic's ``TypeAdapter(Alias)``),
-    or a typing form spelled through an alias of its name. ``imports`` are
-    those of what counts."""
+    ``Literal`` value, ``Annotated``'s notes and what a typing form takes as
+    a value (``NewType('grid', int)``'s name, a field's name) are values,
+    read as none. Not followed: an alias only code reaches (pydantic's
+    ``TypeAdapter(Alias)``), or a typing form spelled through an alias of its
+    name. ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
@@ -843,30 +843,43 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return node.attr
         return getattr(node, "id", None)
 
+    # The typing forms that take some strings as values (a name, a field's
+    # name, a key) and some as types (``call_parts``).
+    var_forms = ("TypeVar", "ParamSpec", "TypeVarTuple")
+    field_forms = ("NamedTuple", "TypedDict", "make_dataclass")
+    forms = frozenset({"ForwardRef", "NewType", *var_forms, *field_forms})
+
     def call_parts(call) -> list:
         """``(argument, whether its strings are references, whether its names
-        can name a type alias)`` for each argument of ``call``. A typing form
-        turns some strings into forward references, which a hint reader then
-        resolves against the module (#329): a functional ``NamedTuple``'s,
-        ``TypedDict``'s or ``make_dataclass``'s field types, a ``TypeVar``'s
-        (or ``ParamSpec``'s, ``TypeVarTuple``'s) constraints, ``bound=`` and
-        ``default=``, and ``ForwardRef``'s argument. Its other strings (a
-        name, a field name, a dict key) are values and name nothing a type
-        could. Any other call's strings are values too (``NewType('grid',
-        int)``; #323), though its names may still name a type."""
+        can name a type alias)`` for each argument of ``call``. A string a
+        call is given can come back a forward reference a hint reader
+        resolves against the module (``opt('T')`` returning
+        ``Optional['T']``), so it is one, but where a typing form takes a
+        value (#323, #329): the name ``NewType``, a ``TypeVar`` (or
+        ``ParamSpec``, ``TypeVarTuple``) or a functional ``NamedTuple``,
+        ``TypedDict`` or ``make_dataclass`` is given, a field's name, a
+        ``TypedDict`` key, and the options and flags of each. Those name
+        nothing a type could either. Its types (field types, a ``TypeVar``'s
+        constraints, ``bound=`` and ``default=``, ``ForwardRef``'s argument,
+        ``NewType``'s supertype) are references."""
         form = spelled(call.func)
         args, keywords = call.args, call.keywords
+        if form not in forms:
+            return [(a, True, True) for a in (*args, *(k.value for k in keywords))]
         parts: list = []
         if form == "ForwardRef":
             parts += [(a, i == 0, i == 0) for i, a in enumerate(args)]
             parts += [(k.value, False, False) for k in keywords]
-        elif form in ("TypeVar", "ParamSpec", "TypeVarTuple"):
+        elif form == "NewType":
+            parts += [(a, i > 0, i > 0) for i, a in enumerate(args)]
+            parts += [(k.value, k.arg == "tp", k.arg == "tp") for k in keywords]
+        elif form in var_forms:
             parts += [(a, i > 0, i > 0) for i, a in enumerate(args)]
             parts += [
                 (k.value, k.arg in ("bound", "default"), k.arg in ("bound", "default"))
                 for k in keywords
             ]
-        elif form in ("NamedTuple", "TypedDict", "make_dataclass"):
+        else:
             for i, a in enumerate(args):
                 if i == 0:
                     parts.append((a, False, False))  # the class's name
@@ -891,9 +904,6 @@ def _script_digest(path: Path, roots: frozenset[str]):
             # keywords are options (`bases=`, `namespace=`).
             fields = form != "make_dataclass"
             parts += [(k.value, fields, True) for k in keywords]
-        else:
-            parts += [(a, False, True) for a in args]
-            parts += [(k.value, False, True) for k in keywords]
         return parts
 
     def annotation_names(
@@ -908,20 +918,21 @@ def _script_digest(path: Path, roots: frozenset[str]):
         outside one too. Without it a name outside a string is evaluated
         where it stands, and the symbol table counts it there, scope-aware.
         ``named``: every name they name, evaluated or as text, but in a
-        value: the type aliases whose own strings a hint reader resolves too
+        value, and the attribute a dotted name ends with (``Outer.Alias``):
+        the type aliases whose own strings a hint reader resolves too
         (``alias_pairs``, #329). ``own`` are the type parameters of the
         definition they belong to, which the text names instead
         (``_OWN_TYPE_PARAMS_RESOLVE``).
 
         A string in ``Literal[...]``, in ``Annotated[...]`` after its type,
-        or in a call's arguments but where a typing form makes it a forward
-        reference (``call_parts``), is a value no reader resolves, so it
-        names nothing: counting `Literal['grid']` would make the run's `grid`
-        the task's code, and extending the grid an edit. A name there is
-        still read (``Literal[Color.RED]``), but names no alias in
-        ``Literal`` or ``Annotated``'s notes, which hold no type. Spelled
-        otherwise (an alias of ``Literal``), its strings are read: a
-        recompute too many at most."""
+        or where a typing form takes a value (``NewType('grid', int)``, see
+        ``call_parts``), is a value no reader resolves, so it names nothing:
+        counting `Literal['grid']` would make the run's `grid` the task's
+        code, and extending the grid an edit. A name there is still read
+        (``Literal[Color.RED]``), but names no alias in ``Literal`` or
+        ``Annotated``'s notes, which hold no type. Spelled otherwise (an
+        alias of ``Literal``), its strings are read: a recompute too many at
+        most."""
         found: set[str] = set()
         named: set[str] = set()
         start = future_annotations if as_text is None else as_text
@@ -965,11 +976,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 continue
             if isinstance(node, ast.Subscript):
                 head = node.value
+                head_name = spelled(head)
                 types, values = [head], []
-                if spelled(head) == "Literal":
+                if head_name == "Literal":
                     values = [node.slice]
                 elif (
-                    spelled(head) == "Annotated"
+                    head_name == "Annotated"
                     and isinstance(node.slice, ast.Tuple)
                     and len(node.slice.elts) > 1
                 ):
@@ -979,6 +991,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.extend((t, text, refs, typed, depth) for t in types)
                     stack.extend((v, text, False, False, depth) for v in values)
                     continue
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                if typed:
+                    # An alias a class body binds (`Outer.Alias`).
+                    named.add(node.attr)
             stack.extend(
                 (c, text, refs, typed, depth) for c in ast.iter_child_nodes(node)
             )
@@ -1029,36 +1045,38 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 for c in ast.iter_child_nodes(n)
                 if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
             )
-        forms = ("NamedTuple", "TypedDict", "make_dataclass", "ForwardRef")
-        forms += ("TypeVar", "ParamSpec", "TypeVarTuple")
         for sub in ast.walk(node):
             if isinstance(sub, ast.Call) and spelled(sub.func) in forms:
-                positions = [p for p, is_ref, _ in call_parts(sub) if is_ref]
                 # Its names are evaluated where the call stands: code reads.
-                more, more_named = annotation_names(positions, set(), as_text=False)
+                # Field specs given as a name (`NamedTuple('Row', FIELDS)`)
+                # name an alias.
+                more, more_named = annotation_names([sub], set(), as_text=False)
                 found |= more
                 named |= more_named
         return found, named
 
     def alias_pairs(node) -> list:
         """``(names, value, own, declared)`` for each assignment statement
-        ``node`` makes outside a function (at the top level, in a block, in a
-        class body): a type alias is a name bound to a type, so a hint reader
+        ``node`` makes, at any depth (in a block, a class body, a function's
+        body): a type alias is a name bound to a type, so a hint reader
         resolves the strings in its value as in an annotation
         (``Alias = list['T']``, ``Alias = 'list[T]'``; #329). The record walks
         a value once an annotation, or an alias's value, names one of its
         ``names`` (``named`` of ``annotation_names``), or always when it is
         ``declared`` one (``Alias: TypeAlias = ...``). A class body's counts:
-        ``get_type_hints(cls)`` reads the class's namespace first. All the
-        value is walked, under a tuple target too: a recompute too many at
-        most. ``own``: a ``type`` statement's type parameters. Not followed:
-        an alias only code reaches (pydantic's ``TypeAdapter(Alias)``)."""
+        ``get_type_hints(cls)`` reads the class's namespace first; so does a
+        function's, which a function nested in it can name. All the value is
+        walked, under a tuple target too, and a function's local named like
+        an alias: a recompute too many at most. An item or attribute set
+        counts for the names in its target (``REG['a'] = list['T']`` for
+        ``REG``): an annotation reading ``REG['a']`` gets what it stores.
+        ``own``: a ``type`` statement's type parameters. Not
+        followed: an alias only code reaches (pydantic's
+        ``TypeAdapter(Alias)``)."""
         found: list = []
         stack = [node]
         while stack:
             n = stack.pop()
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
             if isinstance(n, ast.Assign):
                 names = {
                     sub.id

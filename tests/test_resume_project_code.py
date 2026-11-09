@@ -2410,6 +2410,30 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-through-a-call",
         ),
         pytest.param(
+            # `Optional['T']` comes back: main counted it (#329 review).
+            "import typing\n\nT = {v}\n\n\ndef opt(t):\n"
+            "    return typing.Optional[t]\n\n\ndef task(x: opt('T')):\n    return x\n",
+            id="string-given-to-a-call",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass Outer:\n    Alias = list['T']\n\n\n"
+            "def task(x: Outer.Alias):\n    return x\n",
+            id="alias-of-a-class-by-attribute",
+        ),
+        pytest.param(
+            # What the item set stores is what `REG['a']` reads.
+            "T = {v}\n\n\nclass task:\n    REG = {{}}\n    REG['a'] = list['T']\n"
+            "    x: REG['a'] = None\n",
+            id="alias-an-item-set-stores",
+        ),
+        pytest.param(
+            # `get_type_hints(inner)` resolves `'T'` against the module.
+            "import typing\n\nT = {v}\n\n\ndef task(x):\n    Alias = list['T']\n\n"
+            "    def inner(y: Alias):\n        return y\n\n"
+            "    return typing.get_type_hints(inner)\n",
+            id="alias-local-to-the-task",
+        ),
+        pytest.param(
             "import typing\n\nV = typing.TypeVar('V')\nT = {v}\n\n\n"
             "class Box(typing.Generic[V]):\n    pass\n\n\nAlias = Box['T']\n\n\n"
             "def task(x: Alias):\n    return x\n",
@@ -2435,6 +2459,12 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "import typing\n\nT = {v}\nRow = typing.NamedTuple('Row', x='T')\n\n\n"
             "def task(a):\n    return typing.get_type_hints(Row)\n",
             id="named-tuple-keyword-field",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nFIELDS = [('x', 'T')]\n"
+            "Row = typing.NamedTuple('Row', FIELDS)\n\n\n"
+            "def task(a):\n    return typing.get_type_hints(Row)\n",
+            id="named-tuple-fields-in-a-name",
         ),
         pytest.param(
             "import typing\n\nT = {v}\nRow = typing.TypedDict('Row', {{'x': 'T'}})\n\n\n"
@@ -2468,6 +2498,17 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             "def task(a):\n    return REF\n",
             id="forward-ref",
         ),
+        pytest.param(
+            # pydantic resolves a supertype given as a string.
+            "import typing\n\nT = {v}\nNT = typing.NewType('NT', 'T')\n\n\n"
+            "def task(x: NT):\n    return x\n",
+            id="new-type-supertype",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nNT = typing.NewType('NT', tp='T')\n\n\n"
+            "def task(x: NT):\n    return x\n",
+            id="new-type-supertype-keyword",
+        ),
     ],
 )
 def test_a_string_a_type_hint_reader_resolves_counts(tmp_path, text):
@@ -2475,7 +2516,9 @@ def test_a_string_a_type_hint_reader_resolves_counts(tmp_path, text):
     resolves it against the module (`typing.get_type_hints`, pydantic): in a
     type alias an annotation names, transitively, a declared `TypeAlias`, the
     field types of a functional `NamedTuple`, `TypedDict` or `make_dataclass`,
-    a `TypeVar`'s bound and constraints, `ForwardRef`'s argument (#329)."""
+    a `TypeVar`'s bound and constraints, `ForwardRef`'s argument, a
+    `NewType`'s supertype (#329); and, in an annotation, one given to a call
+    whose result carries it (`opt('T')`)."""
     one = _digest_of_script(tmp_path, "tr1", text.format(v="int"), {"task"})
     two = _digest_of_script(tmp_path, "tr2", text.format(v="str"), {"task"})
     assert one != two
@@ -2851,16 +2894,6 @@ SCRIPT_NOT_EDITS = {
     "a NewType alias spelling the run's grid": (
         "import typing\n\ngrid = [1, {k}]\nGrid = typing.NewType('grid', int)\n\n\n"
         "def task(a: Grid):\n    return a\n\n\nds = run(a=grid)\n"
-    ),
-    "a call in an alias spelling the run's grid": (
-        "grid = [1, {k}]\n\n\ndef kind(name, label=''):\n    return int\n\n\n"
-        "Alias = kind('grid', label='grid')\n\n\ndef task(a: Alias):\n    return a\n\n\n"
-        "ds = run(a=grid)\n"
-    ),
-    "a task's local named like an alias its annotation names": (
-        "cfg = {{'grid': 2}}\ngrid = [1, {k}]\nUnit = int\n\n\n"
-        "def task(a: Unit):\n    Unit = cfg['grid']\n    return a * Unit\n\n\n"
-        "ds = run(a=grid)\n"
     ),
     "a Literal alias spelling the run's grid": (
         "from typing import Literal\n\ngrid = [1, {k}]\nMode = Literal['grid', 'random']\n\n\n"
