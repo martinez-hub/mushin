@@ -798,7 +798,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
     body (a nested function's annotation can name one), written as a plain
     string (``Alias = 'list[T]'`` without ``TypeAlias``), subscripting a
     generic imported from another library, or stored in a container
-    (``D = {'a': list['T']}``), a functional form a counted class only
+    (``D = {'a': list['T']}``), subscripting a class generic only through
+    its own ``__class_getitem__`` or a typing name imported under another
+    name, a functional form a counted class only
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
@@ -1149,22 +1151,22 @@ def _script_digest(path: Path, roots: frozenset[str]):
             )
         if isinstance(sub, ast.ClassDef):
             # A class a subscript specializes: generic by its type
-            # parameters, a subscripted base (`Generic[V]`) or its own
-            # `__class_getitem__`; not an Enum, whose `Samplers['grid']` is
-            # a member (#334 review).
-            generic = (
-                getattr(sub, "type_params", ())
-                or any(isinstance(b, ast.Subscript) for b in sub.bases)
-                or any(
-                    isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and s.name == "__class_getitem__"
-                    for s in sub.body
-                )
+            # parameters or a subscripted base (`Generic[V]`); not an Enum,
+            # whose `Samplers['grid']` is a member, nor a class whose own
+            # `__class_getitem__` may be a lookup too (#334 review).
+            generic = getattr(sub, "type_params", ()) or any(
+                isinstance(b, ast.Subscript) for b in sub.bases
             )
             if generic:
                 type_heads.add(sub.name)
-        elif isinstance(sub, ast.ImportFrom) and sub.module in typing_modules:
-            type_heads.update(alias.asname or alias.name for alias in sub.names)
+        elif (
+            isinstance(sub, ast.ImportFrom)
+            and sub.level == 0
+            and sub.module in typing_modules
+        ):
+            # Under its own name only: `Literal as L` would make `L[...]` a
+            # type whose values are read (#334 review).
+            type_heads.update(alias.name for alias in sub.names if alias.asname is None)
         elif isinstance(sub, ast.Import):
             type_modules.update(
                 alias.asname or alias.name.partition(".")[0]

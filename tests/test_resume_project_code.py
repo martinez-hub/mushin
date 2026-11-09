@@ -2371,12 +2371,6 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-union-string",
         ),
         pytest.param(
-            "T = {v}\n\n\nclass Box:\n    def __class_getitem__(cls, item):\n"
-            "        return list[item]\n\n\nAlias = Box['T']\n\n\n"
-            "def task(x: Alias):\n    return x\n",
-            id="alias-class-getitem",
-        ),
-        pytest.param(
             "T = {v}\n\n\nclass Box[V]:\n    pass\n\n\nAlias = Box['T']\n\n\n"
             "def task(x: Alias):\n    return x\n",
             id="alias-pep695-generic",
@@ -3349,6 +3343,21 @@ SCRIPT_NOT_EDITS = {
         "grid = [1, {k}]\nOptional = {{'grid': int}}\nAlias = Optional['grid']\n\n\n"
         "class Helper:\n    from typing import Optional\n\n\n"
         "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a lookup class's member picked by the run's grid name": (
+        "grid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\nclass RandomSampler:\n    pass\n\n\n"
+        "class Samplers:\n    _by_name = {{'grid': GridSampler, 'random': RandomSampler}}\n\n"
+        "    def __class_getitem__(cls, name):\n        return cls._by_name[name]\n\n\n"
+        "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a type picked from a relative typing module's registry by the run's grid name": (
+        "from .typing import SAMPLERS\n\ngrid = [1, {k}]\nSampler = SAMPLERS['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a renamed Literal alias spelling the run's grid": (
+        "from typing import Literal as L\n\ngrid = [1, {k}]\nMode = L['grid', 'random']\n\n\n"
+        "def task(a, mode: Mode = 'grid'):\n    return a\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
