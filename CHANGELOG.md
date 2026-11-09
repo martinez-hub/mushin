@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- towncrier release notes start -->
 
+## [0.18.2] - 2026-11-09
+
+### Fixed
+
+- A driver script's code record now counts the names its annotations read as text. A module-level name that only a string annotation named (`def task(x: "Config")`, `list["T"]`), or under `from __future__ import annotations` only a method's, a nested function's or a class body's annotation, was not compared. Editing it (`T = int` to `T = str`, or the import a type comes from) then reused the completed cells on `resume=True` or `cache_dir=`, though whatever reads the type hints (hydra-zen's `builds(..., populate_full_signature=True)`, a dataclass config's field types) sees the new value. A string inside `Literal[...]`, or in `Annotated[...]` after its type, is a value and still names nothing. A script whose counted code has such an annotation recomputes once after upgrading. On Python 3.14+, `@mushin.sweep` also no longer raises when the task's annotation names a class defined below it, as plain Python allows (#326). (#328)
+
+
 ## [0.18.1] - 2026-11-08
 
 ### Fixed
@@ -738,7 +745,8 @@ First release of `mushin` as a standalone package — a fork of the
   `nan`/`inf`) from the generated-string strategy.
 - Updated deprecated `xarray.Dataset.dims` to `.sizes` in tests.
 
-[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/martinez-hub/mushin/compare/v0.18.2...HEAD
+[0.18.2]: https://github.com/martinez-hub/mushin/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/martinez-hub/mushin/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/martinez-hub/mushin/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/martinez-hub/mushin/compare/v0.17.1...v0.17.2
