@@ -2541,6 +2541,24 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-name-redefined-after-import",
         ),
         pytest.param(
+            # A class of the form's name: its call's string comes back a reference.
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "class NewType:\n    def __new__(cls, t):\n        return typing.Optional[t]\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-redefined-as-a-class-after-import",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\n"
+            "typing.NewType = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-replaced-on-its-module",
+        ),
+        pytest.param(
+            "from typing import NewType, Optional\n\nT = {v}\n\n\n"
+            "def opt(name, tp):\n    return Optional[name]\n\n\nglobals()['NewType'] = opt\n\n\n"
+            "def task(x: NewType('T', int)):\n    return x\n",
+            id="form-name-set-in-globals",
+        ),
+        pytest.param(
             "from typing import NewType\nfrom mushin_t_helpers import NewType\n\nT = {v}\n\n\n"
             "def task(x: NewType('T')):\n    return x\n",
             id="form-name-reimported-from-elsewhere",

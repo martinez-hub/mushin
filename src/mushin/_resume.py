@@ -804,7 +804,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
-    form spelled through an alias of its name. And a subscript the record
+    form spelled through an alias of its name, or rebound at run time by
+    no statement the script holds (``setattr(typing, 'NewType', f)``,
+    ``exec``), which is read as the typing form. And a subscript the record
     cannot tell from a type (a class or import rebound in a scope it does
     not track, a lookup the class itself defines) may have its key read: a
     recompute too many, never a stale reuse. ``imports`` are those of what counts."""
@@ -1257,6 +1259,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
     # A star import from another module may bind any name, a typing
     # module's name included (#334 review).
     foreign_star = False
+    attribute_roots: set[str] = set()
     type_param_nodes = tuple(
         getattr(ast, kind)
         for kind in ("TypeVar", "ParamSpec", "TypeVarTuple")
@@ -1294,6 +1297,26 @@ def _script_digest(path: Path, roots: frozenset[str]):
             plain_names.add(sub.rest)
         elif type_param_nodes and isinstance(sub, type_param_nodes):
             plain_names.add(sub.name)  # `def f[NewType]()`
+        elif isinstance(sub, ast.Attribute) and not isinstance(sub.ctx, ast.Load):
+            # `typing.NewType = opt` replaces the form on its module.
+            root = sub.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name):
+                attribute_roots.add(root.id)
+        elif (
+            isinstance(sub, ast.Subscript)
+            and not isinstance(sub.ctx, ast.Load)
+            and isinstance(sub.value, ast.Call)
+            and spelled(sub.value.func) in ("globals", "vars")
+        ):
+            # `globals()['NewType'] = opt` binds the name too.
+            key = sub.slice
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                plain_names.add(key.value)
+            else:
+                plain_names.update(forms)
+    plain_names |= attribute_roots & form_roots
     if foreign_star:
         plain_names |= form_roots
 
