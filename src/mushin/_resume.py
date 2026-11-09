@@ -887,6 +887,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return [p for item in node.elts for p in spec_parts("field", item, opaque)]
         if kind == "field":
             if isinstance(node, (ast.Tuple, ast.List)) and node.elts:
+                if any(isinstance(e, ast.Starred) for e in node.elts):
+                    # An unpacked item moves the type out of its place:
+                    # read as a call's argument is (`(*['a', 'T'],)`).
+                    return [(node, not opaque, False)]
                 return [(e, j == 1, j == 1) for j, e in enumerate(node.elts)]
             if isinstance(node, ast.Constant):
                 return [(node, False, False)]  # make_dataclass's bare name
@@ -1272,6 +1276,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
             plain_names.add(sub.arg)
         elif isinstance(sub, ast.Name) and not isinstance(sub.ctx, ast.Load):
             plain_names.add(sub.id)
+        elif isinstance(sub, ast.excepthandler) and sub.name:
+            plain_names.add(sub.name)  # `except E as NewType`
+        elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            plain_names.add(sub.name)  # `case NewType:`
+        elif isinstance(sub, ast.MatchMapping) and sub.rest:
+            plain_names.add(sub.rest)
 
     def form_of(call) -> str | None:
         """The typing form ``call`` calls, or None (see ``form_names``)."""

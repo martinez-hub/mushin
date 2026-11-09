@@ -2539,6 +2539,25 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-on-a-shadowed-typing-name",
         ),
         pytest.param(
+            # A match capture rebinds `NewType`: a plain call, as main read it.
+            "from typing import NewType, Optional\n\nT = {v}\n\n\ndef opt(name):\n"
+            "    return Optional[name]\n\n\nmatch opt:\n    case NewType:\n        pass\n\n\n"
+            "def task(m: NewType('T')):\n    return m\n",
+            id="form-name-bound-by-a-match-capture",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "class Opt(Exception):\n    def __call__(self, t):\n"
+            "        return typing.Optional[t]\n\n\ntry:\n    raise Opt()\nexcept Opt as NewType:\n\n"
+            "    def task(m: NewType('T')):\n        return m\n",
+            id="form-name-bound-by-an-except-name",
+        ),
+        pytest.param(
+            "from typing import NamedTuple\n\nT = {v}\n\n\n"
+            "def task(x: NamedTuple('Row', [(*['a', 'T'],)])):\n    return x\n",
+            id="field-with-an-unpacked-item",
+        ),
+        pytest.param(
             "import dataclasses\n\nT = {v}\n\n\n"
             "def task(\n    x: dataclasses.make_dataclass(\n        'Row', [],\n"
             "        namespace={{'__annotations__': {{'x': 'T'}}}},\n    ),\n):\n"
