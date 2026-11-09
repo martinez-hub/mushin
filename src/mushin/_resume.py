@@ -804,7 +804,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
-    form spelled through an alias of its name. ``imports`` are those of what counts."""
+    form spelled through an alias of its name. And a subscript the record
+    cannot tell from a type (a class or import rebound in a scope it does
+    not track, a lookup the class itself defines) may have its key read: a
+    recompute too many, never a stale reuse. ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
@@ -954,7 +957,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     parts += spec_parts(kind, k.value, opaque)
                 elif k.arg == "bases":  # types, a generated base's fields too
                     parts.append((k.value, True, True))
-                else:  # its options (`namespace=`, `module=`)
+                elif k.arg == "namespace":
+                    # It can hold `__annotations__`: read as a call's argument
+                    # is, a reference in an annotation (as main read it).
+                    parts.append((k.value, not opaque, False))
+                else:  # its options (`module=`, `frozen=`)
                     parts.append((k.value, False, False))
         return parts
 
@@ -1278,6 +1285,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
             and func.attr in forms
             and isinstance(func.value, ast.Name)
             and func.value.id in form_roots
+            # A typing module's name the script also binds otherwise (a
+            # parameter `typing=Factory`) may be something else there.
+            and func.value.id not in plain_names
         ):
             return func.attr
         return None

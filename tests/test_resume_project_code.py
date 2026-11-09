@@ -2531,6 +2531,21 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="form-name-on-another-module",
         ),
         pytest.param(
+            # A parameter named like the typing module is something else.
+            "import typing\n\nT = {v}\n\n\nclass Factory:\n    @staticmethod\n"
+            "    def NewType(t):\n        return typing.Optional[t]\n\n\n"
+            "def task(typing=Factory):\n    def helper(x: typing.NewType('T')):\n"
+            "        return x\n\n    return helper\n",
+            id="form-on-a-shadowed-typing-name",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\n\n\n"
+            "def task(\n    x: dataclasses.make_dataclass(\n        'Row', [],\n"
+            "        namespace={{'__annotations__': {{'x': 'T'}}}},\n    ),\n):\n"
+            "    return x\n",
+            id="make-dataclass-namespace-annotations",
+        ),
+        pytest.param(
             "T = {v}\n\n\ndef make(t):\n    return t\n\n\n"
             "def task(x: make('T').Inner):\n    return x\n",
             id="string-under-a-dotted-base",
