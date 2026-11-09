@@ -912,13 +912,13 @@ def _script_digest(path: Path, roots: frozenset[str]):
         types, a ``TypeVar``'s constraints, ``bound=`` and ``default=``,
         ``ForwardRef``'s argument, ``NewType``'s supertype) are references.
         An unpacked argument (``*args``, ``**kw``) has no place the record
-        can know, so every string in such a call is a reference. A typing
-        form the script redefines by a ``def`` or ``class`` of its name is a
-        plain call."""
-        form = spelled(call.func)
+        can know, so every string in such a call is a reference. A callable
+        of a form's name that is not the typing form (``def NewType``, an
+        import from elsewhere) is a plain call (``form_of``)."""
+        form = form_of(call)
         args, keywords = call.args, call.keywords
         everything = [*args, *(k.value for k in keywords)]
-        if form not in forms or (isinstance(call.func, ast.Name) and form in shadowed):
+        if form is None:
             return [(a, not opaque, not opaque) for a in everything]
         if any(isinstance(a, ast.Starred) for a in args) or any(
             k.arg is None for k in keywords
@@ -1030,7 +1030,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     stack.append((parsed.body, True, True, typed, depth + 1))
                 continue
             if isinstance(node, ast.Call):
-                opaque = alias and spelled(node.func) not in forms
+                opaque = alias and form_of(node) is None
                 stack.append((node.func, text, refs, typed and not opaque, depth))
                 stack.extend(
                     (part, text, refs and is_ref, typed and is_type, depth)
@@ -1135,24 +1135,18 @@ def _script_digest(path: Path, roots: frozenset[str]):
     typing_modules = ("typing", "typing_extensions", "collections", "collections.abc")
     type_heads = {"list", "dict", "tuple", "set", "frozenset", "type"}
     type_modules: set[str] = set()
-    # The typing forms the script redefines by a `def` or `class` of their
-    # name: a call of that bare name is a plain call (`call_parts`).
-    shadowed: set[str] = set()
-    # By the scope that binds them: a function's own class or typing import
+    # By the scope that binds them: the module's, in its blocks too, not a
+    # function's or a class's own (a nested class, a class-level import), which
     # is no head for the module's names (#334 review).
     scan: list = [tree]
     while scan:
         sub = scan.pop()
-        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if sub.name in forms:
-                shadowed.add(sub.name)
-        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue  # its body's names are its own
-        scan.extend(
-            c
-            for c in ast.iter_child_nodes(sub)
-            if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
-        )
+        if not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scan.extend(
+                c
+                for c in ast.iter_child_nodes(sub)
+                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
         if isinstance(sub, ast.ClassDef):
             # A class a subscript specializes: generic by its type
             # parameters, a subscripted base (`Generic[V]`) or its own
@@ -1177,6 +1171,56 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 for alias in sub.names
                 if alias.name in typing_modules
             )
+
+    # A typing form by how the script binds its name, not by its spelling
+    # (#334 review): a bare name only when every binding of it in the script
+    # is an import of that form from a typing module (or `dataclasses`), a
+    # dotted one only on such an imported module (`typing.NewType`). Another
+    # callable of a form's name (`def NewType`, `NewType = opt`, an import
+    # from elsewhere) is a plain call.
+    form_modules = (*typing_modules, "dataclasses")
+    form_names: set[str] = set()
+    plain_names: set[str] = set()
+    form_roots: set[str] = set()
+    for sub in ast.walk(tree):
+        if isinstance(sub, ast.ImportFrom):
+            from_typing = sub.level == 0 and sub.module in form_modules
+            for alias in sub.names:
+                if alias.name == "*":
+                    (form_names if from_typing else plain_names).update(forms)
+                elif from_typing and alias.name in forms and not alias.asname:
+                    form_names.add(alias.name)
+                else:
+                    plain_names.add(alias.asname or alias.name)
+        elif isinstance(sub, ast.Import):
+            for alias in sub.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                if alias.name in form_modules:
+                    form_roots.add(bound)
+                else:
+                    plain_names.add(bound)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            plain_names.add(sub.name)
+        elif isinstance(sub, ast.arg):
+            plain_names.add(sub.arg)
+        elif isinstance(sub, ast.Name) and not isinstance(sub.ctx, ast.Load):
+            plain_names.add(sub.id)
+
+    def form_of(call) -> str | None:
+        """The typing form ``call`` calls, or None (see ``form_names``)."""
+        func = call.func
+        if isinstance(func, ast.Name):
+            name = func.id
+            known = name in form_names and name not in plain_names
+            return name if known and name in forms else None
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in forms
+            and isinstance(func.value, ast.Name)
+            and func.value.id in form_roots
+        ):
+            return func.attr
+        return None
 
     def type_subscript(node) -> bool:
         """Whether subscript ``node`` subscripts a type head (``list['T']``,
@@ -1215,7 +1259,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 if type_subscript(v):
                     out.append(v)
             elif isinstance(v, ast.Call):
-                if spelled(v.func) in forms:
+                if form_of(v) is not None:
                     out.append(v)
             elif isinstance(v, ast.BinOp):
                 # Each operand of a union, checked alone: a dict merged with

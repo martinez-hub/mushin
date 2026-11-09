@@ -2494,6 +2494,31 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="function-named-like-a-form",
         ),
         pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(t):\n    return typing.Optional[t]\n\n\n"
+            "NewType = opt\n\n\ndef task(x: NewType('T')):\n    return x\n",
+            id="form-name-bound-by-assignment",
+        ),
+        pytest.param(
+            "from typing import NamedTuple\n\nT = {v}\nRow = NamedTuple('Row', [('x', 'T')])\n\n\n"
+            "def task(a) -> Row:\n    return a\n",
+            id="form-imported-by-name",
+        ),
+        pytest.param(
+            "from mushin_t_helpers import NewType\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-imported-from-elsewhere",
+        ),
+        pytest.param(
+            "import mushin_t_helpers as helpers\n\nT = {v}\n\n\n"
+            "def task(x: helpers.NewType('T')):\n    return x\n",
+            id="form-name-on-another-module",
+        ),
+        pytest.param(
+            "T = {v}\n\n\ndef make(t):\n    return t\n\n\n"
+            "def task(x: make('T').Inner):\n    return x\n",
+            id="string-under-a-dotted-base",
+        ),
+        pytest.param(
             # What the item set stores is what `REG['a']` reads.
             "T = {v}\n\n\nclass task:\n    REG = {{}}\n    REG['a'] = list['T']\n"
             "    x: REG['a'] = None\n",
@@ -3278,6 +3303,45 @@ SCRIPT_NOT_EDITS = {
         "Alias = TYPES['grid']\n\n\ndef helper():\n    class TYPES(typing.Generic[V]):\n"
         "        pass\n\n    return TYPES\n\n\ndef task(x: Alias):\n    return x\n\n\n"
         "ds = run(a=grid)\n"
+    ),
+    "a type picked from an imported registry by the run's grid name": (
+        "from registry import SAMPLERS\n\ngrid = [1, {k}]\nSampler = SAMPLERS['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a type picked from a module's registry by the run's grid name": (
+        "import registry\n\ngrid = [1, {k}]\nSampler = registry.SAMPLERS['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an Enum member picked through __members__ by the run's grid name": (
+        "import enum\n\ngrid = [1, {k}]\n\n\nclass Samplers(enum.Enum):\n"
+        "    grid = int\n    random = float\n\n\n"
+        "Sampler = Samplers.__members__['grid'].value\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a task's local type alias named like one its annotation names": (
+        "import typing\n\ngrid = [1, {k}]\nUnit = int\n\n\n"
+        "def task(a: Unit):\n    Unit = typing.Optional['grid']\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a list concatenated with + spelling the run's grid": (
+        "BASE = ['lr']\nDEFAULTS = BASE + ['grid']\ngrid = [1, {k}]\n\n\n"
+        "def make(d):\n    return int\n\n\ndef task(a: make(DEFAULTS)):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a conditional value whose branches spell the run's grid": (
+        "FAST = True\nMODE = 'grid' if FAST else 'random'\ngrid = [1, {k}]\n\n\n"
+        "def make(m):\n    return int\n\n\ndef task(a: make(MODE)):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a class's nested generic class named like a registry spelling the run's grid": (
+        "import typing\n\nV = typing.TypeVar('V')\ngrid = [1, {k}]\nTYPES = {{'grid': int}}\n"
+        "Alias = TYPES['grid']\n\n\nclass Helper:\n    class TYPES(typing.Generic[V]):\n"
+        "        pass\n\n\ndef task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a class-level typing import named like a registry spelling the run's grid": (
+        "grid = [1, {k}]\nOptional = {{'grid': int}}\nAlias = Optional['grid']\n\n\n"
+        "class Helper:\n    from typing import Optional\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
