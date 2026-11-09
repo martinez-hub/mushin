@@ -2153,6 +2153,15 @@ _OWN_RESOLVES = pytest.mark.skipif(
             id="string-in-string",
         ),
         pytest.param(
+            "class Holder:\n    T = {v}\n\n\ndef task(x: 'Holder.T'):\n    return x\n",
+            id="string-dotted",
+        ),
+        pytest.param(
+            _FUTURE + "class Holder:\n    T = {v}\n\n\nclass task:\n"
+            "    def run(self, x: Holder.T):\n        return x\n",
+            id="future-dotted",
+        ),
+        pytest.param(
             "T = {v}\n\n\nclass task:\n    def __init__(self, x: 'T'):\n"
             "        self.x = x\n",
             id="string-method",
@@ -2255,6 +2264,12 @@ def test_a_name_an_annotation_reads_as_text_counts(tmp_path, text):
             marks=_OWN_RESOLVES,
         ),
         pytest.param(
+            "T = {v}\ntype Alias[T] = list['T']\n\n\ndef task(x: Alias[int]):\n"
+            "    return x\n",
+            id="type-statement-own-parameter",
+            marks=_OWN_RESOLVES,
+        ),
+        pytest.param(
             "T = {v}\n\n\ndef task(x: 'not python'):\n    return x\n",
             id="string-not-python",
         ),
@@ -2321,6 +2336,575 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
         w for w in caught if issubclass(w.category, (SyntaxWarning, DeprecationWarning))
     ]
     assert one != two
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "T = {v}\nAlias = list['T']\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-subscript",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nAlias = typing.Optional['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-optional",
+        ),
+        pytest.param(
+            # A class body binding `Optional` is that class's own name only.
+            "from typing import Optional\n\nT = {v}\nAlias = Optional['T']\n\n\n"
+            "class Other:\n    Optional = None\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-beside-a-class-rebinding-its-head",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nAlias = list['T']\n\n\n"
+            "def task(x: typing.Annotated[Alias, 'meta']):\n    return x\n",
+            id="alias-in-annotated",
+        ),
+        pytest.param(
+            "T = {v}\nAlias = list['T'] | None\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-union",
+        ),
+        pytest.param(
+            # A string beside `|` is a type: `List[int] | 'T'` is a Union.
+            "import typing\n\nT = {v}\nAlias = typing.List[int] | 'T'\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-union-string",
+        ),
+        pytest.param(
+            "T = {v}\n\n\nclass Box[V]:\n    pass\n\n\nAlias = Box['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-pep695-generic",
+            marks=_PEP695,
+        ),
+        pytest.param(
+            # A method's annotation reads its class body's alias against the
+            # module: the class's `T` is not the alias's (#334 review).
+            "T = {v}\n\n\nclass task[T]:\n    Alias = list['T']\n\n"
+            "    def run(self, x: Alias):\n        return x\n",
+            id="alias-of-a-generic-class-in-a-method",
+            marks=_PEP695,
+        ),
+        pytest.param(
+            "T = {v}\nFAST = True\nAlias = dict[str, list['T'] if FAST else int]\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-conditional-type-argument",
+        ),
+        pytest.param(
+            "import typing as t\n\nT = {v}\nAlias = t.Optional['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-of-a-renamed-typing-module",
+        ),
+        pytest.param(
+            "from collections.abc import Callable\n\nT = {v}\n"
+            "Alias = Callable[['T'], int]\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-of-collections-abc",
+        ),
+        pytest.param(
+            "import typing_extensions\n\nT = {v}\n"
+            "Alias = typing_extensions.Optional['T']\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-of-typing-extensions",
+        ),
+        pytest.param(
+            "T = {v}\ntype Alias = 'list[T]'\n\n\ndef task(x: Alias):\n    return x\n",
+            id="type-statement-string",
+            marks=_PEP695,
+        ),
+        pytest.param(
+            "from typing import TypeAlias\n\nT = {v}\nAlias: TypeAlias = 'T'\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="type-alias-declared",
+        ),
+        pytest.param(
+            # Declared an alias: counted though only code reaches it.
+            "from typing import TypeAlias\n\nT = {v}\nAlias: TypeAlias = 'list[T]'\n\n\n"
+            "def task(x):\n    return Alias\n",
+            id="type-alias-declared-read-by-code",
+        ),
+        pytest.param(
+            # Not declared `TypeAlias` (a string here): followed by its name.
+            "T = {v}\nAlias: 'TypeAlias' = list['T']\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-annotated-not-declared",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\nclass task:\n"
+            "    Alias: typing.ClassVar = list['T']\n    x: Alias = None\n",
+            id="alias-annotated-class-var",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nB = typing.Optional['T']\nA = list[B]\n\n\n"
+            "def task(x: A):\n    return x\n",
+            id="alias-chain",
+        ),
+        pytest.param(
+            "T = {v}\ntry:\n    Alias = list['T']\nexcept TypeError:\n"
+            "    Alias = list\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-in-block",
+        ),
+        pytest.param(
+            _FUTURE + "T = {v}\nAlias = list['T']\n\n\ndef task(x: Alias):\n"
+            "    return x\n",
+            id="alias-future",
+        ),
+        pytest.param(
+            "T = {v}\nAlias = list['T']\n\n\nclass task:\n    x: Alias = None\n",
+            id="alias-class-field",
+        ),
+        pytest.param(
+            "T = {v}\nAlias = list['T']\n\n\nclass task:\n"
+            "    def run(self, x: Alias):\n        return x\n",
+            id="alias-method",
+        ),
+        pytest.param(
+            # `get_type_hints(task)` reads the class's own namespace first.
+            "T = {v}\n\n\nclass task:\n    Alias = list['T']\n    x: Alias = None\n",
+            id="alias-in-class-body",
+        ),
+        pytest.param(
+            # `Inner` is named only once `Alias`'s value is read.
+            "import typing\n\nT = {v}\n\n\nclass task:\n"
+            "    Inner = typing.Optional['T']\n    Alias = list[Inner]\n"
+            "    x: Alias = None\n",
+            id="alias-chain-in-class-body",
+        ),
+        pytest.param(
+            # `Inner` is named, as a string, by an alias stated above it.
+            "T = {v}\n\n\nclass task:\n"
+            "    Alias = list['Inner']\n    Inner = list['T']\n    x: Alias = None\n",
+            id="alias-forward-chain-in-class-body",
+        ),
+        pytest.param(
+            "T = {v}\nAlias, Other = list['T'], int\n\n\ndef task(x: Alias):\n"
+            "    return x\n",
+            id="alias-tuple-target",
+        ),
+        pytest.param(
+            # The call's result carries the alias's `'T'` to the reader.
+            "import typing\n\nT = {v}\nAlias = list['T']\n\n\ndef opt(t):\n"
+            "    return typing.Optional[t]\n\n\ndef task(x: opt(Alias)):\n    return x\n",
+            id="alias-through-a-call",
+        ),
+        pytest.param(
+            # `Optional['T']` comes back: main counted it (#329 review).
+            "import typing\n\nT = {v}\n\n\ndef opt(t):\n"
+            "    return typing.Optional[t]\n\n\ndef task(x: opt('T')):\n    return x\n",
+            id="string-given-to-a-call",
+        ),
+        pytest.param(
+            # The script's own `NewType` is a plain call: main read its string.
+            "import typing\n\nT = {v}\n\n\ndef NewType(t):\n    return typing.Optional[t]\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="function-named-like-a-form",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(t):\n    return typing.Optional[t]\n\n\n"
+            "NewType = opt\n\n\ndef task(x: NewType('T')):\n    return x\n",
+            id="form-name-bound-by-assignment",
+        ),
+        pytest.param(
+            # Imported from typing, then rebound: no longer the typing form.
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "def opt(t):\n    return typing.Optional[t]\n\n\nNewType = opt\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-rebound-after-import",
+        ),
+        pytest.param(
+            "from typing import NamedTuple\n\nT = {v}\nRow = NamedTuple('Row', [('x', 'T')])\n\n\n"
+            "def task(a) -> Row:\n    return a\n",
+            id="form-imported-by-name",
+        ),
+        pytest.param(
+            "from mushin_t_helpers import NewType\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-imported-from-elsewhere",
+        ),
+        pytest.param(
+            "from mushin_t_helpers import *\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-star-imported-from-elsewhere",
+        ),
+        pytest.param(
+            "from typing import NewType\nfrom mushin_t_helpers import *\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-star-imported-over-typing",
+        ),
+        pytest.param(
+            # The star import may rebind `typing` itself.
+            "import typing\nfrom mushin_t_helpers import *\n\nT = {v}\n\n\n"
+            "def task(x: typing.NewType('T')):\n    return x\n",
+            id="form-root-star-imported-over-typing",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "def NewType(t):\n    return typing.Optional[t]\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-redefined-after-import",
+        ),
+        pytest.param(
+            # A class of the form's name: its call's string comes back a reference.
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "class NewType:\n    def __new__(cls, t):\n        return typing.Optional[t]\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-redefined-as-a-class-after-import",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\n"
+            "typing.NewType = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-replaced-on-its-module",
+        ),
+        pytest.param(
+            "from typing import NewType, Optional\n\nT = {v}\n\n\n"
+            "def opt(name, tp):\n    return Optional[name]\n\n\nglobals()['NewType'] = opt\n\n\n"
+            "def task(x: NewType('T', int)):\n    return x\n",
+            id="form-name-set-in-globals",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\ntyping.NewType = opt\nfrom typing import NewType  # noqa: E402\n\n\ndef task(x: NewType('T', int)):\n    return x\n",
+            id="form-imported-after-its-module-is-patched",
+        ),
+        pytest.param(
+            "import typing\nimport typing as t\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\nt.NewType = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-on-a-module-patched-through-another-name",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\nvars(typing)['NewType'] = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-set-in-its-modules-vars",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\ntyping.__dict__['NewType'] = opt\n\n\ndef task(x: typing.NewType('T', int)):\n    return x\n",
+            id="form-set-in-its-modules-dict",
+        ),
+        pytest.param(
+            "from typing import NewType, Optional\n\nT = {v}\n\n\ndef opt(name, tp):\n    return Optional[name]\n\n\nlocals()['NewType'] = opt\n\n\ndef task(x: NewType('T', int)):\n    return x\n",
+            id="form-name-set-in-locals",
+        ),
+        pytest.param(
+            "from typing import NewType, Optional\n\nT = {v}\n\n\ndef opt(name, tp):\n    return Optional[name]\n\n\nKEY = 'NewType'\nglobals()[KEY] = opt\n\n\ndef task(x: NewType('T', int)):\n    return x\n",
+            id="form-name-set-in-globals-by-a-computed-key",
+        ),
+        pytest.param(
+            "from typing import NewType\nfrom mushin_t_helpers import NewType\n\nT = {v}\n\n\n"
+            "def task(x: NewType('T')):\n    return x\n",
+            id="form-name-reimported-from-elsewhere",
+        ),
+        pytest.param(
+            "import typing\nimport mushin_t_helpers as typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.NewType('T')):\n    return x\n",
+            id="form-root-reimported-from-elsewhere",
+        ),
+        pytest.param(
+            "import mushin_t_helpers as helpers\n\nT = {v}\n\n\n"
+            "def task(x: helpers.NewType('T')):\n    return x\n",
+            id="form-name-on-another-module",
+        ),
+        pytest.param(
+            # A parameter named like the typing module is something else.
+            "import typing\n\nT = {v}\n\n\nclass Factory:\n    @staticmethod\n"
+            "    def NewType(t):\n        return typing.Optional[t]\n\n\n"
+            "def task(typing=Factory):\n    def helper(x: typing.NewType('T')):\n"
+            "        return x\n\n    return helper\n",
+            id="form-on-a-shadowed-typing-name",
+        ),
+        pytest.param(
+            # A match capture rebinds `NewType`: a plain call, as main read it.
+            "from typing import NewType, Optional\n\nT = {v}\n\n\ndef opt(name):\n"
+            "    return Optional[name]\n\n\nmatch opt:\n    case NewType:\n        pass\n\n\n"
+            "def task(m: NewType('T')):\n    return m\n",
+            id="form-name-bound-by-a-match-capture",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\n"
+            "class Opt(Exception):\n    def __call__(self, t):\n"
+            "        return typing.Optional[t]\n\n\ntry:\n    raise Opt()\nexcept Opt as NewType:\n\n"
+            "    def task(m: NewType('T')):\n        return m\n",
+            id="form-name-bound-by-an-except-name",
+        ),
+        pytest.param(
+            "from typing import NamedTuple\n\nT = {v}\n\n\n"
+            "def task(x: NamedTuple('Row', [(*['a', 'T'],)])):\n    return x\n",
+            id="field-with-an-unpacked-item",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\n\n\n"
+            "def task(\n    x: dataclasses.make_dataclass(\n        'Row', [],\n"
+            "        namespace={{'__annotations__': {{'x': 'T'}}}},\n    ),\n):\n"
+            "    return x\n",
+            id="make-dataclass-namespace-annotations",
+        ),
+        pytest.param(
+            "T = {v}\n\n\ndef make(t):\n    return t\n\n\n"
+            "def task(x: make('T').Inner):\n    return x\n",
+            id="string-under-a-dotted-base",
+        ),
+        pytest.param(
+            # What the item set stores is what `REG['a']` reads.
+            "T = {v}\n\n\nclass task:\n    REG = {{}}\n    REG['a'] = list['T']\n"
+            "    x: REG['a'] = None\n",
+            id="alias-an-item-set-stores",
+        ),
+        pytest.param(
+            "import typing\n\nV = typing.TypeVar('V')\nT = {v}\n\n\n"
+            "class Box(typing.Generic[V]):\n    pass\n\n\nAlias = Box['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-user-generic",
+        ),
+        pytest.param(
+            "T = {v}\nAlias = list['T']\ncfg: Alias = []\n\n\ndef task():\n"
+            "    return cfg\n",
+            id="alias-module-annotation",
+        ),
+        pytest.param(
+            "T = {v}\ntype Alias = list['T']\n\n\ndef task(x: Alias):\n    return x\n",
+            id="type-statement",
+            marks=_PEP695,
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nRow = typing.NamedTuple('Row', [('x', 'T')])\n\n\n"
+            "def task(a) -> Row:\n    return a\n",
+            id="named-tuple",
+        ),
+        pytest.param(
+            # Keyword fields: deprecated in 3.13, still read where they run.
+            "import typing\n\nT = {v}\nRow = typing.NamedTuple('Row', x='T')\n\n\n"
+            "def task(a) -> Row:\n    return a\n",
+            id="named-tuple-keyword-field",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nRow = typing.NamedTuple('Row', [['x', 'T']])\n\n\n"
+            "def task(a) -> Row:\n    return a\n",
+            id="named-tuple-list-field",
+        ),
+        pytest.param(
+            # The name is read in the string; what it holds is not followed.
+            "import typing\n\nFIELDS = [('x', {v})]\n\n\n"
+            "def task(a: \"typing.NamedTuple('R', FIELDS)\"):\n    return a\n",
+            id="spec-name-in-a-string-annotation",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\n"
+            "Cfg = dataclasses.make_dataclass('Cfg', fields=[('x', 'T')])\n\n\n"
+            "def task(a: Cfg):\n    return a\n",
+            id="make-dataclass-fields-keyword",
+        ),
+        pytest.param(
+            # A generated base's field types are read through `bases=`.
+            "import dataclasses\n\nT = {v}\n\n\n"
+            "def task(\n    x: dataclasses.make_dataclass(\n        'Child', [],\n"
+            "        bases=(dataclasses.make_dataclass('Base', [('x', 'T')]),),\n    ),\n):\n"
+            "    return x\n",
+            id="make-dataclass-generated-base",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.ForwardRef(arg='T')):\n    return x\n",
+            id="forward-ref-keyword",
+        ),
+        pytest.param(
+            # An unpacked argument has no place to read it by.
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.ForwardRef(**{{'arg': 'T'}})):\n    return x\n",
+            id="forward-ref-unpacked",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nREF = typing.ForwardRef(arg='T')\n\n\n"
+            "def task(a: REF):\n    return a\n",
+            id="alias-forward-ref-keyword",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nNT = typing.NewType(*('N', 'T'))\n\n\n"
+            "def task(x: NT):\n    return x\n",
+            id="alias-new-type-unpacked",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nTD = typing.TypedDict('TD', {{**{{'a': 'T'}}}})\n\n\n"
+            "def task(x: TD):\n    return x\n",
+            id="alias-typed-dict-spread",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\nCfg = dataclasses.make_dataclass(\n"
+            "    'Cfg', [], bases=(dataclasses.make_dataclass('Base', [('x', 'T')]),)\n)\n\n\n"
+            "def task(a: Cfg):\n    return a\n",
+            id="alias-make-dataclass-generated-base",
+        ),
+        pytest.param(
+            # A spec computed in an annotation: its strings are read, as main
+            # read every string in an annotation (#334 review).
+            "import typing\n\nEXTRA = []\nT = {v}\n\n\n"
+            "def task(x: typing.NamedTuple('Row', [('a', 'T')] + EXTRA)):\n    return x\n",
+            id="computed-spec-in-an-annotation",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.TypedDict('TD', dict(a='T'))):\n    return x\n",
+            id="computed-dict-spec-in-an-annotation",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.TypedDict('TD', {{**{{'a': 'T'}}}})):\n    return x\n",
+            id="spread-dict-spec-in-an-annotation",
+        ),
+        pytest.param(
+            "import sys\n\nT = {v}\nAlias = list['T'] if sys.argv else dict\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-conditional",
+        ),
+        pytest.param(
+            "T = {v}\nif True:\n\n    class Holder:\n        Alias = list['T']\n"
+            "        x: Alias = None\n\n\ndef task():\n    return Holder\n",
+            id="alias-in-a-class-in-a-block",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\n"
+            "def task(x: typing.NewType(*('N', 'T'))):\n    return x\n",
+            id="new-type-unpacked",
+        ),
+        pytest.param(
+            # The edit is to the function a string annotation calls.
+            "import typing\n\n\ndef make(t):\n    return typing.Optional[{v}]\n\n\n"
+            "def task(x: 'make(int)'):\n    return x\n",
+            id="call-in-a-string-annotation",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nRow = typing.TypedDict('Row', {{'x': 'T'}})\n\n\n"
+            "def task(a: Row):\n    return a\n",
+            id="typed-dict",
+        ),
+        pytest.param(
+            "import dataclasses\n\nT = {v}\n"
+            "Cfg = dataclasses.make_dataclass('Cfg', [('x', 'T')])\n\n\n"
+            "def task(a: Cfg):\n    return a\n",
+            id="make-dataclass",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nV = typing.TypeVar('V', bound='T')\n\n\n"
+            "def task(x: V):\n    return x\n",
+            id="type-var-bound",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nV = typing.TypeVar('V', 'T', bytes)\n\n\n"
+            "def task(x: V):\n    return x\n",
+            id="type-var-constraint",
+        ),
+        pytest.param(
+            # `default=` runs from 3.13; the record only parses the script.
+            "import typing\n\nT = {v}\nV = typing.TypeVar('V', default='T')\n\n\n"
+            "def task(x: V):\n    return x\n",
+            id="type-var-default",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nREF = typing.ForwardRef('T')\n\n\n"
+            "def task(a: REF):\n    return a\n",
+            id="forward-ref",
+        ),
+        pytest.param(
+            # pydantic resolves a supertype given as a string.
+            "import typing\n\nT = {v}\nNT = typing.NewType('NT', 'T')\n\n\n"
+            "def task(x: NT):\n    return x\n",
+            id="new-type-supertype",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\nNT = typing.NewType('NT', tp='T')\n\n\n"
+            "def task(x: NT):\n    return x\n",
+            id="new-type-supertype-keyword",
+        ),
+    ],
+)
+def test_a_string_a_type_hint_reader_resolves_counts(tmp_path, text):
+    """A string outside an annotation is a reference where a hint reader
+    resolves it against the module (`typing.get_type_hints`, pydantic): in a
+    type alias an annotation names, transitively, a declared `TypeAlias`, the
+    field types of a functional `NamedTuple`, `TypedDict` or `make_dataclass`,
+    a `TypeVar`'s bound and constraints, `ForwardRef`'s argument, a
+    `NewType`'s supertype (#329); and, in an annotation, one given to a call
+    whose result carries it (`opt('T')`)."""
+    one = _digest_of_script(tmp_path, "tr1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "tr2", text.format(v="str"), {"task"})
+    assert one != two
+
+
+def test_a_string_nested_past_the_parsers_depth_names_nothing(tmp_path):
+    """A string nested past the parser's depth guard (MemoryError, 3.11 to
+    3.15) names nothing, in a declared alias's value as in an annotation:
+    the record is taken, not failed (#334 review)."""
+    deep = "-" * 7000 + "1"
+    text = (
+        "from typing import TypeAlias\n\nT = {v}\nAlias = list['T']\n"
+        f"Deep: TypeAlias = '{deep}'\n\n\ndef task(x: Alias, y: Deep):\n    return x\n"
+    )
+    one = _digest_of_script(tmp_path, "deep1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "deep2", text.format(v="str"), {"task"})
+    assert one != two
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\ndef opt(name, tp):\n    return typing.Optional[name]\n\n\nNewType = opt\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-assignment",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\ndef NewType(name, tp):\n    return typing.Optional[name]\n\n\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-def",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\n\n\nclass NewType:\n    def __init__(self, name, tp):\n        self.name = name\n\n\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-class",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\nfrom mushin_t_helpers import NewType\n\nT = {v}\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-another-import",
+        ),
+        pytest.param(
+            "import typing\nimport mushin_t_helpers as typing\n\nT = {v}\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="module-rebound-by-another-import",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\n\n\ndef helper(typing=None):\n    return typing\n\n\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="module-shadowed-by-a-parameter",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\ntry:\n    pass\nexcept Exception as NewType:\n    pass\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-an-except-name",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\nmatch 1:\n    case NewType:\n        pass\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="rebound-by-a-match-capture",
+        ),
+        pytest.param(
+            "import typing\nfrom mushin_t_helpers import *\n\nT = {v}\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="star-imported-from-elsewhere",
+        ),
+        pytest.param(
+            "import typing\nfrom mushin_t_helpers import *\n\nT = {v}\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="module-under-a-star-import",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\nglobals()['X'] = 1\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="after-a-globals-store",
+        ),
+        pytest.param(
+            "import typing\n\nT = {v}\ntyping.X = 1\nAlias = typing.NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="after-a-store-into-typing",
+        ),
+        pytest.param(
+            "import typing\nfrom typing import NewType\n\nT = {v}\ntyping.X = 1\nAlias = NewType('N', 'T')\n\n\ndef task(x: Alias):\n    return x\n",
+            id="bare-after-a-store-into-typing",
+        ),
+    ],
+)
+def test_a_plain_call_named_like_a_typing_form_in_an_alias_reads_nothing(
+    tmp_path, text
+):
+    """In an alias's value, a call of a typing form's name that the script
+    binds otherwise (a def, an assignment, another import, a parameter, an
+    except or match name, a star import, a store into a namespace) is a
+    plain call, a value: its strings are not read, though the typing form
+    would read `NewType`'s supertype (#334 review). In an annotation every
+    string is read as main reads it, so this is the alias path only."""
+    one = _digest_of_script(tmp_path, "pc1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "pc2", text.format(v="str"), {"task"})
+    assert one == two
 
 
 def test_a_second_sweep_in_the_script_is_not_the_firsts_code(tmp_path):
@@ -2673,6 +3257,456 @@ SCRIPT_NOT_EDITS = {
     "an Annotated note spelling the run's grid": (
         "import typing\n\ngrid = [1, {k}]\n\n\n"
         "def task(a: typing.Annotated[int, 'grid']):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    # Where no hint reader resolves a string, it is a value, though it spells
+    # the run's grid (#329, #323).
+    "a subscript spelling the run's grid": (
+        "cfg = {{'grid': 2}}\ngrid = [1, {k}]\nscale = cfg['grid']\n\n\n"
+        "def task(a):\n    return a * scale\n\n\nds = run(a=grid)\n"
+    ),
+    "a subscript in the task spelling the run's grid": (
+        "cfg = {{'grid': 2}}\ngrid = [1, {k}]\n\n\n"
+        "def task(a):\n    return a * cfg['grid']\n\n\nds = run(a=grid)\n"
+    ),
+    "a NewType alias spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nGrid = typing.NewType('grid', int)\n\n\n"
+        "def task(a: Grid):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a Literal alias spelling the run's grid": (
+        "from typing import Literal\n\ngrid = [1, {k}]\nMode = Literal['grid', 'random']\n\n\n"
+        "def task(a, mode: Mode = 'grid'):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an Annotated note naming a value that spells the run's grid": (
+        "from typing import Annotated\n\ngrid = [1, {k}]\nMETA = {{'kind': 'grid'}}\n\n\n"
+        "def task(a: Annotated[int, META]):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NamedTuple's names spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n"
+        "Row = typing.NamedTuple('grid', [('grid', int)])\n\n\n"
+        "def task(a: Row):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypedDict's keys spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nRow = typing.TypedDict('grid', {{'grid': int}})\n\n\n"
+        "def task(a: Row):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a make_dataclass's names spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n"
+        "Cfg = dataclasses.make_dataclass(\n"
+        "    'grid', ['grid', ('lr', float)], namespace={{'kind': 'grid'}}\n)\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypeVar's name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nV = typing.TypeVar('grid')\n\n\n"
+        "def task(a: V):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypeVar's name given by keyword spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nV = typing.TypeVar(name='grid')\n\n\n"
+        "def task(a: V):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ParamSpec's name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nP = typing.ParamSpec('grid')\n\n\n"
+        "def task(f: typing.Callable[P, int]):\n    return f\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypeVarTuple's name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nTs = typing.TypeVarTuple('grid')\n\n\n"
+        "def task(*a: typing.Unpack[Ts]):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NewType's name given by keyword spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nGrid = typing.NewType(name='grid', tp=int)\n\n\n"
+        "def task(a: Grid):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef's module spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nREF = typing.ForwardRef('int', module='grid')\n\n\n"
+        "def task(a: REF):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef in an Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a: typing.Annotated[int, typing.ForwardRef('grid')]):\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef in a return's Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a) -> typing.Annotated[int, typing.ForwardRef('grid')]:\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a field spec in an Annotated note whose type spells the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nFIELDS = [('x', 'grid')]\n\n\n"
+        "def task(a: typing.Annotated[int, typing.NamedTuple('R', FIELDS)]):\n"
+        "    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef in an alias's Annotated note spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n"
+        "Meta = typing.Annotated[int, typing.ForwardRef('grid')]\n\n\n"
+        "def task(a: Meta):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a call in an Annotated note naming a value that spells the run's grid": (
+        "from typing import Annotated\n\ngrid = [1, {k}]\nDESC = 'grid'\n\n\n"
+        "def note(**kw):\n    return kw\n\n\n"
+        "def task(a: Annotated[int, note(description=DESC)]):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    # In a type alias's value, a call that is no typing form is a value
+    # (#334 review).
+    "a call in an alias spelling the run's grid": (
+        "grid = [1, {k}]\n\n\ndef kind(name, label=''):\n    return int\n\n\n"
+        "Alias = kind('grid', label='grid')\n\n\ndef task(a: Alias):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a call in an alias naming a value that spells the run's grid": (
+        "grid = [1, {k}]\nCFG = {{'mode': 'grid'}}\n\n\ndef build(cfg):\n    return int\n\n\n"
+        "Alias = build(CFG)\n\n\ndef task(x: Alias):\n    return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a builder from a registry in an alias spelling the run's grid": (
+        "grid = [1, {k}]\nBUILDERS = {{'grid': lambda: int}}\nmake = BUILDERS['grid']\n"
+        "Alias = make()\n\n\ndef task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a namedtuple's field names spelling the run's grid": (
+        "import collections\n\nlr = [1, {k}]\n"
+        "Result = collections.namedtuple('Result', ['lr', 'loss'])\n\n\n"
+        "def task(lr: float) -> Result:\n    return Result(lr, 0.0)\n\n\nds = run(lr=lr)\n"
+    ),
+    "a namedtuple's field string spelling the run's grid": (
+        "import collections\n\nlr = [1, {k}]\n"
+        "Result = collections.namedtuple('Result', 'lr, loss')\n\n\n"
+        "def task(lr: float) -> Result:\n    return Result(lr, 0.0)\n\n\nds = run(lr=lr)\n"
+    ),
+    "an Enum's members spelling the run's grid": (
+        "import enum\n\ngrid = [1, {k}]\nSearch = enum.Enum('Search', ['grid', 'random'])\n\n\n"
+        "def task(a, s: Search = Search.grid):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an annotated class field's default spelling the run's grid": (
+        "grid = [1, {k}]\n\n\nclass task:\n    mode: str = 'grid'\n    x: int = 1\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a dataclass field's default spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n\n\n@dataclasses.dataclass\nclass task:\n"
+        "    mode: str = 'grid'\n    x: int = 1\n\n\nds = run(a=grid)\n"
+    ),
+    "an annotated module name's default spelling the run's grid": (
+        "grid = [1, {k}]\nmode: str = 'grid'\n\n\ndef task(a):\n    return a, mode\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a make_dataclass field's default spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\nCfg = dataclasses.make_dataclass(\n"
+        "    'Cfg', [('mode', str, dataclasses.field(default='grid'))]\n)\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    # A function's own assignments are no aliases the record follows; nor is
+    # an index or an attribute set (#334 review).
+    "a task's local named like an alias its annotation names": (
+        "cfg = {{'grid': 2}}\ngrid = [1, {k}]\nUnit = int\n\n\n"
+        "def task(a: Unit):\n    Unit = cfg['grid']\n    return a * Unit\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a task's item set under a typed index spelling the run's grid": (
+        "lr = [1, {k}]\n\n\ndef task(lr: float, seed: int) -> dict:\n    results = {{}}\n"
+        "    results[int(seed)] = {{'lr': lr, 'loss': 0.0}}\n    return results\n\n\n"
+        "ds = run(lr=lr, seed=[0, 1])\n"
+    ),
+    "a class body's item set under a typed index spelling the run's grid": (
+        "lr = [1, {k}]\n\n\nclass task:\n    seed: int = 0\n    results = {{}}\n"
+        "    results[int(seed)] = {{'name': 'lr'}}\n\n\nds = run(lr=lr)\n"
+    ),
+    "an attribute set in a counted class body spelling the run's grid": (
+        "grid = [1, {k}]\n\n\nclass Config:\n    pass\n\n\nclass task:\n"
+        "    x: Config = None\n    Config.search = 'grid'\n\n\nds = run(a=grid)\n"
+    ),
+    "a dotted annotation's base picked by the run's grid name": (
+        "import types\n\ngrid = [1, {k}]\n"
+        "NAMESPACES = {{'grid': types.SimpleNamespace(Row=int)}}\nns = NAMESPACES['grid']\n\n\n"
+        "def task(x: ns.Row):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a dispatch alias whose key compares to the run's grid": (
+        "grid = [1, {k}]\nMODE = 'x'\nAlias = {{True: int, False: float}}[MODE == 'grid']\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    # Of a bound value, only a type expression is read (#334 review).
+    "a dispatch dict's keys spelling the run's grid": (
+        "import os\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "SAMPLERS = {{'grid': GridSampler, 'random': RandomSampler}}\n"
+        "Sampler = SAMPLERS[os.environ.get('SAMPLER', 'random')]\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an inline dispatch dict's keys spelling the run's grid": (
+        "grid = [1, {k}]\nMODE = 'random'\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "Sampler = {{'grid': GridSampler, 'random': RandomSampler}}[MODE]\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a dispatch dict subscripted in an annotation by a value spelling the run's grid": (
+        "grid = [1, {k}]\nMODE = 'grid'\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "SAMPLERS = {{'grid': GridSampler, 'random': RandomSampler}}\n\n\n"
+        "def task(a, s: SAMPLERS[MODE] = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an if-test in an annotation naming a value that spells the run's grid": (
+        "grid = [1, {k}]\nMODE = 'grid'\n\n\n"
+        "def task(a, s: int if MODE else float = 0):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NewType given unpacked arguments spelling the run's grid": (
+        "import typing\n\nARGS = ('grid', int)\ngrid = [1, {k}]\nNT = typing.NewType(*ARGS)\n\n\n"
+        "def task(x: NT):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a type picked from a registry by the run's grid name": (
+        "grid = [1, {k}]\nTYPES = {{'grid': int}}\nAlias = TYPES['grid']\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a class attribute named like a module alias a method's annotation names": (
+        "from __future__ import annotations\n\ngrid = [1, {k}]\nUnit = int\n\n\n"
+        "class task:\n    Unit = 'grid'\n\n    def run(self, x: Unit):\n        return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a conditional alias whose test indexes by the run's grid": (
+        "grid = [1, {k}]\nFLAGS = {{'grid': True}}\nSampler = int if FLAGS['grid'] else float\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a dispatch alias whose compare names a value spelling the run's grid": (
+        "grid = [1, {k}]\nSEARCH = 'grid'\nMODE = 'x'\n"
+        "Alias = {{True: int, False: float}}[MODE == SEARCH]\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a computed NamedTuple spec in an alias whose field name spells the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nEXTRA = []\n"
+        "Row = typing.NamedTuple('Row', [('grid', float)] + EXTRA)\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a conditional type argument whose test indexes by the run's grid": (
+        "grid = [1, {k}]\nFLAGS = {{'grid': True}}\n"
+        "Alias = dict[str, int if FLAGS['grid'] else float]\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a factory call in a type argument spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\ndef make_type(n):\n    return int\n\n\n"
+        "Alias = typing.Optional[make_type('grid')]\n\n\ndef task(a: Alias):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a registry lookup nested in a type alias spelling the run's grid": (
+        "grid = [1, {k}]\nTYPES = {{'grid': int}}\nAlias = list[TYPES['grid']]\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "an Enum member picked by the run's grid name": (
+        "import enum\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\nclass Samplers(enum.Enum):\n"
+        "    grid = GridSampler\n    random = RandomSampler\n\n\n"
+        "Sampler = Samplers['grid'].value\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a dict merged with | spelling the run's grid": (
+        "BASE = {{'lr': 0.1}}\nDEFAULTS = BASE | {{'search': 'grid'}}\ngrid = [1, {k}]\n\n\n"
+        "def make(d):\n    return int\n\n\ndef task(a: make(DEFAULTS)):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a conditional type argument whose test compares to the run's grid": (
+        "grid = [1, {k}]\nMODE = 'x'\nAlias = dict[str, int if MODE == 'grid' else float]\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a function's generic class named like a registry spelling the run's grid": (
+        "import typing\n\nV = typing.TypeVar('V')\ngrid = [1, {k}]\nTYPES = {{'grid': int}}\n"
+        "Alias = TYPES['grid']\n\n\ndef helper():\n    class TYPES(typing.Generic[V]):\n"
+        "        pass\n\n    return TYPES\n\n\ndef task(x: Alias):\n    return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a type picked from an imported registry by the run's grid name": (
+        "from registry import SAMPLERS\n\ngrid = [1, {k}]\nSampler = SAMPLERS['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a type picked from a module's registry by the run's grid name": (
+        "import registry\n\ngrid = [1, {k}]\nSampler = registry.SAMPLERS['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an Enum member picked through __members__ by the run's grid name": (
+        "import enum\n\ngrid = [1, {k}]\n\n\nclass Samplers(enum.Enum):\n"
+        "    grid = int\n    random = float\n\n\n"
+        "Sampler = Samplers.__members__['grid'].value\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a task's local type alias named like one its annotation names": (
+        "import typing\n\ngrid = [1, {k}]\nUnit = int\n\n\n"
+        "def task(a: Unit):\n    Unit = typing.Optional['grid']\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a list concatenated with + spelling the run's grid": (
+        "BASE = ['lr']\nDEFAULTS = BASE + ['grid']\ngrid = [1, {k}]\n\n\n"
+        "def make(d):\n    return int\n\n\ndef task(a: make(DEFAULTS)):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a conditional value whose branches spell the run's grid": (
+        "FAST = True\nMODE = 'grid' if FAST else 'random'\ngrid = [1, {k}]\n\n\n"
+        "def make(m):\n    return int\n\n\ndef task(a: make(MODE)):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a class's nested generic class named like a registry spelling the run's grid": (
+        "import typing\n\nV = typing.TypeVar('V')\ngrid = [1, {k}]\nTYPES = {{'grid': int}}\n"
+        "Alias = TYPES['grid']\n\n\nclass Helper:\n    class TYPES(typing.Generic[V]):\n"
+        "        pass\n\n\ndef task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a class-level typing import named like a registry spelling the run's grid": (
+        "grid = [1, {k}]\nOptional = {{'grid': int}}\nAlias = Optional['grid']\n\n\n"
+        "class Helper:\n    from typing import Optional\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a lookup class's member picked by the run's grid name": (
+        "grid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\nclass RandomSampler:\n    pass\n\n\n"
+        "class Samplers:\n    _by_name = {{'grid': GridSampler, 'random': RandomSampler}}\n\n"
+        "    def __class_getitem__(cls, name):\n        return cls._by_name[name]\n\n\n"
+        "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a type picked from a relative typing module's registry by the run's grid name": (
+        "from .typing import SAMPLERS\n\ngrid = [1, {k}]\nSampler = SAMPLERS['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a renamed Literal alias spelling the run's grid": (
+        "from typing import Literal as L\n\ngrid = [1, {k}]\nMode = L['grid', 'random']\n\n\n"
+        "def task(a, mode: Mode = 'grid'):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a generic singleton's lookup by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\n\n\n"
+        "class Registry(Generic[T]):\n    def __getitem__(self, k):\n        return object\n\n\n"
+        "Registry = Registry()\ngrid = [1, {k}]\nSampler = Registry['grid']\n\n\n"
+        "def task(x: Sampler):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a decorated generic singleton's lookup by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\n\n\n"
+        "def singleton(cls):\n    return cls()\n\n\n@singleton\n"
+        "class Registry(Generic[T]):\n    def __getitem__(self, k):\n        return object\n\n\n"
+        "grid = [1, {k}]\nSampler = Registry['grid']\n\n\n"
+        "def task(x: Sampler):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a rebound typing name's lookup by the run's grid name": (
+        "from typing import Optional\n\nOptional = {{'grid': int}}\ngrid = [1, {k}]\n"
+        "Alias = Optional['grid']\n\n\ndef task(x: Alias):\n    return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a rebound builtin's lookup by the run's grid name": (
+        "list = {{'grid': int}}\ngrid = [1, {k}]\nAlias = list['grid']\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a generic lookup class's member picked by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\ngrid = [1, {k}]\n\n\n"
+        "class GridSampler:\n    pass\n\n\nclass Samplers(Generic[T]):\n"
+        "    _by_name = {{'grid': GridSampler}}\n\n    def __class_getitem__(cls, name):\n"
+        "        return cls._by_name[name]\n\n\nSampler = Samplers['grid']\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a generic class's assigned lookup picked by the run's grid name": (
+        "grid = [1, {k}]\n\n\ndef _look(cls, name):\n    return int\n\n\n"
+        "class Samplers(dict[str, type]):\n    __class_getitem__ = classmethod(_look)\n\n\n"
+        "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a generic class's metaclass lookup picked by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\ngrid = [1, {k}]\n\n\n"
+        "class Meta(type):\n    def __getitem__(cls, name):\n        return int\n\n\n"
+        "class Samplers(Generic[T], metaclass=Meta):\n    pass\n\n\n"
+        "Sampler = Samplers['grid']\n\n\ndef task(a, s: Sampler = None):\n    return a\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a union built by a comprehension over keys spelling the run's grid": (
+        "from typing import Union\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "SAMPLERS = {{'grid': GridSampler, 'random': RandomSampler}}\n"
+        "AnySampler = Union[*(SAMPLERS[k] for k in ('grid', 'random'))]\n\n\n"
+        "def task(a, s: AnySampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a class body's singleton lookup by the run's grid name": (
+        "from typing import Generic, TypeVar\n\nT = TypeVar('T')\ngrid = [1, {k}]\n\n\n"
+        "class Registry(Generic[T]):\n    def __getitem__(self, k):\n        return int\n\n\n"
+        "class Samplers:\n    Registry = Registry()\n    Default = Registry['grid']\n\n"
+        "    def pick(self, s: Default = None):\n        return s\n\n\n"
+        "def task(a, s: Samplers = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a class body's rebound typing name's lookup by the run's grid name": (
+        "from typing import Optional\n\ngrid = [1, {k}]\n\n\nclass task:\n"
+        "    Optional = {{'grid': int}}\n    Alias = Optional['grid']\n    x: Alias = None\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a make_dataclass's module spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n"
+        "Cfg = dataclasses.make_dataclass('Cfg', [('lr', float)], module='grid')\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a rebound typing module's lookup by the run's grid name": (
+        "import typing\n\ngrid = [1, {k}]\n\n\nclass Registry:\n    TYPES = {{'grid': int}}\n\n\n"
+        "typing = Registry\nAlias = typing.TYPES['grid']\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a class body's rebound typing module's lookup by the run's grid name": (
+        "import typing\n\ngrid = [1, {k}]\n\n\nclass Registry:\n    TYPES = {{'grid': int}}\n\n\n"
+        "class task:\n    typing = Registry\n    Alias = typing.TYPES['grid']\n"
+        "    x: Alias = None\n\n\nds = run(a=grid)\n"
+    ),
+    "a conditional alias whose test spells the run's grid": (
+        "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "Sampler = GridSampler if sys.argv[-1] == 'grid' else RandomSampler\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a conditional alias whose test names a value that spells the run's grid": (
+        "grid = [1, {k}]\nMODE = 'grid'\nAlias = int if MODE else float\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a make_dataclass's names given by the fields keyword spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n"
+        "Cfg = dataclasses.make_dataclass('Cfg', fields=['grid', ('lr', float)])\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a ForwardRef's module given by place spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nREF = typing.ForwardRef('int', False, 'grid')\n\n\n"
+        "def task(a: REF):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an environment set under a two-part dotted annotation spelling the run's grid": (
+        "import os\n\ngrid = [1, {k}]\n\n\n"
+        "def task(out: os.PathLike):\n    os.environ['SEARCH'] = 'grid'\n    return out\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a task local named like a dotted annotation's inner name": (
+        "import os\n\ncfg = {{'grid': 2}}\ngrid = [1, {k}]\n\n\n"
+        "def task(a: os.path.PathLike):\n    path = cfg['grid']\n    return a, path\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a ForwardRef in a local annotation spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\n\n\n"
+        "def task(a):\n    y: typing.ForwardRef('grid') = a\n    return y\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    # A field spec given through a name keeps its shape: a field's name is
+    # not a type (#334 review).
+    "a NamedTuple's field names given through a name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nFIELDS = [('grid', float)]\n"
+        "Row = typing.NamedTuple('Row', FIELDS)\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NamedTuple's field names given starred spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nBASE = [('grid', float)]\n"
+        "Row = typing.NamedTuple('Row', [*BASE, ('lr', float)])\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypedDict's keys given through a name spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nSPEC = {{'grid': int}}\n"
+        "Row = typing.TypedDict('Row', SPEC)\n\n\n"
+        "def task(a: Row):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a TypedDict's keys given spread spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nBASE = {{'grid': int}}\n"
+        "Row = typing.TypedDict('Row', {{**BASE, 'lr': float}})\n\n\n"
+        "def task(a: Row):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a make_dataclass's names given through a name spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\nFIELDS = ['grid', ('lr', float)]\n"
+        "Cfg = dataclasses.make_dataclass('Cfg', FIELDS)\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NamedTuple's field names made by a comprehension spelling the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nNAMES = ['grid', 'lr']\n"
+        "Row = typing.NamedTuple('Row', [(n, float) for n in NAMES])\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a class attribute spelling the run's grid": (
+        "grid = [1, {k}]\n\n\nclass task:\n    label = 'grid'\n    x: int = 1\n\n\n"
         "ds = run(a=grid)\n"
     ),
     "a definition decorated by a function the task calls": (

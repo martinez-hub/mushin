@@ -778,7 +778,43 @@ def _script_digest(path: Path, roots: frozenset[str]):
     kept as text (a string, or any under ``from __future__ import
     annotations``) reads the names in it, since whatever reads type hints
     evaluates that text against the module; a function's local annotation,
-    never evaluated, reads none. ``imports`` are those of what counts."""
+    never evaluated, reads none. So does a string a hint reader resolves in
+    a type alias an annotation names (#329), where its value is written as a
+    type expression: ``Alias = list['T']``, ``typing.Optional['T']``, a
+    generic class ``Box['T']``, a typing form's call (a functional
+    ``NamedTuple``'s field types, a ``TypeVar``'s bound), a union, through
+    other aliases too, and a string only beside ``|``, in one declared
+    ``TypeAlias`` or in a ``type`` statement. A ``Literal`` value and
+    ``Annotated``'s notes are values, read as none. In an alias's value, so
+    is what a typing form takes as a value (``NewType('grid', int)``'s
+    name, a field's name) and anything that is no type expression (a dict,
+    a lookup ``SAMPLERS[MODE]``, a plain call ``namedtuple('Result',
+    ['lr'])``, a bare string ``MODE = 'grid'``); in an annotation every
+    other string is a reference, a call's included (``opt('T')``,
+    ``NewType('grid', int)``), as main read it. Not followed: an
+    alias or a typing form only code reaches (pydantic's
+    ``TypeAdapter(Alias)``, ``get_type_hints(Row)`` in the task's body), an
+    alias reached as an attribute (``Outer.Alias``), built by a call
+    (``Alias = opt('T')``, ``TypeAliasType(...)``), bound in a function's
+    body (a nested function's annotation can name one), written as a plain
+    string (``Alias = 'list[T]'`` without ``TypeAlias``), subscripting a
+    generic imported from another library, or stored in a container
+    (``D = {'a': list['T']}``), subscripting a class generic only through
+    its own ``__class_getitem__``, a decorated or rebound one, or a typing
+    name imported under another name or by a star import, a functional form
+    a counted class only
+    inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
+    though a ``class Base(TypedDict)`` statement counts), a form's field
+    spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
+    form spelled through an alias of its name, or rebound at run time by
+    no store the script holds (``setattr(typing, 'NewType', f)``, ``exec``),
+    which is read as the typing form; a store into a typing module or into
+    ``globals()`` makes every form a plain call. And a value nested in a
+    type that the record cannot tell from one (a subscript of a class or
+    import rebound in a scope it does not track, a lookup the class itself
+    defines, an inline dict's method call) may have its key read: a
+    recompute too many, never a stale reuse. ``imports`` are those of what
+    counts."""
     import ast
     import copy
     import symtable
@@ -827,75 +863,258 @@ def _script_digest(path: Path, roots: frozenset[str]):
         for n in tree.body
     )
 
-    def annotation_names(exprs, own: set[str]) -> set[str]:
-        """The names annotations ``exprs`` read when something evaluates
-        their text later, against the module's globals
-        (``typing.get_type_hints``, hydra-zen's ``builds``, a dataclass's
-        field types; #324): every name inside a string (``'T'``,
-        ``list['T']``), parsed as that evaluation parses it, and under future
-        annotations every name outside one too. Without future annotations a
-        name outside a string is evaluated where it stands, and the symbol
-        table counts it there, scope-aware. ``own`` are the type parameters
-        of the definition they belong to, which the text names instead
-        (``_OWN_TYPE_PARAMS_RESOLVE``).
+    def spelled(node) -> str | None:
+        """The name ``node`` is spelled with, bare or as an attribute
+        (``Literal``, ``typing.Literal``)."""
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return getattr(node, "id", None)
 
-        A string in ``Literal[...]``, or in ``Annotated[...]`` after its
-        type, is a value no reader resolves, so it names nothing: counting
-        `Literal['grid']` would make the run's `grid` the task's code, and
-        extending the grid an edit. A name there is still read
-        (``Literal[Color.RED]``). Spelled otherwise (an alias of
-        ``Literal``), its strings are read: a recompute too many at most."""
+    # The typing forms that take some strings as values (a name, a field's
+    # name, a key) and some as types (``call_parts``).
+    var_forms = ("TypeVar",)
+    field_forms = ("NamedTuple", "TypedDict", "make_dataclass")
+    forms = frozenset({"ForwardRef", "NewType", *var_forms, *field_forms})
+
+    def spec_parts(kind: str, node) -> list:
+        """The parts (as ``call_parts`` gives them) of field spec ``node`` of
+        ``kind``: ``fields`` (a functional ``NamedTuple``'s or
+        ``make_dataclass``'s list), ``field`` (one of its items: ``(name,
+        type)``, ``(name, type, field)``, a list of those, or
+        make_dataclass's bare name) or ``dict`` (a ``TypedDict``'s). A
+        field's type and a dict's values are references; a field's name, its
+        ``field(...)`` and a key are values. Only a spec written out where
+        the form is called has that shape. Any other expression there (a
+        name, ``*BASE``, ``**BASE``, a comprehension, a call) names no
+        alias, so what a name holds is not followed (#334 review: following
+        it as a spec failed three review rounds), and its strings are
+        values. A form is read by place only in an alias's value
+        (``call_parts``)."""
+        if kind == "fields" and isinstance(node, (ast.List, ast.Tuple)):
+            return [p for item in node.elts for p in spec_parts("field", item)]
+        if kind == "field":
+            if isinstance(node, (ast.Tuple, ast.List)) and node.elts:
+                if any(isinstance(e, ast.Starred) for e in node.elts):
+                    # An unpacked item moves the type out of its place.
+                    return [(node, False, False)]
+                return [(e, j == 1, j == 1) for j, e in enumerate(node.elts)]
+            if isinstance(node, ast.Constant):
+                return [(node, False, False)]  # make_dataclass's bare name
+        if kind == "dict" and isinstance(node, ast.Dict):
+            parts: list = []
+            for key, value in zip(node.keys, node.values, strict=True):
+                if key is None:  # `**BASE`
+                    parts += spec_parts("dict", value)
+                else:
+                    parts += [(key, False, False), (value, True, True)]
+            return parts
+        return [(node, False, False)]
+
+    def call_parts(call, opaque: bool) -> list:
+        """``(argument, whether its strings are references, whether its names
+        can name a type alias)`` for each argument of ``call``. In an
+        annotation every string a call is given is a reference, as main read
+        it: a call can return a forward reference a hint reader resolves
+        (``opt('T')`` returning ``Optional['T']``), and reading a typing
+        form's value positions there would make each call taken for a form
+        by mistake a missed edit (#334 review). In a type alias's value
+        (``opaque``), where main read nothing, a call that is no typing form
+        is a value, its names naming no alias (``Result =
+        namedtuple('Result', ['lr'])``, an ``Enum``'s members), and a typing
+        form's arguments are read by their place: the name ``NewType``, a
+        ``TypeVar`` or a functional ``NamedTuple``,
+        ``TypedDict`` or ``make_dataclass`` is given, a field's name, a
+        ``TypedDict`` key, and the options and flags of each are values
+        (#323, #329), and name nothing a type could either. Its types (field
+        types, a ``TypeVar``'s constraints, ``bound=`` and ``default=``,
+        ``ForwardRef``'s argument, ``NewType``'s supertype) are references.
+        An unpacked argument (``*args``, ``**kw``) has no place the record
+        can know, so every string in such a call is a reference. A callable
+        of a form's name that is not the typing form (``def NewType``, an
+        import from elsewhere) is a plain call (``form_of``)."""
+        form = form_of(call) if opaque else None
+        args, keywords = call.args, call.keywords
+        everything = [*args, *(k.value for k in keywords)]
+        if form is None:
+            return [(a, not opaque, not opaque) for a in everything]
+        if any(isinstance(a, ast.Starred) for a in args) or any(
+            k.arg is None for k in keywords
+        ):
+            return [(a, True, True) for a in everything]
+        parts: list = []
+        if form == "ForwardRef":
+            parts += [(a, i == 0, i == 0) for i, a in enumerate(args)]
+            parts += [(k.value, k.arg == "arg", k.arg == "arg") for k in keywords]
+        elif form == "NewType":
+            parts += [(a, i > 0, i > 0) for i, a in enumerate(args)]
+            parts += [(k.value, k.arg == "tp", k.arg == "tp") for k in keywords]
+        elif form in var_forms:
+            parts += [(a, i > 0, i > 0) for i, a in enumerate(args)]
+            parts += [
+                (k.value, k.arg in ("bound", "default"), k.arg in ("bound", "default"))
+                for k in keywords
+            ]
+        else:
+            kind = "dict" if form == "TypedDict" else "fields"
+            for i, a in enumerate(args):
+                if i == 1:
+                    parts += spec_parts(kind, a)
+                else:
+                    parts.append((a, False, False))  # the class's name
+            for k in keywords:
+                if form != "make_dataclass":
+                    # NamedTuple's and TypedDict's keyword fields.
+                    parts.append((k.value, True, True))
+                elif k.arg == "fields":
+                    parts += spec_parts(kind, k.value)
+                elif k.arg == "bases":  # types, a generated base's fields too
+                    parts.append((k.value, True, True))
+                else:  # its options (`namespace=`, `module=`)
+                    parts.append((k.value, False, False))
+        return parts
+
+    def annotation_names(
+        exprs,
+        own: set[str],
+        as_text: bool | None = None,
+        alias: bool = False,
+        shadow: frozenset = frozenset(),
+    ) -> tuple[set[str], set[str]]:
+        """``(read, named)`` for annotations ``exprs`` (each a node, or a
+        ``call_parts`` part), or with ``alias`` for a type alias's value,
+        where a call that is no typing form is opaque. ``read``: the names
+        they read when something evaluates their text later, against the
+        module's globals (``typing.get_type_hints``, hydra-zen's ``builds``,
+        a dataclass's field types; #324): every name inside a string
+        (``'T'``, ``list['T']``), parsed as that evaluation parses it, and
+        with ``as_text`` (by default: under future annotations) every name
+        outside one too. Without it a name outside a string is evaluated
+        where it stands, and the symbol table counts it there, scope-aware.
+        ``named``: every name they name, evaluated or as text, but in a
+        value or a dotted name (``os`` of ``os.PathLike``): the type aliases
+        whose own strings a hint reader resolves too (``alias_pairs``,
+        #329). ``own`` are the
+        type parameters of the definition they belong to, which the text
+        names instead (``_OWN_TYPE_PARAMS_RESOLVE``).
+
+        A string in ``Literal[...]``, in ``Annotated[...]`` after its type,
+        or where a typing form takes a value (``NewType('grid', int)``, see
+        ``call_parts``), is a value no reader resolves, so it names nothing:
+        counting `Literal['grid']` would make the run's `grid` the task's
+        code, and extending the grid an edit. A name there is still read
+        (``Literal[Color.RED]``), but names no alias in ``Literal`` or
+        ``Annotated``'s notes, which hold no type. Spelled otherwise (an
+        alias of ``Literal``), its strings are read: a recompute too many at
+        most."""
         found: set[str] = set()
+        named: set[str] = set()
+        start = future_annotations if as_text is None else as_text
         # (node, whether its bare names are read as text, whether its
-        # strings are references, strings parsed to reach it): a string can
-        # hold a string (`"list['T']"`).
-        stack = [(e, future_annotations, True, 0) for e in exprs if e is not None]
+        # strings are references, whether its names can name an alias,
+        # strings parsed to reach it): a string can hold a string
+        # (`"list['T']"`).
+        stack = []
+        for e in exprs:
+            node, is_ref, is_type = e if isinstance(e, tuple) else (e, True, True)
+            if node is not None:
+                stack.append((node, start, is_ref, is_type, 0))
         while stack:
-            node, as_text, refs, depth = stack.pop()
+            node, text, refs, typed, depth = stack.pop()
             if isinstance(node, ast.Name):
-                if as_text and isinstance(node.ctx, ast.Load):
-                    found.add(node.id)
+                if isinstance(node.ctx, ast.Load):
+                    if text:
+                        found.add(node.id)
+                    if typed:
+                        named.add(node.id)
                 continue
             if isinstance(node, ast.Constant):
                 if refs and isinstance(node.value, str) and depth < 8:
-                    text = node.value.strip()
+                    source = node.value.strip()
                     # `'*Ts'` (PEP 646) is read as `ForwardRef` reads it:
                     # `(*Ts,)`.
-                    source = f"({text},)" if text.startswith("*") else text
+                    if source.startswith("*"):
+                        source = f"({source},)"
                     try:
                         with warnings.catch_warnings():
                             # Only its names matter: an escape in a literal
                             # inside it (`'\d'`) would warn, from no file.
                             warnings.simplefilter("ignore")
                             parsed = ast.parse(source, mode="eval")
-                    except (SyntaxError, ValueError, RecursionError):
+                    except (
+                        SyntaxError,
+                        ValueError,
+                        RecursionError,
+                        MemoryError,  # the parser past its depth guard
+                        OverflowError,
+                    ):
                         continue  # not Python: it names nothing
-                    stack.append((parsed.body, True, True, depth + 1))
+                    stack.append((parsed.body, True, True, typed, depth + 1))
+                continue
+            if isinstance(node, ast.Call):
+                opaque = alias and form_of(node) is None
+                stack.append((node.func, text, refs, typed and not opaque, depth))
+                stack.extend(
+                    (part, text, refs and is_ref, typed and is_type, depth)
+                    for part, is_ref, is_type in call_parts(node, alias)
+                )
                 continue
             if isinstance(node, ast.Subscript):
                 head = node.value
-                if isinstance(head, ast.Attribute):
-                    spelled = head.attr
-                else:
-                    spelled = getattr(head, "id", None)
+                head_name = spelled(head)
                 types, values = [head], []
-                if spelled == "Literal":
+                if head_name == "Literal":
                     values = [node.slice]
                 elif (
-                    spelled == "Annotated"
+                    head_name == "Annotated"
                     and isinstance(node.slice, ast.Tuple)
                     and len(node.slice.elts) > 1
                 ):
                     types.append(node.slice.elts[0])
                     values = node.slice.elts[1:]
                 if values:
-                    stack.extend((t, as_text, refs, depth) for t in types)
-                    stack.extend((v, as_text, False, depth) for v in values)
+                    stack.extend((t, text, refs, typed, depth) for t in types)
+                    stack.extend((v, text, False, False, depth) for v in values)
                     continue
-            stack.extend((c, as_text, refs, depth) for c in ast.iter_child_nodes(node))
-        return found - own if _OWN_TYPE_PARAMS_RESOLVE else found
+                if alias and not type_subscript(node, shadow):
+                    # A lookup in a type alias's value is no type, at any
+                    # depth (`list[TYPES['grid']]`; #334 review).
+                    stack.extend(
+                        (c, text, False, False, depth)
+                        for c in ast.iter_child_nodes(node)
+                    )
+                    continue
+            if alias and isinstance(node, ast.comprehension):
+                # What a comprehension iterates over is no type
+                # (`Union[*(SAMPLERS[k] for k in ('grid', 'random'))]`).
+                stack.extend(
+                    (c, text, False, False, depth) for c in (node.iter, *node.ifs)
+                )
+                continue
+            if alias and isinstance(node, ast.IfExp):
+                # Its test holds no type (`A if MODE == 'grid' else B`).
+                stack.append((node.test, text, False, False, depth))
+                stack.extend(
+                    (c, text, refs, typed, depth) for c in (node.body, node.orelse)
+                )
+                continue
+            if alias and isinstance(node, ast.Compare):
+                stack.extend(
+                    (c, text, False, False, depth) for c in ast.iter_child_nodes(node)
+                )
+                continue
+            if isinstance(node, ast.Attribute):
+                # A dotted name names no alias: not `Outer.Alias` (not
+                # followed), nor `os` of `os.PathLike` (#334 review).
+                stack.append((node.value, text, refs, False, depth))
+                continue
+            stack.extend(
+                (c, text, refs, typed, depth) for c in ast.iter_child_nodes(node)
+            )
+        if _OWN_TYPE_PARAMS_RESOLVE:
+            return found - own, named - own
+        return found, named
 
-    def annotation_reads(node) -> set[str]:
+    def hint_reads(node) -> tuple[set[str], set[str]]:
         """``annotation_names`` of every annotation that statement ``node``
         keeps: each function's parameters and return, at any depth (a
         method, a nested function), and the annotated names of a class body
@@ -904,6 +1123,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         definition as its own only, as ``typing.get_type_hints`` does (3.12.5+):
         a generic class's `T` in a method's annotation is the module's `T`."""
         found: set[str] = set()
+        named: set[str] = set()
         # (node, whether it is in a function body, the type parameters of
         # the class whose body it is in)
         stack: list = [(node, False, set())]
@@ -912,10 +1132,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 a = n.args
                 params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-                found |= annotation_names(
+                more, more_named = annotation_names(
                     [p.annotation for p in params if p is not None] + [n.returns],
                     {p.name for p in getattr(n, "type_params", ())},
                 )
+                found |= more
+                named |= more_named
                 stack.extend((s, True, set()) for s in n.body)
                 continue
             if isinstance(n, ast.ClassDef):
@@ -923,10 +1145,324 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 stack.extend((s, False, body_own) for s in n.body)
                 continue
             if isinstance(n, ast.AnnAssign) and not in_function:
-                found |= annotation_names([n.annotation], own)
+                more, more_named = annotation_names([n.annotation], own)
+                found |= more
+                named |= more_named
             # Statements only: a definition cannot sit in an expression.
             stack.extend(
                 (c, in_function, own)
+                for c in ast.iter_child_nodes(n)
+                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
+        return found, named
+
+    # What a type expression can subscript or be dotted from: the builtin
+    # generics, what the script imports from the typing modules, the classes
+    # the generic classes it defines (`Box['T']`), and the typing modules it
+    # imports (`typing.Optional['T']`, `t.List['T']`).
+    typing_modules = ("typing", "typing_extensions", "collections", "collections.abc")
+    type_heads = {"list", "dict", "tuple", "set", "frozenset", "type"}
+    type_modules: set[str] = set()
+    # By the scope that binds them: the module's, in its blocks too, not a
+    # function's or a class's own (a nested class, a class-level import), which
+    # is no head for the module's names (#334 review).
+    # A head the module also binds another way (`Registry = Registry()`, a
+    # decorator that returns an instance, `list = {...}`) may be a lookup:
+    # the names so bound are no heads.
+    rebound: set[str] = set()
+    comps = (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    scan: list = [tree]
+    while scan:
+        sub = scan.pop()
+        if not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scan.extend(
+                c
+                for c in ast.iter_child_nodes(sub)
+                if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
+        if isinstance(sub, ast.ClassDef):
+            # A class a subscript specializes: generic by its type
+            # parameters or a subscripted base (`Generic[V]`); not an Enum,
+            # whose `Samplers['grid']` is a member, nor a class whose own
+            # `__class_getitem__`, or a metaclass's `__getitem__`, may be a
+            # lookup too (#334 review).
+            generic = getattr(sub, "type_params", ()) or any(
+                isinstance(b, ast.Subscript) for b in sub.bases
+            )
+            body_names: set[str] = set()
+            for s in sub.body:
+                if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body_names.add(s.name)
+                elif isinstance(s, ast.Assign):
+                    body_names.update(
+                        x.id for x in s.targets if isinstance(x, ast.Name)
+                    )
+                elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                    body_names.add(s.target.id)
+            own_getitem = "__class_getitem__" in body_names
+            if generic and not (sub.decorator_list or sub.keywords or own_getitem):
+                type_heads.add(sub.name)
+            else:
+                rebound.add(sub.name)
+        elif (
+            isinstance(sub, ast.ImportFrom)
+            and sub.level == 0
+            and sub.module in typing_modules
+        ):
+            # Under its own name only: `Literal as L` would make `L[...]` a
+            # type whose values are read (#334 review).
+            for alias in sub.names:
+                if alias.asname is None:
+                    type_heads.add(alias.name)
+                else:
+                    rebound.add(alias.asname)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            for alias in sub.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                if isinstance(sub, ast.Import) and alias.name in typing_modules:
+                    type_modules.add(bound)
+                elif alias.name != "*":
+                    rebound.add(bound)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            rebound.add(sub.name)
+        elif isinstance(sub, ast.excepthandler):
+            if sub.name:
+                rebound.add(sub.name)
+        else:
+            exprs = [
+                c
+                for c in ast.iter_child_nodes(sub)
+                if not isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            ]
+            while exprs:
+                e = exprs.pop()
+                if isinstance(e, comps):
+                    continue  # its names are its own
+                if isinstance(e, ast.Name) and not isinstance(e.ctx, ast.Load):
+                    rebound.add(e.id)
+                elif isinstance(e, (ast.MatchAs, ast.MatchStar)) and e.name:
+                    rebound.add(e.name)
+                elif isinstance(e, ast.MatchMapping) and e.rest:
+                    rebound.add(e.rest)
+                exprs.extend(ast.iter_child_nodes(e))
+    type_heads -= rebound
+    type_modules -= rebound  # `typing = Registry`
+
+    # A typing form by how the script binds its name, not by its spelling
+    # (#334 review): a bare name only when every binding of it in the script
+    # is an import of that form from a typing module (or `dataclasses`), a
+    # dotted one only on such an imported module (`typing.NewType`). Another
+    # callable of a form's name (`def NewType`, `NewType = opt`, an import
+    # from elsewhere) is a plain call.
+    form_modules = (*typing_modules, "dataclasses")
+    form_names: set[str] = set()
+    plain_names: set[str] = set()
+    form_roots: set[str] = set()
+    # A star import from another module may bind any name, a typing
+    # module's name included (#334 review).
+    foreign_star = False
+    store_roots: set[str] = set()
+    namespace_store = False
+    type_param_nodes = tuple(
+        getattr(ast, kind)
+        for kind in ("TypeVar", "ParamSpec", "TypeVarTuple")
+        if hasattr(ast, kind)
+    )
+    for sub in ast.walk(tree):
+        if isinstance(sub, ast.ImportFrom):
+            from_typing = sub.level == 0 and sub.module in form_modules
+            for alias in sub.names:
+                if alias.name == "*":
+                    (form_names if from_typing else plain_names).update(forms)
+                    foreign_star = foreign_star or not from_typing
+                elif from_typing and alias.name in forms and not alias.asname:
+                    form_names.add(alias.name)
+                else:
+                    plain_names.add(alias.asname or alias.name)
+        elif isinstance(sub, ast.Import):
+            for alias in sub.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                if alias.name in form_modules:
+                    form_roots.add(bound)
+                else:
+                    plain_names.add(bound)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            plain_names.add(sub.name)
+        elif isinstance(sub, ast.arg):
+            plain_names.add(sub.arg)
+        elif isinstance(sub, ast.Name) and not isinstance(sub.ctx, ast.Load):
+            plain_names.add(sub.id)
+        elif isinstance(sub, ast.excepthandler) and sub.name:
+            plain_names.add(sub.name)  # `except E as NewType`
+        elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            plain_names.add(sub.name)  # `case NewType:`
+        elif isinstance(sub, ast.MatchMapping) and sub.rest:
+            plain_names.add(sub.rest)
+        elif type_param_nodes and isinstance(sub, type_param_nodes):
+            plain_names.add(sub.name)  # `def f[NewType]()`
+        elif isinstance(sub, (ast.Attribute, ast.Subscript)) and not isinstance(
+            sub.ctx, ast.Load
+        ):
+            # A store into a namespace: onto a module's attribute or item
+            # (`typing.NewType = f`, `typing.__dict__[k] = f`), or into
+            # `globals()`, `locals()` or `vars(...)`.
+            root = sub.value
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name):
+                store_roots.add(root.id)
+            elif isinstance(root, ast.Call) and spelled(root.func) in (
+                "globals",
+                "locals",
+                "vars",
+            ):
+                namespace_store = True
+    # A store into a typing module, or into a namespace by key, may replace a
+    # form under any of its names: every form is then a plain call, read as
+    # main read it (#334 review).
+    if namespace_store or store_roots & form_roots:
+        plain_names |= form_roots | forms
+    if foreign_star:
+        plain_names |= form_roots
+
+    def form_of(call) -> str | None:
+        """The typing form ``call`` calls, or None (see ``form_names``)."""
+        func = call.func
+        if isinstance(func, ast.Name):
+            name = func.id
+            known = name in form_names and name not in plain_names
+            return name if known and name in forms else None
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in forms
+            and isinstance(func.value, ast.Name)
+            and func.value.id in form_roots
+            # A typing module's name the script also binds otherwise (a
+            # parameter `typing=Factory`) may be something else there.
+            and func.value.id not in plain_names
+        ):
+            return func.attr
+        return None
+
+    def type_subscript(node, shadow: frozenset = frozenset()) -> bool:
+        """Whether subscript ``node`` subscripts a type head (``list['T']``,
+        ``typing.Optional['T']``, a generic script class ``Box['T']``), not
+        a value (``TYPES['grid']``, ``SAMPLERS[MODE]``, an Enum member).
+        ``shadow``: the names the class body around it binds, which there
+        are its own, not the module's heads (``Registry = Registry()``)."""
+        head = node.value
+        root = head
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(head, ast.Name):
+            return head.id in type_heads and head.id not in shadow
+        return (
+            head is not root
+            and isinstance(root, ast.Name)
+            and root.id in type_modules
+            and root.id not in shadow
+        )
+
+    def type_parts(value, declared: bool, shadow: frozenset = frozenset()) -> list:
+        """The parts of a bound value written as a type expression, which the
+        alias walk reads (#334 review): a subscript of a type head
+        (``list['T']``, ``typing.Optional['T']``, a generic script class
+        ``Box['T']``), a typing form's call, each operand of a union, a name or a
+        dotted name, each item of a tuple or list, the branches of an ``if``
+        expression, and a string only beside ``|`` (``List[int] | 'T'``) or
+        where the binding is ``declared`` a type alias (``Alias: TypeAlias =
+        'T'``, a ``type`` statement). Any
+        other value (a dict, a lookup ``SAMPLERS[MODE]``, a plain call, a
+        bare string ``MODE = 'grid'``) is not a type, and its strings are
+        not read: whatever spells the run's grid there stays a value. Not
+        followed so: a generic imported from elsewhere (``Box['T']`` with
+        ``from lib import Box``), or a type stored in a container."""
+        out: list = []
+        # (part, whether a string there is a type): a union's operand is
+        # (`List[int] | 'T'`), as is a declared alias's whole value.
+        stack = [(value, declared)]
+        while stack:
+            v, strings = stack.pop()
+            if isinstance(v, ast.Subscript):
+                if type_subscript(v, shadow):
+                    out.append(v)
+            elif isinstance(v, ast.Call):
+                if form_of(v) is not None:
+                    out.append(v)
+            elif isinstance(v, ast.BinOp):
+                # Each operand of a union, checked alone: a dict merged with
+                # `|` is no type (`BASE | {'search': 'grid'}`).
+                if isinstance(v.op, ast.BitOr):
+                    stack.extend(((v.left, True), (v.right, True)))
+            elif isinstance(v, (ast.Name, ast.Attribute)):
+                out.append(v)
+            elif isinstance(v, ast.Constant):
+                if strings and isinstance(v.value, str):
+                    out.append(v)
+            elif isinstance(v, (ast.Tuple, ast.List)):
+                stack.extend((e, strings) for e in v.elts)
+            elif isinstance(v, ast.IfExp):
+                stack.extend(((v.body, strings), (v.orelse, strings)))
+        return out
+
+    def alias_pairs(node) -> list:
+        """``(names, value, own, declared)`` for each assignment statement
+        ``node`` makes in a block or a class body, not in a function's body:
+        a type alias is a name bound to a type, so a hint reader resolves the
+        strings in its value as in an annotation (``Alias = list['T']``,
+        ``Alias = 'list[T]'``; #329). The record walks a value once an
+        annotation, or an alias's value, names one of its ``names`` (``named``
+        of ``annotation_names``), or always when it is ``declared`` one
+        (``Alias: TypeAlias = ...``). A class body's counts:
+        ``get_type_hints(cls)`` reads the class's namespace first. All the
+        value is walked, under a tuple target too: a recompute too many at
+        most. An item set counts for its container (``REG['a'] = list['T']``
+        for ``REG``): an annotation reading ``REG['a']`` gets what it stores;
+        an attribute set counts for none, nor do the names in an index. Of
+        a value, only what is written as a type expression is read
+        (``type_parts``). ``own``: a ``type`` statement's type parameters
+        (it is ``declared`` a type alias); a generic class's are not its
+        body's aliases' own, as a method's annotation reads them against the
+        module. Not followed: an
+        alias only code reaches (pydantic's ``TypeAdapter(Alias)``), or a
+        function's own (a function nested in it can name one; #334 review)."""
+        found: list = []
+        # (statement, the names the innermost class body around it binds)
+        stack: list = [(node, frozenset())]
+        while stack:
+            n, shadow = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue  # its body's names are its own
+            if isinstance(n, ast.ClassDef):
+                # Not its type parameters: a method's annotation naming an
+                # alias of its body resolves the alias's `T` against the
+                # module (`get_type_hints(cls.method)`; #334 review). A name
+                # its body binds is its own there, not a module head.
+                shadow = frozenset(name for s in n.body for name in scope_binds(s))
+            if isinstance(n, ast.Assign):
+                names: set[str] = set()
+                targets = list(n.targets)
+                while targets:
+                    target = targets.pop()
+                    while isinstance(target, ast.Subscript):
+                        target = target.value  # an item set: its container
+                    if isinstance(target, ast.Starred):
+                        targets.append(target.value)
+                    elif isinstance(target, (ast.Tuple, ast.List)):
+                        targets.extend(target.elts)
+                    elif isinstance(target, ast.Name):
+                        names.add(target.id)
+                found.append((names, n.value, set(), False, shadow))
+            elif isinstance(n, ast.AnnAssign) and n.value is not None:
+                names = {n.target.id} if isinstance(n.target, ast.Name) else set()
+                declared = spelled(n.annotation) == "TypeAlias"
+                found.append((names, n.value, set(), declared, shadow))
+            elif isinstance(n, getattr(ast, "TypeAlias", ())):  # `type A = ...`
+                params = {p.name for p in n.type_params}
+                found.append(({n.name.id}, n.value, params, True, shadow))
+            # Statements only: a definition cannot sit in an expression.
+            stack.extend(
+                (c, shadow)
                 for c in ast.iter_child_nodes(n)
                 if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
             )
@@ -934,6 +1470,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
 
     read_cache: dict[int, set[str]] = {}
     full_cache: dict[int, set[str]] = {}
+    hint_cache: dict[int, tuple[set[str], set[str]]] = {}
+    pair_cache: dict[int, list] = {}
 
     def reads(node) -> set[str]:
         hit = read_cache.get(id(node))
@@ -941,16 +1479,28 @@ def _script_digest(path: Path, roots: frozenset[str]):
             hit = read_cache[id(node)] = _reads(node)
         return hit
 
+    def hints(node) -> tuple[set[str], set[str]]:
+        hit = hint_cache.get(id(node))
+        if hit is None:
+            hit = hint_cache[id(node)] = hint_reads(node)
+        return hit
+
+    def pairs(node) -> list:
+        hit = pair_cache.get(id(node))
+        if hit is None:
+            hit = pair_cache[id(node)] = alias_pairs(node)
+        return hit
+
     def full_reads(node) -> set[str]:
-        """``reads`` and what the statement's annotations read as text
-        (``annotation_reads``): what the record follows. Neither the symbol
+        """``reads`` and what the statement's hints read as text
+        (``hint_reads``): what the record follows. Neither the symbol
         table nor ``_reads``'s walk reads an annotation kept as text (future
         annotations, or a string), a method's, a nested function's or a
         class body's. The registering-decorator rule compares code only
         (``reads``): a wrapper's `-> dict` registers nothing."""
         hit = full_cache.get(id(node))
         if hit is None:
-            hit = full_cache[id(node)] = reads(node) | annotation_reads(node)
+            hit = full_cache[id(node)] = reads(node) | hints(node)[0]
         return hit
 
     def _reads(node) -> set[str]:
@@ -1199,27 +1749,50 @@ def _script_digest(path: Path, roots: frozenset[str]):
     ]
     kept_ids = {id(n) for n in kept}
     pending = [(n, names) for n, names in candidates if names and id(n) not in kept_ids]
-    # What counted code reads, its annotations' text included (#324), and
-    # what its code alone reads, for the registering-decorator rule.
+    # What counted code reads, its hints' text included (#324), what its code
+    # alone reads, for the registering-decorator rule, and the names its
+    # hints name, whose aliases' strings a hint reader resolves too (#329).
     read: set[str] = set()
     read_code: set[str] = set()
+    typed: set[str] = set()
     for n in kept:
         read |= full_reads(n)
         read_code |= reads(n)
+        typed |= hints(n)[1]
+    walked: set[tuple[int, int]] = set()  # (statement, its alias pair)
     while True:
+        grew = False
+        for n in kept:
+            for i, (names, value, own, declared, shadow) in enumerate(pairs(n)):
+                if (id(n), i) in walked or not (declared or names & typed):
+                    continue
+                walked.add((id(n), i))
+                # Its bare names are evaluated where it stands: code reads.
+                more, more_named = annotation_names(
+                    type_parts(value, declared, shadow),
+                    own,
+                    as_text=False,
+                    alias=True,
+                    shadow=shadow,
+                )
+                if not (more <= read and more_named <= typed):
+                    grew = True
+                    read |= more
+                    typed |= more_named
         add = [
             (n, names)
             for n, names in pending
             if names & read
             or (isinstance(n, defs) and n.decorator_list and registers(n, read_code))
         ]
-        if not add:
+        if not add and not grew:
             break
         added = {id(n) for n, _ in add}
         for n, _ in add:
             kept.append(n)
             read |= full_reads(n)
             read_code |= reads(n)
+            typed |= hints(n)[1]
         pending = [(n, names) for n, names in pending if id(n) not in added]
     kept.sort(key=lambda node: node.lineno)
 
