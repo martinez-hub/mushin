@@ -2351,8 +2351,33 @@ def test_reading_an_annotations_text_does_not_warn(tmp_path):
             id="alias-optional",
         ),
         pytest.param(
-            "T = {v}\nAlias = 'list[T]'\n\n\ndef task(x: Alias):\n    return x\n",
-            id="alias-string",
+            "import typing\n\nT = {v}\nAlias = list['T']\n\n\n"
+            "def task(x: typing.Annotated[Alias, 'meta']):\n    return x\n",
+            id="alias-in-annotated",
+        ),
+        pytest.param(
+            "T = {v}\nAlias = list['T'] | None\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-union",
+        ),
+        pytest.param(
+            "import typing as t\n\nT = {v}\nAlias = t.Optional['T']\n\n\n"
+            "def task(x: Alias):\n    return x\n",
+            id="alias-of-a-renamed-typing-module",
+        ),
+        pytest.param(
+            "from collections.abc import Callable\n\nT = {v}\n"
+            "Alias = Callable[['T'], int]\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-of-collections-abc",
+        ),
+        pytest.param(
+            "import typing_extensions\n\nT = {v}\n"
+            "Alias = typing_extensions.Optional['T']\n\n\ndef task(x: Alias):\n    return x\n",
+            id="alias-of-typing-extensions",
+        ),
+        pytest.param(
+            "T = {v}\ntype Alias = 'list[T]'\n\n\ndef task(x: Alias):\n    return x\n",
+            id="type-statement-string",
+            marks=_PEP695,
         ),
         pytest.param(
             "from typing import TypeAlias\n\nT = {v}\nAlias: TypeAlias = 'T'\n\n\n"
@@ -2588,6 +2613,20 @@ def test_a_string_a_type_hint_reader_resolves_counts(tmp_path, text):
     whose result carries it (`opt('T')`)."""
     one = _digest_of_script(tmp_path, "tr1", text.format(v="int"), {"task"})
     two = _digest_of_script(tmp_path, "tr2", text.format(v="str"), {"task"})
+    assert one != two
+
+
+def test_a_string_nested_past_the_parsers_depth_names_nothing(tmp_path):
+    """A string nested past the parser's depth guard (MemoryError, 3.11 to
+    3.15) names nothing, in a declared alias's value as in an annotation:
+    the record is taken, not failed (#334 review)."""
+    deep = "-" * 7000 + "1"
+    text = (
+        "from typing import TypeAlias\n\nT = {v}\nAlias = list['T']\n"
+        f"Deep: TypeAlias = '{deep}'\n\n\ndef task(x: Alias, y: Deep):\n    return x\n"
+    )
+    one = _digest_of_script(tmp_path, "deep1", text.format(v="int"), {"task"})
+    two = _digest_of_script(tmp_path, "deep2", text.format(v="str"), {"task"})
     assert one != two
 
 
@@ -3110,6 +3149,57 @@ SCRIPT_NOT_EDITS = {
     "a dispatch alias whose key compares to the run's grid": (
         "grid = [1, {k}]\nMODE = 'x'\nAlias = {{True: int, False: float}}[MODE == 'grid']\n\n\n"
         "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    # Of a bound value, only a type expression is read (#334 review).
+    "a dispatch dict's keys spelling the run's grid": (
+        "import os\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "SAMPLERS = {{'grid': GridSampler, 'random': RandomSampler}}\n"
+        "Sampler = SAMPLERS[os.environ.get('SAMPLER', 'random')]\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an inline dispatch dict's keys spelling the run's grid": (
+        "grid = [1, {k}]\nMODE = 'random'\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "Sampler = {{'grid': GridSampler, 'random': RandomSampler}}[MODE]\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a dispatch dict subscripted in an annotation by a value spelling the run's grid": (
+        "grid = [1, {k}]\nMODE = 'grid'\n\n\nclass GridSampler:\n    pass\n\n\n"
+        "class RandomSampler:\n    pass\n\n\n"
+        "SAMPLERS = {{'grid': GridSampler, 'random': RandomSampler}}\n\n\n"
+        "def task(a, s: SAMPLERS[MODE] = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "an if-test in an annotation naming a value that spells the run's grid": (
+        "grid = [1, {k}]\nMODE = 'grid'\n\n\n"
+        "def task(a, s: int if MODE else float = 0):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a NewType given unpacked arguments spelling the run's grid": (
+        "import typing\n\nARGS = ('grid', int)\ngrid = [1, {k}]\nNT = typing.NewType(*ARGS)\n\n\n"
+        "def task(x: NT):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a type picked from a registry by the run's grid name": (
+        "grid = [1, {k}]\nTYPES = {{'grid': int}}\nAlias = TYPES['grid']\n\n\n"
+        "def task(x: Alias):\n    return x\n\n\nds = run(a=grid)\n"
+    ),
+    "a class attribute named like a module alias a method's annotation names": (
+        "from __future__ import annotations\n\ngrid = [1, {k}]\nUnit = int\n\n\n"
+        "class task:\n    Unit = 'grid'\n\n    def run(self, x: Unit):\n        return x\n\n\n"
+        "ds = run(a=grid)\n"
+    ),
+    "a conditional alias whose test indexes by the run's grid": (
+        "grid = [1, {k}]\nFLAGS = {{'grid': True}}\nSampler = int if FLAGS['grid'] else float\n\n\n"
+        "def task(a, s: Sampler = None):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a dispatch alias whose compare names a value spelling the run's grid": (
+        "grid = [1, {k}]\nSEARCH = 'grid'\nMODE = 'x'\n"
+        "Alias = {{True: int, False: float}}[MODE == SEARCH]\n\n\n"
+        "def task(a: Alias):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
+    "a computed NamedTuple spec in an alias whose field name spells the run's grid": (
+        "import typing\n\ngrid = [1, {k}]\nEXTRA = []\n"
+        "Row = typing.NamedTuple('Row', [('grid', float)] + EXTRA)\n\n\n"
+        "def task(a) -> Row:\n    return a\n\n\nds = run(a=grid)\n"
     ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"

@@ -779,21 +779,26 @@ def _script_digest(path: Path, roots: frozenset[str]):
     annotations``) reads the names in it, since whatever reads type hints
     evaluates that text against the module; a function's local annotation,
     never evaluated, reads none. So does a string a hint reader resolves in
-    a type alias an annotation names (#329): ``Alias = list['T']``, through
-    other aliases too, one declared a ``TypeAlias``, and what a typing form
-    written there makes a forward reference (a functional ``NamedTuple``'s
-    field types, a ``TypeVar``'s bound). A ``Literal`` value,
-    ``Annotated``'s notes and what a typing form takes as a value
-    (``NewType('grid', int)``'s name, a field's name) are values, read as
-    none, and so is a call in an alias's value that is no typing form
-    (``Result = namedtuple('Result', ['lr'])``); in an annotation a string
-    given to a call is a reference (``opt('T')``), as main read it. Not
-    followed: an alias or a typing form only code reaches (pydantic's
+    a type alias an annotation names (#329), where its value is written as a
+    type expression: ``Alias = list['T']``, ``typing.Optional['T']``, a
+    script class ``Box['T']``, a typing form's call (a functional
+    ``NamedTuple``'s field types, a ``TypeVar``'s bound), a union, through
+    other aliases too, and a string only in one declared ``TypeAlias`` or a
+    ``type`` statement. A ``Literal`` value, ``Annotated``'s notes and what
+    a typing form takes as a value (``NewType('grid', int)``'s name, a
+    field's name) are values, read as none, and so is anything in an
+    alias's value that is no type expression (a dict, a lookup
+    ``SAMPLERS[MODE]``, a plain call ``namedtuple('Result', ['lr'])``, a
+    bare string ``MODE = 'grid'``); in an annotation a string given to a
+    call is a reference (``opt('T')``), as main read it. Not followed: an
+    alias or a typing form only code reaches (pydantic's
     ``TypeAdapter(Alias)``, ``get_type_hints(Row)`` in the task's body), an
     alias reached as an attribute (``Outer.Alias``), built by a call
-    (``Alias = opt('T')``, ``TypeAliasType(...)``) or bound in a function's
-    body (a nested function's annotation can name one), a functional form a
-    counted class only
+    (``Alias = opt('T')``, ``TypeAliasType(...)``), bound in a function's
+    body (a nested function's annotation can name one), written as a plain
+    string (``Alias = 'list[T]'`` without ``TypeAlias``), subscripting a
+    generic imported from another library, or stored in a container
+    (``D = {'a': list['T']}``), a functional form a counted class only
     inherits from (``class Row(Base)`` with ``Base = TypedDict(...)``,
     though a ``class Base(TypedDict)`` statement counts), a form's field
     spec given through a name (``NamedTuple('Row', FIELDS)``), or a typing
@@ -1010,7 +1015,13 @@ def _script_digest(path: Path, roots: frozenset[str]):
                             # inside it (`'\d'`) would warn, from no file.
                             warnings.simplefilter("ignore")
                             parsed = ast.parse(source, mode="eval")
-                    except (SyntaxError, ValueError, RecursionError):
+                    except (
+                        SyntaxError,
+                        ValueError,
+                        RecursionError,
+                        MemoryError,  # the parser past its depth guard
+                        OverflowError,
+                    ):
                         continue  # not Python: it names nothing
                     stack.append((parsed.body, True, True, typed, depth + 1))
                 continue
@@ -1105,6 +1116,70 @@ def _script_digest(path: Path, roots: frozenset[str]):
             )
         return found, named
 
+    # What a type expression can subscript or be dotted from: the builtin
+    # generics, what the script imports from the typing modules, the classes
+    # it defines (a user generic `Box['T']`), and the typing modules it
+    # imports (`typing.Optional['T']`, `t.List['T']`).
+    typing_modules = ("typing", "typing_extensions", "collections", "collections.abc")
+    type_heads = {"list", "dict", "tuple", "set", "frozenset", "type"}
+    type_modules: set[str] = set()
+    for sub in ast.walk(tree):
+        if isinstance(sub, ast.ClassDef):
+            type_heads.add(sub.name)
+        elif isinstance(sub, ast.ImportFrom) and sub.module in typing_modules:
+            type_heads.update(alias.asname or alias.name for alias in sub.names)
+        elif isinstance(sub, ast.Import):
+            type_modules.update(
+                alias.asname or alias.name.partition(".")[0]
+                for alias in sub.names
+                if alias.name in typing_modules
+            )
+
+    def type_parts(value, declared: bool) -> list:
+        """The parts of a bound value written as a type expression, which the
+        alias walk reads (#334 review): a subscript of a type head
+        (``list['T']``, ``typing.Optional['T']``, a script class
+        ``Box['T']``), a typing form's call, a union ``A | B``, a name or a
+        dotted name, each item of a tuple or list, the branches of an ``if``
+        expression, and a string only where the binding is ``declared`` a
+        type alias (``Alias: TypeAlias = 'T'``, a ``type`` statement). Any
+        other value (a dict, a lookup ``SAMPLERS[MODE]``, a plain call, a
+        bare string ``MODE = 'grid'``) is not a type, and its strings are
+        not read: whatever spells the run's grid there stays a value. Not
+        followed so: a generic imported from elsewhere (``Box['T']`` with
+        ``from lib import Box``), or a type stored in a container."""
+        out: list = []
+        stack = [value]
+        while stack:
+            v = stack.pop()
+            if isinstance(v, ast.Subscript):
+                head = v.value
+                root = head
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if (isinstance(head, ast.Name) and head.id in type_heads) or (
+                    head is not root
+                    and isinstance(root, ast.Name)
+                    and root.id in type_modules
+                ):
+                    out.append(v)
+            elif isinstance(v, ast.Call):
+                if spelled(v.func) in forms:
+                    out.append(v)
+            elif isinstance(v, ast.BinOp):
+                if isinstance(v.op, ast.BitOr):
+                    out.append(v)
+            elif isinstance(v, (ast.Name, ast.Attribute)):
+                out.append(v)
+            elif isinstance(v, ast.Constant):
+                if declared and isinstance(v.value, str):
+                    out.append(v)
+            elif isinstance(v, (ast.Tuple, ast.List)):
+                stack.extend(v.elts)
+            elif isinstance(v, ast.IfExp):
+                stack.extend((v.body, v.orelse))
+        return out
+
     def alias_pairs(node) -> list:
         """``(names, value, own, declared)`` for each assignment statement
         ``node`` makes in a block or a class body, not in a function's body:
@@ -1118,8 +1193,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
         value is walked, under a tuple target too: a recompute too many at
         most. An item set counts for its container (``REG['a'] = list['T']``
         for ``REG``): an annotation reading ``REG['a']`` gets what it stores;
-        an attribute set counts for none, nor do the names in an index.
-        ``own``: a ``type`` statement's type parameters. Not followed: an
+        an attribute set counts for none, nor do the names in an index. Of
+        a value, only what is written as a type expression is read
+        (``type_parts``). ``own``: a ``type`` statement's type parameters,
+        which is ``declared`` a type alias. Not followed: an
         alias only code reaches (pydantic's ``TypeAdapter(Alias)``), or a
         function's own (a function nested in it can name one; #334 review)."""
         found: list = []
@@ -1148,7 +1225,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 found.append((names, n.value, set(), declared))
             elif isinstance(n, getattr(ast, "TypeAlias", ())):  # `type A = ...`
                 own = {p.name for p in n.type_params}
-                found.append(({n.name.id}, n.value, own, False))
+                found.append(({n.name.id}, n.value, own, True))
             # Statements only: a definition cannot sit in an expression.
             stack.extend(
                 c
@@ -1458,7 +1535,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 walked.add((id(n), i))
                 # Its bare names are evaluated where it stands: code reads.
                 more, more_named = annotation_names(
-                    [value], own, as_text=False, alias=True
+                    type_parts(value, declared), own, as_text=False, alias=True
                 )
                 if not (more <= read and more_named <= typed):
                     grew = True
