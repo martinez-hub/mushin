@@ -3451,6 +3451,11 @@ SCRIPT_NOT_EDITS = {
         "    Optional = {{'grid': int}}\n    Alias = Optional['grid']\n    x: Alias = None\n\n\n"
         "ds = run(a=grid)\n"
     ),
+    "a make_dataclass's module spelling the run's grid": (
+        "import dataclasses\n\ngrid = [1, {k}]\n"
+        "Cfg = dataclasses.make_dataclass('Cfg', [('lr', float)], module='grid')\n\n\n"
+        "def task(a: Cfg):\n    return a\n\n\nds = run(a=grid)\n"
+    ),
     "a conditional alias whose test spells the run's grid": (
         "import sys\n\ngrid = [1, {k}]\n\n\nclass GridSampler:\n    pass\n\n\n"
         "class RandomSampler:\n    pass\n\n\n"
