@@ -1242,6 +1242,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
                     rebound.add(e.rest)
                 exprs.extend(ast.iter_child_nodes(e))
     type_heads -= rebound
+    type_modules -= rebound  # `typing = Registry`
 
     # A typing form by how the script binds its name, not by its spelling
     # (#334 review): a bare name only when every binding of it in the script
@@ -1315,7 +1316,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
         if isinstance(head, ast.Name):
             return head.id in type_heads and head.id not in shadow
         return (
-            head is not root and isinstance(root, ast.Name) and root.id in type_modules
+            head is not root
+            and isinstance(root, ast.Name)
+            and root.id in type_modules
+            and root.id not in shadow
         )
 
     def type_parts(value, declared: bool, shadow: frozenset = frozenset()) -> list:
