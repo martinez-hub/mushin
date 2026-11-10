@@ -126,7 +126,10 @@ in the kernel when the run starts: each function and class defined in a cell,
 through decorators, a `partial`, a bound method or an instance. A function or
 class named in an annotation of that code counts as well (a parameter's, a
 return's, a class attribute's or a type parameter's, a string one too), since
-a reader of the hints (`typing.get_type_hints`, pydantic) resolves it. Re-run
+a reader of the hints (`typing.get_type_hints`, pydantic) resolves it. On
+Python 3.13 and earlier, an annotation that is not a string holds the class
+its name meant when its cell ran, so after editing such a class, re-run the
+cell that annotates with it too (the task's, or the dataclass's). Re-run
 the edited cell, then resume, and the cells re-run with a warning naming it
 (`helper (notebook)`). No value is compared: not a number, a string or a dict
 config. A value is only safe to compare
@@ -134,7 +137,10 @@ when every writer of it is known, and in a notebook a writer can sit anywhere
 a value can. So pass a value the results depend on (a model name, a scale) to
 the task as a swept parameter, or use a new `working_dir` after editing one. A
 function reached only through a container (a registry), a closure or a
-default, a name one of the notebook's functions rebinds (`global helper`), a
+default, a class an annotation reaches only through a value such as a type
+alias (`Opt = Optional[Helper]`), a definition only a class body's value names
+(`field(default_factory=make)`), a name one of the notebook's functions
+rebinds (`global helper`), a
 `_target_` defined in the notebook, and code whose text the kernel does not
 keep (a `%%time` cell, `exec`, a `%run` file) are not compared either, and a
 class no `class` statement makes (`type(...)`, `namedtuple(...)`,

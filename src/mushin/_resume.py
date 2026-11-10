@@ -1993,6 +1993,9 @@ def _kernel_name(name: str) -> bool:
 
 _NOTEBOOK_TRUNCATION_WARNED: list = []
 _NOTEBOOK_ANNOTATION_WARNED: list = []
+#: What ``_notebook_entries`` gives when only what the annotations reach is
+#: past the object bound: ``_notebook_record`` takes it again without them.
+_ANNOTATIONS_OVER = object()
 _NOTEBOOK_FAILURE_WARNED: list = []
 _CELL_SCAN_WARNED: list = []
 _HISTORY_WARNED: list = []
@@ -2495,7 +2498,13 @@ def _annotation_names(nodes) -> set[str]:
             continue
         if kind is ast.AnnAssign and not local:
             exprs.append(node.annotation)
-        stack.extend((child, local) for child in ast.iter_child_nodes(node))
+        # The blocks a statement holds (an `if`'s, a `try`'s handlers, a
+        # `match`'s cases); an expression holds no statement.
+        stack.extend(
+            (child, local)
+            for child in ast.iter_child_nodes(node)
+            if isinstance(child, (ast.stmt, ast.excepthandler, ast.match_case))
+        )
     names: set[str] = set()
     pending = [(expr, 0) for expr in exprs]  # (expression, strings around it)
     while pending:
@@ -3925,7 +3934,7 @@ def _notebook_entries(
     class_texts,
     compiled=None,
     annotations: bool = True,
-) -> tuple[dict[str, str], list[str], list[str]] | None:
+) -> tuple[dict[str, str], list[str], list[str]] | object | None:
     """``(entries, modules, added)``: the entries of a notebook's code the
     roots reach; the modules their definitions name (see ``_unit_reading``),
     through the closure or the namespace, as main read them; and what only
@@ -3943,7 +3952,13 @@ def _notebook_entries(
     definitions reads (``_annotation_names``), since a reader of the hints
     resolves it: followed after the code's names, as one more source of
     names, so it adds entries and never changes one the code's names give.
-    None past the object bound (``_notebook_record`` warns). A
+    A name is followed to what the namespace holds when the run starts, as
+    the code's names are: before 3.14, an annotation that is no string
+    holds what its name held when its cell ran. None when the code's names
+    alone reach past the object bound, and ``_ANNOTATIONS_OVER`` when only
+    what the annotations add does: ``_notebook_record`` then takes the
+    record again without annotations, as it does when this raises, and
+    warns. A
     function is its definition's syntax tree; a class its ``class``
     statement; an instance, a bound method's instance, its class. A digest
     covers what its object reaches through edges the run cannot move: a
@@ -3954,7 +3969,7 @@ def _notebook_entries(
     notebook a writer can sit wherever a value can. A name any of the
     notebook's functions rebinds (``global helper; helper = fast``, see
     ``_notebook_writes``) is not followed: what it holds when the run starts
-    can be gone by the next. A record past its
+    can be gone by the next. A record whose code's names reach past its
     object bound has no notebook entries and no modules (with a warning):
     which objects a cut walk took depends on its order. Objects are
     inspected by type, and only a function's own ``__dict__`` and a module's
@@ -4107,7 +4122,7 @@ def _notebook_entries(
                     follow_name(name)
             follow_codes()
             if over[0]:
-                return None
+                return _ANNOTATIONS_OVER
 
     def own(kind: str, nodes) -> str:
         """A unit's own definition, without what it reaches."""
@@ -4178,7 +4193,7 @@ def _notebook_entries(
         for site in unit_site_list:
             # Each unit alone (a method in its class's statement and on its
             # own): the union does not depend on the order the walk took.
-            unit_modules, global_chains, cell_chains, rebound = _unit_reading(*site)
+            unit_modules, global_chains, cell_chains, rebinding = _unit_reading(*site)
             modules |= unit_modules
             # The compiler's free variables decide (a walrus in a comprehension
             # binds in the enclosing function, which the scopes read as the
@@ -4227,7 +4242,7 @@ def _notebook_entries(
                 if chain[0] in defaults:
                     follow(added, _chain_bases(chain[0], defaults[chain[0]]), chain[1:])
             # What a rebinding elsewhere in the tree can make a chain reach.
-            for target in rebound:
+            for target in rebinding:
                 if target[0] == "module":
                     added.add(".".join(target[1]))
                     continue
@@ -4287,13 +4302,21 @@ def _warn_notebook_truncated() -> None:
         )
 
 
-def _warn_annotations_unrecorded() -> None:
+def _warn_annotations_unrecorded(error: BaseException | None) -> None:
+    """What only the annotations reach is not recorded: past the object bound
+    (``error`` None), or reading it raised (its type, not its message, which
+    can hold the notebook's own text)."""
     if not _NOTEBOOK_ANNOTATION_WARNED:
         _NOTEBOOK_ANNOTATION_WARNED.append(True)
+        why = (
+            "is larger than the record covers"
+            if error is None
+            else f"could not be read ({_error_kind(error)})"
+        )
         _best_effort_warning(
-            "resume/cache_dir: the notebook code that the task's annotations name "
-            "is larger than the record covers, or could not be read, so it is "
-            "not compared; use a fresh working_dir after editing it."
+            "resume/cache_dir: the notebook code that the task's annotations "
+            f"name {why}, so it is not compared; use a fresh working_dir after "
+            "editing it."
         )
 
 
@@ -4346,8 +4369,11 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[s
     main's kept: what the later readings add (``_notebook_entries``) and what
     the kernel's kept cells import (``_kept_cell_reading``). The cells'
     modules do not depend on the walk, so they count when it passes its bound
-    or fails. Best effort: a notebook whose entries cannot be taken gives
-    neither its entries nor its modules (as on main), and a scan of the cells
+    or fails. Best effort: when what only the annotations reach is past the
+    object bound or cannot be read, the entries are taken again without them
+    (as on main), with a warning; a notebook whose entries cannot be taken
+    even so gives neither its entries nor its modules (as on main), and a
+    scan of the cells
     that fails gives no cell modules, each with its own warning, since an
     edit then goes unnoticed (a notebook metaclass's attribute hook that
     raises, say)."""
@@ -4386,19 +4412,22 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[s
         try:
             lazy = _lazy_bindings(cell_bindings, namespace)
             args = (namespace, roots, lazy, class_texts, compiled)
+            error: BaseException | None = None
             try:
                 found = _notebook_entries(*args)
-            except Exception:  # noqa: BLE001 - taken again without annotations
-                found = None
-            if found is None:
-                # Past the object bound, or failed: what the annotations add
+            except Exception as caught:  # noqa: BLE001 - taken again below
+                found, error = _ANNOTATIONS_OVER, caught
+            if found is _ANNOTATIONS_OVER:
+                # What only the annotations reach is past the object bound, or
+                # reading the definitions failed: what the annotations add
                 # never costs what the code's names reach, so that is taken
-                # alone. When it is past the bound or fails too, that says so.
+                # alone. When that fails too, its own error is the one reported.
                 found = _notebook_entries(*args, annotations=False)
-                if found is None:
-                    _warn_notebook_truncated()
-                    continue
-                _warn_annotations_unrecorded()
+                if found is not None:
+                    _warn_annotations_unrecorded(error)
+            if found is None:  # the code's names alone reach past the bound
+                _warn_notebook_truncated()
+                continue
             entries, names, more = found
             out.update(entries)
             reached.update(names)

@@ -166,9 +166,12 @@ rules:
   calls, `print` calls or what only they read, so extending the grid is not
   an edit. In a notebook, the functions and classes its cells define that
   the task reaches by name, or that an annotation of that code names (a
-  string one too), count, by their definitions, as the kernel holds
+  string one too; not through a type alias such as `Opt = Optional[Helper]`),
+  count, by their definitions, as the kernel holds
   them when the run starts; no value does (a number, a model name, a dict
-  config), so pass values as swept parameters. For such a task, every
+  config), so pass values as swept parameters. On Python 3.13 and earlier,
+  after editing a class an annotation that is not a string names, re-run the
+  cell that annotates with it too. For such a task, every
   project module a cell imports counts too, so with `cache_dir=`, importing
   another one in a cell can make the cells compute again. Re-running a
   class's cell when mushin cannot tell its version apart from another kept

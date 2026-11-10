@@ -28,7 +28,11 @@ from hypothesis import strategies as st
 
 import mushin._resume
 from _modules_written import _new_modules_are_found  # noqa: F401 - autouse fixture
-from mushin._resume import cell_project_record, project_fingerprints
+from mushin._resume import (
+    cell_project_record,
+    changed_project_code,
+    project_fingerprints,
+)
 
 #: The scan of the kept cells' imports, kept here so a fixture can turn it
 #: back on (``getattr``: the file also runs against an older ``_resume``).
@@ -942,9 +946,10 @@ def test_a_notebook_edit_is_seen(kernel, case):
     _run_cells(kernel, after)
     second = _record(kernel, "task")
     # A scan that raised gives no entries, which would differ vacuously; an
-    # edit changes a digest, it does not drop an entry.
+    # edit changes a digest, it does not drop an entry. A resume compares the
+    # keys both records have, so a key only the second has is no edit.
     assert first.keys() <= second.keys()
-    assert second != first
+    assert changed_project_code({"code": first}, {"code": second})
 
 
 @pytest.mark.parametrize("case", sorted(NOTEBOOK_NOT_EDITS))
@@ -1046,6 +1051,24 @@ ANNOTATION_EDITS = {
         [
             HELPER,
             "class Cfg:\n    if True:\n        h: Helper = None\n\n"
+            "    def go(self):\n        return 1\n",
+            "def task(a):\n    return Cfg().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a field in an except block of a class body": (
+        [
+            HELPER,
+            "class Cfg:\n    try:\n        pass\n    except Exception:\n"
+            "        h: Helper = None\n\n    def go(self):\n        return 1\n",
+            "def task(a):\n    return Cfg().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a field in a match case of a class body": (
+        [
+            HELPER,
+            "class Cfg:\n    match 1:\n        case 1:\n            h: Helper = None\n\n"
             "    def go(self):\n        return 1\n",
             "def task(a):\n    return Cfg().go()\n",
         ],
@@ -1186,7 +1209,8 @@ def test_a_definition_an_annotation_names_is_compared(kernel, case, cases):
     _run_cells(kernel, after)
     second = _record(kernel, "task")
     assert first.keys() <= second.keys()
-    assert second != first
+    # What a resume compares: the keys both records have.
+    assert changed_project_code({"code": first}, {"code": second})
 
 
 @pytest.mark.parametrize("case", sorted(ANNOTATION_NOT_EDITS))
@@ -1254,9 +1278,10 @@ def test_an_annotation_walk_that_raises_keeps_the_code_walks_entries(
     monkeypatch.setattr(resume, "_class_methods", raising)
     monkeypatch.setattr(resume, "_NOTEBOOK_ANNOTATION_WARNED", [])
     monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
-    with pytest.warns(UserWarning, match="annotations name"):
+    with pytest.warns(UserWarning, match=r"could not be read \(RuntimeError\)") as got:
         cut = _record(kernel, "task")
     assert cut == {k: whole[k] for k in ("task (notebook)", "helper (notebook)")}
+    assert len(got) == 1 and "metaclass hook" not in str(got[0].message)
 
 
 def test_a_code_walk_past_the_bound_gives_only_its_own_warning(kernel, monkeypatch):
@@ -1266,12 +1291,22 @@ def test_a_code_walk_past_the_bound_gives_only_its_own_warning(kernel, monkeypat
     monkeypatch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 1)
     monkeypatch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
     monkeypatch.setattr(resume, "_NOTEBOOK_ANNOTATION_WARNED", [])
+    scans = []
+    writes = resume._notebook_writes
+
+    def counted(*args):
+        scans.append(1)
+        return writes(*args)
+
+    monkeypatch.setattr(resume, "_notebook_writes", counted)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         assert _record(kernel, "task") == {}
     messages = [str(w.message) for w in caught]
     assert len(messages) == 1, messages
     assert "larger than the record covers" in messages[0]
+    # Not taken again without annotations: they are not what is too large.
+    assert len(scans) == 1
 
 
 def test_the_annotation_warning_is_given_on_every_run(kernel, monkeypatch):
