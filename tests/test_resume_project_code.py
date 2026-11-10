@@ -4012,6 +4012,22 @@ CLASS_BODY_EDITS = {
     "a match subject before the binding": "lr = {k}\n\n\nclass Cfg:\n    match lr:\n        case 1:\n            y = 'one'\n        case _:\n            y = 'other'\n    lr = 1\n\n\ndef task(a):\n    return Cfg.y\n",
     "an if test before the binding": "lr = {k}\n\n\nclass Cfg:\n    if lr == 1:\n        y = 'one'\n    else:\n        y = 'other'\n    lr = 1\n\n\ndef task(a):\n    return Cfg.y\n",
     "a read after an annotation without a value": "lr = {k}\n\n\nclass Cfg:\n    lr: int\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A name a del or an except handler can unbind reads the module's again,
+    # and a comprehension never sees the class's names.
+    "a del in a nested block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's name, deleted when it ends": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    try:\n        raise ValueError\n    except ValueError as lr:\n        pass\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del on a loop's earlier pass": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    for i in range(2):\n        y = lr\n        if i == 0:\n            del lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a tuple del": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    b = 2\n    del (lr, b)\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del in a with block": "import contextlib\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    with contextlib.nullcontext():\n        del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del in a match case": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    match 1:\n        case 1:\n            del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del, then a read in a later block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        del lr\n    if sys:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a comprehension's body after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    ys = [lr for _ in range(2)]\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a comprehension's condition after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    ys = [x for x in range(3) if x < lr]\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a dict comprehension's value after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    d = {{x: lr for x in range(2)}}\n\n\ndef task(a):\n    return Cfg.d\n",
+    "a comprehension in a class in a function": "lr = {k}\n\n\ndef task(a):\n    class C:\n        lr = 1\n        ys = [lr for _ in range(2)]\n\n    return C.ys\n",
+    # A handler's name another handler or a del inside it can unbind.
+    "a second handler of the name inside the first": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        try:\n            raise KeyError\n        except KeyError as lr:\n            pass\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's name deleted inside it": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        del lr\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
 }
 CLASS_BODY_EDITS_312 = {
     "a generic class's body": "lr = {k}\n\n\nclass Cfg[T]:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
@@ -4035,12 +4051,14 @@ CLASS_BODY_NOT_EDITS = {
     "a read in a block after the binding": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
     "a loop body's read of its target": "lr = {k}\n\n\nclass Cfg:\n    for lr in [5]:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
     "a with block's read of its target": "import contextlib\n\nlr = {k}\n\n\nclass Cfg:\n    with contextlib.nullcontext(5) as lr:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
-    "a handler's read of its name": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
     "a case's read of its capture": "lr = {k}\n\n\nclass Cfg:\n    match 5:\n        case lr:\n            y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
     "a comprehension's own variable before the binding": "lr = {k}\n\n\nclass Cfg:\n    ys = [lr for lr in range(3)]\n    lr = 1\n\n\ndef task(a):\n    return Cfg.ys\n",
     "a lambda's parameter before the binding": "lr = {k}\n\n\nclass Cfg:\n    f = staticmethod(lambda lr: lr)\n    lr = 1\n\n\ndef task(a):\n    return Cfg.f(3)\n",
     "a method's parameter before the binding": "lr = {k}\n\n\nclass Cfg:\n    def f(self, lr):\n        return lr\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg().f(3)\n",
     "a read after a tuple binding": "lr = {k}\n\n\nclass Cfg:\n    lr, b = 1, 2\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # Inside the only handler naming it, its name stays bound.
+    "a handler's read of its name": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's read of its name in a block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        if sys:\n            y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
 }
 
 

@@ -828,8 +828,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     many, never a stale reuse. A class body's read of a name it binds too,
     which it reads from the module until a binding in it runs (``lr = lr``,
     ``lr += [3]``, ``for lr in lr``), counts wherever the class is (#336,
-    ``class_body_reads``); after a binding that runs only in some branches
-    (a ``try`` that binds it in each), it counts too: a recompute too many.
+    ``class_body_reads``), as does any read of a name the body can unbind
+    (``del``, an ``except`` handler's name) and a comprehension's read of
+    one; after a binding that runs only in some branches (a ``try`` that
+    binds it in each), it counts too: a recompute too many.
     ``imports`` are those of what counts."""
     import ast
     import copy
@@ -1587,11 +1589,23 @@ def _script_digest(path: Path, roots: frozenset[str]):
         unless a binding that always runs before it covers it: a statement
         earlier in its block or an enclosing one that assigns, annotates with
         a value, augments, defines or imports the name, or the target of the
-        loop, ``with``, ``except`` or ``case`` the read is in; a ``del``
-        uncovers it. A binding in a block covers only that block, so a read
-        after a ``try`` that binds the name in each branch counts: a
-        recompute too many. Its own other reads are the table's globals
-        already."""
+        loop, ``with`` or ``case`` the read is in. That holds only
+        while nothing can unbind the name again, so a name the class's own
+        scope deletes (``del``, any target form) or names an ``except``
+        handler with (Python deletes it when the handler ends) is never
+        covered: wherever the ``del`` sits, on whatever pass of a loop. A
+        handler's own name is covered inside it only when it is the only
+        handler naming it and no ``del`` removes it, so that nothing within
+        can unbind it. Those
+        are the only statements that remove a name from a namespace; one
+        removed at run time (``locals()``, ``vars()``) is past what the
+        record reads, as everywhere. A comprehension never sees the class's
+        names, so a name of the class that one reads past its first iterable
+        (inlined into the class's table on 3.12+) is always counted. A
+        binding in a block covers only that block, so a read after a ``try``
+        that binds the name in each branch counts, as does one after a
+        walrus or a ``type`` statement binds it: a recompute too many. Its
+        other reads are the table's globals already."""
         found: set[str] = set()
         for cls in ast.walk(node):
             if type(cls) is not ast.ClassDef:
@@ -1599,24 +1613,55 @@ def _script_digest(path: Path, roots: frozenset[str]):
             # Without its table (none is expected), every read may be the
             # module's.
             own = class_locals.get((cls.name, cls.lineno))
-
-            # (statements, the names bound before them)
-            blocks = [(cls.body, frozenset())]
+            deleted, handled = unbinds(cls.body)
+            unbound = deleted | set(handled)
+            # (statements, the names bound before them, the names bound
+            # throughout them: a handler's own name, inside the only handler
+            # naming it, when no `del` removes it, so nothing in it unbinds it)
+            blocks = [(cls.body, frozenset(), frozenset())]
             while blocks:
-                body, outer = blocks.pop()
-                covered = set(outer)
+                body, outer, kept = blocks.pop()
+                covered = (set(outer) - unbound) | kept
                 for stmt in body:
+                    reads, always = here_reads(stmt)
                     found.update(
-                        n for n in here_reads(stmt) - covered if own is None or n in own
+                        n for n in (reads - covered) | always if own is None or n in own
                     )
+                    names: dict[int, set[str]] = {}
+                    if type(stmt) in (ast.Try, ast.TryStar):
+                        names = {
+                            id(h.body): {h.name}
+                            for h in stmt.handlers
+                            if h.name and h.name not in deleted and handled[h.name] == 1
+                        }
                     blocks.extend(
-                        (inner, frozenset(covered | bound))
+                        (
+                            inner,
+                            frozenset(covered | bound),
+                            kept | names.get(id(inner), frozenset()),
+                        )
                         for inner, bound in inner_blocks(stmt)
                     )
-                    covered |= always_binds(stmt)
-                    if type(stmt) is ast.Delete:
-                        covered -= {t.id for t in stmt.targets if type(t) is ast.Name}
+                    covered |= always_binds(stmt) - unbound
         return found
+
+    def unbinds(body) -> tuple[set[str], dict[str, int]]:
+        """``(deleted, handled)``: the names a class body's own scope can
+        unbind, in any block of it: a ``del``'s targets, and how many
+        ``except`` handlers name each name."""
+        deleted: set[str] = set()
+        handled: dict[str, int] = {}
+        pending = [body]
+        while pending:
+            for stmt in pending.pop():
+                if type(stmt) is ast.Delete:
+                    deleted.update(n for t in stmt.targets for n in target_names(t))
+                if type(stmt) in (ast.Try, ast.TryStar):
+                    for h in stmt.handlers:
+                        if h.name:
+                            handled[h.name] = handled.get(h.name, 0) + 1
+                pending.extend(inner for inner, _ in inner_blocks(stmt))
+        return deleted, handled
 
     def target_names(target) -> set[str]:
         """The names an assignment target binds: a name, or those in a tuple
@@ -1662,8 +1707,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return [(stmt.body, bound)]
         if kind in (ast.If, ast.While):
             return [(stmt.body, set()), (stmt.orelse, set())]
-        if kind in (ast.Try, getattr(ast, "TryStar", ast.Try)):
-            handlers = [(h.body, {h.name} if h.name else set()) for h in stmt.handlers]
+        if kind in (ast.Try, ast.TryStar):
+            # A handler's name is never covered: Python deletes it when the
+            # handler ends (`unbinds`), so it binds nothing here.
+            handlers = [(h.body, set()) for h in stmt.handlers]
             return [
                 (stmt.body, set()),
                 *handlers,
@@ -1687,16 +1734,19 @@ def _script_digest(path: Path, roots: frozenset[str]):
             if n
         }
 
-    def here_reads(stmt) -> set[str]:
-        """The names a class body's statement reads in the class's scope,
-        but in the blocks it holds (``inner_blocks``): its expressions, an
-        augmented target, a nested definition's decorators, defaults and
-        annotations, a nested class's decorators, bases and keywords, a
-        lambda's defaults and a comprehension's first iterable. Not a nested
-        scope's own body, which reads the module's names directly (the
-        table's globals)."""
+    def here_reads(stmt) -> tuple[set[str], set[str]]:
+        """``(reads, past_the_class)``: the names a class body's statement
+        reads in the class's scope, but in the blocks it holds
+        (``inner_blocks``): its expressions, an augmented target, a nested
+        definition's decorators, defaults and annotations, a nested class's
+        decorators, bases and keywords, a lambda's defaults and a
+        comprehension's first iterable; and the names a comprehension in it
+        reads past that, which never see the class's (``comprehension_reads``).
+        Not a function's, a lambda's or a nested class's own body, whose
+        reads of the module's names are the table's globals."""
         kind = type(stmt)
         names: set[str] = set()
+        past: set[str] = set()
         if kind is ast.AugAssign and type(stmt.target) is ast.Name:
             names.add(stmt.target.id)
         if kind in (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef):
@@ -1712,7 +1762,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
             # type, a case's pattern and guard, not the statements in them.
             skip = {id(s) for inner, _ in inner_blocks(stmt) for s in inner}
             roots = [c for c in ast.iter_child_nodes(stmt) if id(c) not in skip]
-            if kind in (ast.Try, getattr(ast, "TryStar", ast.Try)):
+            if kind in (ast.Try, ast.TryStar):
                 roots = [h.type for h in stmt.handlers if h.type is not None]
             elif kind is ast.Match:
                 roots = [stmt.subject]
@@ -1730,8 +1780,39 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 continue
             if kind in comps:
                 stack.append(sub.generators[0].iter)
+                past |= comprehension_reads(sub, frozenset())
                 continue
             if kind is ast.Name and type(sub.ctx) is ast.Load:
+                names.add(sub.id)
+            stack.extend(ast.iter_child_nodes(sub))
+        return names, past
+
+    def comprehension_reads(comp, bound: frozenset) -> set[str]:
+        """The names a comprehension's own scope reads: past its first
+        iterable (its element, conditions and later iterables, a nested
+        comprehension's first iterable, a lambda's defaults), not those its
+        targets or an enclosing comprehension's bind (``bound``)."""
+        bound = bound | {n for g in comp.generators for n in target_names(g.target)}
+        parts = [g.iter for g in comp.generators[1:]]
+        parts += [cond for g in comp.generators for cond in g.ifs]
+        if type(comp) is ast.DictComp:
+            parts += [comp.key, comp.value]
+        else:
+            parts.append(comp.elt)
+        comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        names: set[str] = set()
+        stack = list(parts)
+        while stack:
+            sub = stack.pop()
+            kind = type(sub)
+            if kind is ast.Lambda:
+                stack.extend(run_here(sub))
+                continue
+            if kind in comps:
+                stack.append(sub.generators[0].iter)
+                names |= comprehension_reads(sub, bound)
+                continue
+            if kind is ast.Name and type(sub.ctx) is ast.Load and sub.id not in bound:
                 names.add(sub.id)
             stack.extend(ast.iter_child_nodes(sub))
         return names
