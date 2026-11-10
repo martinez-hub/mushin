@@ -4009,6 +4009,9 @@ CLASS_BODY_EDITS = {
     "a tuple target after its read": "lr = {k}\n\n\nclass Cfg:\n    lr, b = lr, 1\n\n\ndef task(a):\n    return Cfg.lr\n",
     "a nested class's base before the binding": "Base = [dict, list][{k} - 1]\n\n\nclass Cfg:\n    class Inner(Base):\n        pass\n\n    Base = 1\n\n\ndef task(a):\n    return Cfg.Inner.__bases__[0].__name__\n",
     "a class in a method": "lr = {k}\n\n\nclass Model:\n    def make(self):\n        class C:\n            lr = lr\n\n        return C.lr\n\n\ndef task(a):\n    return Model().make()\n",
+    "a match subject before the binding": "lr = {k}\n\n\nclass Cfg:\n    match lr:\n        case 1:\n            y = 'one'\n        case _:\n            y = 'other'\n    lr = 1\n\n\ndef task(a):\n    return Cfg.y\n",
+    "an if test before the binding": "lr = {k}\n\n\nclass Cfg:\n    if lr == 1:\n        y = 'one'\n    else:\n        y = 'other'\n    lr = 1\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after an annotation without a value": "lr = {k}\n\n\nclass Cfg:\n    lr: int\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
 }
 CLASS_BODY_EDITS_312 = {
     "a generic class's body": "lr = {k}\n\n\nclass Cfg[T]:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
@@ -4029,6 +4032,15 @@ CLASS_BODY_NOT_EDITS = {
         "    return C.y\n"
     ),
     "a method default after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n\n    def f(self, x=lr):\n        return x\n\n\ndef task(a):\n    return Cfg().f()\n",
+    "a read in a block after the binding": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a loop body's read of its target": "lr = {k}\n\n\nclass Cfg:\n    for lr in [5]:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a with block's read of its target": "import contextlib\n\nlr = {k}\n\n\nclass Cfg:\n    with contextlib.nullcontext(5) as lr:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's read of its name": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a case's read of its capture": "lr = {k}\n\n\nclass Cfg:\n    match 5:\n        case lr:\n            y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a comprehension's own variable before the binding": "lr = {k}\n\n\nclass Cfg:\n    ys = [lr for lr in range(3)]\n    lr = 1\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a lambda's parameter before the binding": "lr = {k}\n\n\nclass Cfg:\n    f = staticmethod(lambda lr: lr)\n    lr = 1\n\n\ndef task(a):\n    return Cfg.f(3)\n",
+    "a method's parameter before the binding": "lr = {k}\n\n\nclass Cfg:\n    def f(self, lr):\n        return lr\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg().f(3)\n",
+    "a read after a tuple binding": "lr = {k}\n\n\nclass Cfg:\n    lr, b = 1, 2\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
 }
 
 
