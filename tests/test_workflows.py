@@ -2524,3 +2524,65 @@ def test_target_job_dirs_tells_a_file_from_a_missing_dir(tmp_path):
         W().run(target_job_dirs=[a_file], working_dir=str(tmp_path / "s"))
     with pytest.raises(FileNotFoundError, match="does not exist"):
         W().run(target_job_dirs=[tmp_path / "gone"], working_dir=str(tmp_path / "s"))
+
+
+def test_a_target_job_dir_hydra_cannot_write_is_refused_before_launch(tmp_path):
+    """The job directories are swept as strings, so one Hydra cannot write
+    unquoted (a `#`, a non-ASCII name) failed inside the launch, after the
+    sweep directory was made; it is refused before (#319)."""
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(job_dir):
+            return dict(m=1.0)
+
+    plain, odd = tmp_path / "plain", tmp_path / "a#b"
+    plain.mkdir()
+    odd.mkdir()
+    with pytest.raises(
+        ValueError, match=r"target job directory '.*a#b' would not parse"
+    ):
+        W().run(target_job_dirs=[plain, odd], working_dir=str(tmp_path / "s"))
+    assert not (tmp_path / "s").exists()
+
+
+def test_the_target_job_dir_refusal_names_the_other_axes_too(tmp_path):
+    """A target job directory and a swept string are refused in one message,
+    so fixing one does not uncover the other on the next run (#319)."""
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(job_dir, a):
+            return dict(m=1.0)
+
+    odd = tmp_path / "a#b"
+    odd.mkdir()
+    with pytest.raises(ValueError) as err:
+        W().run(
+            target_job_dirs=[odd],
+            a=multirun(["true", "x"]),
+            working_dir=str(tmp_path / "s"),
+        )
+    message = str(err.value)
+    assert "`a`: 'true' would reach the task as True." in message
+    assert "a#b' would not parse in its job" in message
+
+
+def test_a_job_dir_parameter_swept_by_hand_gets_the_sweep_advice(tmp_path):
+    """Only the axis `target_job_dirs=` builds is worded as a directory: a
+    task's own `job_dir` swept with multirun gets the advice for a sweep
+    (#319)."""
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(job_dir):
+            return dict(m=1.0)
+
+    with pytest.raises(ValueError) as err:
+        W().run(job_dir=multirun(["true", "x"]), dry_run=True)
+    message = str(err.value)
+    assert "`job_dir`: 'true' would reach the task as True." in message
+    assert "target job directory" not in message

@@ -230,10 +230,12 @@ def test_dry_run_preview_escapes_a_swept_value(tmp_path, monkeypatch):
         def task(name, seed):
             return {"v": 1.0}
 
+    # A raw sweep: Hydra cannot write a non-ASCII string unquoted, so
+    # multirun() refuses one (#319), while a quoted value keeps its quotes.
     summary, raw = _on_ascii_stdout(
         monkeypatch,
         W().run,
-        name=multirun([f"{ALPHA}lpha", "b"]),
+        overrides=[f"+name='{ALPHA}lpha','b'"],
         seed=multirun([0, 1]),
         working_dir=str(tmp_path / "dry"),
         dry_run=True,
@@ -433,8 +435,9 @@ class W(MultiRunMetricsWorkflow):
         return {"v": 1.0}
 
 
+# A raw sweep: multirun() refuses a non-ASCII string (#319).
 W().run(
-    name=multirun(["\\u03b1lpha", "b"]),
+    overrides=["+name='\\u03b1lpha','b'"],
     seed=multirun([0, 1]),
     working_dir=dry,
     dry_run=True,
