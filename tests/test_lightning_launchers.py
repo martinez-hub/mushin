@@ -320,6 +320,16 @@ def test_subprocess_call_argv(monkeypatch, tmp_path, entry):
     assert len(cmd) == 14
 
 
+def test_subprocess_call_quotes_the_job_name(monkeypatch, tmp_path):
+    """A job name holding `=` and `,` reaches the child rank as written: bare,
+    `=` broke the override and `,` made it a sweep (#321)."""
+    captured = _run_subprocess_call_in_hydra_job(
+        monkeypatch, tmp_path, ["hydra.job.name='lr=0.1,a'"]
+    )
+    name = next(o for o in captured["command"] if o.startswith("hydra.job.name="))
+    assert _read_back("hydra.job.name", name.split("=", 1)[1]) == "lr=0.1,a"
+
+
 def test_subprocess_call_unchanged_when_chdir_is_on(monkeypatch, tmp_path):
     # With hydra.job.chdir=True (what mushin's run() always sets) the job dir
     # and the CWD coincide — the launcher must resolve to the same place.
