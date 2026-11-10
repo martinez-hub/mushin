@@ -978,6 +978,11 @@ ANNOTATION_EDITS = {
         [HELPER, "def task(a: list['Helper']):\n    return a\n"],
         [HELPER_EDITED],
     ),
+    # PEP 646: `*args: *tuple[Helper, ...]`, as a string.
+    "a starred string": (
+        [HELPER, "def task(*a: '*tuple[Helper, ...]'):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
     "a string in a string": (
         [HELPER, "def task(a: \"list['Helper']\"):\n    return a\n"],
         [HELPER_EDITED],
@@ -1289,8 +1294,9 @@ def test_the_annotation_walk_adds_no_module_mains_reading_had(kernel, monkeypatc
         kernel,
         [
             # The cell imports `os`, not `os.path`: only Helper's method
-            # names the submodule.
-            "import os\n\n\nclass Helper:\n    def m(self):\n"
+            # names the submodule. Its base's module no cell imports.
+            "import os\n\nDecoder = __import__('json').JSONDecoder\n\n\n"
+            "class Helper(Decoder):\n    def m(self):\n"
             "        return os.path.join('a')\n",
             "def task(a: Helper):\n    return a\n",
         ],
@@ -1309,6 +1315,38 @@ def test_the_annotation_walk_adds_no_module_mains_reading_had(kernel, monkeypatc
     # The chain as read; the file lookup finds the module in it.
     assert "os.path.join" not in reached
     assert "os.path.join" in later
+    assert "json.decoder" not in reached
+    assert "json.decoder" in later
+
+
+def test_an_annotation_string_with_an_escape_gives_no_warning(kernel):
+    """A string annotation is parsed for its names only: an escape in a
+    literal inside it must not warn, from no file."""
+    _run_cells(
+        kernel,
+        [
+            HELPER,
+            "from typing import Annotated\n\n\n"
+            "def task(a: 'Annotated[Helper, \"\\\\d\"]'):\n    return a\n",
+        ],
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = _record(kernel, "task")
+    assert "Helper (notebook)" in record
+    assert not caught, [str(w.message) for w in caught]
+
+
+def test_an_annotation_string_past_the_parsers_depth_names_nothing(kernel):
+    """A string past the parser's depth guard (MemoryError, 3.11 to 3.15)
+    names nothing; the other annotations are still followed."""
+    deep = "-" * 7000 + "1"
+    _run_cells(kernel, [HELPER, f"def task(a: Helper, b: '{deep}'):\n    return a\n"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = _record(kernel, "task")
+    assert "Helper (notebook)" in record
+    assert not caught, [str(w.message) for w in caught]
 
 
 def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):

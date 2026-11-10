@@ -2450,13 +2450,13 @@ def _annotation_names(nodes) -> set[str]:
     return's, of every function in them; a class body's (a field's, a
     ``dataclass``'s); a type parameter's bound, constraints and default; in a
     string too (``x: "Helper"``, ``list["Helper"]``), read as Python reads
-    one, at any depth. Not a function body's own annotation of a variable,
-    which Python never evaluates. Names only: what they hold is the
-    caller's to judge."""
+    one, up to eight strings deep. Not a function body's own annotation of a
+    variable, which Python never evaluates. Names only: what they hold is
+    the caller's to judge."""
     import ast
     import warnings
 
-    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
     exprs: list = []
     # (node, whether it sits in a function's body, where an annotation of a
     # variable is not evaluated)
@@ -2483,19 +2483,14 @@ def _annotation_names(nodes) -> set[str]:
                 args.kwarg,
             ]
             exprs += [p.annotation for p in params if p is not None and p.annotation]
-            if kind is not ast.Lambda and node.returns is not None:
+            if node.returns is not None:
                 exprs.append(node.returns)
-            outer = [*args.defaults, *(d for d in args.kw_defaults if d is not None)]
-            if kind is not ast.Lambda:
-                outer += node.decorator_list
-            stack.extend((part, local) for part in outer)
-            body = [node.body] if kind is ast.Lambda else node.body
-            stack.extend((part, True) for part in body)
+            # Only a statement holds an annotation (a lambda's parameters
+            # have none), so an expression around the definition (a
+            # decorator, a default, a base) holds none either.
+            stack.extend((part, True) for part in node.body)
             continue
         if kind is ast.ClassDef:
-            outer = [*node.decorator_list, *node.bases]
-            outer += [k.value for k in node.keywords]
-            stack.extend((part, local) for part in outer)
             stack.extend((part, False) for part in node.body)
             continue
         if kind is ast.AnnAssign and not local:
