@@ -122,19 +122,25 @@ def test_call_children_scripts_tracks_procs_and_launch_wires_observer(monkeypatc
 
 
 def test_hydra_run_dir_override_is_windows_safe():
-    """Backslash is an escape character inside Hydra's quoted override
-    grammar; a raw Windows cwd would be corrupted. Forward slashes are valid
-    on every platform."""
+    """A re-launched rank's run dir is written with forward slashes, valid on
+    every platform, and quoted as a swept string is (#321), so Hydra reads it
+    back as written, '=' and all."""
     from pathlib import PurePosixPath, PureWindowsPath
+
+    from hydra.core.override_parser.overrides_parser import OverridesParser
 
     from mushin.lightning.launchers import _hydra_run_dir_override
 
-    assert (
-        _hydra_run_dir_override(PureWindowsPath(r"C:\Users\me\out"))
-        == '"C:/Users/me/out"'
-    )
+    def read_back(override):
+        line = f"hydra.run.dir={override}"
+        return OverridesParser.create().parse_overrides([line])[0].value()
+
+    windows = _hydra_run_dir_override(PureWindowsPath(r"C:\Users\me\out"))
+    assert read_back(windows) == "C:/Users/me/out"
     # '=' in the dir name still relies on the quoting
-    assert _hydra_run_dir_override(PurePosixPath("/tmp/lr=0.1")) == '"/tmp/lr=0.1"'
+    assert read_back(_hydra_run_dir_override(PurePosixPath("/tmp/lr=0.1"))) == (
+        "/tmp/lr=0.1"
+    )
 
 
 def test_interrank_delay_env_override(monkeypatch):
