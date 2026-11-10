@@ -52,6 +52,7 @@ def test_a_workflow_whose_task_and_pre_task_name_one_runs(tmp_path):
     wf = tasks.LazyWF()
     wf.run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
     assert wf.to_xarray()["v"].values.tolist() == [1.0, 2.0]
+    wf.validate()  # zen reads both signatures with the annotations as text
 
 
 @lazy
