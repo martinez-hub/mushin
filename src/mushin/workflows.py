@@ -118,7 +118,9 @@ def _dict_key_written(key: Any) -> tuple[bool, str]:
         (read,) = parsed.value().keys()
     except Exception:  # noqa: BLE001 - not parseable is what is reported
         return False, "an override Hydra cannot parse"
-    return (type(read) is type(key) and read == key), repr(read)
+    # Equal is enough: a str never equals what reads back as a number, a bool
+    # or null, and a NumPy integer key reads back as the int it equals.
+    return read == key, repr(read)
 
 
 def _dict_key(key: Any) -> str:

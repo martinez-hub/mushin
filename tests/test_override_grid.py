@@ -264,11 +264,13 @@ class _SeenDict(MultiRunMetricsWorkflow):
 
 
 def test_dict_keys_hydra_can_write_reach_the_task(tmp_path):
-    # A float and a bool key read back as themselves, not as their text.
-    value = {"a": 1, 2: "y", "a b": 3, 1.5: "f", True: "t"}
+    # A float and a bool key read back as themselves, not as their text, and
+    # a NumPy integer key as the int it equals, as before.
+    value = {"a": 1, 2: "y", "a b": 3, 1.5: "f", True: "t", np.int64(7): "n"}
     wf = _run(tmp_path, _SeenDict, d=multirun([value]))
     ds = wf.to_xarray()
-    assert {str(r) for r in ds["d_repr"].values} == {repr(value)}
+    expected = {"a": 1, 2: "y", "a b": 3, 1.5: "f", True: "t", 7: "n"}
+    assert {str(r) for r in ds["d_repr"].values} == {repr(expected)}
 
 
 @pytest.mark.parametrize("key", ["1", "true", "null", "1.5", "a ", "a=b", "a:b"])
