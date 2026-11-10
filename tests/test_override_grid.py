@@ -462,6 +462,33 @@ def test_a_str_field_from_a_defaults_group_turns_back_as_before(
     assert [str(r) for r in wf.to_xarray()["r"].values] == ["'1'", "'2'"]
 
 
+@pytest.mark.config_group("s319")
+def test_a_field_under_a_swept_group_is_not_judged(tmp_path, restore_config_group):
+    """A swept config group picks each job's schema for what lies under it,
+    and the composed config holds only the default's. Each option here types
+    `name` as `str`, so its jobs turn Hydra's 1 back into '1', as on main:
+    the field is not judged, and the sweep runs (#319)."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import ZenField, make_config
+
+    cs = ConfigStore.instance()
+    for option in ("small", "big"):
+        cs.store(group="s319", name=option, node=make_config(name=ZenField(str, "x")))
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(s319):
+            return dict(r=repr(s319.name))
+
+    wf = W(make_config(s319=dict(name="x")))
+    wf.run(
+        overrides=["+s319=small,big"],
+        **{"s319.name": multirun(["1", "2"])},
+        working_dir=str(tmp_path / "s"),
+    )
+    assert {str(r) for r in wf.to_xarray()["r"].values.ravel()} == {"'1'", "'2'"}
+
+
 def test_a_sweeper_the_defaults_list_names_is_left_to_write_its_jobs():
     """A sweeper chosen in the config's defaults list writes the jobs, not
     the basic one the check models: its sweep is not refused (#319)."""

@@ -248,15 +248,18 @@ def _composed_for_launch(
     config_name: str,
     job_name: str,
     version_base: Any,
-) -> tuple[Any, set[str]]:
+) -> tuple[Any, set[str], set[str]]:
     """The config Hydra composes for this sweep before its sweeper writes the
-    jobs, composed as hydra-zen's ``launch`` composes it, and which of
-    ``names`` are config groups (#319).
+    jobs, composed as hydra-zen's ``launch`` composes it; which of ``names``
+    are config groups; and the config paths of the groups the sweep sweeps
+    (#319).
 
     The config is where a job's override lands: it holds the fields' types
     (a ``str`` field from a defaults-list group's config included, and none
     under ``to_dictconfig``) and names the sweeper. A config group's
-    override names an option, not a value. ``cfg`` is stored under
+    override names an option, not a value, and a swept group picks each
+    job's schema for what lies under it, while this config holds only its
+    default's. ``cfg`` is stored under
     ``config_name``, as ``launch`` is about to store it; ``initialize``
     clears Hydra's global state on its way out. A compose that fails here
     fails in ``launch`` too, from the same inputs, so it is not caught."""
@@ -284,7 +287,12 @@ def _composed_for_launch(
         )
         loader = hydra.config_loader()
         groups = {name for name in names if loader.get_group_options(name)}
-    return master, groups
+        swept_groups = {
+            o.key_or_group.replace("/", ".")
+            for o in _override_parser().parse_overrides(list(overrides))
+            if o.is_sweep_override() and loader.get_group_options(o.key_or_group)
+        }
+    return master, groups, swept_groups
 
 
 def _job_value(cfg: Any, key: str, value: Any) -> Any:
@@ -2460,7 +2468,7 @@ class BaseWorkflow:
         misread = []
         if odd:
             try:
-                master, groups = _composed_for_launch(
+                master, groups, swept_groups = _composed_for_launch(
                     self.eval_task_cfg,
                     launch_overrides,
                     [name for name, *_ in odd],
@@ -2488,6 +2496,11 @@ class BaseWorkflow:
                     continue
                 if name in groups:
                     found.append((item, "would fail in its job", False))
+                    continue
+                if any(name.startswith(f"{group}.") for group in swept_groups):
+                    # Each job's option types what lies under a swept group,
+                    # and the composed config holds only its default's: the
+                    # field is not judged, so nothing that ran is refused.
                     continue
                 as_swept = _job_value(job_cfg, name, read)
                 as_fixed = _job_value(job_cfg, name, text)
