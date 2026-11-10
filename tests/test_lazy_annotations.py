@@ -13,6 +13,7 @@ import sys
 
 import pytest
 from hydra_zen import zen
+from hydra_zen.errors import HydraZenValidationError
 
 import mushin
 from mushin import multirun
@@ -52,7 +53,12 @@ def test_a_workflow_whose_task_and_pre_task_name_one_runs(tmp_path):
     wf = tasks.LazyWF()
     wf.run(a=multirun([1, 2]), working_dir=str(tmp_path / "s"))
     assert wf.to_xarray()["v"].values.tolist() == [1.0, 2.0]
-    wf.validate()  # zen reads both signatures with the annotations as text
+    # zen reads both signatures with the annotations as text: it reports the
+    # swept `a` missing from the base config, not a NameError.
+    with pytest.raises(
+        HydraZenValidationError, match="missing the following fields: a"
+    ):
+        wf.validate()
 
 
 @lazy
