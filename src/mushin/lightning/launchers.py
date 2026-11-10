@@ -39,18 +39,26 @@ def _setup_environment() -> None:
         distributed.destroy_process_group()
 
 
+def _hydra_quoted(text: str) -> str:
+    """``text`` as Hydra's own writer quotes a string for an override: it
+    escapes a quote and the backslashes before one, which is all Hydra's
+    grammar unescapes, so the child reads the text back as written (#321).
+    Not ``workflows._quoted``, whose ``${`` form doubles every backslash: an
+    escaped ``\\${`` in a directory's name would become a live interpolation.
+    A ``${`` the text holds is still read as an interpolation, as before."""
+    from hydra.core.override_parser.types import Quote, QuotedString
+
+    return QuotedString(text=text, quote=Quote.single).with_quotes()
+
+
 def _hydra_run_dir_override(cwd) -> str:
     """The ``hydra.run.dir=`` override value for a re-launched rank: quoted for
-    Hydra's override grammar (dir names may contain ``=``, a space or a quote),
-    as a swept string is (``_quoted``, which escapes a quote and the
-    backslashes before one; Hydra keeps any other backslash), with forward
-    slashes. A path holding ``${`` is still an interpolation (#321)."""
+    Hydra's override grammar (dir names may contain ``=``, a space or a quote,
+    ``_hydra_quoted``), with forward slashes."""
     from pathlib import PurePath
 
-    from ..workflows import _quoted
-
     p = cwd if isinstance(cwd, PurePath) else Path(cwd)
-    return _quoted(p.as_posix())
+    return _hydra_quoted(p.as_posix())
 
 
 def _interrank_delay() -> float:
@@ -155,7 +163,8 @@ def _subprocess_call(
         f"++pl_local_rank={local_rank}",
         f"hydra.run.dir={os_cwd}",
         f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
-        f"hydra.job.name={hydra_cfg.job.name}",
+        # A job name from `run(job_name=...)` may hold `=`, `,` or a quote.
+        f"hydra.job.name={_hydra_quoted(str(hydra_cfg.job.name))}",
     ]
     return subprocess.Popen(command, env=env_copy, cwd=cwd)
 

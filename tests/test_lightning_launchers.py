@@ -143,6 +143,34 @@ def test_hydra_run_dir_override_is_windows_safe():
     )
 
 
+def _read_back(override_key, text):
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    line = f"{override_key}={text}"
+    return OverridesParser.create().parse_overrides([line])[0].value()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ['/tmp/a"b', "/tmp/it's", "/tmp/a=b c", "C:/data/run 1", "/tmp/x\\${y}"],
+)
+def test_a_relaunched_ranks_run_dir_reads_back_as_written(path):
+    """A path holding a quote, '=', a space or an escaped interpolation reads
+    back as written (#321)."""
+    from mushin.lightning.launchers import _hydra_run_dir_override
+
+    assert _read_back("hydra.run.dir", _hydra_run_dir_override(path)) == path
+
+
+@pytest.mark.parametrize("name", ["lr=0.1", "a,b", "it's", 'say "hi"', "plain"])
+def test_a_relaunched_ranks_job_name_reads_back_as_written(name):
+    """A job name from run(job_name=...) reaches each child rank as written
+    (#321): bare, `=` broke the override and `,` made it a sweep."""
+    from mushin.lightning.launchers import _hydra_quoted
+
+    assert _read_back("hydra.job.name", _hydra_quoted(name)) == name
+
+
 def test_interrank_delay_env_override(monkeypatch):
     from mushin.lightning.launchers import _interrank_delay
 

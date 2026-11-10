@@ -89,7 +89,10 @@ def _to_override_element(item: Any) -> str:
         return str(item)
     if isinstance(item, str):
         return _quoted(item)
-    if isinstance(item, (list, tuple)):
+    if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+        # A list, a tuple, a range, and what main wrote as a list through its
+        # repr: a nested `hydra_list`/`multirun` (UserList) or an OmegaConf
+        # ListConfig (#321).
         return "[" + ",".join(_to_override_element(x) for x in item) + "]"
     if isinstance(item, Mapping):
         # Hydra dict grammar, so e.g. a launcher's
@@ -106,36 +109,58 @@ def _to_override_element(item: Any) -> str:
     return _quoted(str(item))
 
 
-@functools.lru_cache(maxsize=256)
-def _dict_key_written(key: Any) -> tuple[bool, str]:
-    """``(round_trips, read_back)`` for a dict key written bare, as Hydra's
-    dict grammar takes it: it has no quoted key, so a key is read as its text
-    parses (``'1'`` as ``1``), and one with a space, ``=`` or ``:`` does not
-    parse at all."""
+def _dict_key(key: Any) -> str:
+    """A dict key written for Hydra's override grammar, which has no quoted
+    key, so a key is read back as its text parses (``'1'`` as ``1``, a
+    leading or trailing space stripped; an inner one stays), and one holding
+    ``=`` or ``:`` does not parse. The override has two readers, Hydra's
+    parser and OmegaConf's merge, which takes no ``None`` key, so both are
+    asked. A key either reads back equal through both or is refused before
+    launch with a ``ValueError`` (#321): it would reach the task changed, or
+    fail inside the launch."""
+    import math
+
+    from hydra.errors import OverrideParseException
+    from omegaconf import OmegaConf
+    from omegaconf.errors import OmegaConfBaseException
+
     text = str(key) if isinstance(key, str) else _to_override_element(key)
     try:
         parsed = OverridesParser.create().parse_overrides([f"k={{{text}:0}}"])[0]
+    except OverrideParseException:
+        read, became = None, "an override Hydra cannot parse"
+    else:
         (read,) = parsed.value().keys()
-    except Exception:  # noqa: BLE001 - not parseable is what is reported
-        return False, "an override Hydra cannot parse"
+        became = repr(read)
+        try:
+            OmegaConf.create({read: 0})
+        except OmegaConfBaseException:
+            became = f"{read!r}, a key OmegaConf does not take"
+            read = None
     # Equal is enough: a str never equals what reads back as a number, a bool
-    # or null, and a NumPy integer key reads back as the int it equals.
-    return read == key, repr(read)
-
-
-def _dict_key(key: Any) -> str:
-    """A dict key as Hydra's override grammar reads it back as itself, or a
-    ``ValueError`` before launch: a str key that reads as another type would
-    reach the task changed (#321)."""
-    round_trips, read = _dict_key_written(key)
-    if not round_trips:
-        raise ValueError(
-            f"the dict key {key!r} cannot be written as a Hydra override: its "
-            f"grammar has no quoted keys, so it would become {read}. Put the dict "
-            "in the workflow's eval_task_cfg, or use a key Hydra writes as itself "
-            "(a name, a number)."
+    # or null, and a NumPy integer key reads back as the int it equals; two
+    # NaNs are the same key, though never equal.
+    same = (
+        became == repr(read)
+        and read is not None
+        and (
+            read == key
+            or (
+                isinstance(read, float)
+                and isinstance(key, float)
+                and math.isnan(read)
+                and math.isnan(key)
+            )
         )
-    return str(key) if isinstance(key, str) else _to_override_element(key)
+    )
+    if not same:
+        raise ValueError(
+            f"the dict key {key!r} cannot be written as a Hydra override: Hydra "
+            f"has no quoted dict keys, so it would become {became}. Use a key "
+            "Hydra writes as itself (a name, a number, a bool), or pass the "
+            "values as scalar parameters and build the dict in the task."
+        )
+    return text
 
 
 def _quoted(text: str) -> str:

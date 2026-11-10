@@ -254,6 +254,21 @@ def test_a_hydra_list_reaches_the_task_as_written(tmp_path):
     assert {str(r) for r in ds["b_repr"].values} == {repr(values)}
 
 
+def test_a_hydra_list_keeps_what_main_read_as_a_list(tmp_path):
+    """Main wrote a `hydra_list` through Python's repr, which read back as a
+    list for a nested `hydra_list` or an OmegaConf ListConfig: each still
+    reaches the task as a list, as does a tuple or a range (#321)."""
+    from omegaconf import OmegaConf
+
+    from mushin import hydra_list
+
+    values = [hydra_list([1, 2]), OmegaConf.create(["a"]), (1, "a"), range(2)]
+    wf = _run(tmp_path, _SeenList, a=multirun(["x"]), b=hydra_list(values))
+    ds = wf.to_xarray()
+    expected = [[1, 2], ["a"], [1, "a"], [0, 1]]
+    assert {str(r) for r in ds["b_repr"].values} == {repr(expected)}
+
+
 class _SeenDict(MultiRunMetricsWorkflow):
     @staticmethod
     def task(d=None):
@@ -283,25 +298,24 @@ def test_a_dict_key_hydra_cannot_write_is_refused(tmp_path, key):
     assert not (tmp_path / "s").exists()
 
 
+def test_a_key_omegaconf_does_not_take_is_refused(tmp_path):
+    """Hydra reads `{null:0}` back, but OmegaConf's merge takes no None key:
+    refused before launch, not inside it (#321)."""
+    with pytest.raises(ValueError, match="OmegaConf"):
+        _run(tmp_path, _SeenDict, d=multirun([{None: "x"}]))
+    assert not (tmp_path / "s").exists()
+
+
+def test_a_nan_dict_key_reaches_the_task(tmp_path):
+    """NaN never equals itself, but it is the key it was, as on main."""
+    wf = _run(tmp_path, _SeenDict, d=multirun([{float("nan"): "x"}]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["d_repr"].values} == {"{nan: 'x'}"}
+
+
 def test_a_tuple_dict_key_is_refused(tmp_path):
     with pytest.raises(ValueError, match=re.escape(repr(("a", 1)))):
         _run(tmp_path, _SeenDict, d=multirun([{("a", 1): "x"}]))
-
-
-@pytest.mark.parametrize(
-    "path",
-    ['/tmp/a"b', "/tmp/it's", "/tmp/a=b c", "C:/data/run 1"],
-)
-def test_a_relaunched_ranks_run_dir_round_trips(path):
-    """HydraDDP re-launches each rank with `hydra.run.dir=`: a path holding a
-    quote, '=' or a space parses back to itself (#321)."""
-    from hydra.core.override_parser.overrides_parser import OverridesParser
-
-    from mushin.lightning.launchers import _hydra_run_dir_override
-
-    override = f"hydra.run.dir={_hydra_run_dir_override(path)}"
-    parsed = OverridesParser.create().parse_overrides([override])[0]
-    assert parsed.value() == path
 
 
 def test_a_glob_sweep_is_refused_by_name():
