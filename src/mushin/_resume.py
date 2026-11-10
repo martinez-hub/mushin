@@ -765,11 +765,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     in a top-level block, an ``if``'s, a ``try``'s, a ``with``'s, a loop's
     or a ``match``'s, as for a top-level one, #323; the main block's own
     statements are top-level ones; a class in a block, and a function in one
-    that holds a class, is walked whole, since a class body can read a
-    module name it binds, as in ``lr = lr``, so their locals may count, as
-    may a lambda's parameters and a comprehension's variables, at the top
-    level as in a block, and, on 3.11 to 3.13, whose symbol table lists them
-    as read, the names in a function's local annotation), a star import (it
+    that holds a class, is walked whole, as main walked it, so their locals
+    may count, as may a lambda's parameters and a comprehension's variables,
+    at the top level as in a block, and, on 3.11 to 3.13, whose symbol table
+    lists them as read, the names in a function's local annotation), a star
+    import (it
     may bind any name),
     and a decorated definition whose decorator registers it somewhere counted
     code reads (``@register`` defined in the script, or an alias of it,
@@ -825,11 +825,14 @@ def _script_digest(path: Path, roots: frozenset[str]):
     class body's annotation reads the module's name even where the class
     binds it (``x: 'grid'`` beside ``grid = int``, which
     ``typing.get_type_hints`` resolves in the class first): a recompute too
-    many, never a stale reuse. Not read (#336): a class body's augmented
-    assignment (``lr += [3]``), anywhere; and a class body's read of a name
-    it binds too (``lr = lr``), which the symbol table calls the class's,
-    except where the class is walked whole (in a top-level block, not at the
-    top level, in the main block or in a top-level function).
+    many, never a stale reuse. A class body's read of a name it binds too,
+    which it reads from the module until a binding in it runs (``lr = lr``,
+    ``lr += [3]``, ``for lr in lr``), counts wherever the class is (#336,
+    ``class_body_reads``), as does any read of a name the body can unbind
+    (``del``, an ``except`` handler's name, outside the handler that binds
+    it) and a comprehension's read of one; after a binding that runs only in
+    some branches (a ``try`` that binds it in each), it counts too: a
+    recompute too many.
     ``imports`` are those of what counts."""
     import ast
     import copy
@@ -868,6 +871,22 @@ def _script_digest(path: Path, roots: frozenset[str]):
             }
             names |= found
             here |= found
+
+    # Each class body's own names, by the class's name and first line: those
+    # it binds, which it reads from the module until a binding runs (#336).
+    # A class table only: on 3.12+ a generic class's type-parameter scope is
+    # named like it too.
+    class_locals: dict[tuple[str, int], set[str]] = {}
+    pending_tables = [table]
+    while pending_tables:
+        t = pending_tables.pop()
+        pending_tables.extend(t.get_children())
+        if t.get_type() == "class":
+            class_locals[(t.get_name(), t.get_lineno())] = {
+                sym.get_name()
+                for sym in t.get_symbols()
+                if sym.is_local() and not sym.is_global()
+            }
 
     def loads(nodes) -> set[str]:
         return {
@@ -1558,6 +1577,258 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return loads(outer) | (loads(inner) - own)
 
     def _reads(node) -> set[str]:
+        return code_reads(node) | class_body_reads(node)
+
+    def class_body_reads(node) -> set[str]:
+        """The module names a class body anywhere in ``node`` may read
+        before binding them (#336). A class body evaluates a name it binds
+        by LOAD_NAME: its own namespace, then the module's, so until a
+        binding in the body has run it reads the module's (``lr = lr``,
+        ``lr += [3]``, ``for lr in lr``, a read after a binding inside an
+        ``if``). The symbol table calls such a name the class's and a syntax
+        walk sees an augmented target as a store, so neither counts it.
+
+        A read counts unless a binding that always runs before it covers it:
+        a statement earlier in its block or an enclosing one that assigns,
+        annotates with a value, augments, defines or imports the name, or the
+        target of the loop, ``with`` or ``case`` the read is in. That holds
+        only while nothing can unbind the name again, so a name the class's
+        own scope deletes (``del``, any target form) or names an ``except``
+        handler with (Python deletes it when the handler ends) is never
+        covered: wherever the ``del`` sits, on whatever pass of a loop, at
+        the body's end too (a recompute too many). A handler's own name is
+        covered inside it when no ``del`` removes it and no handler inside it
+        names it, so that nothing within can unbind it. Those are the only
+        statements that remove a name from a namespace; one removed at run
+        time (``locals()``, ``vars()``) is past what the record reads, as
+        everywhere.
+
+        A comprehension never sees the class's names, so a name of the class
+        that one reads past its first iterable (inlined into the class's
+        table on 3.12+) reads past the class and is always counted (a
+        function's local of that name, when the class is in one, is what it
+        finds: a recompute too many). A binding in a block covers only that
+        block, so a read after a ``try`` that binds the name in each branch
+        counts, as does one after a walrus or a ``type`` statement binds it,
+        a ``match`` guard's read of its own capture and a ``with`` item's
+        read of an earlier item's target: a recompute too many. Its other
+        reads are the table's globals already."""
+        found: set[str] = set()
+        for cls in ast.walk(node):
+            if type(cls) is not ast.ClassDef:
+                continue
+            # Without its table (none is expected), every read may be the
+            # module's.
+            own = class_locals.get((cls.name, cls.lineno))
+            deleted, handled = unbinds(cls.body)
+            unbound = deleted | set(handled)
+            # (statements, the names bound before them, the names bound
+            # throughout them: a handler's own name inside it, when no `del`
+            # removes it and no handler inside it names it, so nothing within
+            # unbinds it; a sibling handler cannot run while it does, and a
+            # loop entering it again binds the name again)
+            blocks = [(cls.body, frozenset(), frozenset())]
+            while blocks:
+                body, outer, kept = blocks.pop()
+                covered = (set(outer) - unbound) | kept
+                for stmt in body:
+                    reads, always = here_reads(stmt)
+                    found.update(
+                        n for n in (reads - covered) | always if own is None or n in own
+                    )
+                    names: dict[int, set[str]] = {}
+                    if type(stmt) in (ast.Try, ast.TryStar):
+                        names = {
+                            id(h.body): {h.name}
+                            for h in stmt.handlers
+                            if h.name
+                            and h.name not in deleted
+                            and h.name not in unbinds(h.body)[1]
+                        }
+                    blocks.extend(
+                        (
+                            inner,
+                            frozenset(covered | bound),
+                            kept | names.get(id(inner), frozenset()),
+                        )
+                        for inner, bound in inner_blocks(stmt)
+                    )
+                    covered |= always_binds(stmt) - unbound
+        return found
+
+    def unbinds(body) -> tuple[set[str], dict[str, int]]:
+        """``(deleted, handled)``: the names a class body's own scope can
+        unbind, in any block of it: a ``del``'s targets, and how many
+        ``except`` handlers name each name."""
+        deleted: set[str] = set()
+        handled: dict[str, int] = {}
+        pending = [body]
+        while pending:
+            for stmt in pending.pop():
+                if type(stmt) is ast.Delete:
+                    deleted.update(n for t in stmt.targets for n in target_names(t))
+                if type(stmt) in (ast.Try, ast.TryStar):
+                    for h in stmt.handlers:
+                        if h.name:
+                            handled[h.name] = handled.get(h.name, 0) + 1
+                pending.extend(inner for inner, _ in inner_blocks(stmt))
+        return deleted, handled
+
+    def target_names(target) -> set[str]:
+        """The names an assignment target binds: a name, or those in a tuple
+        or list of targets; not an attribute's or an item's."""
+        if type(target) is ast.Name:
+            return {target.id}
+        if type(target) in (ast.Tuple, ast.List):
+            return {n for e in target.elts for n in target_names(e)}
+        if type(target) is ast.Starred:
+            return target_names(target.value)
+        return set()
+
+    def always_binds(stmt) -> set[str]:
+        """The names a class body's statement binds whenever it completes."""
+        kind = type(stmt)
+        if kind is ast.Assign:
+            return {n for t in stmt.targets for n in target_names(t)}
+        if kind is ast.AnnAssign:
+            return target_names(stmt.target) if stmt.value is not None else set()
+        if kind is ast.AugAssign:
+            return target_names(stmt.target)
+        if kind in defs:
+            return {stmt.name}
+        if kind is ast.Import:
+            return {(a.asname or a.name).partition(".")[0] for a in stmt.names}
+        if kind is ast.ImportFrom:
+            return {a.asname or a.name for a in stmt.names}
+        return set()
+
+    def inner_blocks(stmt) -> list:
+        """``(statements, names bound before they run)`` of the blocks a
+        class body's statement holds in that same scope."""
+        kind = type(stmt)
+        if kind in (ast.For, ast.AsyncFor):
+            return [(stmt.body, target_names(stmt.target)), (stmt.orelse, set())]
+        if kind in (ast.With, ast.AsyncWith):
+            bound = {
+                n
+                for item in stmt.items
+                if item.optional_vars is not None
+                for n in target_names(item.optional_vars)
+            }
+            return [(stmt.body, bound)]
+        if kind in (ast.If, ast.While):
+            return [(stmt.body, set()), (stmt.orelse, set())]
+        if kind in (ast.Try, ast.TryStar):
+            # A handler's name is unbound when it ends (`unbinds`); inside it,
+            # `class_body_reads` keeps it bound when nothing within unbinds it.
+            handlers = [(h.body, set()) for h in stmt.handlers]
+            return [
+                (stmt.body, set()),
+                *handlers,
+                (stmt.orelse, set()),
+                (stmt.finalbody, set()),
+            ]
+        if kind is ast.Match:
+            return [(case.body, captures(case.pattern)) for case in stmt.cases]
+        return []
+
+    def captures(pattern) -> set[str]:
+        return {
+            n
+            for sub in ast.walk(pattern)
+            for n in (
+                getattr(sub, "name", None)
+                if type(sub) in (ast.MatchAs, ast.MatchStar)
+                else None,
+                getattr(sub, "rest", None) if type(sub) is ast.MatchMapping else None,
+            )
+            if n
+        }
+
+    def here_reads(stmt) -> tuple[set[str], set[str]]:
+        """``(reads, past_the_class)``: the names a class body's statement
+        reads in the class's scope, but in the blocks it holds
+        (``inner_blocks``): its expressions, an augmented target, a nested
+        definition's decorators, defaults and annotations, a nested class's
+        decorators, bases and keywords, a lambda's defaults and a
+        comprehension's first iterable; and the names a comprehension in it
+        reads past that, which never see the class's (``comprehension_reads``).
+        Not a function's, a lambda's or a nested class's own body, whose
+        reads of the module's names are the table's globals."""
+        kind = type(stmt)
+        names: set[str] = set()
+        past: set[str] = set()
+        if kind is ast.AugAssign and type(stmt.target) is ast.Name:
+            names.add(stmt.target.id)
+        if kind in (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef):
+            roots = run_here(stmt)
+            if kind is not ast.ClassDef:
+                a = stmt.args
+                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+                roots += [p.annotation for p in params if p and p.annotation]
+                if stmt.returns is not None:
+                    roots.append(stmt.returns)
+        else:
+            # Its own parts: an `if`'s test, a loop's iterable, a handler's
+            # type, a case's pattern and guard, not the statements in them.
+            skip = {id(s) for inner, _ in inner_blocks(stmt) for s in inner}
+            roots = [c for c in ast.iter_child_nodes(stmt) if id(c) not in skip]
+            if kind in (ast.Try, ast.TryStar):
+                roots = [h.type for h in stmt.handlers if h.type is not None]
+            elif kind is ast.Match:
+                roots = [stmt.subject]
+                for case in stmt.cases:
+                    roots.append(case.pattern)
+                    if case.guard is not None:
+                        roots.append(case.guard)
+        comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        stack = list(roots)
+        while stack:
+            sub = stack.pop()
+            kind = type(sub)
+            if kind is ast.Lambda:
+                stack.extend(run_here(sub))
+                continue
+            if kind in comps:
+                stack.append(sub.generators[0].iter)
+                past |= comprehension_reads(sub, frozenset())
+                continue
+            if kind is ast.Name and type(sub.ctx) is ast.Load:
+                names.add(sub.id)
+            stack.extend(ast.iter_child_nodes(sub))
+        return names, past
+
+    def comprehension_reads(comp, bound: frozenset) -> set[str]:
+        """The names a comprehension's own scope reads: past its first
+        iterable (its element, conditions and later iterables, a nested
+        comprehension's first iterable, a lambda's defaults), not those its
+        targets or an enclosing comprehension's bind (``bound``)."""
+        bound = bound | {n for g in comp.generators for n in target_names(g.target)}
+        parts = [g.iter for g in comp.generators[1:]]
+        parts += [cond for g in comp.generators for cond in g.ifs]
+        if type(comp) is ast.DictComp:
+            parts += [comp.key, comp.value]
+        else:
+            parts.append(comp.elt)
+        comps = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        names: set[str] = set()
+        stack = list(parts)
+        while stack:
+            sub = stack.pop()
+            kind = type(sub)
+            if kind is ast.Lambda:
+                stack.extend(run_here(sub))
+                continue
+            if kind in comps:
+                stack.append(sub.generators[0].iter)
+                names |= comprehension_reads(sub, bound)
+                continue
+            if kind is ast.Name and type(sub.ctx) is ast.Load and sub.id not in bound:
+                names.add(sub.id)
+            stack.extend(ast.iter_child_nodes(sub))
+        return names
+
+    def code_reads(node) -> set[str]:
         if isinstance(node, defs):
             return scope_reads.get(node.name, set()) | header_reads(node)
         if isinstance(node, type_alias):
@@ -1573,8 +1844,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
         # reads a module name it binds locally, but a class body does
         # (`lr = lr` reads the module's `lr`), and the table calls that name
         # the class's. So a class in a block, and a function in one that
-        # holds a class anywhere in it, is walked as main walked it: the table
-        # cannot see what that class body reads (#336).
+        # holds a class anywhere in it, is walked as main walked it, which
+        # over-counts their locals. `class_body_reads` adds what such a class
+        # body reads either way (#336); reading these by the table instead
+        # would subtract from main's reading, which needs its own equivalence
+        # run.
         found: set[str] = set()
         stack = [node]
         while stack:

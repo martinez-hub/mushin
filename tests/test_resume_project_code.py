@@ -3985,6 +3985,159 @@ def test_what_a_block_function_reads_counts(tmp_path, case, cases, future):
     assert one != two
 
 
+# --- a class body's read of a name it binds (#336) --------------------------------
+
+# A class body evaluates a name it binds with LOAD_NAME: the class's namespace,
+# then the module's. Until a binding in the body has run, it reads the
+# module's value (`lr = lr`, `lr += [3]`). Each EDIT reads the module's value
+# at run time (checked by executing each case on 3.11, 3.13 and 3.15); each
+# NOT_EDIT reads the class's own.
+CLASS_BODY_EDITS = {
+    "a top-level class's body": "lr = {k}\n\n\nclass Cfg:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a class in a top-level function": "lr = {k}\n\n\ndef task(a):\n    class C:\n        lr = lr\n\n    return C.lr\n",
+    "a class in the main block": "lr = {k}\n\n\ndef task(a):\n    return Cfg.lr\n\n\nif __name__ == '__main__':\n\n    class Cfg:\n        lr = lr\n",
+    "an augmented assignment in a block class": "import sys\n\nlr = [{k}]\n\nif sys:\n\n    class Cfg:\n        lr += [3]\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "an augmented assignment in a top-level class": "lr = [{k}]\n\n\nclass Cfg:\n    lr += [3]\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a loop over the name it binds": "lr = [{k}]\n\n\nclass Cfg:\n    for lr in lr:\n        pass\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a read before the binding": "lr = {k}\n\n\nclass Cfg:\n    y = lr\n    lr = 3\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a method's default before the binding": "lr = {k}\n\n\nclass Cfg:\n    def f(self, x=lr):\n        return x\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg().f()\n",
+    "a decorator's argument before the binding": "lr = {k}\n\n\ndef deco(n):\n    def wrap(f):\n        f.n = n\n        return f\n\n    return wrap\n\n\nclass Cfg:\n    @deco(lr)\n    def f(self):\n        return 0\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg.f.n\n",
+    "a comprehension's first iterable before the binding": "lr = [{k}]\n\n\nclass Cfg:\n    ys = [y * 2 for y in lr]\n    lr = 1\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a read after a binding that may not run": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    if not sys:\n        lr = 1\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after a del": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a nested class's body": "lr = {k}\n\n\nclass Outer:\n    class Inner:\n        lr = lr\n\n\ndef task(a):\n    return Outer.Inner.lr\n",
+    "a tuple target after its read": "lr = {k}\n\n\nclass Cfg:\n    lr, b = lr, 1\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a nested class's base before the binding": "Base = [dict, list][{k} - 1]\n\n\nclass Cfg:\n    class Inner(Base):\n        pass\n\n    Base = 1\n\n\ndef task(a):\n    return Cfg.Inner.__bases__[0].__name__\n",
+    "a class in a method": "lr = {k}\n\n\nclass Model:\n    def make(self):\n        class C:\n            lr = lr\n\n        return C.lr\n\n\ndef task(a):\n    return Model().make()\n",
+    "a match subject before the binding": "lr = {k}\n\n\nclass Cfg:\n    match lr:\n        case 1:\n            y = 'one'\n        case _:\n            y = 'other'\n    lr = 1\n\n\ndef task(a):\n    return Cfg.y\n",
+    "an if test before the binding": "lr = {k}\n\n\nclass Cfg:\n    if lr == 1:\n        y = 'one'\n    else:\n        y = 'other'\n    lr = 1\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after an annotation without a value": "lr = {k}\n\n\nclass Cfg:\n    lr: int\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A name a del or an except handler can unbind reads the module's again,
+    # and a comprehension never sees the class's names.
+    "a del in a nested block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's name, deleted when it ends": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    try:\n        raise ValueError\n    except ValueError as lr:\n        pass\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del on a loop's earlier pass": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    for i in range(2):\n        y = lr\n        if i == 0:\n            del lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a tuple del": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    b = 2\n    del (lr, b)\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del in a with block": "import contextlib\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    with contextlib.nullcontext():\n        del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del in a match case": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    match 1:\n        case 1:\n            del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a del, then a read in a later block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        del lr\n    if sys:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a comprehension's body after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    ys = [lr for _ in range(2)]\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a comprehension's condition after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    ys = [x for x in range(3) if x < lr]\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a dict comprehension's value after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    d = {{x: lr for x in range(2)}}\n\n\ndef task(a):\n    return Cfg.d\n",
+    "a comprehension in a class in a function": "lr = {k}\n\n\ndef task(a):\n    class C:\n        lr = 1\n        ys = [lr for _ in range(2)]\n\n    return C.ys\n",
+    # A handler's name another handler or a del inside it can unbind.
+    "a second handler of the name inside the first": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        try:\n            raise KeyError\n        except KeyError as lr:\n            pass\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's name deleted inside it": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        del lr\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A class-bound name reads the module's, not an enclosing function's.
+    "a class's read of a name it binds, in a function that binds it too": "lr = {k}\n\n\ndef task(a):\n    lr = 5\n\n    class C:\n        lr = lr\n\n    return C.lr\n",
+    "a nested comprehension's body after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    ys = [[lr for _ in range(1)] for _ in range(2)]\n\n\ndef task(a):\n    return Cfg.ys\n",
+}
+CLASS_BODY_EDITS_312 = {
+    "a generic class's body": "lr = {k}\n\n\nclass Cfg[T]:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
+}
+
+# A generic class's own table is found, not its type-parameter scope's.
+CLASS_BODY_NOT_EDITS_312 = {
+    "a generic class's read of an enclosing function's local": "lr = {k}\n\n\ndef task(a):\n    lr = 2\n\n    class C[T]:\n        y = lr\n\n    return C.y\n",
+}
+CLASS_BODY_NOT_EDITS = {
+    "a config class's own constant": "steps = {k}\n\n\nclass Cfg:\n    steps = 100\n    total = steps * 2\n\n\ndef task(a):\n    return Cfg.total\n",
+    "a read after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 0.1\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after an annotated binding": "lr = {k}\n\n\nclass Cfg:\n    lr: float = 0.1\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after a def": "lr = {k}\n\n\nclass Cfg:\n    def lr(self):\n        return 1\n\n    y = lr\n\n\ndef task(a):\n    return Cfg.y.__qualname__\n",
+    "a read after an import": "lr = {k}\n\n\nclass Cfg:\n    import math as lr\n\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after a binding in the same block": "import sys\n\nsteps = {k}\n\n\nclass Cfg:\n    if sys:\n        steps = 10\n        total = steps * 2\n\n\ndef task(a):\n    return Cfg.total\n",
+    "an augmented assignment after a binding": "lr = [{k}]\n\n\nclass Cfg:\n    lr = [1]\n    lr += [3]\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a read after a nested class": "lr = {k}\n\n\nclass Cfg:\n    class lr:\n        pass\n\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A free name: the enclosing function's (LOAD_CLASSDEREF), not the
+    # module's; only the class table tells it from one the body binds.
+    "a read of an enclosing function's local": (
+        "lr = {k}\n\n\ndef task(a):\n    lr = 2\n\n    class C:\n        y = lr\n\n"
+        "    return C.y\n"
+    ),
+    "a method default after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n\n    def f(self, x=lr):\n        return x\n\n\ndef task(a):\n    return Cfg().f()\n",
+    "a read in a block after the binding": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    lr = 1\n    if sys:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a loop body's read of its target": "lr = {k}\n\n\nclass Cfg:\n    for lr in [5]:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a with block's read of its target": "import contextlib\n\nlr = {k}\n\n\nclass Cfg:\n    with contextlib.nullcontext(5) as lr:\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a case's read of its capture": "lr = {k}\n\n\nclass Cfg:\n    match 5:\n        case lr:\n            y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a comprehension's own variable before the binding": "lr = {k}\n\n\nclass Cfg:\n    ys = [lr for lr in range(3)]\n    lr = 1\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a lambda's parameter before the binding": "lr = {k}\n\n\nclass Cfg:\n    f = staticmethod(lambda lr: lr)\n    lr = 1\n\n\ndef task(a):\n    return Cfg.f(3)\n",
+    "a method's parameter before the binding": "lr = {k}\n\n\nclass Cfg:\n    def f(self, lr):\n        return lr\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg().f(3)\n",
+    "a read after a tuple binding": "lr = {k}\n\n\nclass Cfg:\n    lr, b = 1, 2\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # Inside the only handler naming it, its name stays bound.
+    "a handler's read of its name": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a handler's read of its name in a block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        if sys:\n            y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A decorated class's table is found; a sibling handler cannot unbind.
+    "a decorated class's read of an enclosing function's local": "lr = {k}\n\n\ndef deco(c):\n    return c\n\n\ndef task(a):\n    lr = 2\n\n    @deco\n    class C:\n        y = lr\n\n    return C.y\n",
+    "two handlers of one name, each reading it": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('a')\n    except ValueError as lr:\n        y = str(lr)\n    try:\n        raise KeyError('b')\n    except KeyError as lr:\n        z = str(lr)\n\n\ndef task(a):\n    return Cfg.y + Cfg.z\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [
+        *_block_cases(CLASS_BODY_EDITS),
+        *_block_cases(CLASS_BODY_EDITS_312, (3, 12)),
+    ],
+)
+def test_a_class_body_read_of_a_name_it_binds_counts(tmp_path, case, cases):
+    text = cases[case]
+    one = _digest_of_script(tmp_path, "cb1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "cb2", text.format(k=2), {"task"})
+    assert one != two
+
+
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [
+        *_block_cases(CLASS_BODY_NOT_EDITS),
+        *_block_cases(CLASS_BODY_NOT_EDITS_312, (3, 12)),
+    ],
+)
+def test_a_class_body_read_of_its_own_binding_is_not_a_module_read(
+    tmp_path, case, cases
+):
+    text = cases[case]
+    one = _digest_of_script(tmp_path, "cn1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "cn2", text.format(k=2), {"task"})
+    assert one == two
+
+
+def _task_result(text: str, k: int) -> str:
+    namespace = {"__name__": "__main__"}
+    exec(compile(text.format(k=k), "<case>", "exec"), namespace)
+    return repr(namespace["task"](1))
+
+
+def _premise_cases():
+    for cases, version, reads in (
+        (CLASS_BODY_EDITS, None, True),
+        (CLASS_BODY_EDITS_312, (3, 12), True),
+        (CLASS_BODY_NOT_EDITS, None, False),
+        (CLASS_BODY_NOT_EDITS_312, (3, 12), False),
+    ):
+        for param in _block_cases(cases, version):
+            yield pytest.param(*param.values, reads, id=param.id, marks=param.marks)
+
+
+@pytest.mark.parametrize(("case", "cases", "reads_the_module"), list(_premise_cases()))
+def test_each_class_body_case_reads_as_the_record_counts(case, cases, reads_the_module):
+    """The cases' premise, run: an EDIT's task returns another value when the
+    module's name changes, a NOT_EDIT's does not."""
+    changed = _task_result(cases[case], 1) != _task_result(cases[case], 2)
+    assert changed is reads_the_module
+
+
+def test_a_task_class_body_read_of_a_name_it_binds_counts(tmp_path):
+    text = (
+        "lr = {k}\n\n\nclass Task:\n    lr = lr\n\n"
+        "    def __call__(self, a):\n        return a * self.lr\n"
+    )
+    one = _digest_of_script(tmp_path, "ct1", text.format(k=1), {"Task"})
+    two = _digest_of_script(tmp_path, "ct2", text.format(k=2), {"Task"})
+    assert one != two
+
+
 def test_each_run_of_an_augmented_assignment_counts(tmp_path):
     """`SCALE += 1` twice and three times are different values: a chain of
     identical statements is not one statement."""
