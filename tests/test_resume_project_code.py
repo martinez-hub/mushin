@@ -3814,6 +3814,12 @@ BLOCK_NOT_EDITS = {
         "import sys\n\nx = {k}\n\n\ndef deco(f):\n    return f\n\n\nif sys:\n\n"
         "    @deco\n    @deco\n    def task(x):\n        return x\n"
     ),
+    # The main block is flattened into the top-level statements; a block in
+    # it is a top-level block.
+    "a parameter, in a block in the main block": (
+        "import sys\n\nx = {k}\n\nif __name__ == '__main__':\n    if sys:\n\n"
+        "        def task(x):\n            return x\n"
+    ),
     "an inner function's parameter": (
         "import sys\n\nx = {k}\n\nif sys:\n\n    def task(a):\n"
         "        def inner(x):\n            return x\n\n        return inner(a)\n"

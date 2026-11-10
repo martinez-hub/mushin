@@ -763,11 +763,14 @@ def _script_digest(path: Path, roots: frozenset[str]):
     a global (function parameters and locals do not count: the script's symbol
     table says which names are global, for a function defined with ``def``
     in a top-level block, an ``if``'s, a ``try``'s, a ``with``'s, a loop's
-    or a ``match``'s, as for a top-level one, #323; a class in a block, and
-    a function in one that holds a class, is walked whole, since a class
-    body can read a module name it binds, as in ``lr = lr``, so their
-    locals may count, as may a lambda's parameters and a comprehension's
-    variables in a block), a star import (it may bind any name),
+    or a ``match``'s, as for a top-level one, #323; the main block's own
+    statements are top-level ones; a class in a block, and a function in one
+    that holds a class, is walked whole, since a class body can read a
+    module name it binds, as in ``lr = lr``, so their locals may count, as
+    may a lambda's parameters and a comprehension's variables, at the top
+    level as in a block, and, on 3.11 to 3.13, whose symbol table lists them
+    as read, the names in a function's local annotation), a star import (it
+    may bind any name),
     and a decorated definition whose decorator registers it somewhere counted
     code reads (``@register`` defined in the script, or an alias of it,
     writing the ``MODELS`` the task reads)
@@ -822,9 +825,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     class body's annotation reads the module's name even where the class
     binds it (``x: 'grid'`` beside ``grid = int``, which
     ``typing.get_type_hints`` resolves in the class first): a recompute too
-    many, never a stale reuse. Not read: a class body's read of a name it
-    binds too (``lr = lr``, ``lr += [3]``), which the symbol table calls the
-    class's, in a top-level class or in a top-level function's (#336).
+    many, never a stale reuse. Not read (#336): a class body's augmented
+    assignment (``lr += [3]``), anywhere; and a class body's read of a name
+    it binds too (``lr = lr``), which the symbol table calls the class's,
+    except where the class is walked whole (in a top-level block, not at the
+    top level, in the main block or in a top-level function).
     ``imports`` are those of what counts."""
     import ast
     import copy
@@ -4989,7 +4994,10 @@ def changed_project_code(prior, current) -> list[str] | None:
     too, but for one where a generic definition's text annotation names its
     own type parameter and a module binding shares that name: it differs
     between 3.12.0-3.12.4 and later (``_OWN_TYPE_PARAMS_RESOLVE``), so a
-    resume across that upgrade re-runs its cells once. None when either is
+    resume across that upgrade re-runs its cells once. So does one where a
+    counted function's local annotation names a module binding
+    (``y: T = a``): 3.11 to 3.13's symbol table lists the name as read,
+    3.14's does not. None when either is
     missing or malformed (a sidecar from before the field)."""
     if not isinstance(prior, dict) or not isinstance(current, dict):
         return None
