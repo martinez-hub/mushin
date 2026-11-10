@@ -234,6 +234,74 @@ def test_interpolations_with_backslashes_resolve_as_written(tmp_path, monkeypatc
     assert not [p for p in tmp_path.rglob("*") if "${" in p.name]
 
 
+class _SeenList(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a="", b=None):
+        from omegaconf import OmegaConf
+
+        plain = OmegaConf.to_container(b) if OmegaConf.is_config(b) else b
+        return dict(b_repr=repr(plain))
+
+
+def test_a_hydra_list_reaches_the_task_as_written(tmp_path):
+    """A `hydra_list` is written as a list of override elements: a backslash
+    is not doubled, a quote and a comma stay, and None is null (#321)."""
+    from mushin import hydra_list
+
+    values = ["a\\b", "it's", "x,y", None, 1]
+    wf = _run(tmp_path, _SeenList, a=multirun(["x"]), b=hydra_list(values))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["b_repr"].values} == {repr(values)}
+
+
+class _SeenDict(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(d=None):
+        from omegaconf import OmegaConf
+
+        plain = OmegaConf.to_container(d) if OmegaConf.is_config(d) else d
+        return dict(d_repr=repr(plain))
+
+
+def test_dict_keys_hydra_can_write_reach_the_task(tmp_path):
+    # A float and a bool key read back as themselves, not as their text.
+    value = {"a": 1, 2: "y", "a b": 3, 1.5: "f", True: "t"}
+    wf = _run(tmp_path, _SeenDict, d=multirun([value]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["d_repr"].values} == {repr(value)}
+
+
+@pytest.mark.parametrize("key", ["1", "true", "null", "1.5", "a ", "a=b", "a:b"])
+def test_a_dict_key_hydra_cannot_write_is_refused(tmp_path, key):
+    """Hydra's dict grammar has no quoted key: a str key that reads as another
+    type would reach the task changed ('1' as 1, 'a ' as 'a'), and one with
+    '=' or ':' does not parse. Refused before launch, naming the key (#321)."""
+    with pytest.raises(ValueError, match=re.escape(repr(key))):
+        _run(tmp_path, _SeenDict, d=multirun([{key: "x"}]))
+    assert not (tmp_path / "s").exists()
+
+
+def test_a_tuple_dict_key_is_refused(tmp_path):
+    with pytest.raises(ValueError, match=re.escape(repr(("a", 1)))):
+        _run(tmp_path, _SeenDict, d=multirun([{("a", 1): "x"}]))
+
+
+@pytest.mark.parametrize(
+    "path",
+    ['/tmp/a"b', "/tmp/it's", "/tmp/a=b c", "C:/data/run 1"],
+)
+def test_a_relaunched_ranks_run_dir_round_trips(path):
+    """HydraDDP re-launches each rank with `hydra.run.dir=`: a path holding a
+    quote, '=' or a space parses back to itself (#321)."""
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    from mushin.lightning.launchers import _hydra_run_dir_override
+
+    override = f"hydra.run.dir={_hydra_run_dir_override(path)}"
+    parsed = OverridesParser.create().parse_overrides([override])[0]
+    assert parsed.value() == path
+
+
 def test_a_glob_sweep_is_refused_by_name():
     """A glob sweep picks config-group options; the error says glob is not
     supported and names the param without its `+`."""

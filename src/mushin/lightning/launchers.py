@@ -41,13 +41,16 @@ def _setup_environment() -> None:
 
 def _hydra_run_dir_override(cwd) -> str:
     """The ``hydra.run.dir=`` override value for a re-launched rank: quoted for
-    Hydra's override grammar (dir names may contain ``=`` etc.), with forward
-    slashes because backslash is an *escape character* inside that grammar's
-    quoted strings: a raw Windows cwd would be corrupted."""
+    Hydra's override grammar (dir names may contain ``=``, a space or a quote),
+    as a swept string is (``_quoted``, which escapes a quote and the
+    backslashes before one; Hydra keeps any other backslash), with forward
+    slashes. A path holding ``${`` is still an interpolation (#321)."""
     from pathlib import PurePath
 
+    from ..workflows import _quoted
+
     p = cwd if isinstance(cwd, PurePath) else Path(cwd)
-    return f'"{p.as_posix()}"'
+    return _quoted(p.as_posix())
 
 
 def _interrank_delay() -> float:

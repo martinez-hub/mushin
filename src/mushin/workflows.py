@@ -97,11 +97,43 @@ def _to_override_element(item: Any) -> str:
         # as a real dict rather than a quoted Python repr that fails validation.
         return (
             "{"
-            + ",".join(f"{k}:{_to_override_element(v)}" for k, v in item.items())
+            + ",".join(
+                f"{_dict_key(k)}:{_to_override_element(v)}" for k, v in item.items()
+            )
             + "}"
         )
     # Fall back to a quoted string representation for any other type.
     return _quoted(str(item))
+
+
+@functools.lru_cache(maxsize=256)
+def _dict_key_written(key: Any) -> tuple[bool, str]:
+    """``(round_trips, read_back)`` for a dict key written bare, as Hydra's
+    dict grammar takes it: it has no quoted key, so a key is read as its text
+    parses (``'1'`` as ``1``), and one with a space, ``=`` or ``:`` does not
+    parse at all."""
+    text = str(key) if isinstance(key, str) else _to_override_element(key)
+    try:
+        parsed = OverridesParser.create().parse_overrides([f"k={{{text}:0}}"])[0]
+        (read,) = parsed.value().keys()
+    except Exception:  # noqa: BLE001 - not parseable is what is reported
+        return False, "an override Hydra cannot parse"
+    return (type(read) is type(key) and read == key), repr(read)
+
+
+def _dict_key(key: Any) -> str:
+    """A dict key as Hydra's override grammar reads it back as itself, or a
+    ``ValueError`` before launch: a str key that reads as another type would
+    reach the task changed (#321)."""
+    round_trips, read = _dict_key_written(key)
+    if not round_trips:
+        raise ValueError(
+            f"the dict key {key!r} cannot be written as a Hydra override: its "
+            f"grammar has no quoted keys, so it would become {read}. Put the dict "
+            "in the workflow's eval_task_cfg, or use a key Hydra writes as itself "
+            "(a name, a number)."
+        )
+    return str(key) if isinstance(key, str) else _to_override_element(key)
 
 
 def _quoted(text: str) -> str:
@@ -118,7 +150,13 @@ def _quoted(text: str) -> str:
     most of those, so a Windows
     ``outputs\\${now:%Y}`` or a ``${oc.env:X,\\\\server\\share}`` default
     resolved as written. Such a string keeps that form, exactly as before; the
-    task gets what it always did."""
+    task gets what it always did.
+
+    So in such a string, a backslash that is neither right before the ``${``
+    nor inside the interpolation may arrive doubled (#321): write such a
+    path with ``/``, or put the value in the config. Writing only where
+    OmegaConf unescapes would be a third imitation of its escapes, the
+    kind #320 found wrong twice."""
     if "${" in text:
         return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
     return QuotedString(text=text, quote=Quote.single).with_quotes()
@@ -2004,9 +2042,10 @@ class BaseWorkflow:
                 choices = ",".join(_to_override_element(item) for item in v)
                 launch_overrides.append(f"{prefix}{k}=choice({choices})")
             elif isinstance(v, hydra_list):
-                # hydra_list serializes itself to Hydra list syntax; a single
-                # non-swept list value passed to one job.
-                launch_overrides.append(f"{prefix}{k}={v}")
+                # A single non-swept list value passed to one job, each element
+                # written as a sweep element is (#321): its own str is Python's
+                # list repr, which doubled a backslash and wrote None as 'None'.
+                launch_overrides.append(f"{prefix}{k}={_to_override_element(list(v))}")
             else:
                 # Scalar value: serialize like a multirun element so a fixed
                 # string containing ',' / '=' stays a single string (not an
