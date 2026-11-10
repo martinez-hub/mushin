@@ -703,6 +703,35 @@ _LAUNCHER_PLUGINS: dict[str, str] = {
 }
 
 
+def _with_launcher_hint(error: Exception, launcher: str | None) -> Exception | None:
+    """``error`` amended with the pip install hint when it is Hydra's error
+    for a ``launcher`` plugin that is not installed, else None.
+
+    A missing launcher plugin is the FIRST error every cluster user hits;
+    Hydra's raw message lists options but never names the pip package. Both
+    places Hydra composes the sweep's config raise it: ``launch``, and the
+    check on swept strings before it (#319)."""
+    from hydra.errors import MissingConfigException
+
+    if not (
+        isinstance(error, MissingConfigException)
+        and launcher is not None
+        and f"hydra/launcher/{launcher}" in str(error)
+    ):
+        return None
+    pkg = _LAUNCHER_PLUGINS.get(launcher)
+    hint = (
+        f"pip install {pkg}"
+        if pkg
+        else f"install the Hydra launcher plugin providing {launcher!r}"
+    )
+    return MissingConfigException(
+        f"{error}\n\nThe {launcher!r} launcher comes from a Hydra "
+        f"plugin that is not installed here: `{hint}` and re-run.",
+        getattr(error, "missing_cfg_file", None),
+    )
+
+
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
     from ._hydra_yaml import hydra_choices
@@ -2430,15 +2459,22 @@ class BaseWorkflow:
                 odd.append((name, key, written, targets, values))
         misread = []
         if odd:
-            master, groups = _composed_for_launch(
-                self.eval_task_cfg,
-                launch_overrides,
-                [name for name, *_ in odd],
-                to_dictconfig=to_dictconfig,
-                config_name=config_name,
-                job_name=job_name,
-                version_base=version_base,
-            )
+            try:
+                master, groups = _composed_for_launch(
+                    self.eval_task_cfg,
+                    launch_overrides,
+                    [name for name, *_ in odd],
+                    to_dictconfig=to_dictconfig,
+                    config_name=config_name,
+                    job_name=job_name,
+                    version_base=version_base,
+                )
+            except Exception as e:
+                # It fails where `launch` would, and says so as launch does.
+                amended = _with_launcher_hint(e, launcher)
+                if amended is not None:
+                    raise amended from e
+                raise
             if master.hydra.sweeper._target_ != _BASIC_SWEEPER:
                 odd = []
         for name, key, written, targets, values in odd:
@@ -2655,27 +2691,9 @@ class BaseWorkflow:
                 with_log_configuration=with_log_configuration,
             )
         except Exception as e:
-            # A missing launcher plugin is the FIRST error every cluster user
-            # hits; Hydra's raw message lists options but never names the pip
-            # package. Amend it with the install hint.
-            from hydra.errors import MissingConfigException
-
-            if (
-                isinstance(e, MissingConfigException)
-                and launcher is not None
-                and f"hydra/launcher/{launcher}" in str(e)
-            ):
-                pkg = _LAUNCHER_PLUGINS.get(launcher)
-                hint = (
-                    f"pip install {pkg}"
-                    if pkg
-                    else f"install the Hydra launcher plugin providing {launcher!r}"
-                )
-                raise MissingConfigException(
-                    f"{e}\n\nThe {launcher!r} launcher comes from a Hydra "
-                    f"plugin that is not installed here: `{hint}` and re-run.",
-                    getattr(e, "missing_cfg_file", None),
-                ) from e
+            amended = _with_launcher_hint(e, launcher)
+            if amended is not None:
+                raise amended from e
             raise
 
         if isinstance(jobs, list):

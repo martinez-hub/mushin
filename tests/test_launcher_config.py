@@ -74,6 +74,24 @@ def test_missing_launcher_plugin_names_the_pip_package(tmp_path):
         )
 
 
+@pytest.mark.parametrize("values", [[1], ["true", "y"]])
+def test_a_missing_launcher_is_named_wherever_hydra_meets_it(tmp_path, values):
+    """A swept string Hydra reads back differently has the sweep's config
+    composed before launch (#319); a missing launcher fails there, with the
+    same install hint as in the launch."""
+    from hydra.errors import MissingConfigException
+
+    try:
+        import hydra_plugins.hydra_rq_launcher  # noqa: F401
+
+        pytest.skip("hydra-rq-launcher installed; missing-plugin path unreachable")
+    except ImportError:
+        pass
+
+    with pytest.raises(MissingConfigException, match="pip install hydra-rq-launcher"):
+        _W().run(a=multirun(values), launcher="rq", working_dir=str(tmp_path / "s"))
+
+
 def test_launcher_config_dict_value_emits_hydra_dict_grammar():
     """Dict-valued launcher fields (the documented
     additional_parameters={"requeue": True}) must serialize to Hydra's dict
