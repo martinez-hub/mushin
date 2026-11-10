@@ -165,9 +165,13 @@ rules:
   reach by name counts, not the `run(...)` call, top-level
   calls, `print` calls or what only they read, so extending the grid is not
   an edit. In a notebook, the functions and classes its cells define that
-  the task reaches by name count, by their definitions, as the kernel holds
+  the task reaches by name, or that an annotation of that code names (a
+  string one too; not through a type alias such as `Opt = Optional[Helper]`),
+  count, by their definitions, as the kernel holds
   them when the run starts; no value does (a number, a model name, a dict
-  config), so pass values as swept parameters. For such a task, every
+  config), so pass values as swept parameters. On Python 3.13 and earlier,
+  after editing a class an annotation that is not a string names, re-run the
+  cell that annotates with it too. For such a task, every
   project module a cell imports counts too, so with `cache_dir=`, importing
   another one in a cell can make the cells compute again. Re-running a
   class's cell when mushin cannot tell its version apart from another kept
@@ -180,7 +184,8 @@ rules:
   version can also re-run the cells of a class stated more than once in its
   cell. A module loaded other than by a cell's `import` statement
   (`importlib.import_module`, a plugin loader, an import in a `%%time` cell)
-  may not be compared, nor may a class no `class` statement makes
+  may not be compared, nor may a module named only in a string annotation
+  (`"pkg.sub.Model"`), nor may a class no `class` statement makes
   (`type(...)`, `make_dataclass`), or a class of which one cell holds more
   than one version (two `class` statements run, or a statement and a class
   bound from elsewhere), nor what an IPython input transformer changes in a

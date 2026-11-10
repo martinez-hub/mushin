@@ -3,7 +3,8 @@
 """resume=True and cache_dir= notice edits to code defined in a notebook.
 
 A notebook has no file to compare. The record follows the names the task's
-code looks up, through the objects the kernel holds now, and compares their
+code looks up, and those the annotations of the definitions it reaches name
+(#327), through the objects the kernel holds now, and compares their
 definitions: a function's code names the cell text of the version in force,
 and a class is found through its methods. No value is compared (see
 docs/superpowers/specs/2026-10-27-notebook-code-record-design.md).
@@ -27,7 +28,11 @@ from hypothesis import strategies as st
 
 import mushin._resume
 from _modules_written import _new_modules_are_found  # noqa: F401 - autouse fixture
-from mushin._resume import cell_project_record, project_fingerprints
+from mushin._resume import (
+    cell_project_record,
+    changed_project_code,
+    project_fingerprints,
+)
 
 #: The scan of the kept cells' imports, kept here so a fixture can turn it
 #: back on (``getattr``: the file also runs against an older ``_resume``).
@@ -941,9 +946,10 @@ def test_a_notebook_edit_is_seen(kernel, case):
     _run_cells(kernel, after)
     second = _record(kernel, "task")
     # A scan that raised gives no entries, which would differ vacuously; an
-    # edit changes a digest, it does not drop an entry.
+    # edit changes a digest, it does not drop an entry. A resume compares the
+    # keys both records have, so a key only the second has is no edit.
     assert first.keys() <= second.keys()
-    assert second != first
+    assert changed_project_code({"code": first}, {"code": second})
 
 
 @pytest.mark.parametrize("case", sorted(NOTEBOOK_NOT_EDITS))
@@ -957,6 +963,427 @@ def test_a_notebook_change_the_task_cannot_see_is_not_an_edit(kernel, case):
     assert _record(kernel, "task") == first
 
 
+# --- a definition an annotation names (#327) -------------------------------------
+
+HELPER = "class Helper:\n    def m(self):\n        return 1\n"
+HELPER_EDITED = "class Helper:\n    def m(self):\n        return 2\n"
+FUTURE = "from __future__ import annotations\n\n\n"
+
+# A reader of the task's hints (`typing.get_type_hints`, pydantic, hydra-zen's
+# `builds(..., populate_full_signature=True)`) resolves the names in them, so
+# a definition an annotation of the reached code names counts, as a string
+# too. Each case: the cells run first, then the cells run after.
+ANNOTATION_EDITS = {
+    "a parameter's": (
+        [HELPER, "def task(a: Helper):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a string": ([HELPER, "def task(a: 'Helper'):\n    return a\n"], [HELPER_EDITED]),
+    "a string in a subscript": (
+        [HELPER, "def task(a: list['Helper']):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    # PEP 646: `*args: *tuple[Helper, ...]`, as a string.
+    "a starred string": (
+        [HELPER, "def task(*a: '*tuple[Helper, ...]'):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a string in a string": (
+        [HELPER, "def task(a: \"list['Helper']\"):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a return's": ([HELPER, "def task(a) -> Helper:\n    return a\n"], [HELPER_EDITED]),
+    "a keyword argument's": (
+        [HELPER, "def task(a, *, b: Helper = None):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a positional-only argument's": (
+        [HELPER, "def task(a: Helper, /):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a star argument's": (
+        [HELPER, "def task(a, *rest: Helper):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a double-star argument's": (
+        [HELPER, "def task(a, **kw: Helper):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "under future annotations": (
+        [FUTURE + HELPER, FUTURE + "def task(a: Helper):\n    return a\n"],
+        [FUTURE + HELPER_EDITED],
+    ),
+    "a decorated task's": (
+        [
+            HELPER,
+            "import functools\n\n\ndef deco(f):\n    @functools.wraps(f)\n"
+            "    def inner(*a, **k):\n        return f(*a, **k)\n\n    return inner\n",
+            "@deco\ndef task(a: Helper):\n    return a\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    # A pydantic `AfterValidator(check)`: the validator is called on the value.
+    "an Annotated note's function": (
+        [
+            "from typing import Annotated\n\n\ndef check(x):\n    return x\n",
+            "def task(a: Annotated[int, check]):\n    return a\n",
+        ],
+        ["def check(x):\n    return x + 1\n"],
+    ),
+    "a method's, of a reached class": (
+        [
+            HELPER,
+            "class Model:\n    def fit(self, h: Helper):\n        return 1\n",
+            "def task(a):\n    return Model().fit(a)\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a reached dataclass's field": (
+        [
+            HELPER,
+            "import dataclasses\n\n\n@dataclasses.dataclass\nclass Cfg:\n"
+            "    h: Helper = None\n",
+            "def task(a):\n    return Cfg()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a field in a block of a class body": (
+        [
+            HELPER,
+            "class Cfg:\n    if True:\n        h: Helper = None\n\n"
+            "    def go(self):\n        return 1\n",
+            "def task(a):\n    return Cfg().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a field in an except block of a class body": (
+        [
+            HELPER,
+            "class Cfg:\n    try:\n        pass\n    except Exception:\n"
+            "        h: Helper = None\n\n    def go(self):\n        return 1\n",
+            "def task(a):\n    return Cfg().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a field in a match case of a class body": (
+        [
+            HELPER,
+            "class Cfg:\n    match 1:\n        case 1:\n            h: Helper = None\n\n"
+            "    def go(self):\n        return 1\n",
+            "def task(a):\n    return Cfg().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a field of a reached class's base": (
+        [
+            HELPER,
+            "class Base:\n    h: Helper = None\n\n\n"
+            "class Model(Base):\n    def go(self):\n        return 1\n",
+            "def task(a):\n    return Model().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a nested function's string": (
+        [
+            HELPER,
+            "def task(a):\n    def inner(h: 'Helper'):\n        return h\n\n"
+            "    return inner(a)\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a nested class's field": (
+        [
+            HELPER,
+            "def task(a):\n    class Row:\n        h: 'Helper'\n\n    return Row\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    # Helper is reached through the annotation; what its code names is too.
+    "what an annotated class's method calls": (
+        [
+            "def util():\n    return 1\n",
+            "class Helper:\n    def m(self):\n        return util()\n",
+            "def task(a: Helper):\n    return a\n",
+        ],
+        ["def util():\n    return 2\n"],
+    ),
+    "a class an annotated class's field names": (
+        [
+            HELPER,
+            "class Row:\n    h: Helper = None\n",
+            "def task(a: 'Row'):\n    return a\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "a function an annotation names": (
+        ["def make():\n    return 1\n", "def task(a: make):\n    return a\n"],
+        ["def make():\n    return 2\n"],
+    ),
+}
+
+ANNOTATION_EDITS_312 = {
+    "a type parameter's bound": (
+        [HELPER, "def task[T: Helper](a: T):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a type parameter's constraints": (
+        [HELPER, "def task[T: (Helper, int)](a: T):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+    "a reached class's type parameter's bound": (
+        [
+            HELPER,
+            "class Box[T: 'Helper']:\n    def go(self):\n        return 1\n",
+            "def task(a):\n    return Box().go()\n",
+        ],
+        [HELPER_EDITED],
+    ),
+}
+
+ANNOTATION_EDITS_313 = {
+    "a type parameter's default": (
+        [HELPER, "def task[T = Helper](a: T):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+}
+
+ANNOTATION_NOT_EDITS = {
+    # A local variable's annotation is never evaluated, nor kept.
+    "a local variable's annotation": (
+        [HELPER, "def task(a):\n    h: Helper = a\n    return h\n"],
+        [HELPER_EDITED],
+    ),
+    # No value is compared, through an annotation neither.
+    "an annotation naming a value": (
+        ["grid = [1, 2]\n", "def task(a: grid):\n    return a\n"],
+        ["grid = [1, 2, 3]\n"],
+    ),
+    # As a name the code looks up: what it holds when the run starts can be
+    # gone by the next.
+    "a name a notebook function rebinds": (
+        [
+            HELPER,
+            "def swap():\n    global Helper\n    Helper = int\n",
+            "def task(a: Helper):\n    return a\n",
+        ],
+        [HELPER_EDITED],
+    ),
+    "an annotated class's cell run again": (
+        [HELPER, "def task(a: Helper):\n    return a\n"],
+        [HELPER],
+    ),
+    "a string that is no expression": (
+        [HELPER, "def task(a: 'not an expression'):\n    return a\n"],
+        [HELPER_EDITED],
+    ),
+}
+
+
+def _annotation_cases(cases, version):
+    return [
+        pytest.param(
+            name,
+            cases,
+            id=name,
+            marks=pytest.mark.skipif(
+                sys.version_info < version, reason="syntax of a later Python"
+            ),
+        )
+        for name in sorted(cases)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [
+        *_annotation_cases(ANNOTATION_EDITS, (3, 11)),
+        *_annotation_cases(ANNOTATION_EDITS_312, (3, 12)),
+        *_annotation_cases(ANNOTATION_EDITS_313, (3, 13)),
+    ],
+)
+def test_a_definition_an_annotation_names_is_compared(kernel, case, cases):
+    before, after = cases[case]
+    _run_cells(kernel, before)
+    first = _record(kernel, "task")
+    assert first, "the notebook entries are empty"
+    _run_cells(kernel, after)
+    second = _record(kernel, "task")
+    assert first.keys() <= second.keys()
+    # What a resume compares: the keys both records have.
+    assert changed_project_code({"code": first}, {"code": second})
+
+
+@pytest.mark.parametrize("case", sorted(ANNOTATION_NOT_EDITS))
+def test_an_annotation_change_no_reader_sees_is_not_an_edit(kernel, case):
+    before, after = ANNOTATION_NOT_EDITS[case]
+    _run_cells(kernel, before)
+    first = _record(kernel, "task")
+    assert first, "the notebook entries are empty"
+    _run_cells(kernel, after)
+    assert _record(kernel, "task") == first
+
+
+def test_a_definition_an_annotation_names_has_its_own_entry(kernel):
+    _run_cells(kernel, [HELPER, "def task(a: Helper):\n    return a\n"])
+    assert set(_record(kernel, "task")) == {"task (notebook)", "Helper (notebook)"}
+
+
+#: Main's walk reaches task and helper (2 objects); the annotation adds
+#: Helper and its method (4).
+ANNOTATED_PAST_THE_BOUND = [
+    HELPER,
+    "def helper(x):\n    return x\n",
+    "def task(a: Helper):\n    return helper(a)\n",
+]
+
+
+def test_an_annotation_walk_past_the_bound_keeps_the_code_walks_entries(
+    kernel, monkeypatch
+):
+    """What the annotations add is all or nothing: past the object bound,
+    the record keeps what the code's names reach, and warns."""
+    import mushin._resume as resume
+
+    _run_cells(kernel, ANNOTATED_PAST_THE_BOUND)
+    whole = _record(kernel, "task")
+    monkeypatch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 3)
+    monkeypatch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
+    monkeypatch.setattr(resume, "_NOTEBOOK_ANNOTATION_WARNED", [])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cut = _record(kernel, "task")
+    assert cut == {k: whole[k] for k in ("task (notebook)", "helper (notebook)")}
+    messages = [str(w.message) for w in caught]
+    assert len(messages) == 1, messages
+    assert "annotations name" in messages[0]
+    assert messages[0].isascii()
+
+
+def test_an_annotation_walk_that_raises_keeps_the_code_walks_entries(
+    kernel, monkeypatch
+):
+    """A class only an annotation names is read only by the annotation walk:
+    if reading it raises, the record keeps what the code's names reach."""
+    import mushin._resume as resume
+
+    _run_cells(kernel, ANNOTATED_PAST_THE_BOUND)
+    whole = _record(kernel, "task")
+    methods = resume._class_methods
+
+    def raising(cls, namespace):
+        if cls.__name__ == "Helper":
+            raise RuntimeError("a metaclass hook")
+        return methods(cls, namespace)
+
+    monkeypatch.setattr(resume, "_class_methods", raising)
+    monkeypatch.setattr(resume, "_NOTEBOOK_ANNOTATION_WARNED", [])
+    monkeypatch.setattr(resume, "_NOTEBOOK_FAILURE_WARNED", [])
+    with pytest.warns(UserWarning, match=r"could not be read \(RuntimeError\)") as got:
+        cut = _record(kernel, "task")
+    assert cut == {k: whole[k] for k in ("task (notebook)", "helper (notebook)")}
+    assert len(got) == 1 and "metaclass hook" not in str(got[0].message)
+
+
+def test_a_code_walk_past_the_bound_gives_only_its_own_warning(kernel, monkeypatch):
+    import mushin._resume as resume
+
+    _run_cells(kernel, ANNOTATED_PAST_THE_BOUND)
+    monkeypatch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 1)
+    monkeypatch.setattr(resume, "_NOTEBOOK_TRUNCATION_WARNED", [])
+    monkeypatch.setattr(resume, "_NOTEBOOK_ANNOTATION_WARNED", [])
+    scans = []
+    writes = resume._notebook_writes
+
+    def counted(*args):
+        scans.append(1)
+        return writes(*args)
+
+    monkeypatch.setattr(resume, "_notebook_writes", counted)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _record(kernel, "task") == {}
+    messages = [str(w.message) for w in caught]
+    assert len(messages) == 1, messages
+    assert "larger than the record covers" in messages[0]
+    # Not taken again without annotations: they are not what is too large.
+    assert len(scans) == 1
+
+
+def test_the_annotation_warning_is_given_on_every_run(kernel, monkeypatch):
+    import mushin._resume as resume
+
+    _run_cells(kernel, ANNOTATED_PAST_THE_BOUND)
+    monkeypatch.setattr(resume, "_NOTEBOOK_MAX_OBJECTS", 3)
+    monkeypatch.setattr(resume, "_NOTEBOOK_ANNOTATION_WARNED", [])
+    for _ in range(2):
+        with pytest.warns(UserWarning, match="annotations name"):
+            resume.driver_script_entries([kernel.ns["task"]])
+
+
+def test_the_annotation_walk_adds_no_module_mains_reading_had(kernel, monkeypatch):
+    """A module only a class the annotations reach names is followed after
+    main's seeds (``later``), so a record cut by the file bound keeps main's."""
+    import mushin._resume as resume
+
+    _run_cells(
+        kernel,
+        [
+            # The cell imports `os`, not `os.path`: only Helper's method
+            # names the submodule. Its base's module no cell imports.
+            "import os\n\nDecoder = __import__('json').JSONDecoder\n\n\n"
+            "class Helper(Decoder):\n    def m(self):\n"
+            "        return os.path.join('a')\n",
+            "def task(a: Helper):\n    return a\n",
+        ],
+    )
+    seen = []
+    record = resume._notebook_record
+
+    def spy(notebooks):
+        seen.append(record(notebooks))
+        return seen[-1]
+
+    monkeypatch.setattr(resume, "_notebook_record", spy)
+    monkeypatch.setattr(resume, "_maybe_project", lambda name, tops: True)
+    _record(kernel, "task")
+    _, reached, later = seen[-1]
+    # The chain as read; the file lookup finds the module in it.
+    assert "os.path.join" not in reached
+    assert "os.path.join" in later
+    assert "json.decoder" not in reached
+    assert "json.decoder" in later
+
+
+def test_an_annotation_string_with_an_escape_gives_no_warning(kernel):
+    """A string annotation is parsed for its names only: an escape in a
+    literal inside it must not warn, from no file."""
+    _run_cells(
+        kernel,
+        [
+            HELPER,
+            "from typing import Annotated\n\n\n"
+            "def task(a: 'Annotated[Helper, \"\\\\d\"]'):\n    return a\n",
+        ],
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = _record(kernel, "task")
+    assert "Helper (notebook)" in record
+    assert not caught, [str(w.message) for w in caught]
+
+
+def test_an_annotation_string_past_the_parsers_depth_names_nothing(kernel):
+    """A string past the parser's depth guard (MemoryError, 3.11 to 3.15)
+    names nothing; the other annotations are still followed."""
+    deep = "-" * 7000 + "1"
+    _run_cells(kernel, [HELPER, f"def task(a: Helper, b: '{deep}'):\n    return a\n"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        record = _record(kernel, "task")
+    assert "Helper (notebook)" in record
+    assert not caught, [str(w.message) for w in caught]
+
+
 def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
     """A notebook whose entries cannot be taken has none, as on main, but
     says so, once a run, with the exception's type and not its message (the
@@ -964,7 +1391,7 @@ def test_a_notebook_whose_record_fails_warns_on_every_run(kernel, monkeypatch):
     the edit goes unnoticed."""
     import mushin._resume as resume
 
-    def fail(namespace, roots, *rest):
+    def fail(namespace, roots, *rest, **options):
         raise RuntimeError("the notebook's own text")
 
     monkeypatch.setattr(resume, "_notebook_entries", fail)
