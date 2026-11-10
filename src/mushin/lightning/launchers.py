@@ -21,6 +21,8 @@ from pytorch_lightning.strategies.launchers.subprocess_script import (
 )
 from torch import distributed
 
+from ..workflows import _hydra_quoted
+
 R = TypeVar("R")
 
 # Env vars mushin itself set (single-node subprocess launcher). Under an external
@@ -40,14 +42,17 @@ def _setup_environment() -> None:
 
 
 def _hydra_run_dir_override(cwd) -> str:
-    """The ``hydra.run.dir=`` override value for a re-launched rank: quoted for
-    Hydra's override grammar (dir names may contain ``=`` etc.), with forward
-    slashes because backslash is an *escape character* inside that grammar's
-    quoted strings: a raw Windows cwd would be corrupted."""
+    """The ``hydra.run.dir=`` override value for a re-launched rank: quoted as
+    Hydra's own writer quotes (``workflows._hydra_quoted``: a dir name may hold
+    ``=``, a space or a quote), with forward slashes (#321). Not
+    ``workflows._quoted``, whose ``${`` form doubles every backslash: an
+    escaped ``\\${`` in a directory's name would become a live
+    interpolation. A ``${`` a resolved directory's name holds is still read
+    by OmegaConf as one, as before."""
     from pathlib import PurePath
 
     p = cwd if isinstance(cwd, PurePath) else Path(cwd)
-    return f'"{p.as_posix()}"'
+    return _hydra_quoted(p.as_posix())
 
 
 def _interrank_delay() -> float:
@@ -152,7 +157,8 @@ def _subprocess_call(
         f"++pl_local_rank={local_rank}",
         f"hydra.run.dir={os_cwd}",
         f"hydra.output_subdir=.pl_hydra_rank_{global_rank}",
-        f"hydra.job.name={hydra_cfg.job.name}",
+        # A job name from `run(job_name=...)` may hold `=`, `,` or a quote.
+        f"hydra.job.name={_hydra_quoted(str(hydra_cfg.job.name))}",
     ]
     return subprocess.Popen(command, env=env_copy, cwd=cwd)
 

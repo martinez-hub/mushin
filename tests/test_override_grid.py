@@ -234,6 +234,133 @@ def test_interpolations_with_backslashes_resolve_as_written(tmp_path, monkeypatc
     assert not [p for p in tmp_path.rglob("*") if "${" in p.name]
 
 
+class _SeenList(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(a="", b=None):
+        from omegaconf import OmegaConf
+
+        plain = OmegaConf.to_container(b) if OmegaConf.is_config(b) else b
+        return dict(b_repr=repr(plain))
+
+
+def test_a_hydra_list_reaches_the_task_as_written(tmp_path):
+    """A `hydra_list` is written as a list of override elements: a backslash
+    is not doubled, a quote and a comma stay, and None is null (#321)."""
+    from mushin import hydra_list
+
+    values = ["a\\b", "it's", "x,y", None, 1]
+    wf = _run(tmp_path, _SeenList, a=multirun(["x"]), b=hydra_list(values))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["b_repr"].values} == {repr(values)}
+
+
+def test_a_hydra_list_keeps_what_main_read_as_a_list(tmp_path):
+    """Main wrote a `hydra_list` through Python's repr, which read back as a
+    list for a nested `hydra_list` or an OmegaConf ListConfig: each still
+    reaches the task as a list, as does a tuple or a range (#321)."""
+    from omegaconf import OmegaConf
+
+    from mushin import hydra_list
+
+    values = [hydra_list([1, 2]), OmegaConf.create(["a"]), (1, "a"), range(2)]
+    wf = _run(tmp_path, _SeenList, a=multirun(["x"]), b=hydra_list(values))
+    ds = wf.to_xarray()
+    expected = [[1, 2], ["a"], [1, "a"], [0, 1]]
+    assert {str(r) for r in ds["b_repr"].values} == {repr(expected)}
+
+
+def test_a_list_config_interpolation_is_written_unresolved():
+    """A ListConfig's `${a}` is written as written, for the job to resolve,
+    not resolved against the list itself before launch (#321)."""
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import _to_override_element
+
+    assert _to_override_element(OmegaConf.create(["${a}"])) == "['${a}']"
+
+
+def test_an_array_in_a_hydra_list_reaches_the_task_as_lists(tmp_path):
+    from mushin import hydra_list
+
+    wf = _run(tmp_path, _SeenList, a=multirun(["x"]), b=hydra_list([np.eye(2)]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["b_repr"].values} == {repr([[[1.0, 0.0], [0.0, 1.0]]])}
+
+
+def test_a_user_string_keeps_the_text_main_wrote(tmp_path):
+    """Only the sequences main read back as a list are written as one: a
+    UserString, a Sequence too, keeps its text instead of recursing (#321)."""
+    from collections import UserString
+
+    wf = _run(tmp_path, _Seen, a=multirun([UserString("ab")]))
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == [repr("ab")]
+
+
+class _SeenDict(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(d=None):
+        from omegaconf import OmegaConf
+
+        plain = OmegaConf.to_container(d) if OmegaConf.is_config(d) else d
+        return dict(d_repr=repr(plain))
+
+
+def test_dict_keys_hydra_can_write_reach_the_task(tmp_path):
+    # A float and a bool key read back as themselves, not as their text, and
+    # a NumPy integer key as the int it equals, as before.
+    value = {"a": 1, 2: "y", "a b": 3, 1.5: "f", True: "t", np.int64(7): "n"}
+    wf = _run(tmp_path, _SeenDict, d=multirun([value]))
+    ds = wf.to_xarray()
+    expected = {"a": 1, 2: "y", "a b": 3, 1.5: "f", True: "t", 7: "n"}
+    assert {str(r) for r in ds["d_repr"].values} == {repr(expected)}
+
+
+@pytest.mark.parametrize(
+    "key", ["1", "true", "null", "1.5", "a ", "a=b", "a:b", "a:0,b", "a:0},{b"]
+)
+def test_a_dict_key_hydra_cannot_write_is_refused(tmp_path, key):
+    """Hydra's dict grammar has no quoted key: a str key that reads as another
+    type would reach the task changed ('1' as 1, 'a ' as 'a'), and one with
+    '=' or ':' does not parse. Refused before launch, naming the key (#321)."""
+    with pytest.raises(ValueError, match=re.escape(repr(key))):
+        _run(tmp_path, _SeenDict, d=multirun([{key: "x"}]))
+    assert not (tmp_path / "s").exists()
+
+
+def test_a_key_omegaconf_does_not_take_is_refused(tmp_path):
+    """Hydra reads `{null:0}` back, but OmegaConf's merge takes no None key:
+    refused before launch, not inside it (#321)."""
+    with pytest.raises(ValueError, match="OmegaConf"):
+        _run(tmp_path, _SeenDict, d=multirun([{None: "x"}]))
+    assert not (tmp_path / "s").exists()
+
+
+@pytest.mark.parametrize("nan", [float("nan"), np.float32("nan")])
+def test_a_nan_dict_key_reaches_the_task(tmp_path, nan):
+    """NaN never equals itself, but it is the key it was, as on main."""
+    wf = _run(tmp_path, _SeenDict, d=multirun([{nan: "x"}]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["d_repr"].values} == {"{nan: 'x'}"}
+
+
+def test_a_str_enum_key_is_written_as_its_value(tmp_path):
+    """A key mixing in str is written as its value, as such a value is."""
+    import enum
+
+    class Mode(str, enum.Enum):  # noqa: UP042 - str() is 'Mode.TRAIN', the case
+        TRAIN = "train"
+
+    wf = _run(tmp_path, _SeenDict, d=multirun([{Mode.TRAIN: 1}]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["d_repr"].values} == {repr({"train": 1})}
+
+
+def test_a_tuple_dict_key_is_refused(tmp_path):
+    with pytest.raises(ValueError, match=re.escape(repr(("a", 1)))):
+        _run(tmp_path, _SeenDict, d=multirun([{("a", 1): "x"}]))
+
+
 def test_a_glob_sweep_is_refused_by_name():
     """A glob sweep picks config-group options; the error says glob is not
     supported and names the param without its `+`."""

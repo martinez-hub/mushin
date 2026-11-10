@@ -122,19 +122,72 @@ def test_call_children_scripts_tracks_procs_and_launch_wires_observer(monkeypatc
 
 
 def test_hydra_run_dir_override_is_windows_safe():
-    """Backslash is an escape character inside Hydra's quoted override
-    grammar; a raw Windows cwd would be corrupted. Forward slashes are valid
-    on every platform."""
+    """A re-launched rank's run dir is written with forward slashes, valid on
+    every platform, and quoted as Hydra's own writer quotes (#321), so Hydra
+    reads it back as written, '=' and all."""
     from pathlib import PurePosixPath, PureWindowsPath
+
+    from hydra.core.override_parser.overrides_parser import OverridesParser
 
     from mushin.lightning.launchers import _hydra_run_dir_override
 
-    assert (
-        _hydra_run_dir_override(PureWindowsPath(r"C:\Users\me\out"))
-        == '"C:/Users/me/out"'
-    )
+    def read_back(override):
+        line = f"hydra.run.dir={override}"
+        return OverridesParser.create().parse_overrides([line])[0].value()
+
+    windows = _hydra_run_dir_override(PureWindowsPath(r"C:\Users\me\out"))
+    assert read_back(windows) == "C:/Users/me/out"
     # '=' in the dir name still relies on the quoting
-    assert _hydra_run_dir_override(PurePosixPath("/tmp/lr=0.1")) == '"/tmp/lr=0.1"'
+    assert read_back(_hydra_run_dir_override(PurePosixPath("/tmp/lr=0.1"))) == (
+        "/tmp/lr=0.1"
+    )
+
+
+def _read_back(override_key, text):
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    line = f"{override_key}={text}"
+    return OverridesParser.create().parse_overrides([line])[0].value()
+
+
+@pytest.mark.parametrize(
+    "path", ['/tmp/a"b', "/tmp/it's", "/tmp/a=b c", "C:/data/run 1"]
+)
+def test_a_relaunched_ranks_run_dir_reads_back_as_written(path):
+    """A path holding a quote, '=' or a space reads back as written, through
+    Hydra's parser and OmegaConf both (#321)."""
+    from omegaconf import OmegaConf
+
+    from mushin.lightning.launchers import _hydra_run_dir_override
+
+    read = _read_back("hydra.run.dir", _hydra_run_dir_override(path))
+    assert read == path
+    assert OmegaConf.create({"d": read}).d == path
+
+
+def test_an_escaped_interpolation_in_a_run_dir_stays_literal():
+    """As the old double-quoted form, OmegaConf reads `\\${y}` as a literal
+    `${y}`: no live interpolation reaches the child (workflows._quoted's `${`
+    form doubles the backslash, which would make it one)."""
+    from pathlib import PurePosixPath
+
+    from omegaconf import OmegaConf
+
+    from mushin.lightning.launchers import _hydra_run_dir_override
+
+    # Posix: on Windows a backslash in a path is a separator.
+    path = PurePosixPath("/tmp/x\\${y}")
+    read = _read_back("hydra.run.dir", _hydra_run_dir_override(path))
+    assert OmegaConf.create({"d": read}).d == "/tmp/x${y}"
+
+
+@pytest.mark.parametrize("name", ["lr=0.1", "a,b", "it's", 'say "hi"', "plain"])
+def test_a_relaunched_ranks_job_name_reads_back_as_written(name):
+    """A job name from run(job_name=...) reaches each child rank as written
+    (#321): bare, `=` broke the override and `,` made it a sweep."""
+    from mushin.lightning.launchers import _hydra_quoted
+
+    assert _read_back("hydra.job.name", _hydra_quoted(name)) == name
 
 
 def test_interrank_delay_env_override(monkeypatch):
@@ -284,6 +337,16 @@ def test_subprocess_call_argv(monkeypatch, tmp_path, entry):
     assert cmd[12] == "hydra.output_subdir=.pl_hydra_rank_5"
     assert cmd[13].startswith("hydra.job.name=")
     assert len(cmd) == 14
+
+
+def test_subprocess_call_quotes_the_job_name(monkeypatch, tmp_path):
+    """A job name holding `=` and `,` reaches the child rank as written: bare,
+    `=` broke the override and `,` made it a sweep (#321)."""
+    captured = _run_subprocess_call_in_hydra_job(
+        monkeypatch, tmp_path, ["hydra.job.name='lr=0.1,a'"]
+    )
+    name = next(o for o in captured["command"] if o.startswith("hydra.job.name="))
+    assert _read_back("hydra.job.name", name.split("=", 1)[1]) == "lr=0.1,a"
 
 
 def test_subprocess_call_unchanged_when_chdir_is_on(monkeypatch, tmp_path):
