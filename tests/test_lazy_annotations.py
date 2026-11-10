@@ -59,6 +59,10 @@ def test_a_workflow_whose_task_and_pre_task_name_one_runs(tmp_path):
         HydraZenValidationError, match="missing the following fields: a"
     ):
         wf.validate()
+    with pytest.raises(
+        HydraZenValidationError, match="missing the following fields: a"
+    ):
+        wf.validate(include_pre_task=False)
 
 
 @lazy
