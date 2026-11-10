@@ -9,7 +9,9 @@ must be flattened.
 """
 
 import re
+import string
 from pathlib import Path
+from typing import Optional
 
 import hypothesis.strategies as st
 import numpy as np
@@ -278,9 +280,9 @@ def test_the_refusal_names_a_quoted_sweep_that_keeps_the_strings(tmp_path):
     assert [str(r) for r in ds["a_repr"].values] == [repr("true"), repr("it's"), "2"]
 
 
-def test_the_refusal_names_every_axis_and_shortens_a_long_one(tmp_path):
-    """Every refused axis is named; a long one lists its first values, and
-    its raw sweep is shortened the same way (#319)."""
+def test_the_refusal_names_every_axis_and_shortens_a_long_list(tmp_path):
+    """Every refused axis is named, a long one with its first values, and the
+    raw sweep is written out whole: one cut short would not parse (#319)."""
     values = [str(i) for i in range(8)]
     with pytest.raises(ValueError) as err:
         _run(tmp_path, _Seen, a=multirun(values), b=multirun(["x", "null"]))
@@ -288,8 +290,22 @@ def test_the_refusal_names_every_axis_and_shortens_a_long_one(tmp_path):
     assert "`a`: '0' would reach the task as 0" in message
     assert "'4' would reach the task as 4, and 3 more." in message
     assert "`b`: 'null' would reach the task as None." in message
-    raws = ["+a='0','1','2','3','4',...", "+b='x','null'"]
+    raws = ["+a=" + ",".join(f"'{v}'" for v in values), "+b='x','null'"]
     assert f"overrides={raws!r}" in message
+    assert "passed as that type" in message
+
+
+def test_a_one_value_sweep_is_told_to_pass_the_value_fixed(tmp_path):
+    """A one-value comma "sweep" is a fixed value, which would drop the axis,
+    so a one-value axis is offered the fixed value and the dimension it can
+    keep; a value that does not parse is not offered a type (#319)."""
+    with pytest.raises(ValueError) as err:
+        _run(tmp_path, _Seen, a=multirun(["it's"]))
+    message = str(err.value)
+    assert "A one-value sweep (`a`) has no such form: pass the value fixed" in message
+    assert "non_multirun_params_as_singleton_dims=True" in message
+    assert "overrides=" not in message
+    assert "passed as that type" not in message
 
 
 @pytest.mark.parametrize(
@@ -303,65 +319,167 @@ def test_the_refusal_names_every_axis_and_shortens_a_long_one(tmp_path):
 def test_a_sweep_hydra_keeps_runs_as_before(tmp_path, values):
     """What Hydra hands its job as written still runs, each job's override in
     the form it always had: the check refuses, it never rewrites (#319)."""
+    wf = _run(tmp_path, _Seen, a=multirun(values))
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == [repr(v) for v in values]
+    assert _job_overrides(tmp_path, values) == _written_by_choice("+a", values)
+
+
+def _job_overrides(tmp_path, values):
+    return [
+        (tmp_path / "s" / str(n) / ".hydra" / "overrides.yaml").read_text()
+        for n in range(len(values))
+    ]
+
+
+def _written_by_choice(key, values):
+    """Each job's overrides.yaml as Hydra's basic sweeper writes a
+    `choice(...)` sweep of these values."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
 
     from mushin.workflows import _to_override_element
 
-    wf = _run(tmp_path, _Seen, a=multirun(values))
-    ds = wf.to_xarray()
-    assert [str(r) for r in ds["a_repr"].values] == [repr(v) for v in values]
     sweep = OverridesParser.create().parse_overrides(
-        ["+a=choice(" + ",".join(_to_override_element(v) for v in values) + ")"]
+        [f"{key}=choice(" + ",".join(_to_override_element(v) for v in values) + ")"]
     )[0]
-    jobs = [f"- +a={job}\n" for job in sweep.sweep_string_iterator()]
-    written = [
-        (tmp_path / "s" / str(n) / ".hydra" / "overrides.yaml").read_text()
-        for n in range(len(values))
-    ]
-    assert written == jobs
+    return [f"- {key}={job}\n" for job in sweep.sweep_string_iterator()]
 
 
-def test_only_values_written_as_strings_are_read_back(tmp_path, monkeypatch):
-    """The check reads back only the values written quoted, once each: an
-    axis of numbers costs it nothing (#319)."""
+# `Optional[str]`, not `str | None`: hydra-zen types a field annotated
+# `str | None` as Any, which keeps what Hydra reads.
+OPTIONAL_STR = Optional[str]  # noqa: UP045
+
+
+def _typed(type_, default):
+    from hydra_zen import ZenField, make_config
+
+    class W(_Seen):
+        pass
+
+    return lambda: W(
+        make_config(a=ZenField(type_, default), b=ZenField(type_, default))
+    )
+
+
+@pytest.mark.parametrize(
+    "type_, default, values, task_got",
+    [
+        (str, "x", ["1", "True", "inf"], ["'1'", "'True'", "'inf'"]),
+        (OPTIONAL_STR, None, ["1", "007"], ["'1'", "'007'"]),
+        (int, 0, ["1", "2"], ["1", "2"]),
+        # A NaN is the same value swept and fixed, though never equal.
+        (float, 0.0, ["nan", "1.5"], ["nan", "1.5"]),
+    ],
+)
+def test_a_string_the_typed_field_turns_back_runs_as_before(
+    tmp_path, type_, default, values, task_got
+):
+    """The job's config is the second reader: a `str` field turns Hydra's 1
+    back into '1', and an `int` field takes '1' as 1 whether swept or fixed,
+    so these reach the task as on main, each override as it was (#319)."""
+    # The dry run's preview reads the grid's fixed values after the check.
+    summary = _typed(type_, default)().run(a=multirun(values), dry_run=True)
+    assert summary["axes"]["a"] == values
+    assert summary["fixed"] == {}
+    wf = _typed(type_, default)()
+    wf.run(a=multirun(values), working_dir=str(tmp_path / "s"))
+    assert [str(r) for r in wf.to_xarray()["a_repr"].values] == task_got
+    prefix = "+" if default is None else ""
+    assert _job_overrides(tmp_path, values) == _written_by_choice(prefix + "a", values)
+
+
+@pytest.mark.parametrize(
+    "type_, default, values, shown",
+    [
+        (str, "x", ["true", "x"], "'true' would reach the task as 'True'"),
+        (str, "x", ["x", "1e3"], "'1e3' would reach the task as '1000.0'"),
+        (str, "x", ["null", "x"], "'null' would fail in its job"),
+        (OPTIONAL_STR, None, ["null", "x"], "'null' would reach the task as None"),
+        (str, "x", ["it's", "x"], '"it\'s" would not parse in its job'),
+    ],
+)
+def test_a_string_the_typed_field_still_changes_is_refused(
+    tmp_path, type_, default, values, shown
+):
+    """What the field still changes is refused, as it arrives (#319)."""
+    with pytest.raises(ValueError, match=re.escape(f"`a`: {shown}")):
+        _typed(type_, default)().run(
+            a=multirun(values), working_dir=str(tmp_path / "s")
+        )
+    assert not (tmp_path / "s").exists()
+
+
+def test_a_value_only_the_sweep_gives_the_field_is_not_refused():
+    """An Enum field takes Hydra's 1 as its member, but not '1' passed fixed:
+    the sweep is not what fails there, so it is not refused (#319)."""
+    import enum
+
+    class Color(enum.Enum):
+        RED = 1
+        BLUE = 2
+
+    summary = _typed(Color, Color.RED)().run(a=multirun(["1", "2"]), dry_run=True)
+    assert summary["axes"]["a"] == ["1", "2"]
+
+
+@pytest.mark.parametrize(
+    "how", [dict(sweeper="local_test"), dict(overrides=["hydra/sweeper=local_test"])]
+)
+def test_another_sweeper_is_left_to_write_its_jobs(how):
+    """The check models Hydra's basic sweeper; another sweeper writes its
+    jobs its own way, so its sweep is not refused (#319)."""
+    summary = _Seen().run(a=multirun(["true", "x"]), dry_run=True, **how)
+    assert summary["axes"]["a"] == ["true", "x"]
+    with pytest.raises(ValueError, match="would reach the task as True"):
+        _Seen().run(a=multirun(["true", "x"]), dry_run=True, sweeper="basic")
+
+
+def test_only_values_written_as_strings_are_read_back(monkeypatch):
+    """The check reads back only the values written quoted, one call per
+    axis: an axis of numbers costs it nothing (#319)."""
     import mushin.workflows as w
 
     seen = []
-    monkeypatch.setattr(w, "_swept_string_read", lambda text: seen.append(text) or None)
+
+    def read(written):
+        seen.append(written)
+        return [(text[1:-1], text[1:-1]) for text in written]
+
+    monkeypatch.setattr(w, "_swept_strings_read", read)
     _Seen().run(a=multirun(list(range(1000))), b=multirun([True, 1.5]), dry_run=True)
     assert seen == []
     _Seen().run(a=multirun(["x", 1, "y"]), dry_run=True)
-    assert seen == ["'x'", "'y'"]
+    assert seen == [["'x'", "'y'"]]
 
 
+@pytest.mark.parametrize("typed", [False, True])
 @settings(
     max_examples=25,
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
-@given(
-    text=st.text(
-        st.characters(exclude_categories=("Cs",), exclude_characters="$"),
-        max_size=6,
-    )
-)
+@given(text=st.text(st.sampled_from(string.printable.replace("$", "")), max_size=6))
 @example(text="true")
 @example(text="1")
 @example(text="it's")
 @example(text="a b")
-def test_a_swept_string_reaches_the_task_as_a_fixed_one_or_is_refused(tmp_path, text):
-    """Any string swept alone is refused before launch, or reaches the task
-    as the same string passed as a fixed value does (#319)."""
+def test_a_swept_string_reaches_the_task_as_a_fixed_one_or_is_refused(
+    tmp_path, typed, text
+):
+    """Any string swept alone, into an untyped key or a `str` field, is
+    refused before launch, or reaches the task as the same string passed as a
+    fixed value does (#319)."""
     import tempfile
 
+    make = _typed(str, "") if typed else _Seen
     base = Path(tempfile.mkdtemp(dir=tmp_path))
     try:
-        wf = _Seen()
+        wf = make()
         wf.run(a=multirun([text]), working_dir=str(base / "swept"))
     except ValueError:
         assert not (base / "swept").exists()
         return
-    fixed = _Seen()
+    fixed = make()
     fixed.run(a=multirun(["anchor"]), b=text, working_dir=str(base / "fixed"))
     swept = wf.to_xarray()["a_repr"].values.tolist()
     assert swept == fixed.to_xarray()["b_repr"].values.tolist()

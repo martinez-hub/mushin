@@ -2540,6 +2540,8 @@ def test_a_target_job_dir_hydra_cannot_write_is_refused_before_launch(tmp_path):
     plain, odd = tmp_path / "plain", tmp_path / "a#b"
     plain.mkdir()
     odd.mkdir()
-    with pytest.raises(ValueError, match=r"`job_dir`: .*a#b' would not parse"):
+    with pytest.raises(
+        ValueError, match=r"target job directory '.*a#b' would not parse"
+    ):
         W().run(target_job_dirs=[plain, odd], working_dir=str(tmp_path / "s"))
     assert not (tmp_path / "s").exists()

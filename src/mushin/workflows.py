@@ -193,43 +193,80 @@ def _dict_key(key: Any) -> str:
     return text
 
 
-@functools.lru_cache(maxsize=4096)
-def _swept_string_read(written: str) -> str | None:
-    """How a ``choice(...)`` element written as the quoted string ``written``
-    reaches its job, when not as the string a fixed value gives (#319); None
-    when it does.
+#: What ``_swept_strings_read`` gives for a job override that does not parse.
+_UNPARSED = object()
+#: What ``_job_value`` gives for a value the job's config does not take.
+_NOT_TAKEN = object()
 
-    Hydra's ``choice()`` drops a top-level element's quotes, and the sweeper
-    writes each job's value as that bare text, which the job parses again:
-    ``'true'`` arrives as ``True``, ``'1'`` as ``1``, ``"''"`` as ``''``, and
-    ``"it's"`` or a non-ASCII string does not parse. This asks Hydra's own
-    sweeper and parser rather than a copy of the grammar: the job's text is
-    what ``sweep_string_iterator`` gives the basic sweeper. It compares with
-    the element's text, the string a fixed value gives, not with the Python
-    one: a ``${`` string keeps main's escapes in both."""
+
+def _swept_strings_read(written: list[str]) -> list[tuple[str, Any]]:
+    """For each value of a ``choice(...)`` sweep written as a quoted string,
+    ``(text, read)``: the string a fixed value of it gives, and what its
+    job's override reads back as (``_UNPARSED`` when it does not parse).
+
+    Hydra's ``choice()`` drops a top-level element's quotes, and the basic
+    sweeper writes each job's value as that bare text, which the job parses
+    again (#319): ``'true'`` reads back as ``True``, ``'1'`` as ``1``,
+    ``"''"`` as ``''``, and ``"it's"`` or a non-ASCII string does not parse.
+    This asks Hydra's own sweeper and parser rather than a copy of the
+    grammar: the job's text is what ``sweep_string_iterator`` gives the basic
+    sweeper. ``text`` is the element's text, not the Python one: a ``${``
+    string keeps main's escapes in both. One parse for the axis, then one
+    per value."""
     from hydra.errors import OverrideParseException
 
     parser = _override_parser()
-    sweep = parser.parse_overrides([f"x=choice({written})"])[0]
-    (text,) = sweep.value().list
-    (job,) = sweep.sweep_string_iterator()
+    sweep = parser.parse_overrides([f"x=choice({','.join(written)})"])[0]
+    reads = []
+    for text, job in zip(
+        sweep.value().list, sweep.sweep_string_iterator(), strict=True
+    ):
+        try:
+            reads.append((text, parser.parse_overrides([f"x={job}"])[0].value()))
+        except OverrideParseException:
+            reads.append((text, _UNPARSED))
+    return reads
+
+
+def _job_config(cfg: Any) -> Any:
+    """A copy of the workflow's config as OmegaConf holds it, for
+    ``_job_value`` to write into; an empty one if it has none."""
+    from omegaconf import DictConfig, OmegaConf
+
     try:
-        read = parser.parse_overrides([f"x={job}"])[0].value()
-    except OverrideParseException:
-        return "would not parse in its job"
-    # A str equals only a str: what reads back as a number, a bool or null
-    # (or as a sweep) differs.
-    return None if read == text else f"would reach the task as {read!r}"
+        node = OmegaConf.structured(cfg)
+    except Exception:  # noqa: BLE001 - no structure -> every key is untyped
+        node = None
+    return node if isinstance(node, DictConfig) else OmegaConf.create()
+
+
+def _job_value(cfg: Any, key: str, value: Any) -> Any:
+    """``value`` as the job's config holds it at ``key``, or ``_NOT_TAKEN``.
+
+    The job's override is the second reader (#319): a typed field converts
+    what it is given (a ``str`` field turns ``1`` into ``'1'``, an ``int``
+    field ``'1'`` into ``1``), and a key the config lacks takes it as it is.
+    Written as Hydra applies an override, into ``cfg``."""
+    from omegaconf import OmegaConf
+    from omegaconf.errors import OmegaConfBaseException
+
+    try:
+        OmegaConf.update(cfg, key, value, merge=True, force_add=True)
+        return OmegaConf.select(cfg, key)
+    except OmegaConfBaseException:
+        return _NOT_TAKEN
 
 
 def _swept_strings_refusal(
     misread: list[tuple[str, str, list[str], list[tuple[Any, str]]]],
 ) -> str:
-    """The refusal for swept strings Hydra would not hand the task as
-    written: each axis with its first such values, and the raw comma sweep
-    that keeps their quotes (#319). ``misread`` holds, per axis, its name, its
-    override key, every value as written, and each misread value with how it
-    would arrive."""
+    """The refusal for swept strings that would not reach the task as
+    written (#319). ``misread`` holds, per axis, its name, its override key,
+    every value as written, and each misread value with how it would arrive.
+    It names each axis with its first such values, then the ways out: the
+    raw comma sweep that keeps the quotes, written out whole, for an axis of
+    two values or more; the type a value reads as, when one does; and a
+    fixed value for a one-value axis, which no comma sweep can keep swept."""
     shown = 5
 
     def listed(entries: list[str]) -> str:
@@ -241,16 +278,31 @@ def _swept_strings_refusal(
         for name, _, _, found in misread
     )
     raws = [
-        f"{key}=" + ",".join(written[:shown]) + (",..." if len(written) > shown else "")
+        f"{key}=" + ",".join(written)
         for _, key, written, _ in misread
+        if len(written) > 1
     ]
+    single = [f"`{name}`" for name, _, written, _ in misread if len(written) == 1]
+    fixes = []
+    if raws:
+        fixes.append(
+            "Sweep the strings through a raw comma sweep instead, whose values "
+            f"keep their quotes, in place of the multirun argument: overrides={raws!r}."
+        )
+    if any(how.startswith("would reach") for *_, found in misread for _, how in found):
+        fixes.append(
+            "A value meant as a number, a bool or null can be passed as that type."
+        )
+    if single:
+        fixes.append(
+            f"A one-value sweep ({', '.join(single)}) has no such form: pass the "
+            "value fixed, which keeps its quotes; to_xarray("
+            "non_multirun_params_as_singleton_dims=True) keeps it a dimension."
+        )
     return (
         f"these swept strings would not reach the task as written. {axes} "
         "multirun() sweeps through Hydra's choice(), which writes each job's "
-        "value without its quotes. Pass such a value as the type it reads as, "
-        "pass a single string as a fixed value, or sweep the strings through "
-        "a raw override, whose values keep their quotes, in place of the "
-        f"multirun argument: overrides={raws!r}."
+        "value without its quotes. " + " ".join(fixes)
     )
 
 
@@ -2279,15 +2331,66 @@ class BaseWorkflow:
         # refused here, after the duplicate checks (whose message names a
         # value two cells share) and before the dry-run preview or any write.
         # Only a value written quoted can be misread, so an axis of numbers
-        # parses nothing. A raw `overrides=[...]` sweep is the user's own
-        # Hydra syntax and is left to Hydra.
+        # parses nothing. What Hydra reads back differently is then put
+        # through the job's config, the second reader, beside the string a
+        # fixed value gives: a `str` field turns 1 back into '1', so only a
+        # value that still arrives changed is refused. A raw `overrides=[...]`
+        # sweep is the user's own Hydra syntax, and another sweeper writes
+        # its jobs its own way: both are left to Hydra.
+        sweeper_set = (sweeper is not None and sweeper != "basic") or any(
+            o.lstrip("+~").startswith("hydra/sweeper=")
+            and o.split("=", 1)[1] != "basic"
+            for o in overrides or []
+        )
         misread = []
-        for name, key, items, written in swept:
-            found = [
-                (item, how)
+        for name, key, items, written in [] if sweeper_set else swept:
+            quoted = [
+                (item, text)
                 for item, text in zip(items, written, strict=True)
-                if text.startswith("'") and (how := _swept_string_read(text))
+                if text.startswith("'")
             ]
+            if not quoted:
+                continue
+            reads = _swept_strings_read([text for _, text in quoted])
+            job_cfg = None
+            found = []
+            for (item, _), (text, read) in zip(quoted, reads, strict=True):
+                if read is _UNPARSED:
+                    found.append((item, "would not parse in its job"))
+                    continue
+                if read == text:
+                    continue
+                if job_cfg is None:
+                    job_cfg = _job_config(self.eval_task_cfg)
+                as_swept = _job_value(job_cfg, name, read)
+                as_fixed = _job_value(job_cfg, name, text)
+                # A string the field does not take fails fixed too: the sweep
+                # is not what changes it.
+                if (
+                    as_fixed is _NOT_TAKEN
+                    or as_swept == as_fixed
+                    or (_is_nan(as_swept) and _is_nan(as_fixed))
+                ):
+                    continue
+                found.append(
+                    (
+                        item,
+                        "would fail in its job"
+                        if as_swept is _NOT_TAKEN
+                        else f"would reach the task as {as_swept!r}",
+                    )
+                )
+            if found and name == jobdir:
+                # `target_job_dirs=` builds this axis: its user named no
+                # sweep, and a directory has no other type to pass.
+                item, how = found[0]
+                raise ValueError(
+                    f"the target job directory {item!r} {how}: Hydra writes "
+                    "each job's directory into its override without quotes. "
+                    "Move or rename it so its path holds no character Hydra "
+                    "cannot write unquoted (such as '#', a quote or a "
+                    "non-ASCII letter)."
+                )
             if found:
                 misread.append((name, key, written, found))
         if misread:
