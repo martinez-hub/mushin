@@ -93,7 +93,13 @@ def _to_override_element(item: Any) -> str:
     if hasattr(item, "tolist") and getattr(item, "ndim", 0) >= 1:
         # A NumPy array (or a tensor): its elements, not its text (#321).
         return _to_override_element(item.tolist())
-    if isinstance(item, _LIST_TYPES) or _is_list_config(item):
+    if _is_list_config(item):
+        # Its elements as written, an interpolation (`${a}`) unresolved, for
+        # the job to resolve: iterating would resolve it against the list.
+        from omegaconf import OmegaConf
+
+        item = OmegaConf.to_container(item, resolve=False)
+    if isinstance(item, _LIST_TYPES):
         # A list, a tuple, a range, and what main wrote as a list through its
         # repr: a nested `hydra_list`/`multirun` (UserList) or an OmegaConf
         # ListConfig (#321). Named, not `Sequence`: a UserString or a

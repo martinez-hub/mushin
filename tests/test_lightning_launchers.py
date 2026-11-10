@@ -169,11 +169,15 @@ def test_an_escaped_interpolation_in_a_run_dir_stays_literal():
     """As the old double-quoted form, OmegaConf reads `\\${y}` as a literal
     `${y}`: no live interpolation reaches the child (workflows._quoted's `${`
     form doubles the backslash, which would make it one)."""
+    from pathlib import PurePosixPath
+
     from omegaconf import OmegaConf
 
     from mushin.lightning.launchers import _hydra_run_dir_override
 
-    read = _read_back("hydra.run.dir", _hydra_run_dir_override("/tmp/x\\${y}"))
+    # Posix: on Windows a backslash in a path is a separator.
+    path = PurePosixPath("/tmp/x\\${y}")
+    read = _read_back("hydra.run.dir", _hydra_run_dir_override(path))
     assert OmegaConf.create({"d": read}).d == "/tmp/x${y}"
 
 

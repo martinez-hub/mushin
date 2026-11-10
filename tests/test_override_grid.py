@@ -269,6 +269,16 @@ def test_a_hydra_list_keeps_what_main_read_as_a_list(tmp_path):
     assert {str(r) for r in ds["b_repr"].values} == {repr(expected)}
 
 
+def test_a_list_config_interpolation_is_written_unresolved():
+    """A ListConfig's `${a}` is written as written, for the job to resolve,
+    not resolved against the list itself before launch (#321)."""
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import _to_override_element
+
+    assert _to_override_element(OmegaConf.create(["${a}"])) == "['${a}']"
+
+
 def test_an_array_in_a_hydra_list_reaches_the_task_as_lists(tmp_path):
     from mushin import hydra_list
 
