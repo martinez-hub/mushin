@@ -123,8 +123,8 @@ def test_call_children_scripts_tracks_procs_and_launch_wires_observer(monkeypatc
 
 def test_hydra_run_dir_override_is_windows_safe():
     """A re-launched rank's run dir is written with forward slashes, valid on
-    every platform, and quoted as a swept string is (#321), so Hydra reads it
-    back as written, '=' and all."""
+    every platform, and quoted as Hydra's own writer quotes (#321), so Hydra
+    reads it back as written, '=' and all."""
     from pathlib import PurePosixPath, PureWindowsPath
 
     from hydra.core.override_parser.overrides_parser import OverridesParser
@@ -151,15 +151,30 @@ def _read_back(override_key, text):
 
 
 @pytest.mark.parametrize(
-    "path",
-    ['/tmp/a"b', "/tmp/it's", "/tmp/a=b c", "C:/data/run 1", "/tmp/x\\${y}"],
+    "path", ['/tmp/a"b', "/tmp/it's", "/tmp/a=b c", "C:/data/run 1"]
 )
 def test_a_relaunched_ranks_run_dir_reads_back_as_written(path):
-    """A path holding a quote, '=', a space or an escaped interpolation reads
-    back as written (#321)."""
+    """A path holding a quote, '=' or a space reads back as written, through
+    Hydra's parser and OmegaConf both (#321)."""
+    from omegaconf import OmegaConf
+
     from mushin.lightning.launchers import _hydra_run_dir_override
 
-    assert _read_back("hydra.run.dir", _hydra_run_dir_override(path)) == path
+    read = _read_back("hydra.run.dir", _hydra_run_dir_override(path))
+    assert read == path
+    assert OmegaConf.create({"d": read}).d == path
+
+
+def test_an_escaped_interpolation_in_a_run_dir_stays_literal():
+    """As the old double-quoted form, OmegaConf reads `\\${y}` as a literal
+    `${y}`: no live interpolation reaches the child (workflows._quoted's `${`
+    form doubles the backslash, which would make it one)."""
+    from omegaconf import OmegaConf
+
+    from mushin.lightning.launchers import _hydra_run_dir_override
+
+    read = _read_back("hydra.run.dir", _hydra_run_dir_override("/tmp/x\\${y}"))
+    assert OmegaConf.create({"d": read}).d == "/tmp/x${y}"
 
 
 @pytest.mark.parametrize("name", ["lr=0.1", "a,b", "it's", 'say "hi"', "plain"])

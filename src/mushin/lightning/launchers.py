@@ -21,6 +21,8 @@ from pytorch_lightning.strategies.launchers.subprocess_script import (
 )
 from torch import distributed
 
+from ..workflows import _hydra_quoted
+
 R = TypeVar("R")
 
 # Env vars mushin itself set (single-node subprocess launcher). Under an external
@@ -39,22 +41,14 @@ def _setup_environment() -> None:
         distributed.destroy_process_group()
 
 
-def _hydra_quoted(text: str) -> str:
-    """``text`` as Hydra's own writer quotes a string for an override: it
-    escapes a quote and the backslashes before one, which is all Hydra's
-    grammar unescapes, so the child reads the text back as written (#321).
-    Not ``workflows._quoted``, whose ``${`` form doubles every backslash: an
-    escaped ``\\${`` in a directory's name would become a live interpolation.
-    A ``${`` the text holds is still read as an interpolation, as before."""
-    from hydra.core.override_parser.types import Quote, QuotedString
-
-    return QuotedString(text=text, quote=Quote.single).with_quotes()
-
-
 def _hydra_run_dir_override(cwd) -> str:
-    """The ``hydra.run.dir=`` override value for a re-launched rank: quoted for
-    Hydra's override grammar (dir names may contain ``=``, a space or a quote,
-    ``_hydra_quoted``), with forward slashes."""
+    """The ``hydra.run.dir=`` override value for a re-launched rank: quoted as
+    Hydra's own writer quotes (``workflows._hydra_quoted``: a dir name may hold
+    ``=``, a space or a quote), with forward slashes (#321). Not
+    ``workflows._quoted``, whose ``${`` form doubles every backslash: an
+    escaped ``\\${`` in a directory's name would become a live
+    interpolation. A ``${`` a resolved directory's name holds is still read
+    by OmegaConf as one, as before."""
     from pathlib import PurePath
 
     p = cwd if isinstance(cwd, PurePath) else Path(cwd)

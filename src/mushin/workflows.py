@@ -5,8 +5,9 @@
 import dataclasses
 import functools
 import json
+import math
 import uuid
-from collections import defaultdict
+from collections import UserList, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from inspect import getattr_static
 from pathlib import Path
@@ -89,10 +90,14 @@ def _to_override_element(item: Any) -> str:
         return str(item)
     if isinstance(item, str):
         return _quoted(item)
-    if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+    if hasattr(item, "tolist") and getattr(item, "ndim", 0) >= 1:
+        # A NumPy array (or a tensor): its elements, not its text (#321).
+        return _to_override_element(item.tolist())
+    if isinstance(item, _LIST_TYPES) or _is_list_config(item):
         # A list, a tuple, a range, and what main wrote as a list through its
         # repr: a nested `hydra_list`/`multirun` (UserList) or an OmegaConf
-        # ListConfig (#321).
+        # ListConfig (#321). Named, not `Sequence`: a UserString or a
+        # bytearray is one too, and must keep the text it had.
         return "[" + ",".join(_to_override_element(x) for x in item) + "]"
     if isinstance(item, Mapping):
         # Hydra dict grammar, so e.g. a launcher's
@@ -109,58 +114,84 @@ def _to_override_element(item: Any) -> str:
     return _quoted(str(item))
 
 
-def _dict_key(key: Any) -> str:
-    """A dict key written for Hydra's override grammar, which has no quoted
-    key, so a key is read back as its text parses (``'1'`` as ``1``, a
-    leading or trailing space stripped; an inner one stays), and one holding
-    ``=`` or ``:`` does not parse. The override has two readers, Hydra's
-    parser and OmegaConf's merge, which takes no ``None`` key, so both are
-    asked. A key either reads back equal through both or is refused before
-    launch with a ``ValueError`` (#321): it would reach the task changed, or
-    fail inside the launch."""
-    import math
+#: The sequences written as a Hydra list (``_to_override_element``).
+_LIST_TYPES = (list, tuple, range, UserList)
 
+
+def _is_list_config(item: Any) -> bool:
+    from omegaconf import ListConfig
+
+    return isinstance(item, ListConfig)
+
+
+@functools.lru_cache(maxsize=1)
+def _override_parser():
+    return OverridesParser.create()
+
+
+def _is_nan(x: Any) -> bool:
+    try:
+        return math.isnan(x)
+    except TypeError:
+        return False
+
+
+@functools.lru_cache(maxsize=4096, typed=True)
+def _dict_key_written(key: Any) -> tuple[str | None, str]:
+    """``(refusal, text)`` for a dict key written for Hydra's override
+    grammar: ``refusal`` is None when the key reads back as itself through
+    both readers, else what it would become. Hydra has no quoted key, so a
+    key is read back as its text parses (``'1'`` as ``1``; a leading or
+    trailing space is stripped, an inner one stays), and one holding ``=`` or
+    ``:`` does not parse; OmegaConf's merge takes no ``None`` key. The probe
+    must keep its shape (one dict of one key): a key holding ``:0,`` would
+    otherwise rewrite it. A str key is written as its value, as ``_quoted``
+    writes a str subclass (an Enum mixing in str). Typed, so equal keys of
+    different types (``0.5`` and ``Fraction(1, 2)``) are judged apart."""
     from hydra.errors import OverrideParseException
     from omegaconf import OmegaConf
     from omegaconf.errors import OmegaConfBaseException
 
-    text = str(key) if isinstance(key, str) else _to_override_element(key)
+    text = str.__str__(key) if isinstance(key, str) else _to_override_element(key)
     try:
-        parsed = OverridesParser.create().parse_overrides([f"k={{{text}:0}}"])[0]
+        value = _override_parser().parse_overrides([f"k={{{text}:0}}"])[0].value()
     except OverrideParseException:
-        read, became = None, "an override Hydra cannot parse"
-    else:
-        (read,) = parsed.value().keys()
-        became = repr(read)
-        try:
-            OmegaConf.create({read: 0})
-        except OmegaConfBaseException:
-            became = f"{read!r}, a key OmegaConf does not take"
-            read = None
+        return "an override Hydra cannot parse", text
+    if not isinstance(value, dict) or len(value) != 1:
+        return "a different override", text
+    (read,) = value
+    try:
+        OmegaConf.create({read: 0})
+    except OmegaConfBaseException:
+        return f"{read!r}, a key OmegaConf does not take", text
     # Equal is enough: a str never equals what reads back as a number, a bool
     # or null, and a NumPy integer key reads back as the int it equals; two
     # NaNs are the same key, though never equal.
-    same = (
-        became == repr(read)
-        and read is not None
-        and (
-            read == key
-            or (
-                isinstance(read, float)
-                and isinstance(key, float)
-                and math.isnan(read)
-                and math.isnan(key)
-            )
-        )
-    )
-    if not same:
+    if read == key or (_is_nan(read) and _is_nan(key)):
+        return None, text
+    return repr(read), text
+
+
+def _dict_key(key: Any) -> str:
+    """A dict key as Hydra's override grammar reads it back as itself, or a
+    ``ValueError`` before launch naming it (#321): it would reach the task
+    changed, or fail inside the launch (``_dict_key_written``)."""
+    refusal, text = _dict_key_written(key)
+    if refusal is not None:
         raise ValueError(
             f"the dict key {key!r} cannot be written as a Hydra override: Hydra "
-            f"has no quoted dict keys, so it would become {became}. Use a key "
+            f"has no quoted dict keys, so it would become {refusal}. Use a key "
             "Hydra writes as itself (a name, a number, a bool), or pass the "
             "values as scalar parameters and build the dict in the task."
         )
     return text
+
+
+def _hydra_quoted(text: str) -> str:
+    """``text`` as Hydra's own writer quotes a string for an override: it
+    escapes a quote and the backslashes before one, which is all Hydra's
+    grammar unescapes."""
+    return QuotedString(text=text, quote=Quote.single).with_quotes()
 
 
 def _quoted(text: str) -> str:
@@ -186,7 +217,7 @@ def _quoted(text: str) -> str:
     kind #320 found wrong twice."""
     if "${" in text:
         return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
-    return QuotedString(text=text, quote=Quote.single).with_quotes()
+    return _hydra_quoted(text)
 
 
 def _scalar_repr(item: Any) -> Any:

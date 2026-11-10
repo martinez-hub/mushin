@@ -269,6 +269,24 @@ def test_a_hydra_list_keeps_what_main_read_as_a_list(tmp_path):
     assert {str(r) for r in ds["b_repr"].values} == {repr(expected)}
 
 
+def test_an_array_in_a_hydra_list_reaches_the_task_as_lists(tmp_path):
+    from mushin import hydra_list
+
+    wf = _run(tmp_path, _SeenList, a=multirun(["x"]), b=hydra_list([np.eye(2)]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["b_repr"].values} == {repr([[[1.0, 0.0], [0.0, 1.0]]])}
+
+
+def test_a_user_string_keeps_the_text_main_wrote(tmp_path):
+    """Only the sequences main read back as a list are written as one: a
+    UserString, a Sequence too, keeps its text instead of recursing (#321)."""
+    from collections import UserString
+
+    wf = _run(tmp_path, _Seen, a=multirun([UserString("ab")]))
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == [repr("ab")]
+
+
 class _SeenDict(MultiRunMetricsWorkflow):
     @staticmethod
     def task(d=None):
@@ -288,7 +306,9 @@ def test_dict_keys_hydra_can_write_reach_the_task(tmp_path):
     assert {str(r) for r in ds["d_repr"].values} == {repr(expected)}
 
 
-@pytest.mark.parametrize("key", ["1", "true", "null", "1.5", "a ", "a=b", "a:b"])
+@pytest.mark.parametrize(
+    "key", ["1", "true", "null", "1.5", "a ", "a=b", "a:b", "a:0,b", "a:0},{b"]
+)
 def test_a_dict_key_hydra_cannot_write_is_refused(tmp_path, key):
     """Hydra's dict grammar has no quoted key: a str key that reads as another
     type would reach the task changed ('1' as 1, 'a ' as 'a'), and one with
@@ -306,11 +326,24 @@ def test_a_key_omegaconf_does_not_take_is_refused(tmp_path):
     assert not (tmp_path / "s").exists()
 
 
-def test_a_nan_dict_key_reaches_the_task(tmp_path):
+@pytest.mark.parametrize("nan", [float("nan"), np.float32("nan")])
+def test_a_nan_dict_key_reaches_the_task(tmp_path, nan):
     """NaN never equals itself, but it is the key it was, as on main."""
-    wf = _run(tmp_path, _SeenDict, d=multirun([{float("nan"): "x"}]))
+    wf = _run(tmp_path, _SeenDict, d=multirun([{nan: "x"}]))
     ds = wf.to_xarray()
     assert {str(r) for r in ds["d_repr"].values} == {"{nan: 'x'}"}
+
+
+def test_a_str_enum_key_is_written_as_its_value(tmp_path):
+    """A key mixing in str is written as its value, as such a value is."""
+    import enum
+
+    class Mode(str, enum.Enum):  # noqa: UP042 - str() is 'Mode.TRAIN', the case
+        TRAIN = "train"
+
+    wf = _run(tmp_path, _SeenDict, d=multirun([{Mode.TRAIN: 1}]))
+    ds = wf.to_xarray()
+    assert {str(r) for r in ds["d_repr"].values} == {repr({"train": 1})}
 
 
 def test_a_tuple_dict_key_is_refused(tmp_path):
