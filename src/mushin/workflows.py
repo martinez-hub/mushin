@@ -213,7 +213,7 @@ def _required_params(fn) -> set[str]:
     import inspect
 
     try:
-        params = inspect.signature(fn).parameters
+        params = _task_signature(fn)[0].parameters
     except (TypeError, ValueError):
         return set()
     empty = inspect.Parameter.empty
@@ -253,7 +253,7 @@ def _override_name_targets(task_fn) -> set[str] | None:
     import inspect
 
     try:
-        params = inspect.signature(task_fn).parameters
+        params = _task_signature(task_fn)[0].parameters
     except (TypeError, ValueError):
         return None
     names: set[str] = set()
@@ -1285,7 +1285,53 @@ class _TaskRunner:
             raise
 
 
-class _ResumeInjector:
+def _task_signature(fn):
+    """``(signature, as_text)``: ``inspect.signature(fn)``, or on Python 3.14+,
+    when evaluating ``fn``'s annotations raises ``NameError`` (a name imported
+    only under ``TYPE_CHECKING``, which PEP 649 lets a definition name, #330),
+    its signature with every annotation kept as its text. Text, not
+    ``ForwardRef``: hydra-zen's ``zen`` keeps the parameters, and a
+    ``ForwardRef`` pickles its module's globals, which a parallel run cannot
+    send when they hold a module. Any other error is raised as it was."""
+    import inspect
+    import sys
+
+    try:
+        return inspect.signature(fn), False
+    except NameError as error:
+        if sys.version_info < (3, 14):
+            raise
+        unresolved = error
+    import annotationlib
+
+    try:
+        return inspect.signature(
+            fn, annotation_format=annotationlib.Format.STRING
+        ), True
+    except Exception:  # noqa: BLE001 - the evaluation's own error is the one to see
+        raise unresolved from None
+
+
+class _SignedTask:
+    """A callable for hydra-zen's ``zen`` that reads its task's signature
+    without evaluating its annotations (``_task_signature``): a task whose
+    annotations name what is not defined when the run starts (3.14+, #330).
+    Picklable: it holds the module-level task and a ``Signature`` whose
+    annotations are text."""
+
+    def __init__(self, task):
+        self._task = task
+        self._sig = _task_signature(task)[0]
+
+    @property
+    def __signature__(self):  # inspect.signature / zen read this
+        return self._sig
+
+    def __call__(self, *args, **kwargs):
+        return self._task(*args, **kwargs)
+
+
+class _ResumeInjector(_SignedTask):
     """Picklable replacement for the old `_bind_resume_kwarg` closure. Hides a
     task's `mushin_resume` parameter from hydra-zen's `zen` (via a stripped
     __signature__, so zen never tries to resolve it from config) and injects the
@@ -1293,17 +1339,12 @@ class _ResumeInjector:
     an instance holding a module-level task + a Signature is stdlib-picklable."""
 
     def __init__(self, task):
-        import inspect
-
-        self._task = task
-        sig = inspect.signature(task)
-        self._sig = sig.replace(
-            parameters=[p for n, p in sig.parameters.items() if n != "mushin_resume"]
+        super().__init__(task)
+        self._sig = self._sig.replace(
+            parameters=[
+                p for n, p in self._sig.parameters.items() if n != "mushin_resume"
+            ]
         )
-
-    @property
-    def __signature__(self):  # inspect.signature / zen read this
-        return self._sig
 
     def __call__(self, *args, **kwargs):
         from ._resume import current_resume
@@ -1313,12 +1354,23 @@ class _ResumeInjector:
 
 def _prepare_task(task):
     """If `task` declares a `mushin_resume` parameter, wrap it in a picklable
-    `_ResumeInjector`; otherwise return it unchanged. Returns `(prepared, wants)`."""
-    import inspect
-
-    if "mushin_resume" in inspect.signature(task).parameters:
+    `_ResumeInjector`; one whose annotations cannot be evaluated yet in a
+    `_SignedTask` (`_signed`); otherwise return it unchanged. Returns
+    `(prepared, wants)`."""
+    sig, as_text = _task_signature(task)
+    if "mushin_resume" in sig.parameters:
         return _ResumeInjector(task), True
-    return task, False
+    return (_SignedTask(task) if as_text else task), False
+
+
+def _signed(fn):
+    """``fn``, or a `_SignedTask` of it when its annotations cannot be
+    evaluated yet (3.14+, #330), for hydra-zen's ``zen``."""
+    try:
+        as_text = _task_signature(fn)[1]
+    except (TypeError, ValueError):  # no signature to read: zen says so
+        return fn
+    return _SignedTask(fn) if as_text else fn
 
 
 def _write_env_snapshot(working_dir: Path) -> None:
@@ -1575,9 +1627,9 @@ class BaseWorkflow:
     def validate(self, include_pre_task: bool = True):
         """Validates that the configuration will execute with the user-defined evaluation task"""
         if include_pre_task:
-            zen(self.pre_task).validate(self.eval_task_cfg)
+            zen(_signed(self.pre_task)).validate(self.eval_task_cfg)
 
-        zen(self.task).validate(self.eval_task_cfg)
+        zen(_signed(self.task)).validate(self.eval_task_cfg)
 
     def run(
         self,
@@ -2103,7 +2155,7 @@ class BaseWorkflow:
         _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
         task_call = _TaskRunner(
             task=task_fn_wrapper(_task_fn),
-            pre_task=pre_task_fn_wrapper(self.pre_task),
+            pre_task=pre_task_fn_wrapper(_signed(self.pre_task)),
             swept_names=_runner_swept,
             base_provenance=_base_provenance,
             on_error=on_error,
