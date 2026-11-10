@@ -2,6 +2,7 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 
+import copy
 import dataclasses
 import functools
 import json
@@ -212,40 +213,86 @@ def _swept_strings_read(written: list[str]) -> list[tuple[str, Any]]:
     grammar: the job's text is what ``sweep_string_iterator`` gives the basic
     sweeper. ``text`` is the element's text, not the Python one: a ``${``
     string keeps main's escapes in both. One parse for the axis, then one
-    per value."""
+    per job text not read before."""
+    sweep = _override_parser().parse_overrides([f"x=choice({','.join(written)})"])[0]
+    return [
+        (text, _job_read(job))
+        for text, job in zip(
+            sweep.value().list, sweep.sweep_string_iterator(), strict=True
+        )
+    ]
+
+
+@functools.lru_cache(maxsize=4096)
+def _job_read(job: str) -> Any:
+    """What a job's override value ``job`` reads back as, or ``_UNPARSED``.
+    Cached: what it returns is a str, a number, a bool or None."""
     from hydra.errors import OverrideParseException
 
-    parser = _override_parser()
-    sweep = parser.parse_overrides([f"x=choice({','.join(written)})"])[0]
-    reads = []
-    for text, job in zip(
-        sweep.value().list, sweep.sweep_string_iterator(), strict=True
-    ):
-        try:
-            reads.append((text, parser.parse_overrides([f"x={job}"])[0].value()))
-        except OverrideParseException:
-            reads.append((text, _UNPARSED))
-    return reads
-
-
-def _job_config(cfg: Any) -> Any:
-    """A copy of the workflow's config as OmegaConf holds it, for
-    ``_job_value`` to write into; an empty one if it has none."""
-    from omegaconf import DictConfig, OmegaConf
-
     try:
-        node = OmegaConf.structured(cfg)
-    except Exception:  # noqa: BLE001 - no structure -> every key is untyped
-        node = None
-    return node if isinstance(node, DictConfig) else OmegaConf.create()
+        return _override_parser().parse_overrides([f"x={job}"])[0].value()
+    except OverrideParseException:
+        return _UNPARSED
+
+
+#: The sweeper whose way of writing each job's value the check models.
+_BASIC_SWEEPER = "hydra._internal.core_plugins.basic_sweeper.BasicSweeper"
+
+
+def _composed_for_launch(
+    cfg: Any,
+    overrides: list[str],
+    names: list[str],
+    *,
+    to_dictconfig: bool,
+    config_name: str,
+    job_name: str,
+    version_base: Any,
+) -> tuple[Any, set[str]]:
+    """The config Hydra composes for this sweep before its sweeper writes the
+    jobs, composed as hydra-zen's ``launch`` composes it, and which of
+    ``names`` are config groups (#319).
+
+    The config is where a job's override lands: it holds the fields' types
+    (a ``str`` field from a defaults-list group's config included, and none
+    under ``to_dictconfig``) and names the sweeper. A config group's
+    override names an option, not a value. ``cfg`` is stored under
+    ``config_name``, as ``launch`` is about to store it; ``initialize``
+    clears Hydra's global state on its way out. A compose that fails here
+    fails in ``launch`` too, from the same inputs, so it is not caught."""
+    from hydra import initialize
+    from hydra.core.config_store import ConfigStore
+    from hydra.core.global_hydra import GlobalHydra
+    from hydra.types import RunMode
+    from omegaconf import OmegaConf
+
+    if to_dictconfig and dataclasses.is_dataclass(cfg):
+        cfg = OmegaConf.create(OmegaConf.to_container(OmegaConf.structured(cfg)))
+    ConfigStore.instance().store(name=config_name, node=cfg)
+    with initialize(
+        config_path=None,
+        job_name=job_name,
+        **({} if version_base is _NotSet else {"version_base": version_base}),
+    ):
+        hydra = GlobalHydra.instance()
+        master = hydra.hydra.compose_config(
+            config_name=config_name,
+            overrides=list(overrides),
+            run_mode=RunMode.MULTIRUN,
+            from_shell=False,
+            with_log_configuration=False,
+        )
+        loader = hydra.config_loader()
+        groups = {name for name in names if loader.get_group_options(name)}
+    return master, groups
 
 
 def _job_value(cfg: Any, key: str, value: Any) -> Any:
     """``value`` as the job's config holds it at ``key``, or ``_NOT_TAKEN``.
 
-    The job's override is the second reader (#319): a typed field converts
-    what it is given (a ``str`` field turns ``1`` into ``'1'``, an ``int``
-    field ``'1'`` into ``1``), and a key the config lacks takes it as it is.
+    The job's config is the second reader (#319): a typed field converts what
+    it is given (a ``str`` field turns ``1`` into ``'1'``, an ``int`` field
+    ``'1'`` into ``1``), and a key the config lacks takes it as it is.
     Written as Hydra applies an override, into ``cfg``."""
     from omegaconf import OmegaConf
     from omegaconf.errors import OmegaConfBaseException
@@ -257,53 +304,75 @@ def _job_value(cfg: Any, key: str, value: Any) -> Any:
         return _NOT_TAKEN
 
 
+class _TargetDirs(multirun):
+    """The job directories ``target_job_dirs=`` sweeps: an axis mushin builds
+    itself, so the check on swept strings words its refusal for a directory
+    (#319)."""
+
+
 def _swept_strings_refusal(
-    misread: list[tuple[str, str, list[str], list[tuple[Any, str]]]],
+    misread: list[tuple[str, str, list[str], bool, list[tuple[Any, str, bool]]]],
 ) -> str:
     """The refusal for swept strings that would not reach the task as
     written (#319). ``misread`` holds, per axis, its name, its override key,
-    every value as written, and each misread value with how it would arrive.
+    every value as written, whether ``target_job_dirs=`` built it, and each
+    misread value with how it would arrive and whether it would arrive as a
+    number, a bool or None.
+
     It names each axis with its first such values, then the ways out: the
     raw comma sweep that keeps the quotes, written out whole, for an axis of
-    two values or more; the type a value reads as, when one does; and a
-    fixed value for a one-value axis, which no comma sweep can keep swept."""
+    two values or more; the type a value reads as, when the task would get
+    one; and a fixed value for a one-value axis, which no comma sweep keeps
+    swept. A target job directory is told to move or be renamed."""
     shown = 5
 
     def listed(entries: list[str]) -> str:
         more = len(entries) - shown
         return ", ".join(entries[:shown]) + (f", and {more} more" if more > 0 else "")
 
-    axes = " ".join(
-        f"`{name}`: " + listed([f"{item!r} {how}" for item, how in found]) + "."
-        for name, _, _, found in misread
-    )
-    raws = [
-        f"{key}=" + ",".join(written)
-        for _, key, written, _ in misread
-        if len(written) > 1
-    ]
-    single = [f"`{name}`" for name, _, written, _ in misread if len(written) == 1]
-    fixes = []
-    if raws:
-        fixes.append(
-            "Sweep the strings through a raw comma sweep instead, whose values "
-            f"keep their quotes, in place of the multirun argument: overrides={raws!r}."
+    axes = [m for m in misread if not m[3]]
+    parts = []
+    if axes:
+        named = " ".join(
+            f"`{name}`: " + listed([f"{item!r} {how}" for item, how, _ in found]) + "."
+            for name, _, _, _, found in axes
         )
-    if any(how.startswith("would reach") for *_, found in misread for _, how in found):
-        fixes.append(
-            "A value meant as a number, a bool or null can be passed as that type."
+        parts.append(
+            f"these swept strings would not reach the task as written. {named} "
+            "multirun() sweeps through Hydra's choice(), which writes each "
+            "job's value without its quotes."
         )
-    if single:
-        fixes.append(
-            f"A one-value sweep ({', '.join(single)}) has no such form: pass the "
-            "value fixed, which keeps its quotes; to_xarray("
-            "non_multirun_params_as_singleton_dims=True) keeps it a dimension."
-        )
-    return (
-        f"these swept strings would not reach the task as written. {axes} "
-        "multirun() sweeps through Hydra's choice(), which writes each job's "
-        "value without its quotes. " + " ".join(fixes)
-    )
+        raws = [
+            f"{key}=" + ",".join(written)
+            for _, key, written, _, _ in axes
+            if len(written) > 1
+        ]
+        if raws:
+            parts.append(
+                "Sweep the strings through a raw comma sweep instead, whose "
+                f"values keep their quotes: add {raws!r} to run()'s overrides= "
+                "list in place of the multirun argument."
+            )
+        if any(typed for *_, found in axes for _, _, typed in found):
+            parts.append(
+                "A value meant as a number, a bool or null can be passed as that type."
+            )
+        single = [f"`{name}`" for name, _, written, _, _ in axes if len(written) == 1]
+        if single:
+            parts.append(
+                f"A one-value sweep ({', '.join(single)}) has no such form: pass "
+                "the value fixed, which keeps its quotes (it is then not swept)."
+            )
+    for *_, targets, found in misread:
+        if targets:
+            parts.extend(
+                f"The target job directory {item!r} {how}: Hydra writes each "
+                "job's directory into its override without quotes. Move or "
+                "rename it so its path holds no character Hydra cannot write "
+                "unquoted (such as '#', a quote or a non-ASCII letter)."
+                for item, how, _ in found
+            )
+    return " ".join(parts)
 
 
 def _hydra_quoted(text: str) -> str:
@@ -2080,9 +2149,10 @@ class BaseWorkflow:
             cache_dir = str(Path(cache_dir).expanduser().resolve())
 
         launch_overrides = []
-        # Each multirun axis: its name, its override key, its values and how
-        # each is written, for the check on swept strings below (#319).
-        swept: list[tuple[str, str, list[Any], list[str]]] = []
+        # Each multirun axis: its name, its override key, its values, how each
+        # is written, and whether `target_job_dirs=` built it, for the check
+        # on swept strings below (#319).
+        swept: list[tuple[str, str, list[Any], list[str], bool]] = []
 
         if overrides is not None:
             launch_overrides.extend(overrides)
@@ -2221,7 +2291,9 @@ class BaseWorkflow:
                 # Hydra's override parser.
                 written = [_to_override_element(item) for item in v]
                 launch_overrides.append(f"{prefix}{k}=choice({','.join(written)})")
-                swept.append((k, f"{prefix}{k}", list(v), written))
+                swept.append(
+                    (k, f"{prefix}{k}", list(v), written, isinstance(v, _TargetDirs))
+                )
             elif isinstance(v, hydra_list):
                 # A single non-swept list value passed to one job, each element
                 # written as a sweep element is (#321): its own str is Python's
@@ -2331,19 +2403,16 @@ class BaseWorkflow:
         # refused here, after the duplicate checks (whose message names a
         # value two cells share) and before the dry-run preview or any write.
         # Only a value written quoted can be misread, so an axis of numbers
-        # parses nothing. What Hydra reads back differently is then put
-        # through the job's config, the second reader, beside the string a
-        # fixed value gives: a `str` field turns 1 back into '1', so only a
-        # value that still arrives changed is refused. A raw `overrides=[...]`
-        # sweep is the user's own Hydra syntax, and another sweeper writes
-        # its jobs its own way: both are left to Hydra.
-        sweeper_set = (sweeper is not None and sweeper != "basic") or any(
-            o.lstrip("+~").startswith("hydra/sweeper=")
-            and o.split("=", 1)[1] != "basic"
-            for o in overrides or []
-        )
-        misread = []
-        for name, key, items, written in [] if sweeper_set else swept:
+        # parses nothing, and most sweeps stop at Hydra's parser. What reads
+        # back differently is then asked of the config Hydra composes for the
+        # sweep, as `launch` composes it: whether the basic sweeper writes the
+        # jobs (another writes them its own way), whether the key is a config
+        # group (whose override must name an option), and what its field
+        # makes of the value beside the string a fixed value gives (a `str`
+        # field turns 1 back into '1'). A raw `overrides=[...]` sweep is the
+        # user's own Hydra syntax and is left to Hydra.
+        odd = []
+        for name, key, items, written, targets in swept:
             quoted = [
                 (item, text)
                 for item, text in zip(items, written, strict=True)
@@ -2352,16 +2421,38 @@ class BaseWorkflow:
             if not quoted:
                 continue
             reads = _swept_strings_read([text for _, text in quoted])
-            job_cfg = None
+            values = [
+                (item, text, read)
+                for (item, _), (text, read) in zip(quoted, reads, strict=True)
+                if read is _UNPARSED or read != text
+            ]
+            if values:
+                odd.append((name, key, written, targets, values))
+        misread = []
+        if odd:
+            master, groups = _composed_for_launch(
+                self.eval_task_cfg,
+                launch_overrides,
+                [name for name, *_ in odd],
+                to_dictconfig=to_dictconfig,
+                config_name=config_name,
+                job_name=job_name,
+                version_base=version_base,
+            )
+            if master.hydra.sweeper._target_ != _BASIC_SWEEPER:
+                odd = []
+        for name, key, written, targets, values in odd:
+            # A copy per axis: a key's value written here must not reach
+            # another axis's key below it (`model` and `model.width`).
+            job_cfg = copy.deepcopy(master)
             found = []
-            for (item, _), (text, read) in zip(quoted, reads, strict=True):
+            for item, text, read in values:
                 if read is _UNPARSED:
-                    found.append((item, "would not parse in its job"))
+                    found.append((item, "would not parse in its job", False))
                     continue
-                if read == text:
+                if name in groups:
+                    found.append((item, "would fail in its job", False))
                     continue
-                if job_cfg is None:
-                    job_cfg = _job_config(self.eval_task_cfg)
                 as_swept = _job_value(job_cfg, name, read)
                 as_fixed = _job_value(job_cfg, name, text)
                 # A string the field does not take fails fixed too: the sweep
@@ -2372,27 +2463,18 @@ class BaseWorkflow:
                     or (_is_nan(as_swept) and _is_nan(as_fixed))
                 ):
                     continue
-                found.append(
-                    (
-                        item,
-                        "would fail in its job"
-                        if as_swept is _NOT_TAKEN
-                        else f"would reach the task as {as_swept!r}",
+                if as_swept is _NOT_TAKEN:
+                    found.append((item, "would fail in its job", False))
+                else:
+                    found.append(
+                        (
+                            item,
+                            f"would reach the task as {as_swept!r}",
+                            not isinstance(as_swept, str),
+                        )
                     )
-                )
-            if found and name == jobdir:
-                # `target_job_dirs=` builds this axis: its user named no
-                # sweep, and a directory has no other type to pass.
-                item, how = found[0]
-                raise ValueError(
-                    f"the target job directory {item!r} {how}: Hydra writes "
-                    "each job's directory into its override without quotes. "
-                    "Move or rename it so its path holds no character Hydra "
-                    "cannot write unquoted (such as '#', a quote or a "
-                    "non-ASCII letter)."
-                )
             if found:
-                misread.append((name, key, written, found))
+                misread.append((name, key, written, targets, found))
         if misread:
             raise ValueError(_swept_strings_refusal(misread))
 
@@ -3182,7 +3264,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     raise FileNotFoundError(
                         f"The specified target directory {why}: {d}"
                     )
-            target_job_dirs = multirun([str(s) for s in target_job_dirs])
+            target_job_dirs = _TargetDirs([str(s) for s in target_job_dirs])
             workflow_overrides[self._JOBDIR_NAME] = target_job_dirs
 
         return super().run(

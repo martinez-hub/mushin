@@ -274,7 +274,7 @@ def test_the_refusal_names_a_quoted_sweep_that_keeps_the_strings(tmp_path):
     with pytest.raises(ValueError) as err:
         _run(tmp_path, _Seen, a=multirun(["true", "it's", 2]))
     raw = "+a='true','it\\'s',2"
-    assert f"overrides={[raw]!r}" in str(err.value)
+    assert f"add {[raw]!r} to run()'s overrides= list" in str(err.value)
     wf = _run(tmp_path, _Seen, overrides=[raw])
     ds = wf.to_xarray()
     assert [str(r) for r in ds["a_repr"].values] == [repr("true"), repr("it's"), "2"]
@@ -291,7 +291,7 @@ def test_the_refusal_names_every_axis_and_shortens_a_long_list(tmp_path):
     assert "'4' would reach the task as 4, and 3 more." in message
     assert "`b`: 'null' would reach the task as None." in message
     raws = ["+a=" + ",".join(f"'{v}'" for v in values), "+b='x','null'"]
-    assert f"overrides={raws!r}" in message
+    assert f"add {raws!r} to run()'s overrides= list" in message
     assert "passed as that type" in message
 
 
@@ -302,8 +302,10 @@ def test_a_one_value_sweep_is_told_to_pass_the_value_fixed(tmp_path):
     with pytest.raises(ValueError) as err:
         _run(tmp_path, _Seen, a=multirun(["it's"]))
     message = str(err.value)
-    assert "A one-value sweep (`a`) has no such form: pass the value fixed" in message
-    assert "non_multirun_params_as_singleton_dims=True" in message
+    assert (
+        "A one-value sweep (`a`) has no such form: pass the value fixed, which "
+        "keeps its quotes (it is then not swept)." in message
+    )
     assert "overrides=" not in message
     assert "passed as that type" not in message
 
@@ -422,6 +424,97 @@ def test_a_value_only_the_sweep_gives_the_field_is_not_refused():
     assert summary["axes"]["a"] == ["1", "2"]
 
 
+def test_a_field_to_dictconfig_untypes_is_checked_as_untyped(tmp_path):
+    """`to_dictconfig=True` stores the config without its types, so a `str`
+    field keeps what Hydra reads (1 for '1'): refused, as for an untyped key
+    (#319)."""
+    with pytest.raises(
+        ValueError, match=re.escape("`a`: '1' would reach the task as 1")
+    ):
+        _typed(str, "x")().run(
+            a=multirun(["1", "2"]), to_dictconfig=True, working_dir=str(tmp_path / "s")
+        )
+    assert not (tmp_path / "s").exists()
+
+
+@pytest.mark.config_group("m319")
+def test_a_str_field_from_a_defaults_group_turns_back_as_before(
+    tmp_path, restore_config_group
+):
+    """A field typed `str` by a config the defaults list composes in turns
+    Hydra's 1 back into '1', as on main: the check asks the composed config,
+    not the base one (#319)."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import ZenField, make_config
+
+    ConfigStore.instance().store(
+        group="m319", name="base", node=make_config(name=ZenField(str, "x"))
+    )
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(m319):
+            return dict(r=repr(m319.name))
+
+    cfg = make_config(m319=dict(name="x"), hydra_defaults=["_self_", {"m319": "base"}])
+    wf = W(cfg)
+    wf.run(**{"m319.name": multirun(["1", "2"])}, working_dir=str(tmp_path / "s"))
+    assert [str(r) for r in wf.to_xarray()["r"].values] == ["'1'", "'2'"]
+
+
+def test_a_sweeper_the_defaults_list_names_is_left_to_write_its_jobs():
+    """A sweeper chosen in the config's defaults list writes the jobs, not
+    the basic one the check models: its sweep is not refused (#319)."""
+    from hydra_zen import make_config
+
+    cfg = make_config(
+        hydra_defaults=["_self_", {"override hydra/sweeper": "local_test"}]
+    )
+
+    class W(_Seen):
+        pass
+
+    summary = W(cfg).run(a=multirun(["true", "x"]), dry_run=True)
+    assert summary["axes"]["a"] == ["true", "x"]
+
+
+@pytest.mark.config_group("g319")
+def test_a_config_group_option_hydra_retypes_would_fail(tmp_path, restore_config_group):
+    """A config group's override names an option, which must be a string:
+    an option named '1' would fail in its job, and passing it as a number
+    fails too, so that advice is not given (#319)."""
+    from hydra.core.config_store import ConfigStore
+    from hydra_zen import make_config
+
+    cs = ConfigStore.instance()
+    for name in ("1", "small"):
+        cs.store(group="g319", name=name, node=make_config(width=len(name)))
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(g319):
+            return dict(v=float(g319.width))
+
+    with pytest.raises(ValueError) as err:
+        W(make_config(g319=None)).run(
+            g319=multirun(["small", "1"]), working_dir=str(tmp_path / "s")
+        )
+    message = str(err.value)
+    assert "`g319`: '1' would fail in its job." in message
+    assert "passed as that type" not in message
+    assert not (tmp_path / "s").exists()
+
+
+def test_a_str_field_gets_no_advice_to_pass_a_type(tmp_path):
+    """A `str` field turns Hydra's True into 'True', not 'true', and passing
+    True does the same: only the raw comma sweep is offered (#319)."""
+    with pytest.raises(ValueError) as err:
+        _typed(str, "x")().run(a=multirun(["true", "x"]), dry_run=True)
+    message = str(err.value)
+    assert "'true' would reach the task as 'True'" in message
+    assert "passed as that type" not in message
+
+
 @pytest.mark.parametrize(
     "how", [dict(sweeper="local_test"), dict(overrides=["hydra/sweeper=local_test"])]
 )
@@ -450,6 +543,27 @@ def test_only_values_written_as_strings_are_read_back(monkeypatch):
     assert seen == []
     _Seen().run(a=multirun(["x", 1, "y"]), dry_run=True)
     assert seen == [["'x'", "'y'"]]
+
+
+def test_the_config_is_composed_only_for_a_value_read_back_differently(monkeypatch):
+    """Hydra composes the sweep's config only when a value reads back as
+    something else; a sweep of strings Hydra keeps stops at its parser
+    (#319)."""
+    import mushin.workflows as w
+
+    calls = []
+    compose = w._composed_for_launch
+
+    def counted(*args, **kwargs):
+        calls.append(args[2])
+        return compose(*args, **kwargs)
+
+    monkeypatch.setattr(w, "_composed_for_launch", counted)
+    _Seen().run(a=multirun(["x", "a b", 1]), b=multirun(["y", "z"]), dry_run=True)
+    assert calls == []
+    with pytest.raises(ValueError, match="would reach the task as True"):
+        _Seen().run(a=multirun(["x", "y"]), b=multirun(["true", "z"]), dry_run=True)
+    assert calls == [["b"]]
 
 
 @pytest.mark.parametrize("typed", [False, True])

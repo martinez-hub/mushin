@@ -144,16 +144,18 @@ list of values, and every combination is one cell.
   before launch. `multirun` sweeps through Hydra's `choice()`, which writes
   each job's value without its quotes, so `"true"`, `"null"` or `"1"` would
   reach the task as `True`, `None` or `1`, and a string such as `"it's"` or a
-  non-ASCII one would not parse in its job. A field typed `str` in the
-  workflow's config turns some back (`"1"` arrives as `"1"`), and those still
-  run. To sweep the strings, use a raw comma sweep, whose values keep their
-  quotes, in place of `flag=multirun(...)`: the error names it, such as
+  non-ASCII one would not parse in its job. A field the composed config
+  types `str` turns some back (`"1"` arrives as `"1"`), and those still run;
+  `to_dictconfig=True` drops those types. To sweep the strings, use a raw
+  comma sweep, whose values keep their quotes, in place of
+  `flag=multirun(...)`: the error names it, such as
   `overrides=["+flag='true','false'"]`. Each job's override then holds the
   quotes too, its `override_dirname` among them. A raw `choice(...)` drops
   them like `multirun`. You can also sweep the values as the type they read
   as (`multirun([True, False])`), or pass a single one as a fixed value
-  (`flag="true"`). With `sweeper=` naming another sweeper, nothing is
-  refused: that sweeper writes its jobs its own way.
+  (`flag="true"`). Under a sweeper other than Hydra's basic one, chosen with
+  `sweeper=` or in the config's defaults list, nothing is refused: that
+  sweeper writes its jobs its own way.
 - **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather
