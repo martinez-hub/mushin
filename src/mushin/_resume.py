@@ -761,7 +761,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
     is not an edit. Counted: the statements defining ``roots``, every
     statement, in the main block too, that binds a name counted code reads as
     a global (function parameters and locals do not count: the script's symbol
-    table says which names are global), a star import (it may bind any name),
+    table says which names are global, for a function in a top-level block,
+    an ``if``'s, a ``try``'s, a ``with``'s, a loop's or a ``match``'s, as
+    for a top-level one, #323; a class in a block, its methods included, is
+    walked whole, since a class body can read a module name it binds, as in
+    ``lr = lr``, so their locals may count), a star import (it may bind any
+    name),
     and a decorated definition whose decorator registers it somewhere counted
     code reads (``@register`` defined in the script, or an alias of it,
     writing the ``MODELS`` the task reads)
@@ -812,9 +817,11 @@ def _script_digest(path: Path, roots: frozenset[str]):
     ``globals()`` makes every form a plain call. And a value nested in a
     type that the record cannot tell from one (a subscript of a class or
     import rebound in a scope it does not track, a lookup the class itself
-    defines, an inline dict's method call) may have its key read: a
-    recompute too many, never a stale reuse. ``imports`` are those of what
-    counts."""
+    defines, an inline dict's method call) may have its key read, and a
+    class body's annotation reads the module's name even where the class
+    binds it (``x: 'grid'`` beside ``grid = int``, which
+    ``typing.get_type_hints`` resolves in the class first): a recompute too
+    many, never a stale reuse. ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
@@ -833,19 +840,25 @@ def _script_digest(path: Path, roots: frozenset[str]):
     # The bytes, so a byte order mark or a coding cookie is honored.
     table = symtable.symtable(source, str(path), "exec")
     scope_reads: dict[str, set[str]] = {}
+    # And each by its name and first line, for a function in a block (#323):
+    # one scope, where the name holds every scope so named.
+    scope_at: dict[tuple[str, int], set[str]] = {}
     for child in table.get_children():
         # Every scope by its name: on 3.12+ a generic definition (`def f[T]`)
         # is a type-parameter scope named like it, holding the function's.
         names = scope_reads.setdefault(child.get_name(), set())
+        here = scope_at.setdefault((child.get_name(), child.get_lineno()), set())
         stack = [child]
         while stack:
             t = stack.pop()
             stack.extend(t.get_children())
-            names.update(
+            found = {
                 sym.get_name()
                 for sym in t.get_symbols()
                 if sym.is_referenced() and sym.is_global()
-            )
+            }
+            names |= found
+            here |= found
 
     def loads(nodes) -> set[str]:
         return {
@@ -1504,33 +1517,38 @@ def _script_digest(path: Path, roots: frozenset[str]):
             hit = full_cache[id(node)] = reads(node) | hints(node)[0]
         return hit
 
+    def header_reads(node) -> set[str]:
+        """What a definition's header reads: its decorators and defaults
+        where it stands, its annotations (a function's) or bases and keywords
+        (a class's) without its own type parameters (3.12+, `def f[T]`), which
+        are what `T` names there, not the module's `T` (#315). The symbol
+        table knows; a syntax walk does not, so it drops them there.
+        ``run_here``, ``scope_binds`` and the module's ``_outer_parts`` list
+        the same parts for what they read: keep the four in step (#323)."""
+        own = {p.name for p in getattr(node, "type_params", ())}
+        # Evaluated where it is defined: decorators, defaults.
+        outer = list(node.decorator_list)
+        if isinstance(node, ast.ClassDef):
+            # A generic class's bases and keywords are in its type-parameter
+            # scope.
+            inner = node.bases + [k.value for k in node.keywords]
+        else:
+            outer += node.args.defaults + [
+                d for d in node.args.kw_defaults if d is not None
+            ]
+            a = node.args
+            params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+            # A generic function's annotations are in its type-parameter
+            # scope.
+            inner = [arg.annotation for arg in params if arg and arg.annotation]
+            if node.returns is not None:
+                inner.append(node.returns)
+        return loads(outer) | (loads(inner) - own)
+
     def _reads(node) -> set[str]:
-        # A generic definition's own type parameters (3.12+, `def f[T]`) are
-        # what `T` names in the parts evaluated in its type-parameter scope,
-        # not the module's `T` (#315). The symbol table knows; this syntax
-        # walk does not, so it drops them there.
         own = {p.name for p in getattr(node, "type_params", ())}
         if isinstance(node, defs):
-            # Evaluated where it is defined: decorators, defaults.
-            outer = list(node.decorator_list)
-            if isinstance(node, ast.ClassDef):
-                # A generic class's bases and keywords are in its
-                # type-parameter scope.
-                inner = node.bases + [k.value for k in node.keywords]
-            else:
-                outer += node.args.defaults + [
-                    d for d in node.args.kw_defaults if d is not None
-                ]
-                a = node.args
-                params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-                # A generic function's annotations are in its type-parameter
-                # scope.
-                inner = [arg.annotation for arg in params if arg and arg.annotation]
-                if node.returns is not None:
-                    inner.append(node.returns)
-            return (
-                scope_reads.get(node.name, set()) | loads(outer) | (loads(inner) - own)
-            )
+            return scope_reads.get(node.name, set()) | header_reads(node)
         if isinstance(node, type_alias):
             # A `type X[T] = ...` statement (3.12+) is all in its
             # type-parameter scope.
@@ -1550,9 +1568,15 @@ def _script_digest(path: Path, roots: frozenset[str]):
         stack = [node]
         while stack:
             sub = stack.pop()
-            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) or (
-                isinstance(sub, type_alias)
-            ):
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Its own scope, by its name and line: not another scope of
+                # its name (`try: from _c import f / except: def f(...)`
+                # beside a top-level `def f`). Without one, walked as main
+                # walked it.
+                body = scope_at.get((sub.name, sub.lineno))
+                found |= loads([sub]) if body is None else body | header_reads(sub)
+                continue
+            if isinstance(sub, type_alias):
                 found |= reads(sub)
                 continue
             if isinstance(sub, ast.ClassDef):
@@ -2906,6 +2930,11 @@ def _floor_reading(nodes) -> tuple[set[str], set[tuple[str, ...]]]:
     """The reading main took before #293, kept as the floor: whatever it names
     counts too, so the scope-aware reading (``_unit_reading``) only adds to
     what main recorded and never misses what it caught.
+
+    It is main's reading, its blind spots included: a chain on a generic
+    definition's own type parameter (``P.args`` in ``def f[**P](*a:
+    P.args)``) is resolved against the enclosing names, a module too many at
+    worst, never one too few (#323).
 
     ``(modules, chains)`` that definitions' syntax trees name: the modules
     their absolute imports name (as ``_import_pairs`` reads them) and each
