@@ -3756,6 +3756,193 @@ def test_a_script_change_the_task_cannot_see_is_not_an_edit(tmp_path, case):
     assert one == two
 
 
+# --- a function in a top-level block is read as a top-level one (#323) ----------
+
+# A function defined in a top-level `if`, `try`, `with`, loop or `match` reads
+# what a top-level one reads: its body's globals (the symbol table), its
+# decorators and defaults, its annotations without its own type parameters.
+# Not its parameters or locals, which no read of the module's names reaches.
+BLOCK_NOT_EDITS = {
+    "a parameter, in an if": (
+        "import sys\n\nx = {k}\n\nif sys:\n\n    def task(x):\n        return x\n"
+    ),
+    "a parameter, in an else": (
+        "import sys\n\nx = {k}\n\nif not sys:\n    pass\nelse:\n\n"
+        "    def task(x):\n        return x\n"
+    ),
+    "a parameter, in a try": (
+        "x = {k}\n\ntry:\n\n    def task(x):\n        return x\n\n"
+        "except Exception:\n    pass\n"
+    ),
+    "a parameter, in an except": (
+        "x = {k}\n\ntry:\n    import mushin_t_missing_module\nexcept ImportError:\n\n"
+        "    def task(x):\n        return x\n"
+    ),
+    "a parameter, in a with": (
+        "import contextlib\n\nx = {k}\n\nwith contextlib.suppress(Exception):\n\n"
+        "    def task(x):\n        return x\n"
+    ),
+    "a parameter, in a for": (
+        "x = {k}\n\nfor _ in range(1):\n\n    def task(x):\n        return x\n"
+    ),
+    "a parameter, in a while": (
+        "x = {k}\n\nwhile True:\n\n    def task(x):\n        return x\n\n    break\n"
+    ),
+    "a parameter, in a match case": (
+        "import sys\n\nx = {k}\n\nmatch sys.platform:\n    case _:\n\n"
+        "        def task(x):\n            return x\n"
+    ),
+    "a local": (
+        "import sys\n\ny = {k}\n\nif sys:\n\n    def task(a):\n        y = a\n"
+        "        return y\n"
+    ),
+    "an async function's parameter": (
+        "import sys\n\nx = {k}\n\nif sys:\n\n    async def task(x):\n        return x\n"
+    ),
+    # The grid named like a helper's parameter, the helper in a block.
+    "a helper's parameter named like the grid": (
+        "import sys\n\nlr = {k}\n\nif sys:\n\n    def helper(lr):\n        return lr\n\n\n"
+        "def task(a):\n    return helper(a)\n"
+    ),
+    "an inner function's parameter": (
+        "import sys\n\nx = {k}\n\nif sys:\n\n    def task(a):\n"
+        "        def inner(x):\n            return x\n\n        return inner(a)\n"
+    ),
+}
+
+BLOCK_NOT_EDITS_312 = {
+    "a generic function's own type parameter, in a try": (
+        "T = {k}\n\ntry:\n\n    def task[T](x: T) -> T:\n        return x\n\n"
+        "except Exception:\n    pass\n"
+    ),
+    "a generic function's own type parameter, in an if": (
+        "import sys\n\nT = {k}\n\nif sys:\n\n    def task[T](x: T) -> list[T]:\n"
+        "        return [x]\n"
+    ),
+    "a type statement's own type parameter, in an if": (
+        "import sys\n\nT = {k}\n\nif sys:\n    type Alias[T] = list[T]\n\n\n"
+        "def task(x: Alias):\n    return x\n"
+    ),
+}
+
+BLOCK_EDITS = {
+    "the body's global": (
+        "import sys\n\nSCALE = {k}\n\nif sys:\n\n    def task(a):\n"
+        "        return a * SCALE\n"
+    ),
+    "a default": (
+        "import sys\n\nSCALE = {k}\n\nif sys:\n\n    def task(a, s=SCALE):\n"
+        "        return a * s\n"
+    ),
+    "a keyword-only default": (
+        "import sys\n\nSCALE = {k}\n\nif sys:\n\n    def task(a, *, s=SCALE):\n"
+        "        return a * s\n"
+    ),
+    "a decorator's argument": (
+        "import sys\n\nK = {k}\n\n\ndef deco(n):\n    return lambda f: f\n\n\n"
+        "if sys:\n\n    @deco(K)\n    def task(a):\n        return a\n"
+    ),
+    "an annotation": (
+        "import sys\n\nT = {k}\n\nif sys:\n\n    def task(a: T):\n        return a\n"
+    ),
+    "a return annotation": (
+        "import sys\n\nT = {k}\n\nif sys:\n\n    def task(a) -> T:\n        return a\n"
+    ),
+    "a global the function declares": (
+        "import sys\n\nx = {k}\n\nif sys:\n\n    def task(a):\n        global x\n"
+        "        return x\n"
+    ),
+    "an inner function's global": (
+        "import sys\n\nSCALE = {k}\n\nif sys:\n\n    def task(a):\n"
+        "        def inner(b):\n            return b * SCALE\n\n        return inner(a)\n"
+    ),
+    "the block's own test": (
+        "FAST = {k}\n\nif FAST:\n\n    def task(a):\n        return a\n"
+    ),
+    "a parameter named like a global the body also reads": (
+        "import sys\n\nx = {k}\n\nif sys:\n\n    def task(a):\n"
+        "        return [x for x in range(a)] + [x]\n"
+    ),
+    # A class body resolves a name it binds later from the module (`lr = lr`).
+    "a class's body in a block": (
+        "import sys\n\nlr = {k}\n\nif sys:\n\n    class Cfg:\n        lr = lr\n\n\n"
+        "def task(a):\n    return a * Cfg.lr\n"
+    ),
+    "a method's global, in a block": (
+        "import sys\n\nSCALE = {k}\n\nif sys:\n\n    class Model:\n"
+        "        def f(self, a):\n            return a * SCALE\n\n\n"
+        "def task(a):\n    return Model().f(a)\n"
+    ),
+    "a lambda's global, at the top level": (
+        "SCALE = {k}\nscale = lambda a: a * SCALE\n\n\ndef task(a):\n"
+        "    return scale(a)\n"
+    ),
+    "a statement beside the function in the block": (
+        "import sys\n\nSCALE = {k}\n\nif sys:\n    FACTOR = SCALE\n\n"
+        "    def task(a):\n        return a * FACTOR\n"
+    ),
+}
+
+BLOCK_EDITS_312 = {
+    # The test runs where the block stands: the module's T.
+    "a block's test before a generic function": (
+        "T = {k}\n\nif T:\n\n    def task[T](x: T) -> T:\n        return x\n"
+    ),
+    "a generic function's default": (
+        "import sys\n\nT = {k}\n\nif sys:\n\n    def task[U](x: U, d=T) -> U:\n"
+        "        return x\n"
+    ),
+    "a generic function's body reading the module's name": (
+        "import sys\n\nK = {k}\n\nif sys:\n\n    def task[T](x: T) -> T:\n"
+        "        return x * K\n"
+    ),
+}
+
+
+def _block_cases(cases, version=(3, 11)):
+    return [
+        pytest.param(
+            name,
+            cases,
+            id=name,
+            marks=pytest.mark.skipif(
+                sys.version_info < version, reason="syntax of a later Python"
+            ),
+        )
+        for name in sorted(cases)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [*_block_cases(BLOCK_NOT_EDITS), *_block_cases(BLOCK_NOT_EDITS_312, (3, 12))],
+)
+@pytest.mark.parametrize("future", [False, True], ids=["eager", "future"])
+def test_a_block_functions_own_names_are_not_module_reads(
+    tmp_path, case, cases, future
+):
+    text = cases[case]
+    if future:
+        text = "from __future__ import annotations\n\n" + text
+    one = _digest_of_script(tmp_path, "bn1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "bn2", text.format(k=2), {"task"})
+    assert one == two
+
+
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [*_block_cases(BLOCK_EDITS), *_block_cases(BLOCK_EDITS_312, (3, 12))],
+)
+@pytest.mark.parametrize("future", [False, True], ids=["eager", "future"])
+def test_what_a_block_function_reads_counts(tmp_path, case, cases, future):
+    text = cases[case]
+    if future:
+        text = "from __future__ import annotations\n\n" + text
+    one = _digest_of_script(tmp_path, "be1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "be2", text.format(k=2), {"task"})
+    assert one != two
+
+
 def test_each_run_of_an_augmented_assignment_counts(tmp_path):
     """`SCALE += 1` twice and three times are different values: a chain of
     identical statements is not one statement."""

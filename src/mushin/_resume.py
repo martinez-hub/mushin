@@ -827,6 +827,7 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return hit
     tree = ast.parse(source)
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    type_alias = getattr(ast, "TypeAlias", ())  # a `type` statement, 3.12+
 
     # The globals each top-level function or class body reads, by its name.
     # The bytes, so a byte order mark or a coding cookie is honored.
@@ -1530,9 +1531,37 @@ def _script_digest(path: Path, roots: frozenset[str]):
             return (
                 scope_reads.get(node.name, set()) | loads(outer) | (loads(inner) - own)
             )
-        # A `type X[T] = ...` statement (3.12+) is all in its type-parameter
-        # scope.
-        return loads([node]) - own
+        if isinstance(node, type_alias):
+            # A `type X[T] = ...` statement (3.12+) is all in its
+            # type-parameter scope.
+            return loads([node]) - own
+        # Any other statement: the names it evaluates itself, and each
+        # function or `type` statement in its blocks (an `if`'s, a `try`'s,
+        # a `with`'s, a loop's, a `match`'s) read as a top-level one is (#323):
+        # its body by the symbol table, which lists a function in a block as
+        # the module's own child, so neither its parameters nor its locals
+        # count, as for a top-level function. A function's own scope never
+        # reads a module name it binds locally. A class body in one does
+        # (`lr = lr`), and the table calls that name the class's, so a class
+        # in a block, and what its methods read, is walked as main walked it.
+        # (A class body inside such a function is read by the table, as one
+        # inside a top-level function is.)
+        found: set[str] = set()
+        stack = [node]
+        while stack:
+            sub = stack.pop()
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) or (
+                isinstance(sub, type_alias)
+            ):
+                found |= reads(sub)
+                continue
+            if isinstance(sub, ast.ClassDef):
+                found |= loads([sub])
+                continue
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                found.add(sub.id)
+            stack.extend(ast.iter_child_nodes(sub))
+        return found
 
     def run_here(node) -> list:
         """What a definition evaluates where it is defined, but annotations:
