@@ -761,12 +761,13 @@ def _script_digest(path: Path, roots: frozenset[str]):
     is not an edit. Counted: the statements defining ``roots``, every
     statement, in the main block too, that binds a name counted code reads as
     a global (function parameters and locals do not count: the script's symbol
-    table says which names are global, for a function in a top-level block,
-    an ``if``'s, a ``try``'s, a ``with``'s, a loop's or a ``match``'s, as
-    for a top-level one, #323; a class in a block, its methods included, is
-    walked whole, since a class body can read a module name it binds, as in
-    ``lr = lr``, so their locals may count), a star import (it may bind any
-    name),
+    table says which names are global, for a function defined with ``def``
+    in a top-level block, an ``if``'s, a ``try``'s, a ``with``'s, a loop's
+    or a ``match``'s, as for a top-level one, #323; a class in a block, and
+    a function in one that holds a class, is walked whole, since a class
+    body can read a module name it binds, as in ``lr = lr``, so their
+    locals may count, as may a lambda's parameters and a comprehension's
+    variables in a block), a star import (it may bind any name),
     and a decorated definition whose decorator registers it somewhere counted
     code reads (``@register`` defined in the script, or an alias of it,
     writing the ``MODELS`` the task reads)
@@ -821,7 +822,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     class body's annotation reads the module's name even where the class
     binds it (``x: 'grid'`` beside ``grid = int``, which
     ``typing.get_type_hints`` resolves in the class first): a recompute too
-    many, never a stale reuse. ``imports`` are those of what counts."""
+    many, never a stale reuse. Not read: a class body's read of a name it
+    binds too (``lr = lr``, ``lr += [3]``), which the symbol table calls the
+    class's, in a top-level class or in a top-level function's (#336).
+    ``imports`` are those of what counts."""
     import ast
     import copy
     import symtable
@@ -1522,9 +1526,12 @@ def _script_digest(path: Path, roots: frozenset[str]):
         where it stands, its annotations (a function's) or bases and keywords
         (a class's) without its own type parameters (3.12+, `def f[T]`), which
         are what `T` names there, not the module's `T` (#315). The symbol
-        table knows; a syntax walk does not, so it drops them there.
-        ``run_here``, ``scope_binds`` and the module's ``_outer_parts`` list
-        the same parts for what they read: keep the four in step (#323)."""
+        table knows; a syntax walk does not, so it drops them there. Three
+        other lists of a definition's header parts read them for other
+        purposes, and differ on purpose: ``run_here`` what binds where the
+        definition stands (no annotations), ``scope_binds`` the names a walrus
+        binds there, and the module's ``_outer_parts`` what a notebook
+        definition reads where it stands (type parameters' bounds too)."""
         own = {p.name for p in getattr(node, "type_params", ())}
         # Evaluated where it is defined: decorators, defaults.
         outer = list(node.decorator_list)
@@ -1546,24 +1553,23 @@ def _script_digest(path: Path, roots: frozenset[str]):
         return loads(outer) | (loads(inner) - own)
 
     def _reads(node) -> set[str]:
-        own = {p.name for p in getattr(node, "type_params", ())}
         if isinstance(node, defs):
             return scope_reads.get(node.name, set()) | header_reads(node)
         if isinstance(node, type_alias):
             # A `type X[T] = ...` statement (3.12+) is all in its
             # type-parameter scope.
-            return loads([node]) - own
+            return loads([node]) - {p.name for p in node.type_params}
         # Any other statement: the names it evaluates itself, and each
         # function or `type` statement in its blocks (an `if`'s, a `try`'s,
         # a `with`'s, a loop's, a `match`'s) read as a top-level one is (#323):
         # its body by the symbol table, which lists a function in a block as
         # the module's own child, so neither its parameters nor its locals
         # count, as for a top-level function. A function's own scope never
-        # reads a module name it binds locally. A class body in one does
-        # (`lr = lr`), and the table calls that name the class's, so a class
-        # in a block, and what its methods read, is walked as main walked it.
-        # (A class body inside such a function is read by the table, as one
-        # inside a top-level function is.)
+        # reads a module name it binds locally, but a class body does
+        # (`lr = lr` reads the module's `lr`), and the table calls that name
+        # the class's. So a class in a block, and a function in one that
+        # holds a class anywhere in it, is walked as main walked it: the table
+        # cannot see what that class body reads (#336).
         found: set[str] = set()
         stack = [node]
         while stack:
@@ -1574,7 +1580,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
                 # beside a top-level `def f`). Without one, walked as main
                 # walked it.
                 body = scope_at.get((sub.name, sub.lineno))
-                found |= loads([sub]) if body is None else body | header_reads(sub)
+                if body is None or any(type(n) is ast.ClassDef for n in ast.walk(sub)):
+                    found |= loads([sub])
+                else:
+                    found |= body | header_reads(sub)
                 continue
             if isinstance(sub, type_alias):
                 found |= reads(sub)

@@ -3810,6 +3810,10 @@ BLOCK_NOT_EDITS = {
         "x = {k}\n\n\ndef f():\n    return x\n\n\nimport sys\n\nif sys:\n    FLAG = 1\n\n"
         "    def f():\n        return 0\n\n\ndef task(a):\n    return a * FLAG\n"
     ),
+    "a decorated function's parameter": (
+        "import sys\n\nx = {k}\n\n\ndef deco(f):\n    return f\n\n\nif sys:\n\n"
+        "    @deco\n    @deco\n    def task(x):\n        return x\n"
+    ),
     "an inner function's parameter": (
         "import sys\n\nx = {k}\n\nif sys:\n\n    def task(a):\n"
         "        def inner(x):\n            return x\n\n        return inner(a)\n"
@@ -3883,6 +3887,25 @@ BLOCK_EDITS = {
         "SCALE = {k}\nscale = lambda a: a * SCALE\n\n\ndef task(a):\n"
         "    return scale(a)\n"
     ),
+    # A class body reads a name it binds from the module (LOAD_NAME), which
+    # the symbol table calls the class's: such a function is walked whole.
+    "a class body's read in a block function": (
+        "import sys\n\nlr = {k}\n\nif sys:\n\n    def task(a):\n        class C:\n"
+        "            lr = lr\n\n        return C.lr\n"
+    ),
+    "a class body's loop over the name it binds, in a block function": (
+        "import sys\n\nlr = [{k}]\n\nif sys:\n\n    def task(a):\n        class C:\n"
+        "            for lr in lr:\n                pass\n\n        return C.lr\n"
+    ),
+    "a class body's read before it binds the name, in a block function": (
+        "import sys\n\nlr = {k}\n\nif sys:\n\n    def task(a):\n        class C:\n"
+        "            y = lr\n            lr = 3\n\n        return C.y\n"
+    ),
+    "a class body's read in a block function's inner function": (
+        "import sys\n\nlr = {k}\n\nif sys:\n\n    def task(a):\n"
+        "        def make():\n            class C:\n                lr = lr\n\n"
+        "            return C\n\n        return make().lr\n"
+    ),
     "a statement beside the function in the block": (
         "import sys\n\nSCALE = {k}\n\nif sys:\n    FACTOR = SCALE\n\n"
         "    def task(a):\n        return a * FACTOR\n"
@@ -3898,6 +3921,10 @@ BLOCK_EDITS_312 = {
         "import sys\n\nT = {k}\n\nif sys:\n\n    def task[U](x: U, d=T) -> U:\n"
         "        return x\n"
     ),
+    "a class body's read in a generic block function": (
+        "import sys\n\nlr = {k}\n\nif sys:\n\n    def task[T](a: T) -> T:\n"
+        "        class C:\n            lr = lr\n\n        return C.lr\n"
+    ),
     "a generic function's body reading the module's name": (
         "import sys\n\nK = {k}\n\nif sys:\n\n    def task[T](x: T) -> T:\n"
         "        return x * K\n"
@@ -3905,18 +3932,17 @@ BLOCK_EDITS_312 = {
 }
 
 
-def _block_cases(cases, version=(3, 11)):
-    return [
-        pytest.param(
-            name,
-            cases,
-            id=name,
-            marks=pytest.mark.skipif(
+def _block_cases(cases, version=None):
+    marks = (
+        []
+        if version is None
+        else [
+            pytest.mark.skipif(
                 sys.version_info < version, reason="syntax of a later Python"
-            ),
-        )
-        for name in sorted(cases)
-    ]
+            )
+        ]
+    )
+    return [pytest.param(name, cases, id=name, marks=marks) for name in sorted(cases)]
 
 
 @pytest.mark.parametrize(
@@ -3929,6 +3955,10 @@ def test_a_block_functions_own_names_are_not_module_reads(
 ):
     text = cases[case]
     if future:
+        if "generic function" in case and sys.version_info < (3, 12, 5):
+            # As `_OWN_RESOLVES`: before 3.12.5 a hint reader resolves a
+            # generic function's text annotation against the module's `T`.
+            pytest.skip("the module's T is what 3.12.0-3.12.4 resolve")
         text = "from __future__ import annotations\n\n" + text
     one = _digest_of_script(tmp_path, "bn1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "bn2", text.format(k=2), {"task"})
