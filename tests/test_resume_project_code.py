@@ -4030,6 +4030,7 @@ CLASS_BODY_EDITS = {
     "a handler's name deleted inside it": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        del lr\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
     # A class-bound name reads the module's, not an enclosing function's.
     "a class's read of a name it binds, in a function that binds it too": "lr = {k}\n\n\ndef task(a):\n    lr = 5\n\n    class C:\n        lr = lr\n\n    return C.lr\n",
+    "a nested comprehension's body after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    ys = [[lr for _ in range(1)] for _ in range(2)]\n\n\ndef task(a):\n    return Cfg.ys\n",
 }
 CLASS_BODY_EDITS_312 = {
     "a generic class's body": "lr = {k}\n\n\nclass Cfg[T]:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
