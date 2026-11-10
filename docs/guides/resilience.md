@@ -123,8 +123,11 @@ are compared as a whole file.
 
 In a notebook, what counts is the definitions the task's code reaches by name
 in the kernel when the run starts: each function and class defined in a cell,
-through decorators, a `partial`, a bound method or an instance. Re-run the
-edited cell, then resume, and the cells re-run with a warning naming it
+through decorators, a `partial`, a bound method or an instance. A function or
+class named in an annotation of that code counts as well (a parameter's, a
+return's, a class attribute's or a type parameter's, a string one too), since
+a reader of the hints (`typing.get_type_hints`, pydantic) resolves it. Re-run
+the edited cell, then resume, and the cells re-run with a warning naming it
 (`helper (notebook)`). No value is compared: not a number, a string or a dict
 config. A value is only safe to compare
 when every writer of it is known, and in a notebook a writer can sit anywhere
@@ -154,7 +157,8 @@ and after a restart. A resume on another Python version can also re-run the
 cells of a class stated more than once in its cell. A module loaded other
 than by an `import` statement of such a cell (`importlib.import_module`, a
 plugin loader that fills a registry, an import in a `%%time` cell) may not be
-compared, as in a script; nor may a class be told apart by its statement when
+compared, as in a script, nor may one named only in a string annotation
+(`x: "pkg.sub.Model"`); nor may a class be told apart by its statement when
 one cell holds more than one version of it (two `class` statements of it run,
 or a statement and a class bound from elsewhere). Nor may what an IPython input
 transformer changes in a cell be compared, nor a cell holding a form feed, a

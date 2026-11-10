@@ -1992,6 +1992,7 @@ def _kernel_name(name: str) -> bool:
 
 
 _NOTEBOOK_TRUNCATION_WARNED: list = []
+_NOTEBOOK_ANNOTATION_WARNED: list = []
 _NOTEBOOK_FAILURE_WARNED: list = []
 _CELL_SCAN_WARNED: list = []
 _HISTORY_WARNED: list = []
@@ -2439,6 +2440,98 @@ def _outer_parts(node) -> list:
     parts += [p.annotation for p in params if p is not None and p.annotation]
     returns = [node.returns] if node.returns else []
     return [*node.decorator_list, *parts, *returns, *typed]
+
+
+def _annotation_names(nodes) -> set[str]:
+    """The names the annotations in definitions ``nodes`` (a ``def`` or a
+    ``class`` statement and what it holds) read, as a reader of their hints
+    resolves them (``typing.get_type_hints``, pydantic, hydra-zen's
+    ``builds(..., populate_full_signature=True)``): a parameter's and a
+    return's, of every function in them; a class body's (a field's, a
+    ``dataclass``'s); a type parameter's bound, constraints and default; in a
+    string too (``x: "Helper"``, ``list["Helper"]``), read as Python reads
+    one, at any depth. Not a function body's own annotation of a variable,
+    which Python never evaluates. Names only: what they hold is the
+    caller's to judge."""
+    import ast
+    import warnings
+
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    exprs: list = []
+    # (node, whether it sits in a function's body, where an annotation of a
+    # variable is not evaluated)
+    stack = [(node, False) for node in nodes]
+    while stack:
+        node, local = stack.pop()
+        kind = type(node)
+        for param in getattr(node, "type_params", ()):
+            exprs += [
+                part
+                for part in (
+                    getattr(param, "bound", None),
+                    getattr(param, "default_value", None),
+                )
+                if part is not None
+            ]
+        if kind in defs:
+            args = node.args
+            params = [
+                *args.posonlyargs,
+                *args.args,
+                *args.kwonlyargs,
+                args.vararg,
+                args.kwarg,
+            ]
+            exprs += [p.annotation for p in params if p is not None and p.annotation]
+            if kind is not ast.Lambda and node.returns is not None:
+                exprs.append(node.returns)
+            outer = [*args.defaults, *(d for d in args.kw_defaults if d is not None)]
+            if kind is not ast.Lambda:
+                outer += node.decorator_list
+            stack.extend((part, local) for part in outer)
+            body = [node.body] if kind is ast.Lambda else node.body
+            stack.extend((part, True) for part in body)
+            continue
+        if kind is ast.ClassDef:
+            outer = [*node.decorator_list, *node.bases]
+            outer += [k.value for k in node.keywords]
+            stack.extend((part, local) for part in outer)
+            stack.extend((part, False) for part in node.body)
+            continue
+        if kind is ast.AnnAssign and not local:
+            exprs.append(node.annotation)
+        stack.extend((child, local) for child in ast.iter_child_nodes(node))
+    names: set[str] = set()
+    pending = [(expr, 0) for expr in exprs]  # (expression, strings around it)
+    while pending:
+        expr, depth = pending.pop()
+        for node in ast.walk(expr):
+            if type(node) is ast.Name:
+                names.add(node.id)
+            elif type(node) is ast.Constant and type(node.value) is str:
+                if depth >= 8:
+                    continue
+                # As the driver script's record reads a string (see
+                # `_script_digest`), `'*Ts'` as `ForwardRef` does: `(*Ts,)`.
+                source = node.value.strip()
+                if source.startswith("*"):
+                    source = f"({source},)"
+                try:
+                    with warnings.catch_warnings():
+                        # Only its names matter: an escape in a literal inside
+                        # it (`'\d'`) would warn, from no file.
+                        warnings.simplefilter("ignore")
+                        tree = ast.parse(source, mode="eval")
+                except (
+                    SyntaxError,
+                    ValueError,
+                    RecursionError,
+                    MemoryError,  # the parser past its depth guard
+                    OverflowError,
+                ):
+                    continue  # not Python: it names nothing
+                pending.append((tree.body, depth + 1))
+    return names
 
 
 class _Scope:
@@ -3831,21 +3924,31 @@ def _parameter_defaults(fn) -> dict:
 
 
 def _notebook_entries(
-    namespace: dict, roots, cell_bindings: dict, class_texts, compiled=None
-) -> tuple[dict[str, str], list[str], list[str]]:
+    namespace: dict,
+    roots,
+    cell_bindings: dict,
+    class_texts,
+    compiled=None,
+    annotations: bool = True,
+) -> tuple[dict[str, str], list[str], list[str]] | None:
     """``(entries, modules, added)``: the entries of a notebook's code the
     roots reach; the modules their definitions name (see ``_unit_reading``),
     through the closure or the namespace, as main read them; and what only
     the later readings add (a parameter's default value, a rebinding
     elsewhere in the cell, and on 3.15 the other reading of a lazy proxy of a
     kept cell's import, ``cell_bindings`` from ``_lazy_bindings``; a class
-    with no method of its own, ``class_texts``: see ``_class_sites``). A
+    with no method of its own, ``class_texts``: see ``_class_sites``; what
+    the definitions only annotations name reach). A
     cell's text is read as ``compile`` saw it (``compiled``, from
     ``_compiled_texts``: see ``_cell_texts``). Both are
     to follow as files; ``_notebook_record`` drops the foreign ones. Entries
     are ``{"<name> (notebook)": digest}`` for each name their code looks up
     (and each root by its name) that stands for a function or class defined
-    in a cell. A
+    in a cell, and with ``annotations``, each name an annotation of their
+    definitions reads (``_annotation_names``), since a reader of the hints
+    resolves it: followed after the code's names, as one more source of
+    names, so it adds entries and never changes one the code's names give.
+    None past the object bound (``_notebook_record`` warns). A
     function is its definition's syntax tree; a class its ``class``
     statement; an instance, a bound method's instance, its class. A digest
     covers what its object reaches through edges the run cannot move: a
@@ -3877,6 +3980,12 @@ def _notebook_entries(
     units: dict[int, list] = {}
     base_modules: set[str] = set()
     codes: list = []
+    # What only the annotations reach (``annotating`` while they are
+    # followed): main's record had none of it, so whatever it names is
+    # followed after main's seeds, as a ``later`` class's is.
+    annotating = [False]
+    extension: set[int] = set()
+    extension_bases: set[str] = set()
 
     def visit(obj) -> int | None:
         """Take a function or class into ``units``; None past the bound."""
@@ -3886,6 +3995,8 @@ def _notebook_entries(
             over[0] = True
             return None
         unit = units[id(obj)] = [None, obj, [], []]
+        if annotating[0]:
+            extension.add(id(obj))
         if type(obj) is types.FunctionType:
             unit[0] = "function"
             codes.append(obj.__code__)
@@ -3906,7 +4017,8 @@ def _notebook_entries(
                     except TypeError:
                         module = None
                     if isinstance(module, str):
-                        base_modules.add(module)
+                        into = extension_bases if annotating[0] else base_modules
+                        into.add(module)
         for target in targets:
             uid = visit(target) if target is not None else None
             if uid is not None:
@@ -3923,29 +4035,29 @@ def _notebook_entries(
     # Follow the names the reached code looks up, breadth first.
     followed: set[str] = set()
     named: dict[str, object] = {}
-    done = 0
-    while done < len(codes):
-        code = codes[done]
-        done += 1
-        for name in sorted(_code_names(code)[0]):
-            if name in followed or name not in namespace:
-                continue
-            followed.add(name)
-            if _kernel_name(name) or name in rebound:
-                continue
-            found = resolve(namespace[name])
-            if found is not None:
-                named[name] = found
-                visit(found)
+    done = [0]
+
+    def follow_name(name: str) -> None:
+        if name in followed or name not in namespace:
+            return
+        followed.add(name)
+        if _kernel_name(name) or name in rebound:
+            return
+        found = resolve(namespace[name])
+        if found is not None:
+            named[name] = found
+            visit(found)
+
+    def follow_codes() -> None:
+        while done[0] < len(codes):
+            code = codes[done[0]]
+            done[0] += 1
+            for name in sorted(_code_names(code)[0]):
+                follow_name(name)
+
+    follow_codes()
     if over[0]:
-        if not _NOTEBOOK_TRUNCATION_WARNED:
-            _NOTEBOOK_TRUNCATION_WARNED.append(True)
-            _best_effort_warning(
-                "resume/cache_dir: the notebook code this task reaches is larger "
-                "than the record covers, so it is not compared; use a fresh "
-                "working_dir after editing it."
-            )
-        return {}, [], []
+        return None
 
     def sites_of(uid: int) -> tuple[list, bool, bool]:
         """``([(tree, nodes)], ambiguous, later)``: a unit's cell trees and its
@@ -3974,6 +4086,34 @@ def _notebook_entries(
             return sites, len(dumps) != 1, False
         return _class_sites(obj, methods, namespace, class_texts, compiled)
 
+    unit_sites: dict[int, tuple[list, bool, bool]] = {}
+
+    def cached_sites(uid: int) -> tuple[list, bool, bool]:
+        if uid not in unit_sites:
+            unit_sites[uid] = sites_of(uid)
+        return unit_sites[uid]
+
+    # Then the names the reached definitions' annotations read, and what the
+    # definitions they name reach, by their code and by their annotations in
+    # turn. After the code's names, so what those reach is main's walk.
+    if annotations:
+        annotating[0] = True
+        read: set[int] = set()
+        while True:
+            fresh = [uid for uid in units if uid not in read]
+            if not fresh:
+                break
+            for uid in fresh:
+                read.add(uid)
+                names: set[str] = set()
+                for _, nodes in cached_sites(uid)[0]:
+                    names |= _annotation_names(nodes)
+                for name in sorted(names):
+                    follow_name(name)
+            follow_codes()
+            if over[0]:
+                return None
+
     def own(kind: str, nodes) -> str:
         """A unit's own definition, without what it reaches."""
         text = "?" if nodes is None else "|".join(_canonical_dump(n) for n in nodes)
@@ -3984,7 +4124,8 @@ def _notebook_entries(
     # on the order the walk took. Without captures the edges form no cycle
     # (methods, bases and __wrapped__ only point down); components keep that
     # true if one ever appears.
-    unit_sites = {uid: sites_of(uid) for uid in units}
+    for uid in units:
+        cached_sites(uid)
     owns = {
         uid: (
             _ambiguous_own(units[uid][1], units[uid][0])
@@ -4023,10 +4164,12 @@ def _notebook_entries(
     # a lazy proxy's other reading): main's had none of it, so it is followed
     # after every seed main had (``_record``).
     added: set[str] = set()
-    for uid, (sites, _, later) in unit_sites.items():
-        # A class found otherwise than through a method: main read nothing of
-        # it, so what it names is followed after main's seeds.
-        main_modules = set(modules) if later else None
+    added |= extension_bases
+    for uid, (unit_site_list, _, later) in unit_sites.items():
+        # A class found otherwise than through a method, or a definition only
+        # an annotation reaches: main read nothing of it, so what it names is
+        # followed after main's seeds.
+        main_modules = set(modules) if later or uid in extension else None
         # A name a function around the unit binds to something unknown is a
         # free variable of the unit: its closure holds the value.
         kind, obj = units[uid][0], units[uid][1]
@@ -4037,7 +4180,7 @@ def _notebook_entries(
             cells = obj.__closure__ or ()
             free = dict(zip(obj.__code__.co_freevars, cells, strict=False))
             defaults = _parameter_defaults(obj)
-        for site in sites:
+        for site in unit_site_list:
             # Each unit alone (a method in its class's statement and on its
             # own): the union does not depend on the order the walk took.
             unit_modules, global_chains, cell_chains, rebound = _unit_reading(*site)
@@ -4139,6 +4282,26 @@ def _error_kind(error: BaseException) -> str:
         return "an error"
 
 
+def _warn_notebook_truncated() -> None:
+    if not _NOTEBOOK_TRUNCATION_WARNED:
+        _NOTEBOOK_TRUNCATION_WARNED.append(True)
+        _best_effort_warning(
+            "resume/cache_dir: the notebook code this task reaches is larger "
+            "than the record covers, so it is not compared; use a fresh "
+            "working_dir after editing it."
+        )
+
+
+def _warn_annotations_unrecorded() -> None:
+    if not _NOTEBOOK_ANNOTATION_WARNED:
+        _NOTEBOOK_ANNOTATION_WARNED.append(True)
+        _best_effort_warning(
+            "resume/cache_dir: the notebook code that the task's annotations name "
+            "is larger than the record covers, or could not be read, so it is "
+            "not compared; use a fresh working_dir after editing it."
+        )
+
+
 def _warn_notebook_unrecorded(error: BaseException) -> None:
     """Warn, once per run (``driver_script_entries`` clears the flag, so a
     resume warns again), that a notebook's record could not be taken."""
@@ -4227,9 +4390,21 @@ def _notebook_record(notebooks: dict) -> tuple[dict[str, str], list[str], list[s
     for namespace, roots in notebooks.values():
         try:
             lazy = _lazy_bindings(cell_bindings, namespace)
-            entries, names, more = _notebook_entries(
-                namespace, roots, lazy, class_texts, compiled
-            )
+            args = (namespace, roots, lazy, class_texts, compiled)
+            try:
+                found = _notebook_entries(*args)
+            except Exception:  # noqa: BLE001 - taken again without annotations
+                found = None
+            if found is None:
+                # Past the object bound, or failed: what the annotations add
+                # never costs what the code's names reach, so that is taken
+                # alone. When it is past the bound or fails too, that says so.
+                found = _notebook_entries(*args, annotations=False)
+                if found is None:
+                    _warn_notebook_truncated()
+                    continue
+                _warn_annotations_unrecorded()
+            entries, names, more = found
             out.update(entries)
             reached.update(names)
             added.update(more)
@@ -4393,6 +4568,7 @@ def driver_script_entries(roots) -> dict:
     # once-per-place memory does not hide the repeat: it is cleared whenever
     # the warning filters change, which a sweep's run does.)
     _NOTEBOOK_TRUNCATION_WARNED.clear()
+    _NOTEBOOK_ANNOTATION_WARNED.clear()
     _NOTEBOOK_FAILURE_WARNED.clear()
     _CELL_SCAN_WARNED.clear()
     _HISTORY_WARNED.clear()
