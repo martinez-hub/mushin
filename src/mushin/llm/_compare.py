@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import re
@@ -52,8 +51,11 @@ def _snake(name: str) -> str:
 def _accepts_seed(m) -> bool:
     """True if the callable metric takes a `seed` argument (e.g. an llm_judge
     metric), so the per-trial seed can be threaded through to it."""
+    from ..workflows import _task_signature
+
     try:
-        return "seed" in inspect.signature(m).parameters
+        # Without evaluating annotations that cannot be (3.14+, #330).
+        return "seed" in _task_signature(m)[0].parameters
     except (TypeError, ValueError):
         return False
 

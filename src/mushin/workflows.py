@@ -213,7 +213,7 @@ def _required_params(fn) -> set[str]:
     import inspect
 
     try:
-        params = inspect.signature(fn).parameters
+        params = _task_signature(fn)[0].parameters
     except (TypeError, ValueError):
         return set()
     empty = inspect.Parameter.empty
@@ -253,7 +253,7 @@ def _override_name_targets(task_fn) -> set[str] | None:
     import inspect
 
     try:
-        params = inspect.signature(task_fn).parameters
+        params = _task_signature(task_fn)[0].parameters
     except (TypeError, ValueError):
         return None
     names: set[str] = set()
@@ -1285,27 +1285,83 @@ class _TaskRunner:
             raise
 
 
-class _ResumeInjector:
+def _task_signature(fn):
+    """``(signature, as_text)``: ``inspect.signature(fn)``, or on Python 3.14+,
+    when evaluating ``fn``'s annotations raises (a name imported only under
+    ``TYPE_CHECKING``, which PEP 649 lets a definition name, raises
+    ``NameError``; a submodule imported so, ``AttributeError``; a string
+    stand-in in ``X | None``, ``TypeError``; #330), its signature with every
+    annotation kept as its text, which never evaluates them. Text, not
+    ``ForwardRef``: hydra-zen's ``zen`` keeps the parameters, and a
+    ``ForwardRef`` pickles its module's globals, which a parallel run cannot
+    send when they hold a module. When the text cannot be read either, the
+    evaluation's own error is raised (with the text read's as its context);
+    an error that is no annotation's (no signature at all) is raised as it
+    was, since the text read fails the same way."""
+    import inspect
+    import sys
+
+    try:
+        return inspect.signature(fn), False
+    except Exception as error:
+        if sys.version_info < (3, 14):
+            raise
+        import annotationlib
+
+        try:
+            text = annotationlib.Format.STRING
+            return inspect.signature(fn, annotation_format=text), True
+        except Exception:  # noqa: BLE001 - the evaluation's own error is the one to see
+            raise error  # noqa: B904 - its context is the text read's failure
+
+
+class _SignedTask:
+    """A callable for hydra-zen's ``zen`` that reads its task's signature
+    without evaluating its annotations (``_task_signature``): a task whose
+    annotations name what is not defined when the run starts (3.14+, #330).
+    It carries the task's names and docstring for a custom wrapper and for
+    zen's messages, copied one by one: ``functools.update_wrapper`` would copy
+    3.14's ``__annotate__`` too, and set ``__wrapped__``. Picklable: it holds
+    the module-level task and a ``Signature`` whose annotations are text."""
+
+    def __init__(self, task, sig):
+        import types
+
+        self._task = task
+        self._sig = sig
+        # A function's own; another callable's would be its class's (a
+        # partial's module is `functools`), so `__repr__` names it instead.
+        if type(task) is types.FunctionType:
+            for name in ("__name__", "__qualname__", "__module__", "__doc__"):
+                setattr(self, name, getattr(task, name))
+
+    @property
+    def __signature__(self):  # inspect.signature / zen read this
+        return self._sig
+
+    def __repr__(self) -> str:  # zen's messages name the task
+        return repr(self._task)
+
+    def __call__(self, /, *args, **kwargs):  # a task may take a `self`
+        return self._task(*args, **kwargs)
+
+
+class _ResumeInjector(_SignedTask):
     """Picklable replacement for the old `_bind_resume_kwarg` closure. Hides a
     task's `mushin_resume` parameter from hydra-zen's `zen` (via a stripped
     __signature__, so zen never tries to resolve it from config) and injects the
     current cell's ResumeContext from a contextvar at call time. Unlike a closure,
     an instance holding a module-level task + a Signature is stdlib-picklable."""
 
-    def __init__(self, task):
-        import inspect
-
-        self._task = task
-        sig = inspect.signature(task)
-        self._sig = sig.replace(
-            parameters=[p for n, p in sig.parameters.items() if n != "mushin_resume"]
+    def __init__(self, task, sig):
+        super().__init__(task, sig)
+        self._sig = self._sig.replace(
+            parameters=[
+                p for n, p in self._sig.parameters.items() if n != "mushin_resume"
+            ]
         )
 
-    @property
-    def __signature__(self):  # inspect.signature / zen read this
-        return self._sig
-
-    def __call__(self, *args, **kwargs):
+    def __call__(self, /, *args, **kwargs):
         from ._resume import current_resume
 
         return self._task(*args, **kwargs, mushin_resume=current_resume())
@@ -1313,12 +1369,68 @@ class _ResumeInjector:
 
 def _prepare_task(task):
     """If `task` declares a `mushin_resume` parameter, wrap it in a picklable
-    `_ResumeInjector`; otherwise return it unchanged. Returns `(prepared, wants)`."""
-    import inspect
+    `_ResumeInjector`; one whose annotations cannot be evaluated yet in a
+    `_SignedTask` (`_signed`); otherwise return it unchanged. Returns
+    `(prepared, wants)`."""
+    sig, as_text = _task_signature(task)
+    if "mushin_resume" in sig.parameters:
+        return _ResumeInjector(task, sig), True
+    return _signed(task, (sig, as_text)), False
 
-    if "mushin_resume" in inspect.signature(task).parameters:
-        return _ResumeInjector(task), True
-    return task, False
+
+def _check_sent_by_value(fns) -> None:
+    """Raise before launch when a parallel launcher could not send one of
+    ``fns`` (#330). On 3.14+, a function whose annotations do not evaluate
+    (``_task_signature``) is sent by value when the launcher cannot import
+    it by name (a script's or a notebook's), and cloudpickle, which joblib
+    and submitit use, reads its annotations to send it, which raises inside
+    the launch. Whether it is sent by value is cloudpickle's to say, so it is
+    asked: submitit's, or the copy joblib bundles; without either there is
+    nothing to ask."""
+    import sys
+
+    if sys.version_info < (3, 14):
+        return
+    try:
+        import cloudpickle
+    except ImportError:
+        try:
+            from joblib.externals import cloudpickle
+        except ImportError:
+            return
+    for fn in fns:
+        try:
+            as_text = _task_signature(fn)[1]
+        except (TypeError, ValueError):
+            continue
+        if not as_text:
+            continue
+        try:
+            cloudpickle.dumps(fn)
+        except Exception as error:
+            name = getattr(fn, "__qualname__", None) or repr(fn)
+            raise ValueError(
+                f"a parallel launcher cannot send {name!r}: its annotations name "
+                "something that is not defined when it runs (an import made only "
+                "under TYPE_CHECKING), and a function the launcher cannot import "
+                "by name (one defined in a script or a notebook) is sent with its "
+                "annotations evaluated. Define it in an importable module, add "
+                "`from __future__ import annotations` to its file, or run without "
+                "a parallel launcher."
+            ) from error
+
+
+def _signed(fn, read=None):
+    """``fn``, or a `_SignedTask` of it when its annotations cannot be
+    evaluated yet (3.14+, #330), for hydra-zen's ``zen``. ``read`` is
+    ``_task_signature(fn)`` when the caller has it."""
+    if read is None:
+        try:
+            read = _task_signature(fn)
+        except (TypeError, ValueError):  # no signature to read: zen says so
+            return fn
+    sig, as_text = read
+    return _SignedTask(fn, sig) if as_text else fn
 
 
 def _write_env_snapshot(working_dir: Path) -> None:
@@ -1575,9 +1687,14 @@ class BaseWorkflow:
     def validate(self, include_pre_task: bool = True):
         """Validates that the configuration will execute with the user-defined evaluation task"""
         if include_pre_task:
-            zen(self.pre_task).validate(self.eval_task_cfg)
+            zen(_signed(self.pre_task)).validate(self.eval_task_cfg)
 
-        zen(self.task).validate(self.eval_task_cfg)
+        # As run() prepares it: `mushin_resume` is injected, never a field.
+        try:
+            task = _prepare_task(self.task)[0]
+        except (TypeError, ValueError):  # no signature to read: zen says so
+            task = self.task
+        zen(task).validate(self.eval_task_cfg)
 
     def run(
         self,
@@ -1931,6 +2048,18 @@ class BaseWorkflow:
                 "them in the workflow's eval_task_cfg."
             )
 
+        # On 3.14+, a parallel launcher must be able to send what the runner
+        # holds before anything launches (#330).
+        launcher_set = (launcher is not None and launcher != "basic") or any(
+            o.lstrip("+~").startswith("hydra/launcher=")
+            and o.split("=", 1)[1] != "basic"
+            for o in overrides or []
+        )
+        if launcher_set:
+            _check_sent_by_value(
+                (self.task, *getattr(self, "_mushin_code_roots", ()), self.pre_task)
+            )
+
         # The grid axes and cell count drive the dry-run preview, the pre-launch
         # gate, and `sample=`. Derived from the FULLY parsed launch overrides so a
         # sweep axis counts whether it came through a `param=` kwarg OR the raw
@@ -2103,7 +2232,7 @@ class BaseWorkflow:
         _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
         task_call = _TaskRunner(
             task=task_fn_wrapper(_task_fn),
-            pre_task=pre_task_fn_wrapper(self.pre_task),
+            pre_task=pre_task_fn_wrapper(_signed(self.pre_task)),
             swept_names=_runner_swept,
             base_provenance=_base_provenance,
             on_error=on_error,
