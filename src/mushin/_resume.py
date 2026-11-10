@@ -766,10 +766,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     or a ``match``'s, as for a top-level one, #323; the main block's own
     statements are top-level ones; a class in a block, and a function in one
     that holds a class, is walked whole, as main walked it, so their locals
-    may count, as
-    may a lambda's parameters and a comprehension's variables, at the top
-    level as in a block, and, on 3.11 to 3.13, whose symbol table lists them
-    as read, the names in a function's local annotation), a star import (it
+    may count, as may a lambda's parameters and a comprehension's variables,
+    at the top level as in a block, and, on 3.11 to 3.13, whose symbol table
+    lists them as read, the names in a function's local annotation), a star
+    import (it
     may bind any name),
     and a decorated definition whose decorator registers it somewhere counted
     code reads (``@register`` defined in the script, or an alias of it,
@@ -829,9 +829,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
     which it reads from the module until a binding in it runs (``lr = lr``,
     ``lr += [3]``, ``for lr in lr``), counts wherever the class is (#336,
     ``class_body_reads``), as does any read of a name the body can unbind
-    (``del``, an ``except`` handler's name) and a comprehension's read of
-    one; after a binding that runs only in some branches (a ``try`` that
-    binds it in each), it counts too: a recompute too many.
+    (``del``, an ``except`` handler's name, outside the handler that binds
+    it) and a comprehension's read of one; after a binding that runs only in
+    some branches (a ``try`` that binds it in each), it counts too: a
+    recompute too many.
     ``imports`` are those of what counts."""
     import ast
     import copy
@@ -1582,30 +1583,36 @@ def _script_digest(path: Path, roots: frozenset[str]):
         """The module names a class body anywhere in ``node`` may read
         before binding them (#336). A class body evaluates a name it binds
         by LOAD_NAME: its own namespace, then the module's, so until a
-        binding in the body has run it reads the module's (``lr = lr``, ``lr
-        += [3]``, ``for lr in lr``, a read after a binding inside an ``if``).
-        The symbol table calls such a name the class's and a syntax walk sees
-        an augmented target as a store, so neither counts it. A read counts
-        unless a binding that always runs before it covers it: a statement
-        earlier in its block or an enclosing one that assigns, annotates with
-        a value, augments, defines or imports the name, or the target of the
-        loop, ``with`` or ``case`` the read is in. That holds only
-        while nothing can unbind the name again, so a name the class's own
-        scope deletes (``del``, any target form) or names an ``except``
+        binding in the body has run it reads the module's (``lr = lr``,
+        ``lr += [3]``, ``for lr in lr``, a read after a binding inside an
+        ``if``). The symbol table calls such a name the class's and a syntax
+        walk sees an augmented target as a store, so neither counts it.
+
+        A read counts unless a binding that always runs before it covers it:
+        a statement earlier in its block or an enclosing one that assigns,
+        annotates with a value, augments, defines or imports the name, or the
+        target of the loop, ``with`` or ``case`` the read is in. That holds
+        only while nothing can unbind the name again, so a name the class's
+        own scope deletes (``del``, any target form) or names an ``except``
         handler with (Python deletes it when the handler ends) is never
-        covered: wherever the ``del`` sits, on whatever pass of a loop. A
-        handler's own name is covered inside it only when it is the only
-        handler naming it and no ``del`` removes it, so that nothing within
-        can unbind it. Those
-        are the only statements that remove a name from a namespace; one
-        removed at run time (``locals()``, ``vars()``) is past what the
-        record reads, as everywhere. A comprehension never sees the class's
-        names, so a name of the class that one reads past its first iterable
-        (inlined into the class's table on 3.12+) is always counted. A
-        binding in a block covers only that block, so a read after a ``try``
-        that binds the name in each branch counts, as does one after a
-        walrus or a ``type`` statement binds it: a recompute too many. Its
-        other reads are the table's globals already."""
+        covered: wherever the ``del`` sits, on whatever pass of a loop, at
+        the body's end too (a recompute too many). A handler's own name is
+        covered inside it when no ``del`` removes it and no handler inside it
+        names it, so that nothing within can unbind it. Those are the only
+        statements that remove a name from a namespace; one removed at run
+        time (``locals()``, ``vars()``) is past what the record reads, as
+        everywhere.
+
+        A comprehension never sees the class's names, so a name of the class
+        that one reads past its first iterable (inlined into the class's
+        table on 3.12+) reads past the class and is always counted (a
+        function's local of that name, when the class is in one, is what it
+        finds: a recompute too many). A binding in a block covers only that
+        block, so a read after a ``try`` that binds the name in each branch
+        counts, as does one after a walrus or a ``type`` statement binds it,
+        a ``match`` guard's read of its own capture and a ``with`` item's
+        read of an earlier item's target: a recompute too many. Its other
+        reads are the table's globals already."""
         found: set[str] = set()
         for cls in ast.walk(node):
             if type(cls) is not ast.ClassDef:
@@ -1616,8 +1623,10 @@ def _script_digest(path: Path, roots: frozenset[str]):
             deleted, handled = unbinds(cls.body)
             unbound = deleted | set(handled)
             # (statements, the names bound before them, the names bound
-            # throughout them: a handler's own name, inside the only handler
-            # naming it, when no `del` removes it, so nothing in it unbinds it)
+            # throughout them: a handler's own name inside it, when no `del`
+            # removes it and no handler inside it names it, so nothing within
+            # unbinds it; a sibling handler cannot run while it does, and a
+            # loop entering it again binds the name again)
             blocks = [(cls.body, frozenset(), frozenset())]
             while blocks:
                 body, outer, kept = blocks.pop()
@@ -1632,7 +1641,9 @@ def _script_digest(path: Path, roots: frozenset[str]):
                         names = {
                             id(h.body): {h.name}
                             for h in stmt.handlers
-                            if h.name and h.name not in deleted and handled[h.name] == 1
+                            if h.name
+                            and h.name not in deleted
+                            and h.name not in unbinds(h.body)[1]
                         }
                     blocks.extend(
                         (
@@ -1708,8 +1719,8 @@ def _script_digest(path: Path, roots: frozenset[str]):
         if kind in (ast.If, ast.While):
             return [(stmt.body, set()), (stmt.orelse, set())]
         if kind in (ast.Try, ast.TryStar):
-            # A handler's name is never covered: Python deletes it when the
-            # handler ends (`unbinds`), so it binds nothing here.
+            # A handler's name is unbound when it ends (`unbinds`); inside it,
+            # `class_body_reads` keeps it bound when nothing within unbinds it.
             handlers = [(h.body, set()) for h in stmt.handlers]
             return [
                 (stmt.body, set()),

@@ -4028,9 +4028,16 @@ CLASS_BODY_EDITS = {
     # A handler's name another handler or a del inside it can unbind.
     "a second handler of the name inside the first": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        try:\n            raise KeyError\n        except KeyError as lr:\n            pass\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
     "a handler's name deleted inside it": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError\n    except ValueError as lr:\n        del lr\n        y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A class-bound name reads the module's, not an enclosing function's.
+    "a class's read of a name it binds, in a function that binds it too": "lr = {k}\n\n\ndef task(a):\n    lr = 5\n\n    class C:\n        lr = lr\n\n    return C.lr\n",
 }
 CLASS_BODY_EDITS_312 = {
     "a generic class's body": "lr = {k}\n\n\nclass Cfg[T]:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
+}
+
+# A generic class's own table is found, not its type-parameter scope's.
+CLASS_BODY_NOT_EDITS_312 = {
+    "a generic class's read of an enclosing function's local": "lr = {k}\n\n\ndef task(a):\n    lr = 2\n\n    class C[T]:\n        y = lr\n\n    return C.y\n",
 }
 CLASS_BODY_NOT_EDITS = {
     "a config class's own constant": "steps = {k}\n\n\nclass Cfg:\n    steps = 100\n    total = steps * 2\n\n\ndef task(a):\n    return Cfg.total\n",
@@ -4059,6 +4066,9 @@ CLASS_BODY_NOT_EDITS = {
     # Inside the only handler naming it, its name stays bound.
     "a handler's read of its name": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
     "a handler's read of its name in a block": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('x')\n    except ValueError as lr:\n        if sys:\n            y = str(lr)\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A decorated class's table is found; a sibling handler cannot unbind.
+    "a decorated class's read of an enclosing function's local": "lr = {k}\n\n\ndef deco(c):\n    return c\n\n\ndef task(a):\n    lr = 2\n\n    @deco\n    class C:\n        y = lr\n\n    return C.y\n",
+    "two handlers of one name, each reading it": "lr = {k}\n\n\nclass Cfg:\n    try:\n        raise ValueError('a')\n    except ValueError as lr:\n        y = str(lr)\n    try:\n        raise KeyError('b')\n    except KeyError as lr:\n        z = str(lr)\n\n\ndef task(a):\n    return Cfg.y + Cfg.z\n",
 }
 
 
@@ -4076,12 +4086,45 @@ def test_a_class_body_read_of_a_name_it_binds_counts(tmp_path, case, cases):
     assert one != two
 
 
-@pytest.mark.parametrize("case", sorted(CLASS_BODY_NOT_EDITS))
-def test_a_class_body_read_of_its_own_binding_is_not_a_module_read(tmp_path, case):
-    text = CLASS_BODY_NOT_EDITS[case]
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [
+        *_block_cases(CLASS_BODY_NOT_EDITS),
+        *_block_cases(CLASS_BODY_NOT_EDITS_312, (3, 12)),
+    ],
+)
+def test_a_class_body_read_of_its_own_binding_is_not_a_module_read(
+    tmp_path, case, cases
+):
+    text = cases[case]
     one = _digest_of_script(tmp_path, "cn1", text.format(k=1), {"task"})
     two = _digest_of_script(tmp_path, "cn2", text.format(k=2), {"task"})
     assert one == two
+
+
+def _task_result(text: str, k: int) -> str:
+    namespace = {"__name__": "__main__"}
+    exec(compile(text.format(k=k), "<case>", "exec"), namespace)
+    return repr(namespace["task"](1))
+
+
+def _premise_cases():
+    for cases, version, reads in (
+        (CLASS_BODY_EDITS, None, True),
+        (CLASS_BODY_EDITS_312, (3, 12), True),
+        (CLASS_BODY_NOT_EDITS, None, False),
+        (CLASS_BODY_NOT_EDITS_312, (3, 12), False),
+    ):
+        for param in _block_cases(cases, version):
+            yield pytest.param(*param.values, reads, id=param.id, marks=param.marks)
+
+
+@pytest.mark.parametrize(("case", "cases", "reads_the_module"), list(_premise_cases()))
+def test_each_class_body_case_reads_as_the_record_counts(case, cases, reads_the_module):
+    """The cases' premise, run: an EDIT's task returns another value when the
+    module's name changes, a NOT_EDIT's does not."""
+    changed = _task_result(cases[case], 1) != _task_result(cases[case], 2)
+    assert changed is reads_the_module
 
 
 def test_a_task_class_body_read_of_a_name_it_binds_counts(tmp_path):
