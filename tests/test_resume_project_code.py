@@ -3804,6 +3804,12 @@ BLOCK_NOT_EDITS = {
         "import sys\n\nlr = {k}\n\nif sys:\n\n    def helper(lr):\n        return lr\n\n\n"
         "def task(a):\n    return helper(a)\n"
     ),
+    # The block's `f` is its own scope, not the top-level `f`'s, which reads
+    # `x`: counting the block (for FLAG) does not count what the other reads.
+    "another scope of the function's name": (
+        "x = {k}\n\n\ndef f():\n    return x\n\n\nimport sys\n\nif sys:\n    FLAG = 1\n\n"
+        "    def f():\n        return 0\n\n\ndef task(a):\n    return a * FLAG\n"
+    ),
     "an inner function's parameter": (
         "import sys\n\nx = {k}\n\nif sys:\n\n    def task(a):\n"
         "        def inner(x):\n            return x\n\n        return inner(a)\n"
