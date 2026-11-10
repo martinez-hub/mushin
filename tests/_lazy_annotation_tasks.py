@@ -9,16 +9,17 @@ evaluates its annotations, so only the 3.14+ tests import this module. The
 tasks are module-level so a parallel launcher's workers can unpickle them.
 """
 
-import wsgiref
 from typing import TYPE_CHECKING
 
+import _lazy_pkg
 import mushin
 from mushin.workflows import MultiRunMetricsWorkflow
 
 if TYPE_CHECKING:
-    import wsgiref.simple_server
     from decimal import Decimal
     from fractions import Fraction
+
+    import _lazy_pkg.sub
 else:
     # A stand-in some code keeps for its type-checking-only names: evaluating
     # `Fraction | None` then raises TypeError, not NameError.
@@ -44,7 +45,7 @@ class LazyWF(MultiRunMetricsWorkflow):
 
 
 # A submodule imported only for type checking: evaluating raises AttributeError.
-def dotted(a: int, s: wsgiref.simple_server.WSGIServer = None) -> dict:
+def dotted(a: int, s: _lazy_pkg.sub.T = None) -> dict:
     return {"v": float(a)}
 
 

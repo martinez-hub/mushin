@@ -12,7 +12,7 @@ import pickle
 import sys
 
 import pytest
-from hydra_zen import zen
+from hydra_zen import make_config, zen
 from hydra_zen.errors import HydraZenValidationError
 
 import mushin
@@ -43,6 +43,24 @@ def _resumable_plain(a: int, mushin_resume) -> dict:
 
 class _ResumableWF(MultiRunMetricsWorkflow):
     task = staticmethod(_resumable_plain)
+
+
+class _NoSignature:
+    __signature__ = 5  # inspect.signature raises TypeError
+
+    def __call__(self, a):
+        return {"v": float(a)}
+
+
+class _NoSignatureWF(MultiRunMetricsWorkflow):
+    task = staticmethod(_NoSignature())
+
+
+def test_validate_leaves_a_task_without_a_signature_to_zen():
+    """zen says what is wrong with a task it cannot inspect, as before."""
+    wf = _NoSignatureWF(eval_task_cfg=make_config(a=1))
+    with pytest.raises(HydraZenValidationError, match="inspectable signatures"):
+        wf.validate(include_pre_task=False)
 
 
 def test_validate_hides_mushin_resume_as_run_does(tmp_path):
@@ -186,6 +204,20 @@ def test_the_signed_task_carries_the_tasks_names():
     assert prepared.__qualname__ == tasks.task.__qualname__
     assert prepared.__module__ == tasks.task.__module__
     assert not hasattr(prepared, "__wrapped__")
+    assert repr(prepared) == repr(tasks.task)  # zen's messages name the task
+
+
+@lazy
+def test_a_signed_partial_does_not_take_partials_names():
+    import functools
+
+    import _lazy_annotation_tasks as tasks
+
+    task = functools.partial(tasks.task, h=None)
+    prepared = _prepare_task(task)[0]
+    assert prepared.__doc__ != functools.partial.__doc__
+    assert prepared.__module__ != "functools"
+    assert repr(prepared) == repr(task)
 
 
 @lazy
@@ -219,3 +251,55 @@ def test_an_annotation_the_text_read_cannot_read_raises_its_own_error():
     odd.__annotate__ = annotate
     with pytest.raises(NameError, match="undefined_name"):
         _task_signature(odd)
+
+
+_SCRIPT = """\
+import sys
+from typing import TYPE_CHECKING
+
+import mushin
+from mushin import multirun
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+
+@mushin.sweep
+def task(a: int, h: Decimal = None) -> dict:
+    return {"v": float(a)}
+
+
+if __name__ == "__main__":
+    try:
+        task.run(
+            a=multirun([1, 2]),
+            working_dir=sys.argv[1],
+            launcher="joblib",
+            launcher_config={"n_jobs": 2},
+        )
+    except ValueError as error:
+        print("VALUE ERROR:", error)
+        raise SystemExit(3) from None
+"""
+
+
+@lazy
+def test_a_script_task_a_parallel_launcher_cannot_send_stops_before_launch(tmp_path):
+    """A parallel launcher sends a script's task by value, which reads its
+    annotations: mushin says so before anything launches, with the fixes."""
+    import subprocess
+
+    pytest.importorskip("hydra_plugins.hydra_joblib_launcher")
+    script = tmp_path / "parallel_script.py"
+    script.write_text(_SCRIPT)
+    wd = tmp_path / "sweep"
+    done = subprocess.run(
+        [sys.executable, str(script), str(wd)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "from __future__ import annotations" in done.stdout
+    assert "task" in done.stdout
+    assert not wd.exists()
