@@ -3985,6 +3985,85 @@ def test_what_a_block_function_reads_counts(tmp_path, case, cases, future):
     assert one != two
 
 
+# --- a class body's read of a name it binds (#336) --------------------------------
+
+# A class body evaluates a name it binds with LOAD_NAME: the class's namespace,
+# then the module's. Until a binding in the body has run, it reads the
+# module's value (`lr = lr`, `lr += [3]`). Each EDIT reads the module's value
+# at run time (checked by executing each case on 3.11, 3.13 and 3.15); each
+# NOT_EDIT reads the class's own.
+CLASS_BODY_EDITS = {
+    "a top-level class's body": "lr = {k}\n\n\nclass Cfg:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a class in a top-level function": "lr = {k}\n\n\ndef task(a):\n    class C:\n        lr = lr\n\n    return C.lr\n",
+    "a class in the main block": "lr = {k}\n\n\ndef task(a):\n    return Cfg.lr\n\n\nif __name__ == '__main__':\n\n    class Cfg:\n        lr = lr\n",
+    "an augmented assignment in a block class": "import sys\n\nlr = [{k}]\n\nif sys:\n\n    class Cfg:\n        lr += [3]\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "an augmented assignment in a top-level class": "lr = [{k}]\n\n\nclass Cfg:\n    lr += [3]\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a loop over the name it binds": "lr = [{k}]\n\n\nclass Cfg:\n    for lr in lr:\n        pass\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a read before the binding": "lr = {k}\n\n\nclass Cfg:\n    y = lr\n    lr = 3\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a method's default before the binding": "lr = {k}\n\n\nclass Cfg:\n    def f(self, x=lr):\n        return x\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg().f()\n",
+    "a decorator's argument before the binding": "lr = {k}\n\n\ndef deco(n):\n    def wrap(f):\n        f.n = n\n        return f\n\n    return wrap\n\n\nclass Cfg:\n    @deco(lr)\n    def f(self):\n        return 0\n\n    lr = 1\n\n\ndef task(a):\n    return Cfg.f.n\n",
+    "a comprehension's first iterable before the binding": "lr = [{k}]\n\n\nclass Cfg:\n    ys = [y * 2 for y in lr]\n    lr = 1\n\n\ndef task(a):\n    return Cfg.ys\n",
+    "a read after a binding that may not run": "import sys\n\nlr = {k}\n\n\nclass Cfg:\n    if not sys:\n        lr = 1\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after a del": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n    del lr\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a nested class's body": "lr = {k}\n\n\nclass Outer:\n    class Inner:\n        lr = lr\n\n\ndef task(a):\n    return Outer.Inner.lr\n",
+    "a tuple target after its read": "lr = {k}\n\n\nclass Cfg:\n    lr, b = lr, 1\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a nested class's base before the binding": "Base = [dict, list][{k} - 1]\n\n\nclass Cfg:\n    class Inner(Base):\n        pass\n\n    Base = 1\n\n\ndef task(a):\n    return Cfg.Inner.__bases__[0].__name__\n",
+    "a class in a method": "lr = {k}\n\n\nclass Model:\n    def make(self):\n        class C:\n            lr = lr\n\n        return C.lr\n\n\ndef task(a):\n    return Model().make()\n",
+}
+CLASS_BODY_EDITS_312 = {
+    "a generic class's body": "lr = {k}\n\n\nclass Cfg[T]:\n    lr = lr\n\n\ndef task(a):\n    return Cfg.lr\n",
+}
+CLASS_BODY_NOT_EDITS = {
+    "a config class's own constant": "steps = {k}\n\n\nclass Cfg:\n    steps = 100\n    total = steps * 2\n\n\ndef task(a):\n    return Cfg.total\n",
+    "a read after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 0.1\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after an annotated binding": "lr = {k}\n\n\nclass Cfg:\n    lr: float = 0.1\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after a def": "lr = {k}\n\n\nclass Cfg:\n    def lr(self):\n        return 1\n\n    y = lr\n\n\ndef task(a):\n    return Cfg.y.__qualname__\n",
+    "a read after an import": "lr = {k}\n\n\nclass Cfg:\n    import math as lr\n\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    "a read after a binding in the same block": "import sys\n\nsteps = {k}\n\n\nclass Cfg:\n    if sys:\n        steps = 10\n        total = steps * 2\n\n\ndef task(a):\n    return Cfg.total\n",
+    "an augmented assignment after a binding": "lr = [{k}]\n\n\nclass Cfg:\n    lr = [1]\n    lr += [3]\n\n\ndef task(a):\n    return Cfg.lr\n",
+    "a read after a nested class": "lr = {k}\n\n\nclass Cfg:\n    class lr:\n        pass\n\n    y = lr\n\n\ndef task(a):\n    return Cfg.y\n",
+    # A free name: the enclosing function's (LOAD_CLASSDEREF), not the
+    # module's; only the class table tells it from one the body binds.
+    "a read of an enclosing function's local": (
+        "lr = {k}\n\n\ndef task(a):\n    lr = 2\n\n    class C:\n        y = lr\n\n"
+        "    return C.y\n"
+    ),
+    "a method default after the binding": "lr = {k}\n\n\nclass Cfg:\n    lr = 1\n\n    def f(self, x=lr):\n        return x\n\n\ndef task(a):\n    return Cfg().f()\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("case", "cases"),
+    [
+        *_block_cases(CLASS_BODY_EDITS),
+        *_block_cases(CLASS_BODY_EDITS_312, (3, 12)),
+    ],
+)
+def test_a_class_body_read_of_a_name_it_binds_counts(tmp_path, case, cases):
+    text = cases[case]
+    one = _digest_of_script(tmp_path, "cb1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "cb2", text.format(k=2), {"task"})
+    assert one != two
+
+
+@pytest.mark.parametrize("case", sorted(CLASS_BODY_NOT_EDITS))
+def test_a_class_body_read_of_its_own_binding_is_not_a_module_read(tmp_path, case):
+    text = CLASS_BODY_NOT_EDITS[case]
+    one = _digest_of_script(tmp_path, "cn1", text.format(k=1), {"task"})
+    two = _digest_of_script(tmp_path, "cn2", text.format(k=2), {"task"})
+    assert one == two
+
+
+def test_a_task_class_body_read_of_a_name_it_binds_counts(tmp_path):
+    text = (
+        "lr = {k}\n\n\nclass Task:\n    lr = lr\n\n"
+        "    def __call__(self, a):\n        return a * self.lr\n"
+    )
+    one = _digest_of_script(tmp_path, "ct1", text.format(k=1), {"Task"})
+    two = _digest_of_script(tmp_path, "ct2", text.format(k=2), {"Task"})
+    assert one != two
+
+
 def test_each_run_of_an_augmented_assignment_counts(tmp_path):
     """`SCALE += 1` twice and three times are different values: a chain of
     identical statements is not one statement."""
