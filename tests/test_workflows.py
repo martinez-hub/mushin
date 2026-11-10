@@ -2524,3 +2524,22 @@ def test_target_job_dirs_tells_a_file_from_a_missing_dir(tmp_path):
         W().run(target_job_dirs=[a_file], working_dir=str(tmp_path / "s"))
     with pytest.raises(FileNotFoundError, match="does not exist"):
         W().run(target_job_dirs=[tmp_path / "gone"], working_dir=str(tmp_path / "s"))
+
+
+def test_a_target_job_dir_hydra_cannot_write_is_refused_before_launch(tmp_path):
+    """The job directories are swept as strings, so one Hydra cannot write
+    unquoted (a `#`, a non-ASCII name) failed inside the launch, after the
+    sweep directory was made; it is refused before (#319)."""
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(job_dir):
+            return dict(m=1.0)
+
+    plain, odd = tmp_path / "plain", tmp_path / "a#b"
+    plain.mkdir()
+    odd.mkdir()
+    with pytest.raises(ValueError, match=r"`job_dir`: .*a#b' would not parse"):
+        W().run(target_job_dirs=[plain, odd], working_dir=str(tmp_path / "s"))
+    assert not (tmp_path / "s").exists()

@@ -193,6 +193,67 @@ def _dict_key(key: Any) -> str:
     return text
 
 
+@functools.lru_cache(maxsize=4096)
+def _swept_string_read(written: str) -> str | None:
+    """How a ``choice(...)`` element written as the quoted string ``written``
+    reaches its job, when not as the string a fixed value gives (#319); None
+    when it does.
+
+    Hydra's ``choice()`` drops a top-level element's quotes, and the sweeper
+    writes each job's value as that bare text, which the job parses again:
+    ``'true'`` arrives as ``True``, ``'1'`` as ``1``, ``"''"`` as ``''``, and
+    ``"it's"`` or a non-ASCII string does not parse. This asks Hydra's own
+    sweeper and parser rather than a copy of the grammar: the job's text is
+    what ``sweep_string_iterator`` gives the basic sweeper. It compares with
+    the element's text, the string a fixed value gives, not with the Python
+    one: a ``${`` string keeps main's escapes in both."""
+    from hydra.errors import OverrideParseException
+
+    parser = _override_parser()
+    sweep = parser.parse_overrides([f"x=choice({written})"])[0]
+    (text,) = sweep.value().list
+    (job,) = sweep.sweep_string_iterator()
+    try:
+        read = parser.parse_overrides([f"x={job}"])[0].value()
+    except OverrideParseException:
+        return "would not parse in its job"
+    # A str equals only a str: what reads back as a number, a bool or null
+    # (or as a sweep) differs.
+    return None if read == text else f"would reach the task as {read!r}"
+
+
+def _swept_strings_refusal(
+    misread: list[tuple[str, str, list[str], list[tuple[Any, str]]]],
+) -> str:
+    """The refusal for swept strings Hydra would not hand the task as
+    written: each axis with its first such values, and the raw comma sweep
+    that keeps their quotes (#319). ``misread`` holds, per axis, its name, its
+    override key, every value as written, and each misread value with how it
+    would arrive."""
+    shown = 5
+
+    def listed(entries: list[str]) -> str:
+        more = len(entries) - shown
+        return ", ".join(entries[:shown]) + (f", and {more} more" if more > 0 else "")
+
+    axes = " ".join(
+        f"`{name}`: " + listed([f"{item!r} {how}" for item, how in found]) + "."
+        for name, _, _, found in misread
+    )
+    raws = [
+        f"{key}=" + ",".join(written[:shown]) + (",..." if len(written) > shown else "")
+        for _, key, written, _ in misread
+    ]
+    return (
+        f"these swept strings would not reach the task as written. {axes} "
+        "multirun() sweeps through Hydra's choice(), which writes each job's "
+        "value without its quotes. Pass such a value as the type it reads as, "
+        "pass a single string as a fixed value, or sweep the strings through "
+        "a raw override, whose values keep their quotes, in place of the "
+        f"multirun argument: overrides={raws!r}."
+    )
+
+
 def _hydra_quoted(text: str) -> str:
     """``text`` as Hydra's own writer quotes a string for an override: it
     escapes a quote and the backslashes before one, which is all Hydra's
@@ -1967,6 +2028,9 @@ class BaseWorkflow:
             cache_dir = str(Path(cache_dir).expanduser().resolve())
 
         launch_overrides = []
+        # Each multirun axis: its name, its override key, its values and how
+        # each is written, for the check on swept strings below (#319).
+        swept: list[tuple[str, str, list[Any], list[str]]] = []
 
         if overrides is not None:
             launch_overrides.extend(overrides)
@@ -2103,8 +2167,9 @@ class BaseWorkflow:
                 # – and each element is serialized/quoted so that values
                 # containing commas, spaces, or '=' are not silently re-split by
                 # Hydra's override parser.
-                choices = ",".join(_to_override_element(item) for item in v)
-                launch_overrides.append(f"{prefix}{k}=choice({choices})")
+                written = [_to_override_element(item) for item in v]
+                launch_overrides.append(f"{prefix}{k}=choice({','.join(written)})")
+                swept.append((k, f"{prefix}{k}", list(v), written))
             elif isinstance(v, hydra_list):
                 # A single non-swept list value passed to one job, each element
                 # written as a sweep element is (#321): its own str is Python's
@@ -2206,6 +2271,27 @@ class BaseWorkflow:
                     "distinct values, or add a separate axis (e.g. seed) for "
                     "repeat trials."
                 )
+
+        # A string swept through `choice(...)` reaches its job without its
+        # quotes: one that reads as another value ('true', '1', 'null')
+        # reached the task as that value, and one Hydra cannot write unquoted
+        # ("it's", a non-ASCII name) failed inside the launch (#319). Both are
+        # refused here, after the duplicate checks (whose message names a
+        # value two cells share) and before the dry-run preview or any write.
+        # Only a value written quoted can be misread, so an axis of numbers
+        # parses nothing. A raw `overrides=[...]` sweep is the user's own
+        # Hydra syntax and is left to Hydra.
+        misread = []
+        for name, key, items, written in swept:
+            found = [
+                (item, how)
+                for item, text in zip(items, written, strict=True)
+                if text.startswith("'") and (how := _swept_string_read(text))
+            ]
+            if found:
+                misread.append((name, key, written, found))
+        if misread:
+            raise ValueError(_swept_strings_refusal(misread))
 
         # `sample=` bounds what actually COMPUTES; the dry-run preview reports
         # that. The gate below still fires on the full grid: Hydra enumerates

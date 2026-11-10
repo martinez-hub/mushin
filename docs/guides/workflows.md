@@ -140,12 +140,16 @@ list of values, and every combination is one cell.
   option *name*.
 - **`range(1,5)`-style overrides** (e.g. in a sweep dir you re-load) expand to
   their discrete values.
-- **A swept string that reads as another type**, such as `"true"`, `"null"` or
-  `"1"` in `multirun(["true", "false"])`, can reach the task as that type
-  (`True`, `None`, `1`), and its cell can be NaN in the dataset: Hydra writes
-  each job's value without its quotes. Sweep the values as the type they read
-  as (`multirun([True, False])`), or pass a single one as a fixed value
-  (`flag="true"`), which keeps its quotes.
+- **A swept string Hydra would not hand the task as written** is refused
+  before launch. `multirun` sweeps through Hydra's `choice()`, which writes
+  each job's value without its quotes, so `"true"`, `"null"` or `"1"` would
+  reach the task as `True`, `None` or `1`, and a string such as `"it's"` or a
+  non-ASCII one would not parse in its job. Sweep the values as the type they
+  read as (`multirun([True, False])`), pass a single one as a fixed value
+  (`flag="true"`), or sweep the strings through a raw override, whose values
+  keep their quotes, in place of `flag=multirun(...)`: the error names it,
+  such as `overrides=["+flag='true','false'"]`. Each job's override then
+  holds the quotes too, its `override_dirname` among them.
 - **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather

@@ -9,9 +9,12 @@ must be flattened.
 """
 
 import re
+from pathlib import Path
 
+import hypothesis.strategies as st
 import numpy as np
 import pytest
+from hypothesis import HealthCheck, example, given, settings
 
 from mushin import multirun
 from mushin.workflows import MultiRunMetricsWorkflow
@@ -232,6 +235,136 @@ def test_interpolations_with_backslashes_resolve_as_written(tmp_path, monkeypatc
     assert [str(r) for r in ds["a_repr"].values] == ["'x'", "'y'"]
     assert {str(r) for r in ds["b_repr"].values} == {repr("\\\\fileserver\\datasets")}
     assert not [p for p in tmp_path.rglob("*") if "${" in p.name]
+
+
+@pytest.mark.parametrize(
+    "values, shown",
+    [
+        (["true", "x"], "'true' would reach the task as True"),
+        (["null"], "'null' would reach the task as None"),
+        (["1", "2"], "'1' would reach the task as 1, '2' would reach the task as 2"),
+        (["1.5"], "'1.5' would reach the task as 1.5"),
+        (["x", "1e3"], "'1e3' would reach the task as 1000.0"),
+        (["''"], "\"''\" would reach the task as ''"),
+        ([np.str_("1")], f"{np.str_('1')!r} would reach the task as 1"),
+        (["it's"], '"it\'s" would not parse in its job'),
+        (["r\u00e9sum\u00e9"], "'r\u00e9sum\u00e9' would not parse in its job"),
+        # An interpolation string is checked too, in the form it is written.
+        (["x", "${now:%Y}'s"], '"${now:%Y}\'s" would not parse in its job'),
+    ],
+)
+def test_a_swept_string_hydra_would_not_keep_is_refused(tmp_path, values, shown):
+    """``multirun`` sweeps through Hydra's ``choice()``, which writes each
+    job's value without its quotes: a string that reads as another value
+    reached the task as that value (its cell NaN, or keyed as the string), and
+    one Hydra cannot write unquoted failed inside the launch. Each is refused
+    before launch, a dry run included, naming it (#319)."""
+    with pytest.raises(ValueError, match=re.escape(f"`a`: {shown}")):
+        _run(tmp_path, _Seen, a=multirun(values))
+    assert not (tmp_path / "s").exists()
+    with pytest.raises(ValueError, match=re.escape(shown)):
+        _Seen().run(a=multirun(values), dry_run=True)
+
+
+def test_the_refusal_names_a_quoted_sweep_that_keeps_the_strings(tmp_path):
+    """The refusal's raw comma sweep keeps each value's quotes, so the strings
+    it names reach the task as written, each in its own cell (#319)."""
+    with pytest.raises(ValueError) as err:
+        _run(tmp_path, _Seen, a=multirun(["true", "it's", 2]))
+    raw = "+a='true','it\\'s',2"
+    assert f"overrides={[raw]!r}" in str(err.value)
+    wf = _run(tmp_path, _Seen, overrides=[raw])
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == [repr("true"), repr("it's"), "2"]
+
+
+def test_the_refusal_names_every_axis_and_shortens_a_long_one(tmp_path):
+    """Every refused axis is named; a long one lists its first values, and
+    its raw sweep is shortened the same way (#319)."""
+    values = [str(i) for i in range(8)]
+    with pytest.raises(ValueError) as err:
+        _run(tmp_path, _Seen, a=multirun(values), b=multirun(["x", "null"]))
+    message = str(err.value)
+    assert "`a`: '0' would reach the task as 0" in message
+    assert "'4' would reach the task as 4, and 3 more." in message
+    assert "`b`: 'null' would reach the task as None." in message
+    raws = ["+a='0','1','2','3','4',...", "+b='x','null'"]
+    assert f"overrides={raws!r}" in message
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["x", "a b", "x,y", "a=b", "None", "007", "1a", "C:\\dir\\"],
+        [1, 2.5, True],
+        [["true"], {"k": "null"}],
+    ],
+)
+def test_a_sweep_hydra_keeps_runs_as_before(tmp_path, values):
+    """What Hydra hands its job as written still runs, each job's override in
+    the form it always had: the check refuses, it never rewrites (#319)."""
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    from mushin.workflows import _to_override_element
+
+    wf = _run(tmp_path, _Seen, a=multirun(values))
+    ds = wf.to_xarray()
+    assert [str(r) for r in ds["a_repr"].values] == [repr(v) for v in values]
+    sweep = OverridesParser.create().parse_overrides(
+        ["+a=choice(" + ",".join(_to_override_element(v) for v in values) + ")"]
+    )[0]
+    jobs = [f"- +a={job}\n" for job in sweep.sweep_string_iterator()]
+    written = [
+        (tmp_path / "s" / str(n) / ".hydra" / "overrides.yaml").read_text()
+        for n in range(len(values))
+    ]
+    assert written == jobs
+
+
+def test_only_values_written_as_strings_are_read_back(tmp_path, monkeypatch):
+    """The check reads back only the values written quoted, once each: an
+    axis of numbers costs it nothing (#319)."""
+    import mushin.workflows as w
+
+    seen = []
+    monkeypatch.setattr(w, "_swept_string_read", lambda text: seen.append(text) or None)
+    _Seen().run(a=multirun(list(range(1000))), b=multirun([True, 1.5]), dry_run=True)
+    assert seen == []
+    _Seen().run(a=multirun(["x", 1, "y"]), dry_run=True)
+    assert seen == ["'x'", "'y'"]
+
+
+@settings(
+    max_examples=25,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    text=st.text(
+        st.characters(exclude_categories=("Cs",), exclude_characters="$"),
+        max_size=6,
+    )
+)
+@example(text="true")
+@example(text="1")
+@example(text="it's")
+@example(text="a b")
+def test_a_swept_string_reaches_the_task_as_a_fixed_one_or_is_refused(tmp_path, text):
+    """Any string swept alone is refused before launch, or reaches the task
+    as the same string passed as a fixed value does (#319)."""
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(dir=tmp_path))
+    try:
+        wf = _Seen()
+        wf.run(a=multirun([text]), working_dir=str(base / "swept"))
+    except ValueError:
+        assert not (base / "swept").exists()
+        return
+    fixed = _Seen()
+    fixed.run(a=multirun(["anchor"]), b=text, working_dir=str(base / "fixed"))
+    swept = wf.to_xarray()["a_repr"].values.tolist()
+    assert swept == fixed.to_xarray()["b_repr"].values.tolist()
 
 
 class _SeenList(MultiRunMetricsWorkflow):
