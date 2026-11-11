@@ -30,6 +30,7 @@ extra. Accessing those features without it raises a clear install hint.
 | `viz` | matplotlib (for plotting results) | `pip install "mushin-py[viz]"` |
 | `netcdf` | netCDF4 (save/load datasets as `.nc` files) | `pip install "mushin-py[netcdf]"` |
 | `mcp` | MCP server (`mushin-mcp`) for Claude Code integration | `pip install "mushin-py[mcp]"` |
+| `slurm` | the Hydra launcher behind `launcher="submitit_slurm"`, which submits each cell to a SLURM cluster (adds hydra-submitit-launcher) | `pip install "mushin-py[slurm]"` |
 | `detection` / `image` / `audio` | extra metric batteries (imply `eval`) | `pip install "mushin-py[detection]"` |
 
 Combine extras with commas, e.g. `pip install "mushin-py[eval,viz]"`.

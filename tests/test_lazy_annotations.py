@@ -303,3 +303,25 @@ def test_a_script_task_a_parallel_launcher_cannot_send_stops_before_launch(tmp_p
     assert "from __future__ import annotations" in done.stdout
     assert "task" in done.stdout
     assert not wd.exists()
+
+
+@lazy
+def test_without_a_top_level_cloudpickle_the_guard_asks_joblibs_copy(monkeypatch):
+    """The dev group installs cloudpickle through submitit (#344); a user with
+    only joblib has just the copy joblib bundles, and the guard must ask it."""
+    pytest.importorskip("joblib.externals.cloudpickle")
+    from mushin.workflows import _check_sent_by_value
+
+    # A script's task: cloudpickle sends a `__main__` function by value.
+    namespace = {"__name__": "__main__"}
+    source = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "def task(a: int, h: Decimal = None):\n"
+        "    return {}\n"
+    )
+    exec(compile(source, "<script>", "exec"), namespace)
+    monkeypatch.setitem(sys.modules, "cloudpickle", None)  # `import` fails
+    with pytest.raises(ValueError, match="cannot send"):
+        _check_sent_by_value([namespace["task"]])

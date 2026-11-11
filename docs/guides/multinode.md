@@ -36,7 +36,7 @@ slurm = submitit_slurm_config(
 ```
 
 Hand the dict straight to `run()` (install the plugin first:
-`pip install hydra-submitit-launcher`): no hand-rolled `hydra.launcher.*`
+`pip install "mushin-py[slurm]"`): no hand-rolled `hydra.launcher.*`
 overrides:
 
 ```python
@@ -116,7 +116,7 @@ Two multi-rank cautions:
 
 To validate a real multi-node run on your cluster:
 
-1. `pip install hydra-submitit-launcher` on the cluster.
+1. `pip install "mushin-py[slurm]"` on the cluster.
 2. Build the launcher config with `submitit_slurm_config(nodes=2, gpus_per_node=<G>, partition=<P>, account=<A>)`.
 3. Configure the Trainer with `devices=<G>`, `num_nodes=2`, `strategy=builds(HydraDDP)`.
 4. Launch your hydra-zen workflow with `hydra/launcher=submitit_slurm` and `--multirun`.

@@ -24,6 +24,33 @@ def test_submitit_slurm_config_passthrough_and_optional():
     assert "partition" not in cfg  # omitted when not given
 
 
+def test_submitit_slurm_config_keys_are_fields_of_the_installed_launcher():
+    """Every key the helper emits, and every pass-through its docstring and the
+    multi-node guide name, must be a field of the installed plugin's SLURM
+    config: Hydra rejects any other key ("Key ... is not in struct") before
+    anything is submitted. hydra-submitit-launcher before 1.2.0 has no
+    `account`, so this pins the `slurm` extra's floor (#344)."""
+    import dataclasses
+
+    config = pytest.importorskip("hydra_plugins.hydra_submitit_launcher.config")
+    from mushin.lightning import submitit_slurm_config
+
+    cfg = submitit_slurm_config(
+        nodes=2,
+        gpus_per_node=4,
+        cpus_per_task=8,
+        partition="gpu",
+        mem_gb=64,
+        account="proj",
+        qos="high",
+        constraint="a100",
+        signal_delay_s=120,
+        additional_parameters={"requeue": True},
+    )
+    fields = {f.name for f in dataclasses.fields(config.SlurmQueueConf)}
+    assert set(cfg) <= fields, sorted(set(cfg) - fields)
+
+
 def test_submitit_slurm_config_rejects_bad_inputs():
     from mushin.lightning import submitit_slurm_config
 

@@ -17,7 +17,7 @@ Requires a real SLURM cluster with >=2 GPU nodes and ``hydra-submitit-launcher``
 Not run in CI. Fill in your ``partition``/``account`` below.
 
 Run it (submits the SLURM job for you):
-  pip install hydra-submitit-launcher
+  pip install "mushin-py[slurm]"
   python examples/multinode_ddp.py
 
 For single-node multi-GPU, set ``nodes=1`` and ``gpus_per_node`` to that node's
