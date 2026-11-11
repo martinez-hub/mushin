@@ -28,9 +28,11 @@ def fail_on_one(seed):
 
 
 @mushin.sweep
-def die_on_one(seed):
-    if seed == 1:
+def die_on_two(seed):
+    if seed == 2:
         # Ends the process with no Python error handling, as an out-of-memory
-        # kill or `scancel` ends a job on a cluster.
+        # kill or `scancel` ends a job on a cluster. The last seed of the tests'
+        # grid, so the driver has every other job's result when it meets this
+        # one, and no job is left running if it aborts there.
         os._exit(9)
     return dict(v=float(seed))

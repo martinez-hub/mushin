@@ -51,27 +51,24 @@ def test_launcher_config_requires_launcher(tmp_path):
         )
 
 
-def test_missing_launcher_plugin_names_the_pip_package(tmp_path):
+@pytest.mark.parametrize("launcher", ["submitit_slurm", "submitit_local"])
+def test_missing_submitit_launcher_names_the_slurm_extra(launcher):
     """The first error every cluster user hits: the launcher plugin isn't
-    installed. The message must say WHICH package to pip install, not just
-    Hydra's raw 'Could not find' listing."""
+    installed. The message must say what to pip install, the `slurm` extra
+    (which holds the plugin's floor), not just Hydra's raw 'Could not find'
+    listing. The dev group installs the plugin (#344), so this hands the hint
+    Hydra's error directly; the rq test below takes the same hint through
+    `run()`."""
     from hydra.errors import MissingConfigException
 
-    # Ray's launcher, not submitit's: the dev group installs
-    # hydra-submitit-launcher (#344), which would make this path unreachable.
-    try:
-        import hydra_plugins.hydra_ray_launcher  # noqa: F401
+    from mushin.workflows import _with_launcher_hint
 
-        pytest.skip("hydra-ray-launcher installed; missing-plugin path unreachable")
-    except ImportError:
-        pass
-
-    with pytest.raises(MissingConfigException, match="pip install hydra-ray-launcher"):
-        _W().run(
-            a=multirun([1]),
-            launcher="ray",
-            working_dir=str(tmp_path / "s"),
-        )
+    error = MissingConfigException(
+        f"Could not find 'hydra/launcher/{launcher}'", f"hydra/launcher/{launcher}"
+    )
+    hinted = _with_launcher_hint(error, launcher)
+    assert isinstance(hinted, MissingConfigException)
+    assert 'pip install "mushin-py[slurm]"' in str(hinted)
 
 
 @pytest.mark.parametrize("values", [[1], ["true", "y"]])

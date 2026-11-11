@@ -700,11 +700,13 @@ def _current_job_fields() -> tuple[int | None, dict | None]:
     return num, hydra_choices(hydra)
 
 
-# Pip package per Hydra launcher name, for the missing-plugin install hint.
+# What to `pip install` per Hydra launcher name, for the missing-plugin install
+# hint. The submitit launchers come with mushin's `slurm` extra, which also
+# holds the plugin's floor (#344); quoted, as a shell needs `[...]` to be.
 _LAUNCHER_PLUGINS: dict[str, str] = {
     "joblib": "hydra-joblib-launcher",
-    "submitit_slurm": "hydra-submitit-launcher",
-    "submitit_local": "hydra-submitit-launcher",
+    "submitit_slurm": '"mushin-py[slurm]"',
+    "submitit_local": '"mushin-py[slurm]"',
     "ray": "hydra-ray-launcher",
     "ray_aws": "hydra-ray-launcher",
     "rq": "hydra-rq-launcher",

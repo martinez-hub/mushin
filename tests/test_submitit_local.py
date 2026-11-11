@@ -61,6 +61,15 @@ def test_each_cell_runs_as_its_own_job(tmp_path):
     assert (wd / "mushin_sweep_manifest.json").is_file()
 
 
+def test_a_cell_that_raises_raises_its_own_error_by_default(tmp_path):
+    # SLURM users see this by default: the task's own exception, not
+    # submitit's wrapper around it.
+    with pytest.raises(RuntimeError, match="boom"):
+        tasks.fail_on_one.run(
+            seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), **LOCAL
+        )
+
+
 def test_a_cell_that_raises_is_nan_under_on_error_nan(tmp_path):
     with pytest.warns(UserWarning, match="failed"):
         ds = tasks.fail_on_one.run(
@@ -103,14 +112,14 @@ def test_sample_computes_only_the_sampled_cells(tmp_path):
     reason="#345: a job that dies outside Python aborts the driver",
 )
 def test_a_job_that_dies_outside_python_is_nan_under_on_error_nan(tmp_path):
-    ds = tasks.die_on_one.run(
+    ds = tasks.die_on_two.run(
         seed=multirun([0, 1, 2]),
         working_dir=str(tmp_path / "s"),
         on_error="nan",
         **LOCAL,
     )
     v = ds["v"].values
-    assert v[0] == 0.0 and np.isnan(v[1]) and v[2] == 2.0
+    assert v[0] == 0.0 and v[1] == 1.0 and np.isnan(v[2])
 
 
 @pytest.mark.xfail(
