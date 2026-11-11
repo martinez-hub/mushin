@@ -35,9 +35,9 @@ def run_parallel(working_dir=None, launcher="joblib"):
     returning the labeled ``xarray.Dataset``.
 
     ``launcher="joblib"`` parallelizes across local cores (needs
-    ``hydra-joblib-launcher``). For a SLURM cluster, install
-    ``hydra-submitit-launcher`` and pass ``launcher="submitit_slurm"`` with the
-    scheduler fields, e.g.::
+    ``hydra-joblib-launcher``). For a SLURM cluster, install the ``slurm``
+    extra (``pip install "mushin-py[slurm]"``) and pass
+    ``launcher="submitit_slurm"`` with the scheduler fields, e.g.::
 
         experiment.run(
             lr=mushin.multirun([...]), seed=mushin.multirun([...]),

@@ -157,7 +157,7 @@ The core install is the sweep → dataset workflow. The **`eval`** extra adds th
 evaluation layer (`compare`, the metric batteries, LLM evaluation, `Study`) and
 its heavier dependencies (torchmetrics, scipy), keeping the core lean; using
 those features without it raises a clear install hint. The other extras are
-`viz`, `netcdf`, `detection`, `image`, `audio`, and `mcp`; the three battery
+`viz`, `netcdf`, `detection`, `image`, `audio`, `mcp`, and `slurm`; the three battery
 extras pull in `eval` for you. Combine them with commas, e.g.
 `"mushin-py[eval,viz]"`, which works verbatim with `pip install`, `uv add`, or
 `uv pip install`.

@@ -28,6 +28,7 @@ package named `mushin` is not this project.
 | `pip install "mushin-py[netcdf]"` | saving datasets as `.nc` files |
 | `pip install "mushin-py[mcp]"` | `mushin-mcp`, a read-only MCP server over finished runs |
 | `pip install "mushin-py[detection]"` (or `image`, `audio`) | more metric batteries |
+| `pip install "mushin-py[slurm]"` | `launcher="submitit_slurm"`, to submit cells to a SLURM cluster (adds hydra-submitit-launcher) |
 | `pip install hydra-joblib-launcher` | `launcher="joblib"`, to run cells in parallel (a Hydra plugin, not an extra) |
 | `pip install hydra-ray-launcher` | the Ray launcher, to pack several jobs onto each GPU (a Hydra plugin, not an extra) |
 

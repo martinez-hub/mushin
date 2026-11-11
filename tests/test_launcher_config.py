@@ -57,19 +57,19 @@ def test_missing_launcher_plugin_names_the_pip_package(tmp_path):
     Hydra's raw 'Could not find' listing."""
     from hydra.errors import MissingConfigException
 
+    # Ray's launcher, not submitit's: the dev group installs
+    # hydra-submitit-launcher (#344), which would make this path unreachable.
     try:
-        import hydra_plugins.hydra_submitit_launcher  # noqa: F401
+        import hydra_plugins.hydra_ray_launcher  # noqa: F401
 
-        pytest.skip(
-            "hydra-submitit-launcher installed; missing-plugin path unreachable"
-        )
+        pytest.skip("hydra-ray-launcher installed; missing-plugin path unreachable")
     except ImportError:
         pass
 
-    with pytest.raises(MissingConfigException, match="hydra-submitit-launcher"):
+    with pytest.raises(MissingConfigException, match="pip install hydra-ray-launcher"):
         _W().run(
             a=multirun([1]),
-            launcher="submitit_slurm",
+            launcher="ray",
             working_dir=str(tmp_path / "s"),
         )
 
