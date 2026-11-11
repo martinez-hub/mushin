@@ -24,7 +24,9 @@ until every job ends, and:
    result: the runner records the job id in the status sidecar, and a dead
    job whose cell says `completed` with its own id is a completed cell.
    Until then the manifest says failed and the sidecar says completed for
-   such a cell; a later `resume=True` reuses it.
+   such a cell; a later `resume=True` reuses it. The same test tells a
+   terminal status an earlier sweep left in a reused dir (the job died before
+   the runner) from this job's own, which PR 1 also leaves alone.
 3. **Skip reusable cells before submission** (resume, `cache_dir`, `sample=`)
    in mushin's launcher, keeping Hydra's job numbers.
 4. **Submit and return** (`wait=False`) with a submission record (cell to job
@@ -66,16 +68,32 @@ until every job ends, and:
   `_mushin_collects_dead_jobs` (mushin's runner) gets this; any other sees the
   plugin's error. The launcher holds no new state: it is pickled into every
   job and into `checkpoint()`.
-- **D5. `jobs_post_process` records each dead cell before its main loop**,
-  whatever `on_error` is (that loop raises at the first failure under
-  `"raise"`). A cell whose status is `running`, or that has none (the job died
-  before the runner, so the dir may not exist), becomes `failed`, loses any
-  metrics file a prior attempt left, and gets a `mushin_error.txt` with
-  submitit's message and its log tail. A terminal status is the runner's own
-  record and is left alone (see split item 2). The manifest and the failures
-  list keep one line: the job id, its state and its log path.
-- **D6. `on_error="raise"` now raises after every job has ended**, as it
-  already did for a task that raised.
+- **D5. The launcher records each dead cell as it collects it**, through the
+  runner's `record_dead_cell`, whatever `on_error` is. A cell whose status is
+  `running`, or that has none (the job died before the runner), becomes
+  `failed` and loses any metrics file a prior attempt left. A cell whose job
+  died before Hydra made its dir also gets the `.hydra/` snapshot `run_job`
+  would have written, so a reload finds it as failed rather than never run.
+  As for a task that raised, `mushin_error.txt` (submitit's message, with its
+  log tail) is written only under `"nan"`; under `"raise"` the raised error
+  carries it. A terminal status is left alone (split item 2). The manifest
+  and the failures list keep one line shaped like a repr: the job id, its
+  state and its log path.
+- **D6. A dead job under `on_error="raise"` is a FAILED return**, as
+  `run_job` returns a task that raised, so the sweeper raises it after that
+  job's batch (with the default sweeper, after every job). Under `"nan"` it
+  is a COMPLETED return carrying `_DeadJob`. Every job of a batch is waited
+  on either way.
+- **D7. An error that cannot become a failed cell** (a job submitit cannot
+  say has ended, a cell the driver cannot compose) is raised once every job
+  of the batch has been waited on. Any other error from `results()` for a job
+  that has ended (an unreadable result) is a dead cell.
+- **D8. Routing covers `launcher=` and a raw `hydra/launcher=` override.** A
+  launcher chosen in a config's defaults list runs the plugin's own launcher:
+  reading the composed `hydra.launcher._target_` would cost a compose on
+  every sweep. The digest pin hashes the code lines of the plugin's
+  `launch()` (comments and blank lines dropped; `ast.dump` differs between
+  Python versions).
 
 ## Needs a cluster
 

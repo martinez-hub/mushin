@@ -86,12 +86,13 @@ filesystem; `load_experiment` reads it back as usual.
 
 When SLURM preempts (or times out) a cell's job, the sweep driver observes a
 failed job: under the default `on_error="raise"` the sweep raises that error
-once every job has ended; under `on_error="nan"` it records the failure and
-finishes the rest. A job that ends without a result (its time limit, an
-out-of-memory kill, a failed node) fails its cell this way, and the cell's
-`mushin_error.txt` names the job's log. (mushin runs `submitit_slurm` through
-its own subclass of the plugin's launcher, which waits on every job, so a
-cell's `.hydra/hydra.yaml` names `mushin_submitit_slurm`.)
+once the jobs launched with it have ended; under `on_error="nan"` it records
+the failure and finishes the rest. A job that ends without a result (its time
+limit, an out-of-memory kill, a failed node) fails its cell this way, and
+under `on_error="nan"` the cell's `mushin_error.txt` names the job's log.
+(mushin runs `launcher="submitit_slurm"` through its own subclass of the
+plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
+names `mushin_submitit_slurm`.)
 Either way, recovery is one command: re-run the same sweep with
 `resume=True` (same `working_dir`): completed cells are reused from their
 sidecars, and only the preempted/missing cells re-run. Inside a long cell, use

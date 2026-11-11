@@ -11,6 +11,7 @@ arrays, signals, preemption or requeue; those stay in the cluster runbook
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
@@ -30,6 +31,7 @@ pytestmark = pytest.mark.skipif(
 import _submitit_tasks as tasks  # noqa: E402
 import mushin  # noqa: E402
 from mushin import multirun  # noqa: E402
+from mushin.workflows import MultiRunMetricsWorkflow  # noqa: E402
 
 TESTS = Path(__file__).resolve().parent
 # A short time limit, so a job orphaned by an aborted test ends soon.
@@ -127,8 +129,9 @@ def test_a_job_that_dies_outside_python_is_nan_under_on_error_nan(tmp_path):
     assert "UncompletedJobError" in error and ".submitit" in error
     manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
     (failed,) = [c for c in manifest["cells"].values() if c["status"] == "failed"]
-    assert "ended without a result" in failed["error"]
-    assert "\n" not in failed["error"]  # the log tail stays in the cell
+    # One line, shaped like a task's repr; the log tail stays in the cell.
+    assert failed["error"].startswith("UncompletedJobError('submitit job ")
+    assert "gave no result" in failed["error"] and "\n" not in failed["error"]
     assert {r["status"] for r in mushin.show(wd).rows} == {"completed", "failed"}
 
 
@@ -151,15 +154,41 @@ def test_a_dead_job_raises_after_the_others_end_by_default(tmp_path):
         tasks.die_on_zero_and_two.run(
             seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL
         )
-    # Each dead cell is recorded before the error propagates.
+    # Each dead cell is recorded before the error propagates; as for a task
+    # that raised, mushin_error.txt is left to on_error="nan".
     assert [_status(wd / n) for n in "012"] == ["failed", "completed", "failed"]
+    assert not list(wd.glob("*/mushin_error.txt"))
+
+
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+def test_a_dead_job_stops_a_batched_sweep_as_a_raising_task_does(tmp_path, on_error):
+    """With one job per batch, "raise" stops after the dead job's batch, as
+    it does after a task that raises; "nan" goes on to every batch."""
+    wd = tmp_path / "s"
+    run = functools.partial(
+        tasks.die_on_zero_and_two.run,
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        on_error=on_error,
+        overrides=["hydra.sweeper.max_batch_size=1"],
+        **LOCAL,
+    )
+    if on_error == "raise":
+        with pytest.raises(submitit.core.utils.UncompletedJobError):
+            run()
+        assert len(_job_dirs(wd)) == 1 and not (wd / "1").exists()
+    else:
+        with pytest.warns(UserWarning, match="2 run"):
+            ds = run()
+        assert len(_job_dirs(wd)) == 3 and ds["v"].values[1] == 1.0
 
 
 def test_a_job_that_fails_before_its_cell_starts_is_a_failed_cell(
     tmp_path, monkeypatch
 ):
     """No job can import the task's module, so none reaches mushin's runner
-    and no cell dir exists: each cell is still recorded as failed."""
+    and no cell dir exists: each cell is still recorded as failed, and the
+    sweep reloads with both cells failed."""
     monkeypatch.setenv("PYTHONPATH", "")
     monkeypatch.chdir(tmp_path)  # `python -m` puts the cwd on a job's path
     wd = tmp_path / "s"
@@ -172,6 +201,48 @@ def test_a_job_that_fails_before_its_cell_starts_is_a_failed_cell(
         error = (wd / cell / "mushin_error.txt").read_text()
         assert "FailedJobError" in error and "_submitit_tasks" in error
     assert {r["status"] for r in mushin.show(wd).rows} == {"failed"}
+    reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+    assert sorted(f["combo"] for f in reloaded.failures) == ["seed=0", "seed=1"]
+
+
+def test_one_cell_dead_before_it_starts_reloads_failed_and_resumes(
+    tmp_path, monkeypatch
+):
+    """Job 1 dies while Hydra computes its dir, in a sweep that otherwise
+    runs. The driver writes the dir Hydra never made, so a reload sees a
+    failed cell (not one never run), and a resume computes only that cell."""
+    wd = str(tmp_path / "s")
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=wd, **LOCAL)
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+    with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
+        first = tasks.die_when_told.run(
+            on_error="nan", overrides=[tasks.DIE_BEFORE_START], **sweep
+        )
+    assert (tmp_path / "s/1/.hydra/hydra.yaml").is_file()
+    reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+    assert [f["combo"] for f in reloaded.failures] == ["seed=1"]
+    assert reloaded.skipped == []
+
+    monkeypatch.delenv("MUSHIN_TEST_DIE_BEFORE_START")
+    again = tasks.die_when_told.run(
+        resume=True, overrides=[tasks.DIE_BEFORE_START], **sweep
+    )
+    assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
+    before, after = first["pid"].values, again["pid"].values
+    assert after[0] == before[0] and after[2] == before[2]  # reused
+
+
+def test_a_cell_dead_while_running_resumes(tmp_path, monkeypatch):
+    wd = str(tmp_path / "s")
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=wd, **LOCAL)
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
+        first = tasks.die_when_told.run(on_error="nan", **sweep)
+    monkeypatch.delenv("MUSHIN_TEST_DIE")
+    again = tasks.die_when_told.run(resume=True, **sweep)
+    assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
+    before, after = first["pid"].values, again["pid"].values
+    assert after[0] == before[0] and after[2] == before[2]  # reused
 
 
 def test_a_plain_hydra_task_on_mushins_launcher_sees_the_plugins_error(tmp_path):

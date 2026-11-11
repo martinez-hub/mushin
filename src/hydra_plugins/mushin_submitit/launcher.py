@@ -116,34 +116,63 @@ if _plugin_launcher is not None:
             return jobs, job_params
 
         def _wait(self, jobs, job_params):
-            """Every job's result, in submission order. A job that ends
-            without one is a failed cell for mushin's runner; for any other
-            task function it raises, as the plugin does."""
+            """Every job's result, in submission order.
+
+            For mushin's runner, a job that ended without a result is a
+            failed cell (`_dead_return`), and the later jobs are still waited
+            on. An error that cannot become one (a job not known to have
+            ended, or a cell that cannot be composed here) is raised once
+            every job has been waited on. Any other task function sees the
+            first error at once, as the plugin raises it."""
             from submitit.core.utils import FailedJobError, UncompletedJobError
 
             collects = getattr(self.task_function, "_mushin_collects_dead_jobs", False)
-            returns = []
+            returns, unrecorded = [], None
             for job, params in zip(jobs, job_params, strict=True):
                 try:
                     returns.append(job.results()[0])
+                    continue
                 except (UncompletedJobError, FailedJobError) as exc:
+                    # submitit raises these once the job has ended.
                     if not collects:
                         raise
-                    overrides, _, idx = params[0], params[1], params[2]
-                    returns.append(self._dead_return(job, overrides, idx, exc))
+                    error, ended = exc, True
+                except Exception as exc:  # noqa: BLE001 - e.g. an unreadable result
+                    if not collects:
+                        raise
+                    error, ended = exc, _ended(job)
+                try:
+                    if not ended:
+                        # Recording a cell whose job may still run would
+                        # overwrite what that job writes.
+                        raise error
+                    returns.append(self._dead_return(job, params[0], params[2], error))
+                except Exception as exc:  # noqa: BLE001 - raised after the loop
+                    unrecorded = unrecorded or exc
+                    returns.append(None)
+            if unrecorded is not None:
+                raise unrecorded
             return returns
 
         def _dead_return(self, job, overrides, idx, exc):
-            """The JobReturn the job would have sent had it run, carrying a
-            `_DeadJob`. COMPLETED, not FAILED: Hydra's sweeper re-raises a
-            FAILED return's exception whatever `on_error` says. Composed as
-            the plugin's `__call__` and Hydra's `run_job` compose a job,
-            here in the driver, with the global HydraConfig restored after."""
+            """The JobReturn the job would have sent, for a job that ended
+            without a result, after mushin's runner records the cell as
+            failed. The job is composed as the plugin's `__call__` and
+            Hydra's `run_job` compose it, here in the driver, with the global
+            HydraConfig restored after.
+
+            Under the runner's `on_error="raise"` the return is FAILED with
+            the job's error, as `run_job` returns a task that raised, so the
+            sweeper raises it after this batch. Under `"nan"` it is
+            COMPLETED with a `_DeadJob`, which mushin takes as a failed cell
+            (a FAILED return is raised whatever `on_error` says)."""
             from hydra.core.hydra_config import HydraConfig
 
             from mushin.workflows import _DeadJob
 
             assert self.hydra_context is not None and self.config is not None
+            runner = self.task_function
+            dead = _DeadJob(exc, _summary(job, exc, self.params))
             outer = HydraConfig.instance().cfg
             try:
                 config = self.hydra_context.config_loader.load_sweep_config(
@@ -173,26 +202,42 @@ if _plugin_launcher is not None:
                 # run_job's rule; mushin sets chdir, so this is the cell dir.
                 chdir = config.hydra.job.chdir
                 ret.working_dir = output_dir if chdir else os.getcwd()
+                # Inside the try: the cell's config-group choices come from
+                # the HydraConfig set above.
+                runner.record_dead_cell(ret, dead)
             finally:
                 HydraConfig.instance().cfg = outer
-            ret.status = JobStatus.COMPLETED
-            ret.return_value = _DeadJob(exc, _summary(job, exc, self.params))
+            if getattr(runner, "on_error", "raise") == "raise":
+                ret.status = JobStatus.FAILED
+                ret.return_value = exc
+            else:
+                ret.status = JobStatus.COMPLETED
+                ret.return_value = dead
             return ret
 
+    def _ended(job) -> bool:
+        """Whether submitit knows the job has ended; False when it cannot
+        tell."""
+        try:
+            return bool(job.done())
+        except Exception:  # noqa: BLE001 - the scheduler may not answer
+            return False
+
     def _summary(job, exc, params) -> str:
-        """One line for the manifest, the failures list and the warning;
-        submitit's own message, with its log tail, goes to the cell's
-        mushin_error.txt."""
+        """One line, shaped like the `repr` of a task's exception, for the
+        manifest, the failures list and the warning; submitit's own message,
+        with its log tail, goes to the cell's mushin_error.txt."""
         try:
             state = job.state
         except Exception:  # noqa: BLE001 - the scheduler may not answer
             state = "unknown"
         paths = job.paths
         log_file = paths.stdout if params.get("stderr_to_stdout") else paths.stderr
-        return (
-            f"{type(exc).__name__}: submitit job {job.job_id} ended without a "
-            f"result (state: {state}); its log: {log_file}"
+        message = (
+            f"submitit job {job.job_id} gave no result (state: {state}); "
+            f"its log: {log_file}"
         )
+        return f"{type(exc).__name__}({message!r})"
 
     class MushinSlurmLauncher(_MushinSubmititMixin, _plugin_launcher.SlurmLauncher):
         pass
