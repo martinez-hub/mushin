@@ -371,6 +371,10 @@ more with `max_num_timeout=1` and a task that checkpoints on `SIGUSR1`.
   which pickles mushin's launcher class) and the cell completes;
 - `t9_runs/1/.hydra/hydra.yaml` names `mushin_submitit_slurm`.
 
+Also preempt (or `scontrol requeue`) a running job on a partition with
+requeue on: note whether `results()` raised before the requeued job ran,
+and what the cell holds once it has.
+
 **Report:** what `sacct` says for seeds 0 and 2 (`TIMEOUT`, `OUT_OF_MEMORY`),
 the first line of each `mushin_error.txt`, and, for the follow-up that keeps a
 result when a job dies after its cell completed, whether the `job_id` in that

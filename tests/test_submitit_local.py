@@ -232,6 +232,25 @@ def test_one_cell_dead_before_it_starts_reloads_failed_and_resumes(
     assert after[0] == before[0] and after[2] == before[2]  # reused
 
 
+def test_a_dead_job_for_a_cell_sample_left_out_is_skipped(tmp_path, monkeypatch):
+    """`sample=` still submits every cell; one it left out is skipped, as the
+    runner skips it, even when its job dies before the runner starts."""
+    wd = tmp_path / "s"
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "0,1,2")
+    with pytest.warns(UserWarning, match="2 run"):
+        tasks.die_when_told.run(
+            seed=multirun([0, 1, 2]),
+            working_dir=str(wd),
+            sample=2,
+            on_error="nan",
+            overrides=[tasks.DIE_BEFORE_START],
+            **LOCAL,
+        )
+    statuses = sorted(_status(wd / n) for n in "012")
+    assert statuses == ["failed", "failed", "skipped"]
+    assert len(list(wd.glob("*/mushin_error.txt"))) == 2
+
+
 def test_a_cell_dead_while_running_resumes(tmp_path, monkeypatch):
     wd = str(tmp_path / "s")
     sweep = dict(seed=multirun([0, 1, 2]), working_dir=wd, **LOCAL)

@@ -25,8 +25,9 @@ until every job ends, and:
    job whose cell says `completed` with its own id is a completed cell.
    Until then the manifest says failed and the sidecar says completed for
    such a cell; a later `resume=True` reuses it. The same test tells a
-   terminal status an earlier sweep left in a reused dir (the job died before
-   the runner) from this job's own, which PR 1 also leaves alone.
+   terminal status an earlier sweep or attempt left (the job died before the
+   runner, so a reused dir keeps its old status and `mushin_error.txt`) from
+   this job's own, which PR 1 also leaves alone.
 3. **Skip reusable cells before submission** (resume, `cache_dir`, `sample=`)
    in mushin's launcher, keeping Hydra's job numbers.
 4. **Submit and return** (`wait=False`) with a submission record (cell to job
@@ -84,6 +85,9 @@ until every job ends, and:
   job's batch (with the default sweeper, after every job). Under `"nan"` it
   is a COMPLETED return carrying `_DeadJob`. Every job of a batch is waited
   on either way.
+- **D6b. A dead job for a cell `sample=` left out is skipped**, as the
+  runner would have skipped it; `record_dead_cell` returns the status and
+  value for every case, so the launcher holds no mushin semantics.
 - **D7. An error that cannot become a failed cell** (a job submitit cannot
   say has ended, a cell the driver cannot compose) is raised once every job
   of the batch has been waited on. Any other error from `results()` for a job

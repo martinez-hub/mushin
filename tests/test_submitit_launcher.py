@@ -109,6 +109,45 @@ def test_the_submission_is_the_plugins_own():
     assert copied == original
 
 
+def test_the_job_is_composed_as_hydras_run_job_composes_it():
+    """`_dead_return` mirrors the part of Hydra's `run_job` that places a job
+    (its dir, `runtime.output_dir`, the JobReturn's fields, the chdir rule).
+    A hydra-core release that changes that part fails here: compare it with
+    `_dead_return`, then update the digest."""
+    from hydra.core.utils import run_job
+
+    lines = inspect.getsource(run_job).splitlines()
+    i = next(n for n, line in enumerate(lines) if "job_dir_key))" in line)
+    j = next(
+        n for n, line in enumerate(lines) if "ret.working_dir = os.getcwd()" in line
+    )
+    code = "\n".join(
+        line.strip()
+        for line in lines[i : j + 1]
+        if line.strip() and not line.strip().startswith("#")
+    )
+    assert hashlib.sha256(code.encode()).hexdigest() == (
+        "7990aa89eac439de7d4fffa47c6f5efa2c54eceb00d79664060797ee743e91fa"
+    )
+
+
+def test_recording_a_dead_cell_never_fails_the_run(tmp_path):
+    """Recording is best-effort: whatever goes wrong there, the run still
+    has the failure through the job's return."""
+    from hydra.core.utils import JobReturn
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import _DeadJob, _record_dead_cell
+
+    ret = JobReturn()
+    ret.working_dir = "0"
+    # A hydra node with no `output_subdir` or `job`: reading them raises.
+    ret.hydra_cfg = OmegaConf.create({"hydra": {"runtime": {"cwd": str(tmp_path)}}})
+    OmegaConf.set_struct(ret.hydra_cfg, True)
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('x')")
+    _record_dead_cell(ret, dead, combo={}, status="failed", on_error="nan")
+
+
 @pytest.mark.parametrize(
     ("given", "routed"),
     [

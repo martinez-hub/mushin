@@ -40,7 +40,7 @@ except ImportError:  # no `slurm` extra: nothing to define
 if _plugin_launcher is not None:
     from hydra.core.config_store import ConfigStore
     from hydra.core.singleton import Singleton
-    from hydra.core.utils import JobReturn, JobStatus, filter_overrides
+    from hydra.core.utils import JobReturn, filter_overrides
     from omegaconf import OmegaConf, open_dict, read_write
 
     class _MushinSubmititMixin:
@@ -155,17 +155,13 @@ if _plugin_launcher is not None:
             return returns
 
         def _dead_return(self, job, overrides, idx, exc):
-            """The JobReturn the job would have sent, for a job that ended
-            without a result, after mushin's runner records the cell as
-            failed. The job is composed as the plugin's `__call__` and
-            Hydra's `run_job` compose it, here in the driver, with the global
-            HydraConfig restored after.
-
-            Under the runner's `on_error="raise"` the return is FAILED with
-            the job's error, as `run_job` returns a task that raised, so the
-            sweeper raises it after this batch. Under `"nan"` it is
-            COMPLETED with a `_DeadJob`, which mushin takes as a failed cell
-            (a FAILED return is raised whatever `on_error` says)."""
+            """The JobReturn for a job that ended without a result, with the
+            status and value mushin's runner gives it once it has recorded
+            the cell (`_TaskRunner.record_dead_cell`). The job is composed
+            as the plugin's `__call__` and Hydra's `run_job` compose it
+            (`tests/test_submitit_launcher.py` pins the part of `run_job`
+            mirrored here), in the driver, with the global HydraConfig
+            restored after."""
             from hydra.core.hydra_config import HydraConfig
 
             from mushin.workflows import _DeadJob
@@ -204,15 +200,9 @@ if _plugin_launcher is not None:
                 ret.working_dir = output_dir if chdir else os.getcwd()
                 # Inside the try: the cell's config-group choices come from
                 # the HydraConfig set above.
-                runner.record_dead_cell(ret, dead)
+                ret.status, ret.return_value = runner.record_dead_cell(ret, dead)
             finally:
                 HydraConfig.instance().cfg = outer
-            if getattr(runner, "on_error", "raise") == "raise":
-                ret.status = JobStatus.FAILED
-                ret.return_value = exc
-            else:
-                ret.status = JobStatus.COMPLETED
-                ret.return_value = dead
             return ret
 
     def _ended(job) -> bool:

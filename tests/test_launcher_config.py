@@ -51,7 +51,16 @@ def test_launcher_config_requires_launcher(tmp_path):
         )
 
 
-@pytest.mark.parametrize("launcher", ["submitit_slurm", "submitit_local"])
+@pytest.mark.parametrize(
+    "launcher",
+    [
+        "submitit_slurm",
+        "submitit_local",
+        # mushin's own, which run() routes those to (#345)
+        "mushin_submitit_slurm",
+        "mushin_submitit_local",
+    ],
+)
 def test_missing_submitit_launcher_names_the_slurm_extra(launcher):
     """The first error every cluster user hits: the launcher plugin isn't
     installed. The message must say what to pip install, the `slurm` extra
