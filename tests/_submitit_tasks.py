@@ -1,6 +1,6 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""Tasks for tests/test_submitit_local.py.
+"""Tasks for tests/test_submitit_local.py and test_submitit_launcher.py.
 
 They live in a module of their own because submitit pickles a task by
 reference: each job is a fresh `python -m submitit.core._submit` process that
@@ -31,8 +31,22 @@ def fail_on_one(seed):
 def die_on_two(seed):
     if seed == 2:
         # Ends the process with no Python error handling, as an out-of-memory
-        # kill or `scancel` ends a job on a cluster. The last seed of the tests'
-        # grid, so the driver has every other job's result when it meets this
-        # one, and no job is left running if it aborts there.
+        # kill or `scancel` ends a job on a cluster.
         os._exit(9)
     return dict(v=float(seed))
+
+
+@mushin.sweep
+def die_on_zero_and_two(seed):
+    # The first job and the last die, so a launcher that stopped waiting at
+    # the first dead job would lose the cell between them.
+    if seed in (0, 2):
+        os._exit(9)
+    return dict(v=float(seed))
+
+
+def die_plainly(seed):
+    """Not a mushin task: a plain Hydra task function that dies."""
+    if seed == 1:
+        os._exit(9)
+    return seed

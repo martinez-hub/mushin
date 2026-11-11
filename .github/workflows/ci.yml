@@ -367,6 +367,18 @@ jobs:
           PY
       - name: The core install ships the agent guide
         run: test -s "$(/tmp/core/bin/python -m mushin guide --path)"
+      # Hydra imports every hydra_plugins module in every Hydra app, and a
+      # failed import there is a warning in each. Without the slurm extra,
+      # mushin's submitit launchers must import cleanly and define nothing (#345).
+      - name: Hydra's plugin scan is silent without the slurm extra
+        run: |
+          /tmp/core/bin/python -W error - <<'PY'
+          from hydra.core.plugins import Plugins
+          from hydra.plugins.launcher import Launcher
+
+          names = {c.__name__ for c in Plugins.instance().discover(Launcher)}
+          assert names == {"BasicLauncher"}, names
+          PY
 
   # Single required status check. Passes when no needed job failed or was
   # cancelled — skipped jobs (e.g. the test matrix on a docs-only PR) are fine.
