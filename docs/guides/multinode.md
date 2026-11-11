@@ -87,9 +87,12 @@ filesystem; `load_experiment` reads it back as usual.
 When SLURM preempts (or times out) a cell's job, the sweep driver observes a
 failed job: under the default `on_error="raise"` the sweep raises that error
 once the jobs launched with it have ended; under `on_error="nan"` it records
-the failure and finishes the rest. A job that ends without a result (its time
-limit, an out-of-memory kill, a failed node) fails its cell this way, and
-under `on_error="nan"` the cell's `mushin_error.txt` names the job's log.
+the failure and finishes the rest. At a time limit, submitit usually raises
+an error inside the task, which fails the cell as any task error does. A job
+killed before it can return (an out-of-memory kill, a failed node,
+`scancel`, or a time limit that ends the process before Python can act)
+fails its cell the same way, and under `on_error="nan"` the cell's
+`mushin_error.txt` then names the job's log.
 (mushin runs `launcher="submitit_slurm"` through its own subclass of the
 plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
 names `mushin_submitit_slurm`.)

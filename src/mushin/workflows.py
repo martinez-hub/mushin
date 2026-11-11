@@ -574,13 +574,17 @@ class _FailedRun:
 
 
 class _DeadJob(_FailedRun):
-    """A cell whose launcher job ended without a result: killed at its time
-    limit, out of memory, on a failed node, or exited outside Python (#345).
-    mushin's submitit launchers return it in place of the result the job never
-    sent, so ``jobs_post_process`` handles the cell as it does a task that
-    raised, under ``on_error``. ``summary`` is the one line the manifest and
-    the failures list keep; the exception carries the launcher's full message
-    (with its log tail), which goes to the cell's mushin_error.txt."""
+    """A cell whose launcher job ended without a result: killed out of
+    memory, on a failed node, by ``scancel`` or at a time limit before Python
+    could act, or exited outside Python (#345).
+    Under ``on_error="nan"`` mushin's submitit launchers return it in place of
+    the result the job never sent, so ``jobs_post_process`` takes the cell as
+    failed (under ``"raise"`` they return the job's error as a FAILED job, and
+    a cell ``sample=`` left out is skipped; see
+    ``_TaskRunner.record_dead_cell``). ``summary`` is the one line the
+    manifest and the failures list keep; the exception carries the
+    launcher's full message (with its log tail), which goes to the cell's
+    mushin_error.txt."""
 
     __slots__ = ("summary",)
 
@@ -3226,9 +3230,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             the failure (``self.failures``, the sweep manifest, and a
             ``mushin_error.txt`` traceback in the cell dir), fills that cell's
             metrics with NaN, and keeps sweeping. On the submitit launchers, a
-            cell whose job ends without a result (its time limit, an
-            out-of-memory kill, a failed node) fails the same way, and its
-            ``mushin_error.txt`` names the job's log.
+            cell whose job is killed before it can return (an out-of-memory
+            kill, a failed node, ``scancel``) fails the same way, and its
+            ``mushin_error.txt`` names the job's log. A time limit usually
+            reaches the task as an error submitit raises in it, which fails
+            the cell as any task error does.
         resume : bool (default: False)
             Skip cells already recorded as completed in ``working_dir`` (their
             metrics are read from the sidecar) and re-run the rest. A completed

@@ -343,8 +343,9 @@ cells re-executed.
 mushin runs `submitit_slurm` through its own subclass of the plugin's launcher
 (`hydra_plugins/mushin_submitit/launcher.py`), which waits on every job and
 returns one that ended without a result as a failed cell. Write
-`t9_dead.py` with a module-level task: seed 0 sleeps past the time limit, seed 1
-returns at once, seed 2 allocates past `mem_gb`, seed 3 returns at once.
+`t9_dead.py` with a module-level task: seed 0 sleeps past the time limit,
+seed 1 returns at once, seed 2 allocates past `mem_gb`, seed 3 sleeps for 10
+minutes (`scancel` its job once it runs).
 
 ```python
 experiment.run(
@@ -357,16 +358,19 @@ experiment.run(
 ```
 
 Then run it again with `on_error="raise"` and a fresh `working_dir`, and once
-more with `max_num_timeout=1` and a task that checkpoints on `SIGUSR1`.
+more with `max_num_timeout=1` and a task that saves and resumes a checkpoint
+(the resilience guide's `mushin_resume` pattern).
 
 **PASS if:**
 
-- under `"nan"` the run returns; seeds 0 and 2 are NaN, 1 and 3 have values;
-  `t9_runs/0` and `t9_runs/2` hold a `failed` status and a `mushin_error.txt`
-  naming a `.submitit/<array>_<task>/` log; `mushin.show("t9_runs")` says
-  `failed` for both;
-- under `"raise"` the error (`UncompletedJobError`) is raised only after
-  seeds 1 and 3 completed;
+- under `"nan"` the run returns; seeds 0, 2 and 3 are NaN, 1 has a value;
+  each of those cells holds a `failed` status and a `mushin_error.txt`.
+  Seed 0's should be a traceback ending in submitit's "timed-out" error (the
+  task's own failure path, as a probe on `submitit_local` showed); seeds 2
+  and 3 should hold submitit's message naming a `.submitit/<array>_<task>/`
+  log (the dead-job path). Record which path each cell took;
+- under `"raise"` an `UncompletedJobError` is raised once the other jobs have
+  ended, and seed 1 completed;
 - the requeue run resubmits the timed-out job (submitit's `checkpoint`,
   which pickles mushin's launcher class) and the cell completes;
 - `t9_runs/1/.hydra/hydra.yaml` names `mushin_submitit_slurm`.
@@ -375,7 +379,8 @@ Also preempt (or `scontrol requeue`) a running job on a partition with
 requeue on: note whether `results()` raised before the requeued job ran,
 and what the cell holds once it has.
 
-**Report:** what `sacct` says for seeds 0 and 2 (`TIMEOUT`, `OUT_OF_MEMORY`),
+**Report:** what `sacct` says for seeds 0, 2 and 3 (`TIMEOUT`,
+`OUT_OF_MEMORY`, `CANCELLED`),
 the first line of each `mushin_error.txt`, and, for the follow-up that keeps a
 result when a job dies after its cell completed, whether the `job_id` in that
 message matches `hydra.job.id` in the cell's `hydra.yaml`.

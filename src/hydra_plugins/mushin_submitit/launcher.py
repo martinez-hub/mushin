@@ -4,8 +4,8 @@
 
 They are hydra-submitit-launcher's own launchers, changed in one place: the
 plugin waits on its jobs in a list comprehension, so the first job that ends
-without a result (killed at its time limit, out of memory, on a failed node,
-or exited outside Python) raises from the driver while the later jobs still
+without a result (killed out of memory, on a failed node, by `scancel` or at
+a time limit before Python could act, or exited outside Python) raises from the driver while the later jobs still
 run, unobserved, and the sweep records nothing. Here every job is waited on,
 and a job that ends without a result comes back to mushin as a failed cell,
 which `on_error` then handles as it does a task that raised (#345).

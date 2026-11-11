@@ -62,10 +62,10 @@ until every job ends, and:
 - **D4. `launch()` is `_submit()` then `_wait()`.** `_submit` is the plugin
   1.2.0 body up to `map_array`, copied; a test pins a digest of the plugin's
   `launch` and compares the copy line by line. `_wait` waits on every job in
-  order; `UncompletedJobError` and `FailedJobError` become a COMPLETED
-  `JobReturn` carrying `_DeadJob` (FAILED would make Hydra's sweeper re-raise
-  whatever `on_error` says), composed in the driver as the job would have
-  been, with the global `HydraConfig` restored. Only a task function marked
+  order; a job that ended without a result becomes a `JobReturn` composed in
+  the driver as the job would have been (a test pins the part of `run_job`
+  this mirrors), with the global `HydraConfig` restored, and with the status
+  and value the runner gives it (D6, D6b). Only a task function marked
   `_mushin_collects_dead_jobs` (mushin's runner) gets this; any other sees the
   plugin's error. The launcher holds no new state: it is pickled into every
   job and into `checkpoint()`.
@@ -101,7 +101,16 @@ until every job ends, and:
 
 ## Needs a cluster
 
-Runbook T9: what `results()` raises on a time limit, an out-of-memory kill
-and `scancel`; requeue through `checkpoint()` with the subclass; whether
+A probe on `submitit_local` (a cell sleeping past `timeout_min=1`) shows a
+time limit taking the runner's path, not this one: submitit's handler
+catches the timeout signal, tries `checkpoint()` (which pickles mushin's
+launcher fine) and, once out of retries, raises `UncompletedJobError("Job
+not requeued because: timed-out too many times.")` inside the task, so the
+cell fails with a traceback, as it already did before this PR. The dead-job
+path is for kills Python cannot act on: out of memory, a failed node,
+`scancel`, or a time limit's final kill while the task sits in C code.
+
+Runbook T9: what `results()` raises on an out-of-memory kill, a failed node
+and `scancel`, and on a time limit hit while the task is in C code; requeue through `checkpoint()` with the subclass; whether
 `hydra.job.id` matches the job id submitit reports for an array task
 (`<array>_<task>`), which item 2 relies on.
