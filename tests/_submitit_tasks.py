@@ -11,6 +11,7 @@ tests/ on that process's PYTHONPATH).
 from __future__ import annotations
 
 import os
+import sys
 
 from omegaconf import OmegaConf
 
@@ -34,6 +35,16 @@ def die_on_two(seed):
     if seed == 2:
         # Ends the process with no Python error handling, as an out-of-memory
         # kill or `scancel` ends a job on a cluster.
+        os._exit(9)
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def die_loudly(seed):
+    """Writes a long error stream, its cause at the end, then dies."""
+    if seed == 1:
+        sys.stderr.write("x" * 1_000_000 + "\nthe cause, last\n")
+        sys.stderr.flush()
         os._exit(9)
     return dict(v=float(seed))
 

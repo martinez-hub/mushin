@@ -24,10 +24,24 @@ until every job ends, and:
    result: the runner records the job id in the status sidecar, and a dead
    job whose cell says `completed` with its own id is a completed cell.
    Until then the manifest says failed and the sidecar says completed for
-   such a cell; a later `resume=True` reuses it. The same test tells a
-   terminal status an earlier sweep or attempt left (the job died before the
-   runner, so a reused dir keeps its old status and `mushin_error.txt`) from
-   this job's own, which PR 1 also leaves alone.
+   such a cell; a later `resume=True` reuses it (checked with the basic
+   launcher: the task did not rerun and the manifest went back to
+   completed). Under `"nan"`, then, a job that finished can come back NaN
+   where before PR 1 the sweep aborted. Cases:
+   - the result arrives after submitit's 15 to 30 s wait (a slow shared
+     filesystem), so `results()` raises for a job SLURM calls COMPLETED;
+   - the driver cannot read the result;
+   - in a job of several tasks, a rank other than 0 dies after rank 0 has
+     returned: submitit's `results()` raises the first failed task's error,
+     so the plugin's `results()[0]` drops rank 0's result (`job.task(0)`
+     would keep it).
+   The same test tells a terminal status an earlier sweep or attempt left
+   from this job's own, which PR 1 also leaves alone: the job died before the
+   runner, so a reused dir keeps its old status and `mushin_error.txt` (on a
+   resume, a failed cell rerun whose job dies before the runner keeps the
+   previous attempt's error file). A stale `running` record or `.hydra/`
+   snapshot from an earlier sweep in a reused dir is likewise kept, with its
+   attempt and hashes; PR 1 records only this sweep's combo over it.
 3. **Skip reusable cells before submission** (resume, `cache_dir`, `sample=`)
    in mushin's launcher, keeping Hydra's job numbers.
 4. **Submit and return** (`wait=False`) with a submission record (cell to job
@@ -75,11 +89,15 @@ until every job ends, and:
   `failed` and loses any metrics file a prior attempt left. A cell whose job
   died before Hydra made its dir also gets the `.hydra/` snapshot `run_job`
   would have written, so a reload finds it as failed rather than never run.
-  As for a task that raised, `mushin_error.txt` (submitit's message, with its
-  log tail) is written only under `"nan"`; under `"raise"` the raised error
-  carries it. A terminal status is left alone (split item 2). The manifest
-  and the failures list keep one line shaped like a repr: the job id, its
-  state and its log path.
+  As for a task that raised, `mushin_error.txt` (submitit's message, with the
+  job's whole error stream; past 22,000 characters mushin keeps the first
+  2,000 and the last 20,000) is written only under `"nan"`; under `"raise"`
+  the raised error, bounded the same way, carries it. A terminal status is
+  left alone (split item 2). The manifest and the failures list keep one
+  line shaped like a repr: the job id, its state, its log path (for a job of
+  several tasks, their folder) and, for a `FailedJobError` (the job raised
+  outside the task's own error handling: it could not import the task, or
+  could not save its result), the error's last line.
 - **D6. A dead job under `on_error="raise"` is a FAILED return**, as
   `run_job` returns a task that raised, so the sweeper raises it after that
   job's batch (with the default sweeper, after every job). Under `"nan"` it
@@ -111,6 +129,9 @@ path is for kills Python cannot act on: out of memory, a failed node,
 `scancel`, or a time limit's final kill while the task sits in C code.
 
 Runbook T9: what `results()` raises on an out-of-memory kill, a failed node
-and `scancel`, and on a time limit hit while the task is in C code; requeue through `checkpoint()` with the subclass; whether
+and `scancel`, and on a time limit hit while the task is in C code; requeue
+through `checkpoint()` with the subclass; a two-task job whose rank 1 dies
+after rank 0 returned, and any COMPLETED job that comes back as "gave no
+result" (item 2's cases); whether
 `hydra.job.id` matches the job id submitit reports for an array task
 (`<array>_<task>`), which item 2 relies on.

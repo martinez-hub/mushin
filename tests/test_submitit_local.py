@@ -135,6 +135,20 @@ def test_a_job_that_dies_outside_python_is_nan_under_on_error_nan(tmp_path):
     assert {r["status"] for r in mushin.show(wd).rows} == {"completed", "failed"}
 
 
+def test_a_dead_jobs_long_error_stream_keeps_its_start_and_end(tmp_path):
+    """submitit puts a dead job's whole error stream in its error; the cell
+    keeps its start and its end, where the cause is."""
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
+        tasks.die_loudly.run(
+            seed=multirun([0, 1]), working_dir=str(wd), on_error="nan", **LOCAL
+        )
+    error = (wd / "1" / "mushin_error.txt").read_text()
+    assert len(error) < 25_000 and "characters cut by mushin" in error
+    assert error.startswith("UncompletedJobError(")
+    assert error.rstrip().endswith("the cause, last")
+
+
 def test_every_job_is_waited_on_when_the_first_dies(tmp_path):
     """The plugin waited in submission order and stopped at the first dead
     job; the cell between the two dead ones still finishes."""
@@ -200,6 +214,11 @@ def test_a_job_that_fails_before_its_cell_starts_is_a_failed_cell(
         assert _status(wd / cell) == "failed"
         error = (wd / cell / "mushin_error.txt").read_text()
         assert "FailedJobError" in error and "_submitit_tasks" in error
+    # The one line names what the job raised, not a kill.
+    manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
+    for c in manifest["cells"].values():
+        assert c["error"].startswith("FailedJobError(")
+        assert "raised ModuleNotFoundError" in c["error"] and "\n" not in c["error"]
     assert {r["status"] for r in mushin.show(wd).rows} == {"failed"}
     reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
     assert sorted(f["combo"] for f in reloaded.failures) == ["seed=0", "seed=1"]
@@ -219,6 +238,8 @@ def test_one_cell_dead_before_it_starts_reloads_failed_and_resumes(
             on_error="nan", overrides=[tasks.DIE_BEFORE_START], **sweep
         )
     assert (tmp_path / "s/1/.hydra/hydra.yaml").is_file()
+    dead = json.loads((tmp_path / "s/1/mushin_cell_status.json").read_text())
+    assert dead["status"] == "failed" and dead["combo"] == {"seed": 1}
     reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
     assert [f["combo"] for f in reloaded.failures] == ["seed=1"]
     assert reloaded.skipped == []
@@ -257,6 +278,8 @@ def test_a_cell_dead_while_running_resumes(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
     with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
         first = tasks.die_when_told.run(on_error="nan", **sweep)
+    dead = json.loads((tmp_path / "s/1/mushin_cell_status.json").read_text())
+    assert dead["status"] == "failed" and dead["combo"] == {"seed": 1}
     monkeypatch.delenv("MUSHIN_TEST_DIE")
     again = tasks.die_when_told.run(resume=True, **sweep)
     assert again["v"].values.tolist() == [0.0, 1.0, 2.0]

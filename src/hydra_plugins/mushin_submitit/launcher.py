@@ -5,8 +5,9 @@
 They are hydra-submitit-launcher's own launchers, changed in one place: the
 plugin waits on its jobs in a list comprehension, so the first job that ends
 without a result (killed out of memory, on a failed node, by `scancel` or at
-a time limit before Python could act, or exited outside Python) raises from the driver while the later jobs still
-run, unobserved, and the sweep records nothing. Here every job is waited on,
+a time limit before Python could act, or raised outside the task, as when it
+cannot import it) raises from the driver while the later jobs still run,
+unobserved, and the sweep records nothing. Here every job is waited on,
 and a job that ends without a result comes back to mushin as a failed cell,
 which `on_error` then handles as it does a task that raised (#345).
 
@@ -168,7 +169,11 @@ if _plugin_launcher is not None:
 
             assert self.hydra_context is not None and self.config is not None
             runner = self.task_function
-            dead = _DeadJob(exc, _summary(job, exc, self.params))
+            # The summary reads the whole message; the cell keeps a bounded one.
+            dead = _DeadJob(
+                _bounded(exc, _log_of(job, self.params)),
+                _summary(job, exc, self.params),
+            )
             outer = HydraConfig.instance().cfg
             try:
                 config = self.hydra_context.config_loader.load_sweep_config(
@@ -213,19 +218,69 @@ if _plugin_launcher is not None:
         except Exception:  # noqa: BLE001 - the scheduler may not answer
             return False
 
+    # submitit puts a dead job's whole error stream in its message, and a long
+    # run can write megabytes there (a progress bar redrawn with `\r` is one
+    # line), so mushin keeps its start and its end, where the cause usually is.
+    _HEAD_CHARS, _TAIL_CHARS = 2_000, 20_000
+    _TRACE_LINE_CHARS = 200
+
+    def _log_of(job, params) -> str:
+        """The job's log; for a job of several tasks (several nodes), the
+        folder of their logs, as submitit's message names the failed task."""
+        paths = job.paths
+        if getattr(job, "num_tasks", 1) > 1:
+            return f"{paths.folder} (one per task)"
+        return str(paths.stdout if params.get("stderr_to_stdout") else paths.stderr)
+
+    def _bounded(exc, log_file):
+        """``exc``, or, for a submitit error whose message is longer than
+        mushin keeps, one of the same type with the message's start and end."""
+        from submitit.core.utils import FailedJobError, UncompletedJobError
+
+        message = str(exc)
+        if not isinstance(exc, (UncompletedJobError, FailedJobError)) or (
+            len(message) <= _HEAD_CHARS + _TAIL_CHARS
+        ):
+            return exc
+        cut = len(message) - _HEAD_CHARS - _TAIL_CHARS
+        return type(exc)(
+            f"{message[:_HEAD_CHARS]}\n[... {cut} characters cut by mushin; "
+            f"the whole log: {log_file} ...]\n{message[-_TAIL_CHARS:]}"
+        )
+
+    def _last_trace_line(message: str) -> str:
+        """The error line of the traceback a FailedJobError carries (between
+        submitit's dashed rules), on one line; empty if there is none."""
+        parts = message.split("\n----------------------\n")
+        if len(parts) < 3:
+            return ""
+        lines = [line.strip() for line in parts[1].splitlines() if line.strip()]
+        line = lines[-1] if lines else ""
+        if len(line) > _TRACE_LINE_CHARS:
+            line = line[: _TRACE_LINE_CHARS - 3] + "..."
+        return line
+
     def _summary(job, exc, params) -> str:
         """One line, shaped like the `repr` of a task's exception, for the
         manifest, the failures list and the warning; submitit's own message,
-        with its log tail, goes to the cell's mushin_error.txt."""
+        with the job's error stream (its start and end when long), goes to
+        the cell's mushin_error.txt. A FailedJobError means the job raised
+        outside the task's own error handling (it could not import the task,
+        or could not save its result), so its line names that error."""
+        from submitit.core.utils import FailedJobError
+
         try:
             state = job.state
         except Exception:  # noqa: BLE001 - the scheduler may not answer
             state = "unknown"
-        paths = job.paths
-        log_file = paths.stdout if params.get("stderr_to_stdout") else paths.stderr
+        if isinstance(exc, FailedJobError):
+            raised = _last_trace_line(str(exc))
+            what = f"raised {raised}" if raised else "raised an error"
+        else:
+            what = "gave no result"
         message = (
-            f"submitit job {job.job_id} gave no result (state: {state}); "
-            f"its log: {log_file}"
+            f"submitit job {job.job_id} {what} (state: {state}); "
+            f"its log: {_log_of(job, params)}"
         )
         return f"{type(exc).__name__}({message!r})"
 

@@ -149,7 +149,8 @@ rules:
 - **Failures.** With `on_error="nan"`, the sweep goes on when a cell raises:
   the cell becomes NaN, `experiment.workflow.failures` lists it, and its
   traceback is in `mushin_error.txt` in the cell's directory (for a SLURM job
-  killed before it returned, the path to the job's log). `compare_methods`
+  that ended without returning, killed or unable to import the task,
+  submitit's message and the path to the job's log). `compare_methods`
   then refuses the incomplete grid with `IncompleteSweepError`, unless you pass
   `allow_incomplete=True`. Fix the cause, then rerun the same script with
   `resume=True`.

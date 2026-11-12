@@ -379,6 +379,18 @@ Also preempt (or `scontrol requeue`) a running job on a partition with
 requeue on: note whether `results()` raised before the requeued job ran,
 and what the cell holds once it has.
 
+Two cases the follow-up (split item 2) handles, recorded here so it can be
+checked against what SLURM does:
+
+- with `launcher_config={"nodes": 1, "tasks_per_node": 2}`, a task where rank
+  1 calls `os._exit(9)` after rank 0 has returned its metrics (read the rank
+  from `SLURM_PROCID`; sleep a few seconds on rank 1 first). Record the
+  cell's status in the manifest and in its `mushin_cell_status.json`, whether
+  it has a `mushin_error.txt`, and the error line `run()` warned with;
+- if any cell whose `sacct` state is `COMPLETED` comes back failed with
+  "gave no result", note the filesystem of the `.submitit` folder: the result
+  arrived after submitit's 15 to 30 s wait.
+
 **Report:** what `sacct` says for seeds 0, 2 and 3 (`TIMEOUT`,
 `OUT_OF_MEMORY`, `CANCELLED`),
 the first line of each `mushin_error.txt`, and, for the follow-up that keeps a

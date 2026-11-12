@@ -576,15 +576,16 @@ class _FailedRun:
 class _DeadJob(_FailedRun):
     """A cell whose launcher job ended without a result: killed out of
     memory, on a failed node, by ``scancel`` or at a time limit before Python
-    could act, or exited outside Python (#345).
+    could act, exited outside Python, or raised outside the task's own error
+    handling, as when it cannot import the task (#345).
     Under ``on_error="nan"`` mushin's submitit launchers return it in place of
     the result the job never sent, so ``jobs_post_process`` takes the cell as
     failed (under ``"raise"`` they return the job's error as a FAILED job, and
     a cell ``sample=`` left out is skipped; see
     ``_TaskRunner.record_dead_cell``). ``summary`` is the one line the
-    manifest and the failures list keep; the exception carries the
-    launcher's full message (with its log tail), which goes to the cell's
-    mushin_error.txt."""
+    manifest and the failures list keep; the exception carries submitit's
+    message, with the job's error stream (its start and end when long),
+    which goes to the cell's mushin_error.txt."""
 
     __slots__ = ("summary",)
 
@@ -852,7 +853,9 @@ def _record_dead_cell(
         write_cell_status(
             cell_dir,
             status=status,
-            combo=prior.get("combo", combo),
+            # This sweep's combo; a prior record's only when it could not be
+            # computed (a stale one may be an earlier sweep's).
+            combo=combo or prior.get("combo", {}),
             attempt=prior.get("attempt", 1),
             config_hash=prior.get("config_hash"),
             code_hash=prior.get("code_hash"),
@@ -860,7 +863,7 @@ def _record_dead_cell(
             choices=_group_choices_of_job(ret),
         )
         if status == "failed" and on_error == "nan":
-            # UTF-8 whatever the locale: the log tail is the job's own output.
+            # UTF-8 whatever the locale: the error stream is the job's output.
             (cell_dir / "mushin_error.txt").write_text(
                 f"{dead.summary}\n\n{dead.exception}\n",
                 encoding="utf-8",
@@ -3230,8 +3233,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             the failure (``self.failures``, the sweep manifest, and a
             ``mushin_error.txt`` traceback in the cell dir), fills that cell's
             metrics with NaN, and keeps sweeping. On the submitit launchers, a
-            cell whose job is killed before it can return (an out-of-memory
-            kill, a failed node, ``scancel``) fails the same way, and its
+            cell whose job ends without returning (an out-of-memory kill, a
+            failed node, ``scancel``, or an error outside the task, such as
+            the job failing to import it) fails the same way, and its
             ``mushin_error.txt`` names the job's log. A time limit usually
             reaches the task as an error submitit raises in it, which fails
             the cell as any task error does.
@@ -3653,7 +3657,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if exc is not None:
                 if on_error == "raise":
                     raise exc
-                # A dead job's error carries its log tail; keep one line,
+                # A dead job's error carries its error stream; keep one line,
                 # shaped like a repr (#345).
                 error = rv.summary if isinstance(rv, _DeadJob) else repr(exc)
                 self.failures.append(

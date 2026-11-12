@@ -42,9 +42,10 @@ ds.attrs["mushin_failures"]  # JSON list: ["method=mlp,seed=3"]
 To debug a failed cell, look inside its `working_dir`: mushin writes the full
 stack trace to `mushin_error.txt` there (the one-line `exception` above is just
 the repr), alongside Hydra's own `.hydra/` config snapshot and job log for that
-cell. When the cell's SLURM job was killed before it could return (out of
-memory, say), the file holds submitit's message instead, with the path to
-the job's log.
+cell. When the cell's SLURM job ended without returning (killed out of
+memory, say, or unable to import the task), the file holds submitit's message
+instead: the path to the job's log, then the job's error output (its start
+and end, when it is long).
 
 The failed cells are also written to a **sweep manifest**,
 `<working_dir>/mushin_sweep_manifest.json`, which records every requested cell's

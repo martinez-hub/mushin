@@ -148,6 +148,33 @@ def test_recording_a_dead_cell_never_fails_the_run(tmp_path):
     _record_dead_cell(ret, dead, combo={}, status="failed", on_error="nan")
 
 
+def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
+    """A `running` record an earlier sweep left in a reused dir names that
+    sweep's combo; the failed record names this one's."""
+    from hydra.core.utils import JobReturn
+    from omegaconf import OmegaConf
+
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _record_dead_cell
+
+    write_cell_status(tmp_path / "0", status="running", combo={"lr": 0.1}, attempt=1)
+    ret = JobReturn()
+    ret.working_dir = "0"
+    ret.hydra_cfg = OmegaConf.create(
+        {
+            "hydra": {
+                "runtime": {"cwd": str(tmp_path)},
+                "output_subdir": None,
+                "job": {"num": 0},
+            }
+        }
+    )
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('x')")
+    _record_dead_cell(ret, dead, combo={"lr": 0.2}, status="failed", on_error="raise")
+    recorded = read_cell_status(tmp_path / "0")
+    assert recorded["status"] == "failed" and recorded["combo"] == {"lr": 0.2}
+
+
 @pytest.mark.parametrize(
     ("given", "routed"),
     [
@@ -244,3 +271,77 @@ def test_an_error_it_cannot_record_is_raised_after_every_job(launcher, monkeypat
     with pytest.raises(KeyError, match="compose"):
         launcher._wait(jobs, PARAMS[:2])
     assert all(j.waited for j in jobs)
+
+
+def test_a_long_submitit_message_keeps_its_start_and_end():
+    """submitit puts a dead job's whole error stream in its error, which a
+    long run can make megabytes long; mushin keeps a bounded copy."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from submitit.core.utils import FailedJobError, UncompletedJobError
+
+    from hydra_plugins.mushin_submitit.launcher import _bounded
+
+    short, other = UncompletedJobError("no result"), EOFError("x" * 100_000)
+    assert _bounded(short, "log") is short and _bounded(other, "log") is other
+    for kind in (UncompletedJobError, FailedJobError):
+        long = kind("head\n" + "x" * 1_000_000 + "\nkilled: out of memory")
+        kept = _bounded(long, "/logs/1_0_log.err")
+        assert type(kept) is kind and len(str(kept)) < 23_000
+        assert str(kept).startswith("head\n")
+        assert str(kept).endswith("killed: out of memory")
+        assert "cut by mushin; the whole log: /logs/1_0_log.err" in str(kept)
+
+
+class _Paths:
+    folder = "/logs"
+    stderr, stdout = "/logs/1_0_log.err", "/logs/1_0_log.out"
+
+
+class _Ended:
+    """A submitit job that has ended, for `_summary`."""
+
+    job_id, state, paths = "1", "COMPLETED", _Paths()
+
+    def __init__(self, num_tasks=1):
+        self.num_tasks = num_tasks
+
+
+def _failed_job_error(trace):
+    """A FailedJobError as submitit's `Job.exception()` builds it."""
+    from submitit.core.utils import FailedJobError
+
+    rule = "----------------------"
+    return FailedJobError(
+        f"Job (task=0) failed during processing with trace:\n{rule}\n{trace}\n"
+        f"{rule}\nYou can check full logs with 'job.stderr(0)'"
+    )
+
+
+def test_the_summary_names_what_ended_the_job_and_its_log():
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from submitit.core.utils import UncompletedJobError
+
+    from hydra_plugins.mushin_submitit.launcher import _summary
+
+    lost = _summary(_Ended(), UncompletedJobError("no output\nlog"), {})
+    assert lost == (
+        "UncompletedJobError('submitit job 1 gave no result (state: COMPLETED);"
+        " its log: /logs/1_0_log.err')"
+    )
+    assert "its log: /logs/1_0_log.out" in _summary(
+        _Ended(), UncompletedJobError("x"), {"stderr_to_stdout": True}
+    )
+
+    # A FailedJobError: the job raised outside the task's error handling.
+    trace = "Traceback (most recent call last):\n  File ...\nModuleNotFoundError: x\n"
+    raised = _summary(_Ended(), _failed_job_error(trace), {})
+    assert raised.startswith(
+        "FailedJobError('submitit job 1 raised ModuleNotFoundError: x"
+    )
+    long = _summary(_Ended(), _failed_job_error("E: " + "y" * 5_000 + "\n"), {})
+    assert "\n" not in long and len(long) < 400
+    assert "raised an error (state" in _summary(_Ended(), _failed_job_error(""), {})
+
+    # A job of several tasks has a log per task: name their folder.
+    several = _summary(_Ended(num_tasks=2), UncompletedJobError("x"), {})
+    assert "its log: /logs (one per task)" in several
