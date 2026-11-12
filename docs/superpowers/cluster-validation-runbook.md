@@ -28,6 +28,7 @@ nodes. You need: SSH to the cluster, the ability to `pip install` into a Python
 | Multi-node DDP | `multinode-ddp` | #50 | 2 |
 | `HydraFSDP` (multi-node) | `hydra-fsdp` | #58 | 2 |
 | Resume: real SLURM preemption | `main` | #83 | 2 |
+| A dead job is a failed cell | `fix/345-dead-jobs` | #345 | 2 |
 
 > **Phase 1** needs one node with **2+ GPUs** (an interactive/`salloc` GPU session
 > is enough). **Phase 2** needs **2+ nodes + the SLURM scheduler** and the submitit
@@ -260,7 +261,7 @@ killed/remaining cells ran). Check: `cat ran.log`. **FAIL** if seeds 0/1 re-ran.
 
 ## Phase 2 — multi-node / SLURM (2+ nodes + scheduler)
 
-Needs the submitit launcher: `pip install hydra-submitit-launcher`. Replace
+Needs the submitit launcher: `pip install "mushin-py[slurm]"`. Replace
 `<PARTITION>`/`<ACCOUNT>`/`<G>` (GPUs per node) with your cluster's values.
 
 ### T5 — Out-of-process submitit launcher submits cells as SLURM jobs (PR #86)
@@ -335,6 +336,67 @@ the cancellation (durable status survived the kill), and the grid completes. **F
 if completed cells re-ran. **Report:** the before/after job-dir listing and which
 cells re-executed.
 
+### T9: A job that ends without a result is a failed cell (#345)
+
+**Branch:** the #345 branch (then `main`) · **Needs:** SLURM + the `slurm` extra.
+
+mushin runs `submitit_slurm` through its own subclass of the plugin's launcher
+(`hydra_plugins/mushin_submitit/launcher.py`), which waits on every job and
+returns one that ended without a result as a failed cell. Write
+`t9_dead.py` with a module-level task: seed 0 sleeps past the time limit,
+seed 1 returns at once, seed 2 allocates past `mem_gb`, seed 3 sleeps for 10
+minutes (`scancel` its job once it runs).
+
+```python
+experiment.run(
+    seed=mushin.multirun([0, 1, 2, 3]),
+    working_dir="t9_runs",
+    launcher="submitit_slurm",
+    launcher_config={"timeout_min": 2, "mem_gb": 1, "partition": "<PARTITION>"},
+    on_error="nan",
+)
+```
+
+Then run it again with `on_error="raise"` and a fresh `working_dir`, and once
+more with `max_num_timeout=1` and a task that saves and resumes a checkpoint
+(the resilience guide's `mushin_resume` pattern).
+
+**PASS if:**
+
+- under `"nan"` the run returns; seeds 0, 2 and 3 are NaN, 1 has a value;
+  each of those cells holds a `failed` status and a `mushin_error.txt`.
+  Seed 0's should be a traceback ending in submitit's "timed-out" error (the
+  task's own failure path, as a probe on `submitit_local` showed); seeds 2
+  and 3 should hold submitit's message naming a `.submitit/<array>_<task>/`
+  log (the dead-job path). Record which path each cell took;
+- under `"raise"` an `UncompletedJobError` is raised once the other jobs have
+  ended, and seed 1 completed;
+- the requeue run resubmits the timed-out job (submitit's `checkpoint`,
+  which pickles mushin's launcher class) and the cell completes;
+- `t9_runs/1/.hydra/hydra.yaml` names `mushin_submitit_slurm`.
+
+Also preempt (or `scontrol requeue`) a running job on a partition with
+requeue on: note whether `results()` raised before the requeued job ran,
+and what the cell holds once it has.
+
+Two cases the follow-up (split item 2) handles, recorded here so it can be
+checked against what SLURM does:
+
+- with `launcher_config={"nodes": 1, "tasks_per_node": 2}`, a task where rank
+  1 calls `os._exit(9)` after rank 0 has returned its metrics (read the rank
+  from `SLURM_PROCID`; sleep a few seconds on rank 1 first). Record the
+  cell's status in the manifest and in its `mushin_cell_status.json`, whether
+  it has a `mushin_error.txt`, and the error line `run()` warned with;
+- if any cell whose `sacct` state is `COMPLETED` comes back failed with
+  "gave no result", note the filesystem of the `.submitit` folder: the result
+  arrived after submitit's 15 to 30 s wait.
+
+**Report:** what `sacct` says for seeds 0, 2 and 3 (`TIMEOUT`,
+`OUT_OF_MEMORY`, `CANCELLED`),
+the first line of each `mushin_error.txt`, and, for the follow-up that keeps a
+result when a job dies after its cell completed, whether the `job_id` in that
+message matches `hydra.job.id` in the cell's `hydra.yaml`.
+
 ---
 
 ## Graduation
@@ -346,6 +408,7 @@ cells re-executed.
 | T1 + T6 | #50 multi-node DDP (T1 single-node, T6 multi-node) |
 | T3 + T7 | #58 HydraFSDP |
 | T5 | #86 submitit out-of-process |
+| T5 + T9 | #345 mushin's submitit launchers (dead jobs) |
 
 When a PR's tests pass, remove its `do-not-merge:needs-cluster` gate, rebase onto
 `main`, and merge. Record the run (cluster, GPUs, date, logs) on the PR so the

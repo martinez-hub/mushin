@@ -573,6 +573,27 @@ class _FailedRun:
         self.exception = exception
 
 
+class _DeadJob(_FailedRun):
+    """A cell whose launcher job ended without a result: killed out of
+    memory, on a failed node, by ``scancel`` or at a time limit before Python
+    could act, exited outside Python, or raised outside the task's own error
+    handling, as when it cannot import the task (#345).
+    Under ``on_error="nan"`` mushin's submitit launchers return it in place of
+    the result the job never sent, so ``jobs_post_process`` takes the cell as
+    failed (under ``"raise"`` they return the job's error as a FAILED job, and
+    a cell ``sample=`` left out is skipped; see
+    ``_TaskRunner.record_dead_cell``). ``summary`` is the one line the
+    manifest and the failures list keep; the exception carries submitit's
+    message, with the job's error stream (its start and end when long),
+    which goes to the cell's mushin_error.txt."""
+
+    __slots__ = ("summary",)
+
+    def __init__(self, exception: BaseException, summary: str) -> None:
+        super().__init__(exception)
+        self.summary = summary
+
+
 class _SkippedRun:
     """Sentinel returned in place of a cell that was intentionally not run: the
     wall-clock budget (``max_total_seconds``) was exhausted, or the cell was not
@@ -729,7 +750,9 @@ def _with_launcher_hint(error: Exception, launcher: str | None) -> Exception | N
         and f"hydra/launcher/{launcher}" in str(error)
     ):
         return None
-    pkg = _LAUNCHER_PLUGINS.get(launcher)
+    # mushin's own submitit launchers come with the plugin's extra.
+    plain = {v: k for k, v in _MUSHIN_SUBMITIT.items()}.get(launcher, launcher)
+    pkg = _LAUNCHER_PLUGINS.get(plain)
     hint = (
         f"pip install {pkg}"
         if pkg
@@ -751,6 +774,116 @@ def _group_choices_of_job(job) -> dict | None:
     except Exception:  # noqa: BLE001 - jobs loaded without hydra_cfg
         return None
     return hydra_choices(hydra)
+
+
+# The submitit plugin's launcher names, and mushin's launchers that run in
+# their place (`hydra_plugins/mushin_submitit/launcher.py`, #345).
+_MUSHIN_SUBMITIT = {
+    "submitit_slurm": "mushin_submitit_slurm",
+    "submitit_local": "mushin_submitit_local",
+}
+
+
+def _route_to_mushin_launchers(overrides: list[str]) -> list[str]:
+    """``overrides`` with the submitit plugin's launcher choice swapped for
+    mushin's launcher of the same kind, which waits on every job and returns a
+    job that ended without a result as a failed cell (#345). ``launcher=``
+    and a raw ``hydra/launcher=`` override are routed alike. A launcher a
+    config's defaults list chooses is not: seeing it would take composing
+    the config for every sweep. Unchanged when mushin's launchers are not
+    there to run (no `slurm` extra), so Hydra reports the name the user
+    wrote, with the install hint."""
+    routed = []
+    for o in overrides:
+        key, sep, name = o.partition("=")
+        name = name.strip()  # Hydra reads `hydra/launcher= submitit_slurm` too
+        if sep and key.lstrip("+") == "hydra/launcher" and name in _MUSHIN_SUBMITIT:
+            if not _mushin_launchers_available():
+                return overrides
+            o = f"{key}={_MUSHIN_SUBMITIT[name]}"
+        routed.append(o)
+    return routed
+
+
+def _record_dead_cell(
+    ret: JobReturn,
+    dead: _DeadJob,
+    *,
+    combo: dict | None,
+    status: str,
+    on_error: str,
+) -> None:
+    """Record in its cell that the cell's job ended without a result (#345).
+
+    ``ret`` is the job as mushin's submitit launcher composed it in the
+    driver. The runner wrote 'running' when it started the cell, and nothing
+    if the job died before that, perhaps before Hydra made the cell's dir.
+    Such a cell gets the ``.hydra/`` snapshot ``run_job`` would have written
+    (so a reload finds it) and the ``status`` the runner would have recorded:
+    'skipped' for a cell ``sample=`` left out, else 'failed', as for a task
+    that raised. A metrics file a prior attempt left is removed, and a failed
+    cell under ``on_error="nan"`` gets mushin_error.txt: the one-line
+    summary, which names the job's log, then submitit's message (under
+    ``"raise"`` the raised error carries submitit's message alone). A terminal status (completed, failed, skipped) is left as it
+    is: telling one this job wrote from an earlier sweep's or attempt's is
+    the next part of #345. Best-effort throughout: the run records the
+    failure through the job's return whatever happens here."""
+    from omegaconf import OmegaConf
+
+    from ._resume import read_cell_status, write_cell_status
+    from ._sweep_io import METRICS_FILE
+
+    try:
+        cell_dir = _job_dir(ret)
+        prior = read_cell_status(cell_dir) or {}
+        if prior.get("status") not in (None, "running"):
+            return
+        hydra = ret.hydra_cfg.hydra
+        # Written before the status, which must be the newer of the two
+        # (`sidecar_job_fields`). As `run_job` saves them, unresolved.
+        if hydra.output_subdir is not None:
+            snapshot = cell_dir / str(hydra.output_subdir)
+            if not (snapshot / "hydra.yaml").exists():
+                snapshot.mkdir(parents=True, exist_ok=True)
+                for name, node in (
+                    ("config.yaml", ret.cfg),
+                    ("hydra.yaml", ret.hydra_cfg),
+                    ("overrides.yaml", OmegaConf.create(list(ret.overrides))),
+                ):
+                    (snapshot / name).write_text(
+                        OmegaConf.to_yaml(node), encoding="utf-8"
+                    )
+        (cell_dir / METRICS_FILE).unlink(missing_ok=True)
+        # Creates the cell's dir if nothing above did (no `output_subdir`).
+        write_cell_status(
+            cell_dir,
+            status=status,
+            # This sweep's combo (None: it could not be computed); a prior
+            # record's may be an earlier sweep's.
+            combo=prior.get("combo", {}) if combo is None else combo,
+            attempt=prior.get("attempt", 1),
+            config_hash=prior.get("config_hash"),
+            code_hash=prior.get("code_hash"),
+            job_num=hydra.job.num,
+            choices=_group_choices_of_job(ret),
+        )
+        if status == "failed" and on_error == "nan":
+            # UTF-8 whatever the locale: the error stream is the job's output.
+            (cell_dir / "mushin_error.txt").write_text(
+                f"{dead.summary}\n\n{dead.exception}\n",
+                encoding="utf-8",
+                errors="backslashreplace",
+            )
+    except Exception:  # noqa: BLE001 - see the docstring: never fails the run
+        pass
+
+
+def _mushin_launchers_available() -> bool:
+    try:
+        from hydra_plugins.mushin_submitit import launcher
+    except ImportError:
+        return False
+    return getattr(launcher, "MushinSlurmLauncher", None) is not None
 
 
 # Prefix of the file, in the sweep root, through which a parallel launcher's
@@ -934,6 +1067,11 @@ class _TaskRunner:
     picklable state; imports module-level helpers inside __call__ (never captures
     the _CURRENT_RESUME contextvar). Behavior mirrors the previous chain
     exactly; see the spec's Semantics Mapping."""
+
+    # mushin's submitit launchers turn a job that ended without a result into a
+    # `_DeadJob` only for a task function that says it handles one (#345); any
+    # other Hydra application on those launchers sees the plugin's error.
+    _mushin_collects_dead_jobs = True
 
     def __init__(
         self,
@@ -1253,6 +1391,38 @@ class _TaskRunner:
             _current_group_choice,
             MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray,
         )
+
+    def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
+        """Record a cell whose job ended without a result (#345), and return
+        the status and value of the JobReturn mushin's submitit launcher
+        sends for it. Called in the driver, with HydraConfig set to the
+        job's config, from which the combo reads config-group choices.
+
+        A cell ``sample=`` left out is skipped, as this runner skips it.
+        Any other is failed: under ``on_error="raise"`` a FAILED return with
+        the job's error, as ``run_job`` returns a task that raised (so the
+        sweeper raises it after the batch); under ``"nan"`` a COMPLETED
+        return with the `_DeadJob`, which ``jobs_post_process`` takes as a
+        failed cell (a FAILED return is raised whatever ``on_error`` says)."""
+        num = ret.hydra_cfg.hydra.job.num
+        sampled = getattr(self, "sampled_indices", None)
+        skipped = sampled is not None and num is not None and num not in sampled
+        try:
+            combo = self._combo(ret.cfg, self.swept_names)
+        except Exception:  # noqa: BLE001 - the combo itself may not compute
+            combo = None
+        _record_dead_cell(
+            ret,
+            dead,
+            combo=combo,
+            status="skipped" if skipped else "failed",
+            on_error=self.on_error,
+        )
+        if skipped:
+            return JobStatus.COMPLETED, _SkippedRun("not sampled")
+        if self.on_error == "raise":
+            return JobStatus.FAILED, dead.exception
+        return JobStatus.COMPLETED, dead
 
     def __call__(self, cfg):
         import warnings
@@ -2697,7 +2867,7 @@ class BaseWorkflow:
             jobs = launch(
                 self.eval_task_cfg,
                 task_call,
-                overrides=launch_overrides,
+                overrides=_route_to_mushin_launchers(launch_overrides),
                 multirun=True,
                 version_base=version_base,
                 to_dictconfig=to_dictconfig,
@@ -3067,7 +3237,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ``"raise"`` propagates the first failing cell. ``"nan"`` records
             the failure (``self.failures``, the sweep manifest, and a
             ``mushin_error.txt`` traceback in the cell dir), fills that cell's
-            metrics with NaN, and keeps sweeping.
+            metrics with NaN, and keeps sweeping. On the submitit launchers, a
+            cell whose job ends without returning (an out-of-memory kill, a
+            failed node, ``scancel``, or an error outside the task, such as
+            the job failing to import it) fails the same way, and its
+            ``mushin_error.txt`` names the job's log. A time limit usually
+            reaches the task as an error submitit raises in it, which fails
+            the cell as any task error does.
         resume : bool (default: False)
             Skip cells already recorded as completed in ``working_dir`` (their
             metrics are read from the sidecar) and re-run the rest. A completed
@@ -3486,16 +3662,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if exc is not None:
                 if on_error == "raise":
                     raise exc
+                # A dead job's error carries its error stream; keep one line,
+                # shaped like a repr (#345).
+                error = rv.summary if isinstance(rv, _DeadJob) else repr(exc)
                 self.failures.append(
                     {
                         "combo": key,
-                        "exception": repr(exc),
+                        "exception": error,
                         "working_dir": str(wdir),
                     }
                 )
-                manifest.mark(
-                    swept_combo, dir=wdir.name, status="failed", error=repr(exc)
-                )
+                manifest.mark(swept_combo, dir=wdir.name, status="failed", error=error)
                 job_metrics.append(None)
             else:
                 job_metrics.append(rv)

@@ -85,8 +85,18 @@ filesystem; `load_experiment` reads it back as usual.
 ## Preemption & resume
 
 When SLURM preempts (or times out) a cell's job, the sweep driver observes a
-failed job: under the default `on_error="raise"` the sweep aborts with that
-error; under `on_error="nan"` it records the failure and finishes the rest.
+failed job: under the default `on_error="raise"` the sweep raises that error
+once the jobs launched with it have ended; under `on_error="nan"` it records
+the failure and finishes the rest. At a time limit, submitit usually raises
+an error inside the task, which fails the cell as any task error does. A job
+that ends without returning (an out-of-memory kill, a failed node,
+`scancel`, a time limit that ends the process before Python can act, or an
+error outside the task, such as the job failing to import it) fails its cell
+the same way, and under `on_error="nan"` the cell's `mushin_error.txt` then
+names the job's log.
+(mushin runs `launcher="submitit_slurm"` through its own subclass of the
+plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
+names `mushin_submitit_slurm`.)
 Either way, recovery is one command: re-run the same sweep with
 `resume=True` (same `working_dir`): completed cells are reused from their
 sidecars, and only the preempted/missing cells re-run. Inside a long cell, use

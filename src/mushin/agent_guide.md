@@ -148,7 +148,9 @@ rules:
   `T` by up to one cell per worker.
 - **Failures.** With `on_error="nan"`, the sweep goes on when a cell raises:
   the cell becomes NaN, `experiment.workflow.failures` lists it, and its
-  traceback is in `mushin_error.txt` in the cell's directory. `compare_methods`
+  traceback is in `mushin_error.txt` in the cell's directory (for a SLURM job
+  that ended without returning, killed or unable to import the task,
+  submitit's message and the path to the job's log). `compare_methods`
   then refuses the incomplete grid with `IncompleteSweepError`, unless you pass
   `allow_incomplete=True`. Fix the cause, then rerun the same script with
   `resume=True`.
@@ -303,7 +305,7 @@ runs/compare-v1/
   0/, 1/, ...                  one directory per cell, holding:
     mushin_cell_status.json    completed, failed, skipped or running
     mushin_metrics.json        the dict the task returned (completed cells)
-    mushin_error.txt           the traceback (failed cells, on_error="nan")
+    mushin_error.txt           the traceback or job log path (failed cells, on_error="nan")
     mushin_provenance.json     git commit, package versions, hardware if torch ran (cells that ran)
     mushin_workflow.log, .hydra/
 ```
