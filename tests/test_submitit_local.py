@@ -214,11 +214,12 @@ def test_a_job_that_fails_before_its_cell_starts_is_a_failed_cell(
         assert _status(wd / cell) == "failed"
         error = (wd / cell / "mushin_error.txt").read_text()
         assert "FailedJobError" in error and "_submitit_tasks" in error
-    # The one line names what the job raised, not a kill.
+    # The one line says the job raised, not that it gave no result.
     manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
     for c in manifest["cells"].values():
-        assert c["error"].startswith("FailedJobError(")
-        assert "raised ModuleNotFoundError" in c["error"] and "\n" not in c["error"]
+        assert c["error"].startswith("FailedJobError('submitit job ")
+        assert "raised an error instead of returning" in c["error"]
+        assert "\n" not in c["error"]
     assert {r["status"] for r in mushin.show(wd).rows} == {"failed"}
     reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
     assert sorted(f["combo"] for f in reloaded.failures) == ["seed=0", "seed=1"]

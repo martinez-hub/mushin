@@ -95,9 +95,15 @@ until every job ends, and:
   the raised error, bounded the same way, carries it. A terminal status is
   left alone (split item 2). The manifest and the failures list keep one
   line shaped like a repr: the job id, its state, its log path (for a job of
-  several tasks, their folder) and, for a `FailedJobError` (the job raised
-  outside the task's own error handling: it could not import the task, or
-  could not save its result), the error's last line.
+  several tasks, their folder) and what ended it: "gave no result", or, for
+  a `FailedJobError` (the job pickled an error instead of a result: it could
+  not import the task, or could not save its result), "raised an error
+  instead of returning". The line does not name that error: reading it from
+  the traceback's text named the wrong exception for some tracebacks (a
+  lowercase `struct.error`, a note after the error line, an exception
+  group), and the traceback is in `mushin_error.txt` under `"nan"` and in
+  the raised error under `"raise"`. The bounded copy has no traceback, since
+  the original's frames hold the whole message.
 - **D6. A dead job under `on_error="raise"` is a FAILED return**, as
   `run_job` returns a task that raised, so the sweeper raises it after that
   job's batch (with the default sweeper, after every job). Under `"nan"` it

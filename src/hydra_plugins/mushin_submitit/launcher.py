@@ -24,7 +24,6 @@ plugin it defines nothing. mushin itself is imported only when a job died.
 import copy
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -223,7 +222,6 @@ if _plugin_launcher is not None:
     # run can write megabytes there (a progress bar redrawn with `\r` is one
     # line), so mushin keeps its start and its end, where the cause usually is.
     _HEAD_CHARS, _TAIL_CHARS = 2_000, 20_000
-    _TRACE_LINE_CHARS = 200
 
     def _log_of(job, params) -> str:
         """The job's log; for a job of several tasks (several nodes), the
@@ -235,9 +233,10 @@ if _plugin_launcher is not None:
 
     def _bounded(exc, folder):
         """``exc``, or, for a submitit error whose message is longer than
-        mushin keeps, one of the same type with the message's start and end
-        (and the original's traceback and cause). The cut text may be the
-        job's stderr or its stdout, so the marker names their folder."""
+        mushin keeps, a new one of the same type with the message's start and
+        end. The new one has no traceback: the original's frames hold the
+        whole message. The cut text may be the job's stderr or its stdout,
+        so the marker names their folder."""
         from submitit.core.utils import FailedJobError, UncompletedJobError
 
         message = str(exc)
@@ -246,44 +245,20 @@ if _plugin_launcher is not None:
         ):
             return exc
         cut = len(message) - _HEAD_CHARS - _TAIL_CHARS
-        kept = type(exc)(
+        return type(exc)(
             f"{message[:_HEAD_CHARS]}\n[... {cut} characters cut by mushin; "
             f"the job's logs are in {folder} ...]\n{message[-_TAIL_CHARS:]}"
         )
-        kept.__cause__, kept.__context__ = exc.__cause__, exc.__context__
-        return kept.with_traceback(exc.__traceback__)
-
-    # submitit's FailedJobError puts the job's traceback between two rules.
-    _RULE = "\n----------------------\n"
-    # A traceback's error line: `Name: message` or a bare `Name`, the class
-    # name capitalized and maybe module-qualified, so a later line of a
-    # multi-line message ("see the docs") is not taken for it.
-    _ERROR_LINE = re.compile(r"(?:[a-z_]\w*\.)*[A-Z_]\w*(?:: |$)")
-
-    def _last_trace_line(message: str) -> str:
-        """The error line of the traceback a FailedJobError carries: the last
-        line shaped like one, after the indentation and bars an exception
-        group draws, on one line; empty if there is none. The traceback is
-        everything between submitit's first rule and its last, so a rule
-        inside the traceback does not cut it."""
-        parts = message.split(_RULE)
-        if len(parts) < 3:
-            return ""
-        for line in reversed(_RULE.join(parts[1:-1]).splitlines()):
-            line = line.lstrip(" |").rstrip()
-            if _ERROR_LINE.match(line):
-                if len(line) > _TRACE_LINE_CHARS:
-                    line = line[: _TRACE_LINE_CHARS - 3] + "..."
-                return line
-        return ""
 
     def _summary(job, exc, params) -> str:
         """One line, shaped like the `repr` of a task's exception, for the
         manifest, the failures list and the warning; submitit's own message,
         with the job's error stream (its start and end when long), goes to
-        the cell's mushin_error.txt. A FailedJobError means the job raised
-        outside the task's own error handling (it could not import the task,
-        or could not save its result), so its line names that error."""
+        the cell's mushin_error.txt. submitit raises a FailedJobError only
+        for a job that pickled an error instead of a result (it could not
+        import the task, say, or save its result); the line says so and
+        leaves the error to that file, since reading it from the traceback's
+        text named the wrong exception for some tracebacks."""
         from submitit.core.utils import FailedJobError
 
         try:
@@ -291,8 +266,7 @@ if _plugin_launcher is not None:
         except Exception:  # noqa: BLE001 - the scheduler may not answer
             state = "unknown"
         if isinstance(exc, FailedJobError):
-            raised = _last_trace_line(str(exc))
-            what = f"raised {raised}" if raised else "raised an error"
+            what = "raised an error instead of returning"
         else:
             what = "gave no result"
         message = (

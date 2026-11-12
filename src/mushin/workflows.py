@@ -822,9 +822,9 @@ def _record_dead_cell(
     (so a reload finds it) and the ``status`` the runner would have recorded:
     'skipped' for a cell ``sample=`` left out, else 'failed', as for a task
     that raised. A metrics file a prior attempt left is removed, and a failed
-    cell under ``on_error="nan"`` gets mushin_error.txt with the launcher's
-    message, which names the job's log (under ``"raise"`` the raised error
-    carries it). A terminal status (completed, failed, skipped) is left as it
+    cell under ``on_error="nan"`` gets mushin_error.txt: the one-line
+    summary, which names the job's log, then submitit's message (under
+    ``"raise"`` the raised error carries submitit's message alone). A terminal status (completed, failed, skipped) is left as it
     is: telling one this job wrote from an earlier sweep's or attempt's is
     the next part of #345. Best-effort throughout: the run records the
     failure through the job's return whatever happens here."""
