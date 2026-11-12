@@ -24,6 +24,7 @@ plugin it defines nothing. mushin itself is imported only when a job died.
 import copy
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -171,7 +172,7 @@ if _plugin_launcher is not None:
             runner = self.task_function
             # The summary reads the whole message; the cell keeps a bounded one.
             dead = _DeadJob(
-                _bounded(exc, _log_of(job, self.params)),
+                _bounded(exc, job.paths.folder),
                 _summary(job, exc, self.params),
             )
             outer = HydraConfig.instance().cfg
@@ -232,9 +233,11 @@ if _plugin_launcher is not None:
             return f"{paths.folder} (one per task)"
         return str(paths.stdout if params.get("stderr_to_stdout") else paths.stderr)
 
-    def _bounded(exc, log_file):
+    def _bounded(exc, folder):
         """``exc``, or, for a submitit error whose message is longer than
-        mushin keeps, one of the same type with the message's start and end."""
+        mushin keeps, one of the same type with the message's start and end
+        (and the original's traceback and cause). The cut text may be the
+        job's stderr or its stdout, so the marker names their folder."""
         from submitit.core.utils import FailedJobError, UncompletedJobError
 
         message = str(exc)
@@ -243,22 +246,36 @@ if _plugin_launcher is not None:
         ):
             return exc
         cut = len(message) - _HEAD_CHARS - _TAIL_CHARS
-        return type(exc)(
+        kept = type(exc)(
             f"{message[:_HEAD_CHARS]}\n[... {cut} characters cut by mushin; "
-            f"the whole log: {log_file} ...]\n{message[-_TAIL_CHARS:]}"
+            f"the job's logs are in {folder} ...]\n{message[-_TAIL_CHARS:]}"
         )
+        kept.__cause__, kept.__context__ = exc.__cause__, exc.__context__
+        return kept.with_traceback(exc.__traceback__)
+
+    # submitit's FailedJobError puts the job's traceback between two rules.
+    _RULE = "\n----------------------\n"
+    # A traceback's error line: `Name: message` or a bare `Name`, the class
+    # name capitalized and maybe module-qualified, so a later line of a
+    # multi-line message ("see the docs") is not taken for it.
+    _ERROR_LINE = re.compile(r"(?:[a-z_]\w*\.)*[A-Z_]\w*(?:: |$)")
 
     def _last_trace_line(message: str) -> str:
-        """The error line of the traceback a FailedJobError carries (between
-        submitit's dashed rules), on one line; empty if there is none."""
-        parts = message.split("\n----------------------\n")
+        """The error line of the traceback a FailedJobError carries: the last
+        line shaped like one, after the indentation and bars an exception
+        group draws, on one line; empty if there is none. The traceback is
+        everything between submitit's first rule and its last, so a rule
+        inside the traceback does not cut it."""
+        parts = message.split(_RULE)
         if len(parts) < 3:
             return ""
-        lines = [line.strip() for line in parts[1].splitlines() if line.strip()]
-        line = lines[-1] if lines else ""
-        if len(line) > _TRACE_LINE_CHARS:
-            line = line[: _TRACE_LINE_CHARS - 3] + "..."
-        return line
+        for line in reversed(_RULE.join(parts[1:-1]).splitlines()):
+            line = line.lstrip(" |").rstrip()
+            if _ERROR_LINE.match(line):
+                if len(line) > _TRACE_LINE_CHARS:
+                    line = line[: _TRACE_LINE_CHARS - 3] + "..."
+                return line
+        return ""
 
     def _summary(job, exc, params) -> str:
         """One line, shaped like the `repr` of a task's exception, for the

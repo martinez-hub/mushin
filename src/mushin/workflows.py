@@ -806,7 +806,12 @@ def _route_to_mushin_launchers(overrides: list[str]) -> list[str]:
 
 
 def _record_dead_cell(
-    ret: JobReturn, dead: _DeadJob, *, combo: dict, status: str, on_error: str
+    ret: JobReturn,
+    dead: _DeadJob,
+    *,
+    combo: dict | None,
+    status: str,
+    on_error: str,
 ) -> None:
     """Record in its cell that the cell's job ended without a result (#345).
 
@@ -853,9 +858,9 @@ def _record_dead_cell(
         write_cell_status(
             cell_dir,
             status=status,
-            # This sweep's combo; a prior record's only when it could not be
-            # computed (a stale one may be an earlier sweep's).
-            combo=combo or prior.get("combo", {}),
+            # This sweep's combo (None: it could not be computed); a prior
+            # record's may be an earlier sweep's.
+            combo=prior.get("combo", {}) if combo is None else combo,
             attempt=prior.get("attempt", 1),
             config_hash=prior.get("config_hash"),
             code_hash=prior.get("code_hash"),
@@ -1405,7 +1410,7 @@ class _TaskRunner:
         try:
             combo = self._combo(ret.cfg, self.swept_names)
         except Exception:  # noqa: BLE001 - the combo itself may not compute
-            combo = {}
+            combo = None
         _record_dead_cell(
             ret,
             dead,

@@ -170,9 +170,15 @@ def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
         }
     )
     dead = _DeadJob(RuntimeError("x"), "RuntimeError('x')")
-    _record_dead_cell(ret, dead, combo={"lr": 0.2}, status="failed", on_error="raise")
-    recorded = read_cell_status(tmp_path / "0")
-    assert recorded["status"] == "failed" and recorded["combo"] == {"lr": 0.2}
+    # This sweep's combo, even an empty one (nothing swept); the prior
+    # record's only when this one could not be computed.
+    for combo, recorded in (({"lr": 0.2}, {"lr": 0.2}), ({}, {}), (None, {"lr": 0.1})):
+        write_cell_status(
+            tmp_path / "0", status="running", combo={"lr": 0.1}, attempt=1
+        )
+        _record_dead_cell(ret, dead, combo=combo, status="failed", on_error="raise")
+        status = read_cell_status(tmp_path / "0")
+        assert status["status"] == "failed" and status["combo"] == recorded
 
 
 @pytest.mark.parametrize(
@@ -284,12 +290,22 @@ def test_a_long_submitit_message_keeps_its_start_and_end():
     short, other = UncompletedJobError("no result"), EOFError("x" * 100_000)
     assert _bounded(short, "log") is short and _bounded(other, "log") is other
     for kind in (UncompletedJobError, FailedJobError):
-        long = kind("head\n" + "x" * 1_000_000 + "\nkilled: out of memory")
-        kept = _bounded(long, "/logs/1_0_log.err")
+        try:
+            try:
+                raise OSError("cause")
+            except OSError as cause:
+                text = "head\n" + "x" * 1_000_000 + "\nkilled: out of memory"
+                raise kind(text) from cause
+        except kind as raised:
+            long = raised
+        kept = _bounded(long, "/logs")
         assert type(kept) is kind and len(str(kept)) < 23_000
         assert str(kept).startswith("head\n")
         assert str(kept).endswith("killed: out of memory")
-        assert "cut by mushin; the whole log: /logs/1_0_log.err" in str(kept)
+        # The cut text may be stderr or stdout: name the folder of both.
+        assert "cut by mushin; the job's logs are in /logs" in str(kept)
+        assert kept.__traceback__ is long.__traceback__
+        assert kept.__cause__ is long.__cause__
 
 
 class _Paths:
@@ -345,3 +361,60 @@ def test_the_summary_names_what_ended_the_job_and_its_log():
     # A job of several tasks has a log per task: name their folder.
     several = _summary(_Ended(num_tasks=2), UncompletedJobError("x"), {})
     assert "its log: /logs (one per task)" in several
+
+
+def _trace_of(raise_it):
+    """The traceback text submitit pickles for an error the job raised."""
+    import traceback
+
+    try:
+        raise_it()
+    except BaseException:  # noqa: BLE001 - KeyboardInterrupt included
+        return traceback.format_exc()
+
+
+class ModelError(Exception):
+    pass
+
+
+def test_the_error_line_is_read_from_real_tracebacks():
+    """The last line of a traceback is not always its error line."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from hydra_plugins.mushin_submitit.launcher import _last_trace_line
+
+    def multi_line():
+        raise ValueError("bad value\nretry")
+
+    def group():
+        raise ExceptionGroup("several", [ValueError("x")])
+
+    def chained():
+        try:
+            raise KeyError("first")
+        except KeyError:
+            raise RuntimeError("second") from None
+
+    def rule_inside():
+        # submitit's rule inside the traceback, before its last error line.
+        try:
+            raise ValueError("a\n----------------------\nb")
+        except ValueError:
+            raise RuntimeError("second")  # noqa: B904 - the context is the point
+
+    def bare():
+        raise KeyboardInterrupt
+
+    def qualified():
+        raise ModelError("diverged")
+
+    cases = [
+        (multi_line, "ValueError: bad value"),
+        (group, "ValueError: x"),
+        (chained, "RuntimeError: second"),
+        (rule_inside, "RuntimeError: second"),
+        (bare, "KeyboardInterrupt"),
+        (qualified, f"{__name__}.ModelError: diverged"),
+    ]
+    for raise_it, line in cases:
+        error = _failed_job_error(_trace_of(raise_it))
+        assert _last_trace_line(str(error)) == line, raise_it.__name__
