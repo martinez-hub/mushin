@@ -508,6 +508,21 @@ def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
         assert hydra_run_stamp(snapshot) == record["run_id"]
 
 
+def test_a_task_that_returns_none_keeps_the_first_tasks_metrics(tmp_path):
+    """A job of several tasks runs the cell in each; one that returns None
+    after the first task wrote the metrics leaves them (#355)."""
+    wd = tmp_path / "s"
+    ds = tasks.first_task_reports.run(
+        seed=multirun([0, 1]),
+        working_dir=str(wd),
+        launcher="submitit_local",
+        launcher_config={"timeout_min": 2, "tasks_per_node": 2},
+    )
+    assert ds["v"].values.tolist() == [0.0, 1.0]
+    for cell in ("0", "1"):
+        assert (wd / cell / "mushin_metrics.json").is_file()
+
+
 # Cells that need no job are settled in the driver (#345): only the rest are
 # submitted, under their own job numbers.
 
