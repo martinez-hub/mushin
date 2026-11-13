@@ -136,7 +136,9 @@ def test_gate_fires_on_full_grid_even_with_sample(tmp_path):
             return dict(m=float(a))
 
     wf = W()
-    with pytest.raises(ValueError, match="sample.*does not reduce"):
+    with pytest.raises(
+        ValueError, match="sample.*not the grid: all 6 cells are still composed"
+    ):
         wf.run(
             a=multirun([1, 2, 3, 4, 5, 6]),
             sample=2,

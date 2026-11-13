@@ -128,3 +128,28 @@ def unpicklable_result(seed):
     if seed == 0:
         return dict(v=float(seed), lock=threading.Lock())
     return dict(v=float(seed))
+
+
+@mushin.sweep
+def scaled(seed, scale):
+    return dict(v=float(seed) * scale)
+
+
+@mushin.sweep
+def env_scaled(seed, n):
+    return dict(v=float(n))
+
+
+# A custom resolver reading a variable `hydra.job.env_set` sets for each job:
+# registered in the driver and in every job, which import this module.
+OmegaConf.register_new_resolver(
+    "mushin_test_n", lambda: os.environ.get("MUSHIN_TEST_N", "1"), replace=True
+)
+
+
+def _job_only():
+    """What only a job's environment holds: raises in the driver."""
+    return os.environ["SUBMITIT_LOCAL_JOB_ID"]
+
+
+OmegaConf.register_new_resolver("mushin_test_job_only", _job_only, replace=True)

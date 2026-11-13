@@ -101,6 +101,17 @@ def test_the_submission_is_the_plugins_own():
         "jobs = executor.map_array",
     )
     original = body(theirs, "import submitit", "jobs = executor.map_array")
+    # mushin's edit, exactly: a cell settled in the driver needs no job.
+    lines = copied.splitlines()
+    edit = [
+        "# mushin's: a cell settled in the driver needs no job.",
+        "if idx in skip:",
+        "continue",
+    ]
+    at = lines.index(edit[0])
+    assert lines[at : at + 3] == edit
+    del lines[at : at + 3]
+    copied = "\n".join(lines)
     # The copy's only edits: names it reaches through the plugin's modules,
     # and the builtin generic.
     original = original.replace(
@@ -609,3 +620,225 @@ def test_only_a_one_task_job_that_gave_no_result_may_keep_its_record():
     assert ours._keepable(_Ended(), OSError("unreadable result"))
     assert not ours._keepable(_Ended(num_tasks=2), gave_none)
     assert not ours._keepable(_Ended(), _failed_job_error("RuntimeError: x"))
+
+
+_A = {"code": {"pkg/a.py": "1"}}
+_AB = {"code": {"pkg/a.py": "1", "pkg/b.py": "2"}}
+
+
+def _resuming_runner(tmp_path, monkeypatch, prior, *, code_hash=None, deps=None):
+    """A `_TaskRunner` resuming a sweep whose cell ``lr=0.2`` completed in
+    dir 0 with the record ``prior``; its own project-code record is
+    ``deps``."""
+    from mushin import _resume
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _PriorCells, _TaskRunner
+
+    monkeypatch.setattr(_resume, "cell_project_record", lambda *a, **k: deps)
+    cell = tmp_path / "0"
+    write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1, **prior)
+    write_metrics_sidecar(cell, {"v": 1.0})
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.code_hash, runner.cache_dir, runner.cache_ok = code_hash, None, True
+    runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
+    runner.script_entries = {}
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
+    return runner
+
+
+def _strictly(runner, cwd, chash):
+    """`_settle(strict=True)` for cell ``lr=0.2`` in ``cwd``: its value, and
+    the records its record function writes."""
+    import warnings
+
+    written = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the driver leaves warning to the job
+        value, _, record = runner._settle(
+            {"lr": 0.2},
+            cwd,
+            {"lr": 0.2},
+            chash,
+            0,
+            lambda *a, **k: written.append(k),
+            strict=True,
+        )
+    assert written == []  # nothing is recorded before the driver decides
+    if record is not None:
+        record()
+    return value, written
+
+
+@pytest.mark.parametrize(
+    ("prior", "chash", "code_hash", "deps", "settles"),
+    [
+        (dict(config_hash="c"), "c", None, None, True),
+        (dict(config_hash="c"), None, None, None, False),  # cannot resolve it
+        (dict(), None, None, None, True),  # a sweep from before the fingerprint
+        (dict(config_hash="c"), "d", None, None, False),  # changed
+        (dict(code_hash="x"), None, "x", None, True),
+        (dict(code_hash="x"), None, None, None, False),  # cannot take it
+        (dict(code_hash="x"), None, "y", None, False),  # changed
+        (dict(code_deps=_A), None, None, _AB, True),
+        (dict(code_deps=_AB), None, None, _AB, True),
+        (dict(code_deps=_AB), None, None, _A, False),  # a file only the job reaches
+        (dict(code_deps=_A), None, None, None, False),  # cannot compare
+        (dict(code_deps=_A), None, None, {"code": {"pkg/a.py": "9"}}, False),
+        (dict(code_deps="garbled"), None, None, _A, False),  # not comparable
+    ],
+)
+def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
+    tmp_path, monkeypatch, prior, chash, code_hash, deps, settles
+):
+    """`_settle(strict=True)`: a fingerprint the prior record has and the
+    driver cannot take, or a project-code record that lacks a file the prior
+    one names, is not 'unchanged' there, as it is in the job."""
+    from mushin.workflows import _COMPUTE
+
+    runner = _resuming_runner(
+        tmp_path, monkeypatch, prior, code_hash=code_hash, deps=deps
+    )
+    value, written = _strictly(runner, tmp_path / "1", chash)
+    assert (value is not _COMPUTE) is settles
+    assert len(written) == settles
+    if settles:
+        assert written[0]["status"] == "completed"
+        assert (tmp_path / "1" / "mushin_metrics.json").is_file()
+
+
+def test_a_reused_cell_from_before_the_field_takes_the_drivers_record(
+    tmp_path, monkeypatch
+):
+    """A prior record with no project-code record takes the driver's, as it
+    takes the job's: a later resume then compares every file it names."""
+    runner = _resuming_runner(tmp_path, monkeypatch, dict(), deps=_AB)
+    value, written = _strictly(runner, tmp_path / "1", None)
+    assert value == {"v": 1.0}
+    assert written[0]["code_deps"] == _AB
+
+
+@pytest.mark.parametrize("lacking", [False, True], ids=["comparable", "lacking-a-file"])
+def test_a_changed_cell_may_still_be_a_cache_hit_in_the_driver(
+    tmp_path, monkeypatch, lacking
+):
+    """As in the job, a resume that will not reuse a changed cell still looks
+    in the cache, unless the driver's project-code record lacks a file the
+    prior one names (its cache key may then be another code's)."""
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _COMPUTE
+
+    if lacking:  # the driver's record lacks pkg/b.py
+        prior, deps = dict(config_hash="c", code_deps=_AB), _A
+    else:
+        prior, deps = dict(config_hash="c"), None
+    runner = _resuming_runner(tmp_path, monkeypatch, prior, code_hash="x", deps=deps)
+    runner.cache_dir = str(tmp_path / "cache")
+    write_metrics_sidecar(tmp_path / "cache" / runner._cache_key("d", deps), {"v": 2.0})
+    value, written = _strictly(runner, tmp_path / "1", "d")
+    if lacking:
+        assert (value, written) == (_COMPUTE, [])
+    else:
+        assert value == {"v": 2.0}
+        assert [w["status"] for w in written] == ["completed"]
+
+
+def test_the_driver_composes_cells_only_when_one_may_be_reused(tmp_path):
+    from mushin.workflows import _PriorCells, _TaskRunner
+
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.prior_manifest, runner.cache_dir, runner.cache_ok = None, None, True
+    assert not runner._reuses()
+    # A cache that holds nothing yet: nothing to reuse.
+    runner.cache_dir = str(tmp_path / "cache")
+    assert not runner._reuses()
+    (tmp_path / "cache").mkdir()
+    assert not runner._reuses()
+    (tmp_path / "cache" / "k").mkdir()
+    assert runner._reuses()
+    runner.cache_ok = False
+    assert not runner._reuses()
+    # A resume over another grid shape matches no cell.
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr", "seed"), {"x": "0"})
+    assert not runner._reuses()
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"x": "0"})
+    assert runner._reuses()
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {})
+    assert not runner._reuses()
+    # sample= leaves cells out whatever else holds.
+    runner.sampled_indices = {0}
+    assert runner.settles_in_driver()
+    assert runner.may_settle(1) and not runner.may_settle(0)
+
+
+@pytest.mark.parametrize(
+    ("cfg", "env_set", "reads"),
+    [
+        ({"a": 1, "b": "${x}"}, {}, False),
+        ({"a": "${oc.env:HOME}"}, {}, True),
+        ({"a": {"b": ["x", "${ oc.env : HOME }"]}}, {}, True),  # spaced, nested
+        ({"a": "path/${env:HOME}/x"}, {}, True),  # OmegaConf's older name
+        ({"a": "${oc.decode:${oc.env:N}}"}, {}, True),
+        ({"a": "environment"}, {}, False),
+        ({"a": 1}, {"N": "8"}, False),  # a fixed value: applied in the driver
+        ({"a": 1}, {"N": "${oc.env:SLURM_JOB_ID}"}, True),  # the job's own
+    ],
+)
+def test_a_config_that_reads_the_environment_is_seen(cfg, env_set, reads):
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import _reads_environment
+
+    ret = SimpleNamespace(
+        cfg=OmegaConf.create(cfg),
+        hydra_cfg=OmegaConf.create({"hydra": {"job": {"env_set": env_set}}}),
+    )
+    assert _reads_environment(ret) is reads
+
+
+def test_judging_in_the_driver_keeps_every_warn_once_memory():
+    """A later run in the driver's process must still give the warnings the
+    driver's judging held back."""
+    import warnings
+
+    from mushin import _resume
+
+    key = ("a test module",)
+    _resume._LOAD_BASELINE[key] = ((), "digest", [False])
+    before = list(_resume._TRUNCATION_WARNED)
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            with _resume.judging_quietly():
+                warnings.warn("held back", UserWarning)
+                _resume._TRUNCATION_WARNED.append(True)
+                _resume._LOAD_BASELINE[key][2][0] = True
+        assert not seen
+        assert _resume._TRUNCATION_WARNED == before
+        assert _resume._LOAD_BASELINE[key][2][0] is False
+        # A module reloaded since is a new load, seen anew inside: its entry
+        # starts unwarned, whatever the old load's flag was.
+        _resume._LOAD_BASELINE[key][2][0] = True
+        with _resume.judging_quietly():
+            _resume._LOAD_BASELINE[key] = ((), "digest 2", [True])
+        assert _resume._LOAD_BASELINE[key][2][0] is False
+    finally:
+        _resume._LOAD_BASELINE.pop(key, None)
+        _resume._TRUNCATION_WARNED[:] = before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_a_dir_that_cannot_be_resolved_is_taken_as_written(tmp_path):
+    """A symlink loop raises from `Path.resolve` on some Pythons; judging a
+    cell in the driver must not."""
+    import os
+
+    from mushin.workflows import _resolved
+
+    os.symlink(tmp_path / "b", tmp_path / "a")
+    os.symlink(tmp_path / "a", tmp_path / "b")
+    assert _resolved(tmp_path / "a" / "0").is_absolute()
