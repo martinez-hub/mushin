@@ -2630,6 +2630,52 @@ def test_a_reload_keeps_a_cell_whose_snapshot_is_newer_than_its_record(tmp_path,
     assert loaded.is_complete
 
 
+def test_a_numeric_looking_run_id_stays_the_runs_stamp(tmp_path, monkeypatch):
+    """The stamp is quoted: an id such as 1e5... or all digits must read
+    back as itself, not as a number."""
+    import json
+
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin.workflows import _TaskRunner
+
+    init = _TaskRunner.__init__
+    for run_id in ("1e5" + "0" * 29, "1" * 32):
+
+        def numeric(self, *args, run_id=run_id, **kwargs):
+            init(self, *args, **kwargs)
+            self.run_id = run_id
+
+        monkeypatch.setattr(_TaskRunner, "__init__", numeric)
+        wd = tmp_path / run_id[:4]
+        _ReusedDir().run(x=multirun([1]), lr=1.0, working_dir=str(wd))
+        record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
+        snapshot = load_hydra_record(wd / "0" / ".hydra" / "hydra.yaml")
+        assert record["run_id"] == run_id
+        assert hydra_run_stamp(snapshot) == run_id
+
+
+@pytest.mark.parametrize(
+    ("stamp", "read"),
+    [
+        ("abc123", "abc123"),
+        (None, None),
+        ("", None),
+        ("???", None),
+        ("${hydra.job.name}", None),
+        (5, None),
+    ],
+)
+def test_a_run_stamp_reads_alike_on_both_read_paths(stamp, read):
+    from omegaconf import OmegaConf
+
+    from mushin._hydra_yaml import hydra_run_stamp
+
+    job = {"name": "abc"} if stamp is None else {"name": "abc", "mushin_run_id": stamp}
+    tree = {"hydra": {"job": job}}
+    assert hydra_run_stamp(tree) == read
+    assert hydra_run_stamp(OmegaConf.create(tree)) == read
+
+
 def test_offline_reload_restores_inf_metrics(tmp_path):
     """The tagged ±Inf sidecar marker must be decoded by the default
     metric_load_fn too — an offline reload must yield real Inf values, not
