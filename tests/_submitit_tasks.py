@@ -152,6 +152,41 @@ def none_on_one(seed):
     return None if seed == 1 else dict(v=float(seed))
 
 
+def _wait_for(name, text=""):
+    import time
+
+    deadline = time.monotonic() + 20  # well under the job's time limit
+    while time.monotonic() < deadline:
+        if os.path.exists(name) and text in open(name).read():
+            break
+        time.sleep(0.05)
+    time.sleep(0.5)  # past the other task's record too
+
+
+@mushin.sweep
+def second_task_raises_late(seed):
+    """In a job of two tasks, the first returns metrics and the second
+    raises once the first has written them (#365)."""
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 0:
+        return dict(v=float(seed))
+    _wait_for("mushin_metrics.json")
+    raise RuntimeError(f"task 1 of seed {seed}")
+
+
+@mushin.sweep
+def first_task_raises_early(seed):
+    """In a job of two tasks, the first raises at once and the second
+    returns metrics once the first has recorded its failure (#365)."""
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 0:
+        raise RuntimeError(f"task 0 of seed {seed}")
+    _wait_for("mushin_cell_status.json", '"failed"')
+    return dict(v=float(seed) + 100)
+
+
 @mushin.sweep
 def scaled(seed, scale):
     return dict(v=float(seed) * scale)

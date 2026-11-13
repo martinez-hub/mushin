@@ -261,7 +261,9 @@ if _plugin_launcher is not None:
             returns, unrecorded = [], None
             for job, params in zip(jobs, job_params, strict=True):
                 try:
-                    returns.append(job.results()[0])
+                    results = job.results()
+                    several = collects and len(results) > 1
+                    returns.append(self._job_return(results) if several else results[0])
                     continue
                 except (UncompletedJobError, FailedJobError) as exc:
                     # submitit raises these once the job has ended.
@@ -284,6 +286,19 @@ if _plugin_launcher is not None:
             if unrecorded is not None:
                 raise unrecorded
             return returns
+
+        def _job_return(self, results):
+            """The return a job of mushin's runner stands for: its first
+            task's, unless a task failed (raised: Hydra returns that as a
+            FAILED return, or, under ``on_error="nan"``, the runner's
+            sentinel), when the cell failed, as ``"raise"`` already had it
+            once ``results()`` raised. The first task's failure, else the
+            first failing task's; the cell's record is made to agree (#365)."""
+            failed = [r for r in results if _task_failed(r)]
+            if not failed:
+                return results[0]
+            self.task_function.record_a_failed_task(results[0])
+            return results[0] if _task_failed(results[0]) else failed[0]
 
         @contextlib.contextmanager
         def _composed(self, overrides, idx, job_id):
@@ -341,6 +356,7 @@ if _plugin_launcher is not None:
                 _bounded(exc, job.paths.folder),
                 _summary(job, exc, self.params),
                 keepable=_keepable(job, exc),
+                several_tasks=getattr(job, "num_tasks", 1) > 1,
             )
             with self._composed(overrides, idx, str(job.job_id)) as ret:
                 # Inside: the cell's config-group choices come from the
@@ -352,6 +368,17 @@ if _plugin_launcher is not None:
                     "record holds one, which stands for it (#345)"
                 )
             return ret
+
+    def _task_failed(ret) -> bool:
+        """Whether one task's return is a failure: a FAILED return (its
+        error is not read, which would raise it) or the runner's sentinel."""
+        from hydra.core.utils import JobStatus
+
+        from mushin.workflows import _FailedRun
+
+        return getattr(ret, "status", None) == JobStatus.FAILED or isinstance(
+            getattr(ret, "_return_value", None), _FailedRun
+        )
 
     def _keepable(job, exc) -> bool:
         """Whether a completed record the job's cell holds can stand for the

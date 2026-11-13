@@ -588,16 +588,23 @@ class _DeadJob(_FailedRun):
     which goes to the cell's mushin_error.txt. ``keepable`` says a completed
     record the job's runner wrote can stand for the job's result: the job
     had one task, and gave no result rather than an error it pickled in its
-    place (it could not save its result, say)."""
+    place (it could not save its result, say). ``several_tasks`` says the
+    job had more than one task, whose completed record is then no task's
+    result alone: the cell failed, and its record is made to say so (#365)."""
 
-    __slots__ = ("keepable", "summary")
+    __slots__ = ("keepable", "several_tasks", "summary")
 
     def __init__(
-        self, exception: BaseException, summary: str, keepable: bool = False
+        self,
+        exception: BaseException,
+        summary: str,
+        keepable: bool = False,
+        several_tasks: bool = False,
     ) -> None:
         super().__init__(exception)
         self.summary = summary
         self.keepable = keepable
+        self.several_tasks = several_tasks
 
 
 #: What `_TaskRunner._settle` returns for a cell that must compute.
@@ -1889,6 +1896,47 @@ class _TaskRunner:
         writes = [lambda: _write_hydra_snapshot(ret, cell_dir, replace=True), record]
         return JobStatus.COMPLETED, value, writes
 
+    def record_a_failed_task(self, ret: JobReturn) -> None:
+        """Record failed the cell of a job of several tasks one of which
+        failed, when the cell's record is a completed one this run's job
+        wrote: another task finished after the failing one recorded its
+        failure (#365). ``ret`` is one task's return. The cell's metrics file
+        goes with the record; the failing task's own error file stays.
+        Best-effort: the run fails the cell whatever happens here."""
+        from ._resume import read_cell_status, write_cell_status
+        from ._sweep_io import METRICS_FILE, remove_sidecar
+
+        try:
+            cell_dir = _job_dir(ret)
+            prior = read_cell_status(cell_dir) or {}
+            num = ret.hydra_cfg.hydra.job.num
+        except Exception:  # noqa: BLE001 - no record to read
+            return
+        own = (
+            prior.get("status") == "completed"
+            and self.run_id is not None
+            and prior.get("run_id") == self.run_id
+            and prior.get("job_num") == num
+        )
+        if not own:
+            return
+        try:
+            write_cell_status(
+                cell_dir,
+                status="failed",
+                combo=prior.get("combo", {}),
+                attempt=prior.get("attempt", 1),
+                config_hash=prior.get("config_hash"),
+                code_hash=prior.get("code_hash"),
+                job_num=prior.get("job_num"),
+                choices=prior.get("choices"),
+                run_id=self.run_id,
+                job_id=prior.get("job_id"),
+            )
+        except Exception:  # noqa: BLE001 - best-effort, see above
+            return
+        remove_sidecar(cell_dir / METRICS_FILE)
+
     def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
         """Record a cell whose job ended without a result (#345), and return
         the status and value of the JobReturn mushin's submitit launcher
@@ -1904,8 +1952,9 @@ class _TaskRunner:
         when the job had one task and did not pickle an error
         in place of its result (`_DeadJob.keepable`): it finished, but its
         result did not reach the driver, as when it came after submitit
-        stopped waiting. A skipped one is skipped. Any other terminal record
-        of the job's own is kept as it is, and the cell fails.
+        stopped waiting. A skipped one is skipped. A completed one of a job of
+        several tasks is recorded failed, as the cell is (#365). Any other
+        terminal record of the job's own is kept as it is, and the cell fails.
 
         Otherwise, over a 'running' record or none, the job died before its
         runner recorded an end, and `_record_dead_cell` records it. Any
@@ -1952,7 +2001,10 @@ class _TaskRunner:
                 return JobStatus.COMPLETED, metrics
         if own and status == "skipped":
             return JobStatus.COMPLETED, _SkippedRun("recorded by its job")
-        if status in (None, "running"):
+        # A job of several tasks failed as a whole: a completed record of its
+        # own is one task's, not the cell's result (#365).
+        failed_own = own and status == "completed" and dead.several_tasks
+        if status in (None, "running") or failed_own:
             _record_dead_cell(
                 ret,
                 dead,

@@ -434,8 +434,7 @@ def _results_that_raised(monkeypatch):
 def test_a_job_of_several_tasks_fails_its_cell_when_one_dies(tmp_path, monkeypatch):
     """Every task of the job runs mushin's runner in the cell's dir, so the
     cell's completed record is not known to be the first task's (the job's
-    result): the cell fails, as when the record could not be read, and the
-    record is left for a resume."""
+    result): the cell fails, as when the record could not be read."""
     raised = _results_that_raised(monkeypatch)
     wd = tmp_path / "s"
     with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
@@ -450,8 +449,11 @@ def test_a_job_of_several_tasks_fails_its_cell_when_one_dies(tmp_path, monkeypat
     assert len(set(raised)) == 1
     v = ds["v"].values
     assert v[0] == 0.0 and np.isnan(v[1])
+    # The first task's completed record is not the job's result: the cell
+    # failed, and its record says so (#365).
     record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "completed"
+    assert record["status"] == "failed"
+    assert not (wd / "1" / "mushin_metrics.json").exists()
 
 
 def test_a_result_submitit_could_not_save_fails_its_cell(tmp_path):
@@ -561,6 +563,36 @@ def test_a_job_of_several_tasks_runs_its_cell_without_the_budget(tmp_path):
     assert len(logs) == 4  # two tasks for each cell
     for log in logs:
         assert "`max_total_seconds` is disabled" in log.read_text()
+
+
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+@pytest.mark.parametrize("task", ["second_task_raises_late", "first_task_raises_early"])
+def test_a_job_whose_task_raises_fails_its_cell_and_its_record(
+    tmp_path, on_error, task
+):
+    """A job of several tasks fails its cell when any task raises, whichever
+    task records last, and the cell's record says so, so a reload agrees
+    with the run (#365). On main the run took the first task's return."""
+    wd = tmp_path / "s"
+    sweep = dict(
+        seed=multirun([0]),
+        working_dir=str(wd),
+        on_error=on_error,
+        launcher="submitit_local",
+        launcher_config={"timeout_min": 2, "tasks_per_node": 2},
+    )
+    if on_error == "raise":
+        with pytest.raises(RuntimeError, match="task . of seed 0"):
+            getattr(tasks, task).run(**sweep)
+    else:
+        with pytest.warns(UserWarning, match=r"failed: \['seed=0'\]"):
+            ds = getattr(tasks, task).run(**sweep)
+        assert "v" not in ds or np.isnan(ds["v"].values).all()
+    record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "failed"
+    assert not (wd / "0" / "mushin_metrics.json").exists()
+    loaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+    assert [f["combo"] for f in loaded.failures] == ["seed=0"]
 
 
 # Cells that need no job are settled in the driver (#345): only the rest are

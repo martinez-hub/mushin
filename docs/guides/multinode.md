@@ -137,7 +137,9 @@ Two multi-rank cautions:
 - Every rank of a cell runs the task function, so per-cell files
   (status/metrics/provenance sidecars) are written once per rank; writes are
   atomic and carry the same values, so this is benign; `MetricsCallback`'s
-  `.pt` files are rank-0-only by design.
+  `.pt` files are rank-0-only by design. The cell's result is rank 0's, but
+  the cell fails when the task raises on any rank or a rank dies, under
+  either `on_error`, and its record then says failed.
 
 ## Runbook (the merge gate)
 
