@@ -109,7 +109,48 @@ def write_cell_status(
         payload["job_id"] = job_id
     if metrics is not None:
         payload["metrics"] = metrics
+    # A record that replaces another cell's lists the checkpoints that cell
+    # left in the dir, which this cell is never handed; a later record of the
+    # same cell carries the list (#355).
+    foreign = _foreign_checkpoints(Path(cell_dir), combo)
+    if foreign:
+        payload["foreign_ckpts"] = foreign
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
+
+
+def _foreign_checkpoints(cell_dir: Path, combo: Any) -> dict:
+    """The checkpoints of another cell in ``cell_dir``, for the record of
+    ``combo`` about to be written there: carried from a record of this cell,
+    listed (`_checkpoint_stamps`) when the record replaces another cell's,
+    and none over no record."""
+    prior = read_cell_status(cell_dir)
+    if not isinstance(prior, dict) or not isinstance(prior.get("combo"), dict):
+        return {}
+    if same_cell(prior["combo"], combo):
+        carried = prior.get("foreign_ckpts")
+        return carried if isinstance(carried, dict) else {}
+    return _checkpoint_stamps(cell_dir)
+
+
+def _checkpoint_stamps(cell_dir: Path) -> dict:
+    """{name: [mtime_ns, size]} of each top-level ``*.ckpt`` file in
+    ``cell_dir``. A checkpoint the cell writes later under the same name has
+    another mtime, so it is its own."""
+    import stat
+
+    stamps: dict = {}
+    try:
+        paths = list(Path(cell_dir).glob("*.ckpt"))
+    except OSError:
+        return stamps
+    for path in paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            stamps[path.name] = [st.st_mtime_ns, st.st_size]
+    return stamps
 
 
 def _records_job_fields(num: Any, choices: Any) -> bool:
@@ -5427,15 +5468,29 @@ def read_cell_status(cell_dir) -> dict | None:
     return data
 
 
-def discover_last_ckpt(cell_dir) -> Path | None:
+def discover_last_ckpt(cell_dir, foreign: Any = None) -> Path | None:
     """Best-effort: the checkpoint a resuming task should load. Prefers an exact
     ``last.ckpt``; otherwise the most-recently-modified ``*.ckpt`` in ``cell_dir``.
-    Returns None if there is none."""
+    Returns None if there is none. A file ``foreign`` (a record's
+    ``foreign_ckpts``) lists as another cell's, unchanged since, is never
+    one (#355)."""
     d = Path(cell_dir)
+    listed = foreign if isinstance(foreign, dict) else {}
+
+    def own(path: Path) -> bool:
+        stamp = listed.get(path.name)
+        if not isinstance(stamp, list):
+            return True
+        try:
+            st = path.stat()
+        except OSError:
+            return False
+        return [st.st_mtime_ns, st.st_size] != stamp
+
     exact = d / "last.ckpt"
-    if exact.exists():
+    if exact.exists() and own(exact):
         return exact
-    ckpts = [p for p in d.glob("*.ckpt") if p.is_file()]
+    ckpts = [p for p in d.glob("*.ckpt") if p.is_file() and own(p)]
     if not ckpts:
         return None
     return max(ckpts, key=lambda p: p.stat().st_mtime)
@@ -5462,7 +5517,7 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     cell_dir = Path(cell_dir)
     prior = read_cell_status(cell_dir)
     matches = prior is not None and same_cell(prior.get("combo"), combo)
-    last = discover_last_ckpt(cell_dir) if matches else None
+    last = discover_last_ckpt(cell_dir, prior.get("foreign_ckpts")) if matches else None
     # Coerce a malformed/older-schema `attempt` (missing, null, "3") to an int
     # so it degrades to a fresh attempt instead of raising inside the wrapper.
     try:

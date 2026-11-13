@@ -362,3 +362,76 @@ def test_a_resume_without_its_manifest_reuses_a_non_finite_cell(tmp_path, x):
     calls.clear()
     W().run(x=multirun([1.0, x]), working_dir=str(tmp_path), resume=True)
     assert calls == []
+
+
+# A cell that takes a dir over records the checkpoints another cell left
+# there, and is never handed them (#355 item 2).
+
+
+def _old_ckpt(path, text):
+    path.write_text(text)
+    old = 10**9 * 1_600_000_000  # long before this test
+    os.utime(path, ns=(old, old))
+
+
+def test_a_cell_taking_a_dir_over_is_not_handed_its_checkpoints(tmp_path):
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    assert "last.ckpt" in read_cell_status(tmp_path)["foreign_ckpts"]
+    write_cell_status(tmp_path, status="failed", combo={"x": 2}, attempt=1)
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.is_resume is True and rc.last_ckpt is None
+    # Its own checkpoint, written since, is handed over.
+    (tmp_path / "last.ckpt").write_text("x=2")
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt is not None and rc.last_ckpt.read_text() == "x=2"
+
+
+def test_a_cells_own_checkpoint_is_preferred_to_a_foreign_last(tmp_path):
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    (tmp_path / "epoch=1.ckpt").write_text("x=2")
+    write_cell_status(tmp_path, status="completed", combo={"x": 2}, attempt=1)
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt.name == "epoch=1.ckpt"
+
+
+def test_a_cells_own_checkpoints_are_never_foreign(tmp_path):
+    write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="failed", combo={"x": 1}, attempt=1)
+    assert "foreign_ckpts" not in read_cell_status(tmp_path)
+    assert build_resume_context(tmp_path, {"x": 1}).last_ckpt.read_text() == "x=1"
+
+
+def test_a_second_grid_does_not_resume_from_the_firsts_weights(tmp_path):
+    """The issue's case: a second sweep over another grid into the same
+    working_dir reuses dir 0, and its failed cell's resume must not start
+    from the first sweep's checkpoint (main handed it over)."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen.append(None if last is None else last.read_text())
+            if x == 1:
+                (Path.cwd() / "last.ckpt").write_text("weights of x=1")
+                return dict(v=1.0)
+            if mushin_resume.attempt == 1:
+                raise RuntimeError("first attempt fails")
+            return dict(v=float(x))
+
+    W().run(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(x=multirun([3]), working_dir=str(tmp_path), on_error="nan")
+    W().run(x=multirun([3]), working_dir=str(tmp_path), resume=True)
+    assert seen == [None, None, None]

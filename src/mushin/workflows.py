@@ -2093,7 +2093,8 @@ class _TaskRunner:
                 # pre_task may stage a checkpoint into the cell dir (the
                 # resilience guide's pattern), so the checkpoint is looked for
                 # after it, as it was when the hook ran first.
-                rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
+                foreign = (read_cell_status(cwd) or {}).get("foreign_ckpts")
+                rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd, foreign))
             written = NOT_WRITTEN
             try:
                 written = write_provenance(cwd, cfg, base=self.base_provenance)
