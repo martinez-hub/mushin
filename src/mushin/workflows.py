@@ -2150,6 +2150,9 @@ class _TaskRunner:
                 # result if the job's own return is lost, while it is still
                 # this one (#345).
                 metrics=written,
+                # A task that returned None wrote no metrics file: a reload
+                # reads that, not a lost file (#364).
+                no_metrics=result is None,
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
@@ -4524,6 +4527,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if isinstance(metrics_filename, str):
             metrics_filename = [metrics_filename]
 
+        from ._resume import wrote_no_metrics
         from ._sweep_io import METRICS_FILE
 
         job_metrics: list[Any] = []
@@ -4546,32 +4550,37 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ):
                 job_metrics.append(None)
                 continue
-            # A completed cell whose task returned no metrics has no
-            # mushin_metrics.json: its record, from a version that records its
-            # run, names no file it wrote (#364). One that names a file whose
-            # file is gone lost it, and a record from before `run_id` cannot
-            # tell the two apart: both still raise, as does a missing file of
-            # the user's own.
-            wrote_none = (
-                status == "completed"
-                and "run_id" in (record or {})
-                and "metrics" not in (record or {})
-            )
-            _metrics, absent = {}, 0
+            # A completed cell whose task returned None wrote no metrics
+            # file, and its record says so (#364): its sidecar is not looked
+            # for. Any other missing file still raises: a lost one, a file of
+            # the user's own, and a record from before the flag.
+            _metrics = {}
             for name in metrics_filename:
                 files = sorted(dir_.glob(name))
-                if not files and name == METRICS_FILE and wrote_none:
-                    absent += 1
+                if (
+                    not files
+                    and Path(name) == Path(METRICS_FILE)
+                    and wrote_no_metrics(record)
+                ):
                     continue
                 if not files:
+                    hint = ""
+                    if (record or {}).get("status") == "completed" and "run_id" not in (
+                        record or {}
+                    ):
+                        hint = (
+                            " (this completed cell's record is from an earlier "
+                            "mushin version, which did not record a task that "
+                            "returned no metrics: re-run the cell to reload it)"
+                        )
                     raise FileNotFoundError(
                         f"No files with the path/pattern {dir_ / name} were found"
+                        + hint
                     )
 
                 for f_ in files:
                     _metrics.update(self.metric_load_fn(f_))
-            # Only the sidecar asked for, and none written: no result (NaN).
-            job_metrics.append(None if absent == len(metrics_filename) else _metrics)
+            job_metrics.append(_metrics)
 
         # Keep the job-aligned view (None = failed/skipped cell) so `to_xarray`
         # can rebuild `_metrics_by_combo` per cell even when some cells are

@@ -2861,8 +2861,9 @@ class _SometimesNone(MultiRunMetricsWorkflow):
 
 
 def test_a_reload_reads_a_cell_that_returned_no_metrics_as_the_run_does(tmp_path):
-    """#364: a completed cell whose task returned None has no metrics file;
-    the reload gives it NaN, as the run does, instead of raising."""
+    """#364: a completed cell whose task returned None has no metrics file,
+    and its record says so: the reload gives it NaN, as the run does,
+    instead of raising."""
     wf = _SometimesNone()
     wf.run(x=multirun([1, 2]), working_dir=str(tmp_path))
     ran = wf.to_xarray()["v"].values.tolist()
@@ -2876,33 +2877,57 @@ def test_a_reload_reads_a_cell_that_returned_no_metrics_as_the_run_does(tmp_path
 
 
 def test_a_metrics_file_a_cell_wrote_and_lost_still_raises(tmp_path):
-    """The record names the file its attempt wrote (its digest): a missing
-    one was lost, not never written."""
+    """Only a task that returned None is recorded as writing no metrics: a
+    missing file of a cell whose task returned metrics was lost."""
     _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
     (tmp_path / "0" / "mushin_metrics.json").unlink()
-    with pytest.raises(FileNotFoundError, match="No files"):
+    with pytest.raises(FileNotFoundError, match="No files") as info:
         _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert "earlier mushin version" not in str(info.value)
 
 
-def test_a_record_from_before_run_id_still_raises_for_a_missing_file(tmp_path):
-    """A released version's record cannot tell 'returned None' from a lost
-    file: as before, a reload raises."""
+def test_a_record_from_before_the_flag_still_raises_with_a_hint(tmp_path):
+    """A released version's record says nothing of a task that returned
+    None, so it cannot tell that from a lost file: a reload raises, and says
+    why."""
     import json
 
     _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
     path = tmp_path / "1" / "mushin_cell_status.json"
     record = json.loads(path.read_text())
-    del record["run_id"]
+    for key in ("no_metrics", "run_id"):
+        del record[key]
     path.write_text(json.dumps(record))
-    with pytest.raises(FileNotFoundError, match="No files"):
+    with pytest.raises(FileNotFoundError, match="No files.*earlier mushin version"):
         _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
 
 
 @pytest.mark.parametrize("name", ["fit_metrics.pt", "nothing_*.json"])
 def test_a_missing_file_of_the_users_own_still_raises(tmp_path, name):
-    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
-    with pytest.raises(FileNotFoundError, match="No files"):
+    """A cell that returned None: only the sidecar is not looked for. Its
+    job is the first, so no other cell's missing file raises first."""
+    _SometimesNone().run(x=multirun([2, 1]), working_dir=str(tmp_path))
+    with pytest.raises(FileNotFoundError, match="No files") as info:
         _SometimesNone().load_from_dir(tmp_path, ["mushin_metrics.json", name])
+    assert str(tmp_path / "0") in str(info.value)
+
+
+def test_the_sidecar_may_be_named_as_a_path(tmp_path):
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    loaded = _SometimesNone().load_from_dir(tmp_path, "./mushin_metrics.json")
+    values = loaded.to_xarray()["v"].values.tolist()
+    assert values[0] == 1.0 and values[1] != values[1]
+
+
+def test_a_none_cell_whose_metrics_file_exists_loads_it(tmp_path):
+    """In a job of several tasks, one returning None can write its record
+    over that of the task that wrote the metrics: a file there still loads."""
+    from mushin._sweep_io import write_metrics_sidecar
+
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    write_metrics_sidecar(tmp_path / "1", {"v": 2.0})
+    loaded = _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert loaded.to_xarray()["v"].values.tolist() == [1.0, 2.0]
 
 
 def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_path):
