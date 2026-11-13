@@ -1515,11 +1515,11 @@ class _TaskRunner:
         """True when this process is one rank of an EXTERNAL multi-rank launch
         (SLURM/submitit set SLURM_NTASKS; submitit's local executor sets
         SUBMITIT_LOCAL_NTASKS; torchrun sets WORLD_SIZE + RANK, all before the
-        process starts). Requires a per-rank marker alongside each count
-        (SLURM_PROCID, SUBMITIT_LOCAL_GLOBALID, RANK), so mushin's own
-        single-node launcher (which exports WORLD_SIZE in rank 0 but never a
-        rank) and a single-task local job (one task) are not mistaken for an
-        external rank."""
+        process starts). Requires a per-rank marker alongside WORLD_SIZE
+        (RANK or SLURM_PROCID), so mushin's own single-node launcher (which
+        exports WORLD_SIZE and LOCAL_RANK, never RANK/SLURM_PROCID) is not
+        mistaken for an external rank; a local job counts only in its tasks,
+        which each have SUBMITIT_LOCAL_GLOBALID."""
         import os
 
         def _gt1(name: str) -> bool:
@@ -2009,23 +2009,32 @@ class _TaskRunner:
         # 'completed', so a later resume with more time finishes it. A cell
         # already running is never interrupted.
         if self.max_total_seconds is not None and self._multi_rank_world():
-            # Under an external multi-rank launch (submitit DDP/FSDP: every
-            # rank runs this task and checks the deadline at its own moment),
-            # a budget that expires on one rank but not its siblings would
-            # leave the training ranks hanging at NCCL rendezvous. Disable the
-            # budget rather than risk the hang; the scheduler's own time limit
-            # still bounds the job.
+            # Under an external multi-rank launch (submitit DDP/FSDP, or a
+            # submitit job of several tasks: every rank runs this task and
+            # checks the deadline at its own moment), a budget that expires
+            # on one rank but not its siblings would leave the training ranks
+            # hanging at NCCL rendezvous, or let a late task record the cell
+            # skipped over another's result (#365). Disable the budget rather
+            # than risk either; the scheduler's own time limit still bounds
+            # the job.
             if not self._budget_rank_warned:
-                warnings.warn(
-                    "`max_total_seconds` is disabled for this cell: it runs "
-                    "under a multi-rank launch (WORLD_SIZE/SLURM_NTASKS > 1), "
-                    "where ranks checking the deadline at different moments "
-                    "could diverge and hang DDP at rendezvous. Use the "
-                    "scheduler's time limit (e.g. submitit's `timeout_min`) "
-                    "to bound multi-rank jobs.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+                # A filter that turns this into an error must not fail the
+                # cell over a disabled budget, as in `_budget_fallback`.
+                try:
+                    warnings.warn(
+                        "`max_total_seconds` is disabled for this cell: it runs "
+                        "under a multi-rank launch, as one of several ranks or "
+                        "tasks (SLURM_NTASKS, SUBMITIT_LOCAL_NTASKS or "
+                        "WORLD_SIZE > 1), which check "
+                        "the deadline at different moments and could diverge: "
+                        "DDP could hang at rendezvous, or a late task record "
+                        "the cell skipped. Use the scheduler's time limit "
+                        "(e.g. submitit's `timeout_min`) to bound such jobs.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                except Warning:
+                    pass
                 self._budget_rank_warned = True
         elif self.max_total_seconds is not None:
             # Start the clock first (a no-op once this process knows the
@@ -2725,9 +2734,11 @@ class BaseWorkflow:
             them. One deadline for the whole sweep, timed from its first
             computed cell: under a parallel launcher (joblib, submitit) every
             worker stops starting cells once it passes. Disabled (with a
-            warning) for cells running under an external multi-rank launch,
-            because ranks checking it at different moments could diverge and
-            hang DDP.
+            warning in the cell's own process) for a cell run as one of
+            several ranks or tasks (a multi-rank DDP launch, or a submitit job
+            with ``tasks_per_node > 1``, ``submitit_local`` included), because
+            each checks it at its own moment: DDP could hang, or a late task
+            record the cell skipped.
 
         sample : int | None (default: None)
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast
@@ -3832,10 +3843,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             fails, each worker process times the budget from its own first
             cell, which runs, with a warning raised in that worker (on its
             stderr, not through the caller's warning filters). Disabled (with
-            a warning) for cells running under a multi-rank launch (submitit
-            DDP/FSDP): ranks checking the deadline at different moments could
-            diverge and hang at rendezvous; use the scheduler's time limit for
-            those jobs instead.
+            a warning) for a cell run as one of several ranks or tasks
+            (submitit DDP/FSDP, or a submitit job with ``tasks_per_node > 1``):
+            each checks the deadline at its own moment, so DDP could hang at
+            rendezvous, or a late task record the cell skipped; use the
+            scheduler's time limit for those jobs instead.
         sample : int | None (default: None)
             Run only a random subset of ``sample`` cells from the full grid for
             fast exploration; the remaining cells are skipped (NaN, and
