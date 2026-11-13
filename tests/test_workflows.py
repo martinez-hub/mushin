@@ -2465,6 +2465,60 @@ def test_skipped_cell_removes_stale_metrics_sidecar(tmp_path):
             assert not (d / "mushin_metrics.json").exists()
 
 
+def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_path):
+    """#355: a task that returns None has no metrics, so a metrics file an
+    earlier sweep left in its reused dir is not this cell's."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class First(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x))
+
+    class Second(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return None
+
+    First().run(x=multirun([1, 2]), working_dir=tmp_path)
+    assert len(list(tmp_path.glob("*/mushin_metrics.json"))) == 2
+    Second().run(x=multirun([1, 2]), working_dir=tmp_path)
+    assert list(tmp_path.glob("*/mushin_metrics.json")) == []
+
+
+@pytest.mark.parametrize("same_run", [False, True], ids=["another-run", "this-run"])
+def test_a_cell_removes_only_another_runs_metrics_file(tmp_path, monkeypatch, same_run):
+    """At its start a cell removes a metrics file only when the record it
+    replaces is another run's: in a job of several tasks each runs the cell,
+    and one that starts after another finished must keep what it wrote. Two
+    runs given one run id stand in for two tasks of one job."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow, _TaskRunner
+
+    class First(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x))
+
+    class Second(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return None
+
+    if same_run:
+        init = _TaskRunner.__init__
+
+        def one_run(self, *args, **kwargs):
+            init(self, *args, **kwargs)
+            self.run_id = "one run"
+
+        monkeypatch.setattr(_TaskRunner, "__init__", one_run)
+    First().run(x=multirun([1]), working_dir=tmp_path)
+    Second().run(x=multirun([1]), working_dir=tmp_path)
+    assert (tmp_path / "0" / "mushin_metrics.json").exists() is same_run
+
+
 def test_offline_reload_restores_inf_metrics(tmp_path):
     """The tagged ±Inf sidecar marker must be decoded by the default
     metric_load_fn too — an offline reload must yield real Inf values, not

@@ -1959,6 +1959,7 @@ class _TaskRunner:
             _CURRENT_RESUME,
             build_resume_context,
             discover_last_ckpt,
+            read_cell_status,
             resolved_config,
             resolved_config_hash,
         )
@@ -2050,6 +2051,21 @@ class _TaskRunner:
             # The prior sidecar (attempt, is_resume) is read before the write
             # below replaces it.
             rc = build_resume_context(cwd, combo)
+            # A metrics file another run left here (an earlier sweep's cell in a
+            # reused dir, #355) is not this cell's result: this attempt writes
+            # its own or none, so a reload must not take that one for it. Only
+            # the first of this run's tasks to start here removes it, before
+            # its 'running' write: in a job of several tasks each runs this
+            # cell, and a task that starts after another finished finds this
+            # run's record and keeps what it wrote. Two tasks that both read
+            # the earlier record remove it before either has run; only a task
+            # stalled between these two statements while another runs the
+            # whole cell could remove a fresh result. A runner pickled before
+            # `run_id` existed (an array queued before an upgrade) has none,
+            # and leaves the file, as before this rule.
+            earlier = read_cell_status(cwd) or {}
+            if earlier.get("run_id") != self.run_id:
+                remove_sidecar(cwd / METRICS_FILE)
             # 'running' is written before the hooks that take time (pre_task,
             # provenance capture), so a job killed in them leaves its own record
             # in the dir, not a prior sweep's: a reload would take that one's
