@@ -594,7 +594,8 @@ def test_a_cache_hit_submits_no_job(tmp_path):
     first = tasks.record_pid.run(working_dir=str(tmp_path / "a"), **sweep)
     again = tasks.record_pid.run(working_dir=str(tmp_path / "b"), **sweep)
     assert again["pid"].values.tolist() == first["pid"].values.tolist()
-    assert len(_job_dirs(tmp_path / "b")) == 0
+    # Nothing left to submit: no executor, so not even its folder.
+    assert not (tmp_path / "b" / ".submitit").exists()
 
 
 def test_a_changed_config_on_resume_submits_every_cell(tmp_path):

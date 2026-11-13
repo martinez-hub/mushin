@@ -933,16 +933,21 @@ def _covers(deps: dict | None, prior: dict) -> bool:
 
 def _reads_environment(ret: JobReturn) -> bool:
     """Whether a job's config may resolve differently in its own process: it
-    reads the environment (``${oc.env:...}``, OmegaConf's older ``${env:...}``)
-    or Hydra sets some for the job (``hydra.job.env_set``)."""
+    reads the environment (``${oc.env:...}``, OmegaConf's older ``${env:...}``,
+    spaced as OmegaConf allows) or Hydra sets some for the job
+    (``hydra.job.env_set``). A custom resolver that reads ``os.environ`` is
+    not seen."""
+    import re
+
     from omegaconf import OmegaConf
 
     if OmegaConf.select(ret.hydra_cfg, "hydra.job.env_set"):
         return True
+    env = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
 
     def reads(node: Any) -> bool:
         if isinstance(node, str):
-            return "${oc.env:" in node or "${env:" in node
+            return env.search(node) is not None
         if isinstance(node, Mapping):
             return any(reads(v) for v in node.values())
         if isinstance(node, (list, tuple)):

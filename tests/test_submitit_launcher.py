@@ -677,3 +677,29 @@ def test_the_driver_can_defer_its_writes(tmp_path):
     defer[0]()
     assert [w["status"] for w in written] == ["completed"]
     assert (tmp_path / "1" / "mushin_metrics.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("cfg", "env_set", "reads"),
+    [
+        ({"a": 1, "b": "${x}"}, {}, False),
+        ({"a": "${oc.env:HOME}"}, {}, True),
+        ({"a": {"b": ["x", "${ oc.env : HOME }"]}}, {}, True),  # spaced, nested
+        ({"a": "path/${env:HOME}/x"}, {}, True),  # OmegaConf's older name
+        ({"a": "${oc.decode:${oc.env:N}}"}, {}, True),
+        ({"a": "environment"}, {}, False),
+        ({"a": 1}, {"N": "8"}, True),
+    ],
+)
+def test_a_config_that_reads_the_environment_is_seen(cfg, env_set, reads):
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    from mushin.workflows import _reads_environment
+
+    ret = SimpleNamespace(
+        cfg=OmegaConf.create(cfg),
+        hydra_cfg=OmegaConf.create({"hydra": {"job": {"env_set": env_set}}}),
+    )
+    assert _reads_environment(ret) is reads
