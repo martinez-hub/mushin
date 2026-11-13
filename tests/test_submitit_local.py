@@ -501,13 +501,15 @@ def test_a_dead_job_leaves_this_cells_earlier_result_for_a_resume(
 
 
 def _records(wd: Path) -> dict[str, dict]:
-    """Each cell's record, without what names the run, the job or the
-    attempt's own process."""
+    """Each cell's record, without what names the run or the job; a metrics
+    digest only as present (each run's metrics hold its own pids)."""
     out = {}
     for path in sorted(wd.glob("[0-9]*/mushin_cell_status.json")):
         record = json.loads(path.read_text())
         for key in ("run_id", "job_id"):
             record.pop(key, None)
+        if "metrics" in record:
+            record["metrics"] = "a digest"
         out[path.parent.name] = record
     return out
 
