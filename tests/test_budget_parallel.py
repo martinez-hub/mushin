@@ -404,6 +404,29 @@ def test_a_requeued_cell_runs_after_the_deadline(tmp_path, monkeypatch):
     assert isinstance(_copy(runner)(other), _SkippedRun)
 
 
+def test_a_requeued_cell_that_completed_runs_after_the_deadline(tmp_path, monkeypatch):
+    """A cell preempted after its 'completed' write, before its job ended, is
+    requeued and enters again after the deadline: it started under this
+    budget, so it runs, and keeps its metrics, rather than being recorded
+    skipped. Another run's completed record is no exemption."""
+    from mushin._sweep_io import METRICS_FILE
+
+    root = tmp_path / "s"
+    runner = _runner(max_total_seconds=0.2)
+    cfg = _cell(root, 0, monkeypatch)
+    assert _copy(runner)(cfg) == {"v": 0.0}  # starts the clock, completes
+    time.sleep(0.3)
+    _in_another_process(runner)  # the requeued job is a new process
+
+    assert _copy(runner)(cfg) == {"v": 0.0}
+    assert read_cell_status(Path.cwd())["status"] == "completed"
+    assert (Path.cwd() / METRICS_FILE).is_file()
+
+    other = _cell(root, 1, monkeypatch)
+    write_cell_status(Path.cwd(), status="completed", combo={}, attempt=1, run_id="x")
+    assert isinstance(_copy(runner)(other), _SkippedRun)
+
+
 def test_budget_expired_never_starts_the_clock(tmp_path, monkeypatch):
     """The expiry check is pure: only `_start_budget`, for a cell about to
     compute, starts the clock, so a stray check cannot start it early."""

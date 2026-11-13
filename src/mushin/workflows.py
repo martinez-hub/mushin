@@ -1467,16 +1467,22 @@ class _TaskRunner:
 
     def _began_under_this_budget(self, cell_dir) -> bool:
         """Whether this cell already started under this run's budget: its own
-        status sidecar says 'running' with this run's `budget_id`. A cell that
-        a scheduler preempted and requeued (SLURM `requeue`) enters again in a
-        new process, possibly after the deadline; it started before the
-        deadline, and a running cell is never cut short, so it runs on."""
+        status sidecar says 'running' with this run's `budget_id`, or is an
+        end this run recorded ('completed' or 'failed' with its `run_id`). A
+        cell that a scheduler preempted and requeued (SLURM `requeue`) enters
+        again in a new process, possibly after the deadline; it started before
+        the deadline, and a running cell is never cut short, so it runs on.
+        One preempted after its 'completed' write, before its job ended, would
+        otherwise be recorded skipped, and its metrics file removed."""
         from ._resume import read_cell_status
 
         status = read_cell_status(cell_dir) or {}
+        if status.get("status") == "running":
+            return status.get("budget_id") == self.budget_id
         return (
-            status.get("status") == "running"
-            and status.get("budget_id") == self.budget_id
+            status.get("status") in ("completed", "failed")
+            and self.run_id is not None
+            and status.get("run_id") == self.run_id
         )
 
     def _cache_key(self, config_hash, deps) -> str | None:
