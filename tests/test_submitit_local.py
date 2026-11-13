@@ -479,27 +479,6 @@ def test_a_dead_job_leaves_another_cells_record_in_a_reused_dir(tmp_path, monkey
     assert record["combo"] == {"seed": 6} and record["attempt"] == 1
 
 
-def test_a_resumed_failed_cell_whose_job_dies_gets_this_jobs_error(
-    tmp_path, monkeypatch
-):
-    wd = tmp_path / "s"
-    sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), on_error="nan", **LOCAL)
-    monkeypatch.setenv("MUSHIN_TEST_RAISE", "1")
-    with pytest.warns(UserWarning, match="failed"):
-        tasks.raise_when_told.run(**sweep)
-    assert "boom" in (wd / "1" / "mushin_error.txt").read_text()
-    monkeypatch.delenv("MUSHIN_TEST_RAISE")
-    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
-    with pytest.warns(UserWarning, match="failed"):
-        tasks.raise_when_told.run(
-            resume=True, overrides=[tasks.DIE_BEFORE_START], **sweep
-        )
-    error = (wd / "1" / "mushin_error.txt").read_text()
-    assert "boom" not in error and error.startswith("UncompletedJobError(")
-    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "failed" and record["attempt"] == 2
-
-
 def test_a_dead_job_leaves_this_cells_earlier_result_for_a_resume(
     tmp_path, monkeypatch
 ):

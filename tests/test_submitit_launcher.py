@@ -152,7 +152,6 @@ def test_recording_a_dead_cell_never_fails_the_run(tmp_path):
         status="failed",
         on_error="nan",
         prior={},
-        refresh=False,
         run_id="r",
     )
 
@@ -192,7 +191,6 @@ def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
             status="failed",
             on_error="raise",
             prior=read_cell_status(tmp_path / "0"),
-            refresh=False,
             run_id="r",
         )
         status = read_cell_status(tmp_path / "0")
@@ -219,12 +217,9 @@ def _dead_ret(root, *, output_subdir=None, job_id="7"):
     return ret
 
 
-@pytest.mark.parametrize("refresh", [False, True], ids=["as #350", "refreshed"])
-def test_a_dead_cell_replaces_an_earlier_record_only_when_refreshed(tmp_path, refresh):
-    """Recording over a 'running' record keeps its attempt, fingerprints and
-    snapshot, as #350 did. Refreshing an earlier run's record of this cell
-    writes this job's snapshot, counts one attempt more, and keeps no
-    earlier fingerprint or error file."""
+def test_a_dead_cell_is_recorded_as_350_did_with_its_run_and_job(tmp_path):
+    """Over a 'running' record the attempt, fingerprints and snapshot stay,
+    as #350 recorded them; the record now names this run and the job."""
     from mushin._resume import read_cell_status, write_cell_status
     from mushin.workflows import _DeadJob, _record_dead_cell
 
@@ -233,42 +228,29 @@ def test_a_dead_cell_replaces_an_earlier_record_only_when_refreshed(tmp_path, re
     snapshot.mkdir(parents=True)
     (snapshot / "hydra.yaml").write_text("earlier: true\n")
     (snapshot / "config.yaml").write_text("lr: 0.1\n")
-    (cell / "mushin_error.txt").write_text("an earlier attempt's error\n")
     write_cell_status(
         cell,
-        status="failed" if refresh else "running",
+        status="running",
         combo={"lr": 0.2},
         attempt=3,
         config_hash="c",
         code_hash="k",
-        run_id="earlier" if refresh else "this",
+        run_id="this",
     )
-    ret = _dead_ret(tmp_path, output_subdir=".hydra")
-    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')")
     _record_dead_cell(
-        ret,
-        dead,
+        _dead_ret(tmp_path, output_subdir=".hydra"),
+        _DeadJob(RuntimeError("x"), "RuntimeError('died')"),
         combo={"lr": 0.2},
         status="failed",
         on_error="raise",
         prior=read_cell_status(cell),
-        refresh=refresh,
         run_id="this",
     )
     status = read_cell_status(cell)
-    assert status["status"] == "failed"
+    assert status["status"] == "failed" and status["attempt"] == 3
+    assert (status["config_hash"], status["code_hash"]) == ("c", "k")
     assert status["run_id"] == "this" and status["job_id"] == "7"
-    if refresh:
-        assert status["attempt"] == 4  # the same cell, one attempt more
-        assert "config_hash" not in status and "code_hash" not in status
-        assert "lr: 0.2" in (snapshot / "config.yaml").read_text()
-        assert "earlier" not in (snapshot / "hydra.yaml").read_text()
-        # Under "raise" no error file is written, and the earlier one is gone.
-        assert not (cell / "mushin_error.txt").exists()
-    else:
-        assert status["attempt"] == 3
-        assert (status["config_hash"], status["code_hash"]) == ("c", "k")
-        assert (snapshot / "config.yaml").read_text() == "lr: 0.1\n"
+    assert (snapshot / "config.yaml").read_text() == "lr: 0.1\n"
 
 
 @pytest.mark.parametrize(
@@ -505,7 +487,7 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
             "dead",
             False,
         ),
-        (dict(status="failed", run_id="earlier"), False, True, "dead", True),
+        (dict(status="failed", run_id="earlier"), False, True, "dead", False),
         (
             dict(status="failed", run_id="earlier", combo=OTHER),
             False,
@@ -526,9 +508,8 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
 def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
     tmp_path, prior, metrics, keepable, returns, recorded
 ):
-    """Which record a dead job keeps, which it records its end over, and
-    which it leaves, as #350 did: an earlier run's completed result, and
-    another cell's terminal record (#355)."""
+    """Which record a dead job keeps as its own end, and which it records its
+    end over or leaves, as #350 did (another cell's records: #355)."""
     from hydra.core.utils import JobStatus
 
     from mushin._resume import read_cell_status, write_cell_status
@@ -568,19 +549,6 @@ def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
         if prior is not None:
             assert (cell / "mushin_error.txt").read_text() == "boom\n"
         assert (cell / "mushin_metrics.json").exists() == metrics
-
-
-def test_a_dead_job_counts_an_attempt_as_the_runner_does(tmp_path):
-    from mushin._resume import read_cell_status, write_cell_status
-    from mushin.workflows import _DeadJob, _TaskRunner
-
-    cell = tmp_path / "0"
-    write_cell_status(cell, status="failed", combo=THIS, attempt=2, run_id="earlier")
-    runner = object.__new__(_TaskRunner)
-    runner.swept_names, runner.sampled_indices = ["lr"], None
-    runner.on_error, runner.run_id = "raise", "this"
-    runner.record_dead_cell(_dead_ret(tmp_path), _DeadJob(RuntimeError("x"), "x"))
-    assert read_cell_status(cell)["attempt"] == 3
 
 
 def test_only_a_one_task_job_that_gave_no_result_may_keep_its_record():

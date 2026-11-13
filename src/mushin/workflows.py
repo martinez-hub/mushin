@@ -864,7 +864,6 @@ def _record_dead_cell(
     status: str,
     on_error: str,
     prior: dict,
-    refresh: bool,
     run_id: str | None,
 ) -> None:
     """Record in its cell that the cell's job ended without a result (#345).
@@ -872,39 +871,31 @@ def _record_dead_cell(
     ``ret`` is the job as mushin's submitit launcher composed it in the
     driver, and ``prior`` the cell's record as the runner found it:
     'running', or none (the job died before the runner wrote anything,
-    perhaps before Hydra made the cell's dir), or, with ``refresh``, an
-    earlier run's failed or skipped record of this cell.
+    perhaps before Hydra made the cell's dir).
 
     The cell gets the ``status`` the runner would have recorded: 'skipped'
     for a cell ``sample=`` left out, else 'failed', as for a task that
-    raised. A cell without Hydra's ``.hydra/`` snapshot gets the one
-    ``run_job`` would have written, so a reload finds it. A refreshed cell
-    gets this job's snapshot over the earlier one, its attempt counted as the
-    runner counts it, no earlier fingerprints, and no earlier error file. A
-    metrics file a prior attempt left is removed; a failed cell under
-    ``on_error="nan"`` gets mushin_error.txt: the one-line summary, which
-    names the job's log, then submitit's message (under ``"raise"`` the
-    raised error carries submitit's message alone). Best-effort throughout:
-    the run records the failure through the job's return whatever happens
-    here."""
+    raised, with this run's ``run_id`` and the job's id. A cell without
+    Hydra's ``.hydra/`` snapshot gets the one ``run_job`` would have written,
+    so a reload finds it. A metrics file a prior attempt left is removed, and
+    a failed cell under ``on_error="nan"`` gets mushin_error.txt: the
+    one-line summary, which names the job's log, then submitit's message
+    (under ``"raise"`` the raised error carries submitit's message alone).
+    Best-effort throughout: the run records the failure through the job's
+    return whatever happens here."""
     from omegaconf import OmegaConf
 
-    from ._resume import build_resume_context, write_cell_status
+    from ._resume import write_cell_status
     from ._sweep_io import METRICS_FILE
 
     try:
         cell_dir = _job_dir(ret)
         hydra = ret.hydra_cfg.hydra
-        # Counted before anything here changes the dir.
-        if refresh:
-            attempt = build_resume_context(cell_dir, combo).attempt  # type: ignore[arg-type]
-        else:
-            attempt = prior.get("attempt", 1)
         # Written before the status, which must be the newer of the two
         # (`sidecar_job_fields`). As `run_job` saves them, unresolved.
         if hydra.output_subdir is not None:
             snapshot = cell_dir / str(hydra.output_subdir)
-            if refresh or not (snapshot / "hydra.yaml").exists():
+            if not (snapshot / "hydra.yaml").exists():
                 snapshot.mkdir(parents=True, exist_ok=True)
                 for name, node in (
                     ("config.yaml", ret.cfg),
@@ -915,8 +906,6 @@ def _record_dead_cell(
                         OmegaConf.to_yaml(node), encoding="utf-8"
                     )
         (cell_dir / METRICS_FILE).unlink(missing_ok=True)
-        if refresh:
-            (cell_dir / "mushin_error.txt").unlink(missing_ok=True)
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
             cell_dir,
@@ -924,9 +913,9 @@ def _record_dead_cell(
             # This sweep's combo (None: it could not be computed); a prior
             # record's may be an earlier sweep's.
             combo=prior.get("combo", {}) if combo is None else combo,
-            attempt=attempt,
-            config_hash=None if refresh else prior.get("config_hash"),
-            code_hash=None if refresh else prior.get("code_hash"),
+            attempt=prior.get("attempt", 1),
+            config_hash=prior.get("config_hash"),
+            code_hash=prior.get("code_hash"),
             job_num=hydra.job.num,
             choices=_group_choices_of_job(ret),
             run_id=run_id,
@@ -1484,12 +1473,11 @@ class _TaskRunner:
         stopped waiting. A skipped one is skipped. Any other terminal record
         of the job's own is kept as it is, and the cell fails.
 
-        Otherwise the job died before its runner recorded an end, and
-        `_record_dead_cell` records it over a 'running' record or none, and
-        over an earlier run's failed or skipped record of this cell. Any
-        other terminal record (an earlier run's completed one, which a resume
-        reuses, or another cell's in a reused dir, #355) is left as it is,
-        and the cell fails for this run.
+        Otherwise, over a 'running' record or none, the job died before its
+        runner recorded an end, and `_record_dead_cell` records it. Any
+        other terminal record (an earlier run's, which a resume may reuse,
+        or another cell's in a reused dir, #355) is left as it is, and the
+        cell fails for this run.
 
         A cell ``sample=`` left out is skipped, as this runner skips it. A
         failed cell is, under ``on_error="raise"``, a FAILED return with the
@@ -1523,10 +1511,7 @@ class _TaskRunner:
                 return JobStatus.COMPLETED, metrics
         if own and status == "skipped":
             return JobStatus.COMPLETED, _SkippedRun("recorded by its job")
-        # An earlier run's failed or skipped record of this cell: its files
-        # are this cell's, and its error file is an earlier attempt's.
-        refresh = not own and this_cell and status in ("failed", "skipped")
-        if status in (None, "running") or refresh:
+        if status in (None, "running"):
             _record_dead_cell(
                 ret,
                 dead,
@@ -1534,7 +1519,6 @@ class _TaskRunner:
                 status="skipped" if skipped else "failed",
                 on_error=self.on_error,
                 prior=prior,
-                refresh=refresh,
                 run_id=self.run_id,
             )
         if skipped:

@@ -209,6 +209,11 @@ if _plugin_launcher is not None:
                 # Inside the try: the cell's config-group choices come from
                 # the HydraConfig set above.
                 ret.status, ret.return_value = runner.record_dead_cell(ret, dead)
+                if isinstance(ret.return_value, dict):
+                    log.info(
+                        f"submitit job {job.job_id} gave no result; its cell's "
+                        "record holds one, which stands for it (#345)"
+                    )
             finally:
                 HydraConfig.instance().cfg = outer
             return ret

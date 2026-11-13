@@ -97,15 +97,6 @@ DIE_BEFORE_START = (
 
 
 @mushin.sweep
-def raise_when_told(seed):
-    """Raises on the seed `MUSHIN_TEST_RAISE` names, so its cell fails
-    through the runner, with the runner's own error file."""
-    if os.environ.get("MUSHIN_TEST_RAISE") == str(seed):
-        raise RuntimeError("boom")
-    return dict(v=float(seed), pid=float(os.getpid()))
-
-
-@mushin.sweep
 def second_task_dies(seed):
     """In a job of two tasks, the second dies on seed 1 after the first has
     started, and the first returns only once it has, so the cell's last

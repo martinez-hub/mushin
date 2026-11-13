@@ -2588,9 +2588,9 @@ def test_a_job_dir_parameter_swept_by_hand_gets_the_sweep_advice(tmp_path):
     assert "target job directory" not in message
 
 
-def test_a_completed_record_says_whether_this_attempt_wrote_metrics(tmp_path):
+def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_path):
     """A launcher that loses a job's result can take the metrics file for it
-    only when the record says this attempt wrote it (#345)."""
+    only when the record says the file holds the result whole (#345)."""
     import json
 
     class Some(MultiRunMetricsWorkflow):

@@ -78,8 +78,9 @@ def write_cell_status(
 
     ``run_id`` names the ``run()`` that wrote the record and ``job_id`` the
     job it ran in (Hydra's ``job.id``, which a submitit launcher sets to the
-    scheduler's id), and ``metrics`` says a completed cell wrote its metrics
-    file in this attempt. A launcher that finds a job ended without a result
+    scheduler's id), and ``metrics`` says a completed cell's metrics file,
+    written in that attempt, holds its result whole (no value written as its
+    text). A launcher that finds a job ended without a result
     tells by ``run_id`` and the combo whether the cell's record is that
     job's own, and can then take a completed record's metrics file as the
     job's result (#345)."""
