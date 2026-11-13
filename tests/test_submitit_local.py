@@ -495,6 +495,19 @@ def test_a_dead_job_leaves_this_cells_earlier_result_for_a_resume(
     assert again["pid"].values[1] == first["pid"].values[1]
 
 
+def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
+    """#355: a reload tells a record an earlier run left from this run's by
+    the run its job's hydra.yaml names."""
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+
+    wd = tmp_path / "s"
+    tasks.record_pid.run(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    for cell in ("0", "1"):
+        record = json.loads((wd / cell / "mushin_cell_status.json").read_text())
+        snapshot = load_hydra_record(wd / cell / ".hydra" / "hydra.yaml")
+        assert hydra_run_stamp(snapshot) == record["run_id"]
+
+
 def test_a_task_that_returns_none_keeps_the_first_tasks_metrics(tmp_path):
     """A job of several tasks runs the cell in each; one that returns None
     after the first task wrote the metrics leaves them (#355)."""
