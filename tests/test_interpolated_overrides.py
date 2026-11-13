@@ -1,8 +1,9 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""A sweep's override holding an interpolation that cannot be resolved once
-its jobs have run is read as written, instead of stopping `run()` and a
-reload (#351). One that can be resolved reads as before."""
+"""A fixed value holding an interpolation that cannot be resolved once the
+sweep's jobs have run is read as written, instead of stopping `run()` and a
+reload (#351). One that can be resolved reads as before, and a swept one
+that cannot still raises (#353)."""
 
 import json
 import subprocess
@@ -120,14 +121,10 @@ def test_an_interpolation_that_resolves_reads_its_value(tmp_path, swept):
     assert np.ravel(loaded.to_xarray().score.values).tolist() == scores
 
 
-def test_a_swept_hydra_interpolation_warns_instead_of_stopping_the_sweep(tmp_path):
-    # Each job resolves the value to its own directory, so the grid's text
-    # cannot key that cell; the run returns and says so.
-    wf = Plain()
-    with pytest.warns(UserWarning, match="cannot resolve the sweep"):
-        wf.run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)
-    ds = wf.to_xarray()
-    assert ds.coords["x"].values.tolist() == [f"{HYDRA_DIR}/a", "b"]
-    score = ds.score.values
-    assert np.isnan(score[0]) and score[1] == 1.0
-    assert (tmp_path / MANIFEST_FILE).exists()
+def test_a_swept_interpolation_that_cannot_be_resolved_still_raises(tmp_path):
+    # Each job resolves it to a value of its own, which the grid cannot key
+    # by its text (#353): raising, as before, beats a cell silently NaN.
+    from omegaconf.errors import InterpolationResolutionError
+
+    with pytest.raises(InterpolationResolutionError):
+        Plain().run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)

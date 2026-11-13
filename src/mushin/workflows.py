@@ -636,46 +636,31 @@ _MISSING_SWEPT = object()
 def _override_texts(overrides) -> list[str]:
     """A sweep's override strings, read back from its YAML (#351).
 
-    Each is read as before, its interpolations resolved, except one whose
-    resolution fails, which is read as the file holds it. An override such
-    as ``+out='${hydra:runtime.output_dir}'`` cannot be resolved once the
-    jobs have run: there is no ``HydraConfig`` for the ``hydra`` resolver to
-    read (in a new process, no such resolver). It stopped ``run()`` after
-    every cell had completed, and stopped a reload. A sweep's values read
-    unresolved cannot key cells that each job resolved for itself, so that
-    case warns."""
+    Each is read as before, its interpolations resolved, except a fixed
+    value whose resolution fails, which is read as the file holds it. An
+    override such as ``+out='${hydra:runtime.output_dir}'`` cannot be
+    resolved once the jobs have run: there is no ``HydraConfig`` for the
+    ``hydra`` resolver to read (in a new process, no such resolver). It
+    stopped ``run()`` after every cell had completed, and stopped a reload.
+    A sweep's values key the grid's cells, which each job resolved for
+    itself, so one that cannot be resolved still raises (#353)."""
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
-    if not OmegaConf.is_config(overrides):
-        return list(overrides)
     written = OmegaConf.to_container(overrides, resolve=False)
     texts = []
     for i, text in enumerate(written):  # type: ignore[arg-type]
         try:
             texts.append(overrides[i])
-        except InterpolationResolutionError as e:
+        except InterpolationResolutionError:
+            try:
+                swept = _override_parser().parse_override(text).is_sweep_override()
+            except Exception:  # noqa: BLE001 - one Hydra cannot parse fails as before
+                swept = True
+            if swept:
+                raise
             texts.append(text)
-            if _is_sweep_override(text):
-                import warnings
-
-                warnings.warn(
-                    f"mushin cannot resolve the sweep {text!r} once its jobs "
-                    f"have run ({e}), so it reads that axis's values as "
-                    "written; a cell's value, which its job resolved, will "
-                    "not match them and the cell comes back NaN. Sweep plain "
-                    "values instead, and resolve them in the task.",
-                    UserWarning,
-                    stacklevel=2,
-                )
     return texts
-
-
-def _is_sweep_override(text: str) -> bool:
-    try:
-        return _override_parser().parse_override(text).is_sweep_override()
-    except Exception:  # noqa: BLE001 - only decides whether to warn
-        return False
 
 
 def _read_swept_value(cfg, name: str):
@@ -3592,13 +3577,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         multirun_cfg = self.working_dir / "multirun.yaml"
         self._target_dir_multirun_overrides = defaultdict(list)
 
-        overrides = _override_texts(load_from_yaml(multirun_cfg).hydra.overrides.task)
-        self.overrides = overrides
+        self.overrides = load_from_yaml(multirun_cfg).hydra.overrides.task
 
         # Use Hydra's override parser (rather than naive string splitting) so
         # that the job-dir sweep – e.g. `+job_dir=choice('a','b')` – and any
         # quoted values containing '=' / commas are parsed correctly.
-        parsed = self._parse_overrides(overrides)
+        parsed = self._parse_overrides(_override_texts(self.overrides))
         jobdir_value = parsed.get(self._JOBDIR_NAME, [])
         dirs = list(jobdir_value) if _non_str_sequence(jobdir_value) else []
 
