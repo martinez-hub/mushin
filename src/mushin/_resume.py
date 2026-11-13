@@ -129,9 +129,17 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
     ``hydra_yaml`` that is there but cannot be examined.
 
     Hydra writes a job's hydra.yaml before the task runs, and the task writes
-    the sidecar, so a sidecar older than the hydra.yaml beside it is a previous
-    sweep's record of a reused directory (the new job was killed before its
-    first status write), and that hydra.yaml is the record to read."""
+    the sidecar, so a sidecar older than the hydra.yaml beside it predates
+    that job: a previous sweep's record of a reused directory (the new job was
+    killed before its first status write), or a copy that did not keep the
+    files' times. Either way that hydra.yaml is the one to read."""
+    return sidecar_state(cell_dir, hydra_yaml)[0]
+
+
+def sidecar_state(cell_dir, hydra_yaml=None) -> tuple[tuple[int, dict] | None, bool]:
+    """``sidecar_job_fields``, and whether the sidecar is older than
+    ``hydra_yaml``: a record a later job's snapshot came after, which
+    `record_of_another_run` then judges by the run that snapshot names."""
     if hydra_yaml is not None:
         # The sidecar's age is taken before its content: a sidecar replaced in
         # between is then read in its newer state, and only its age is
@@ -139,21 +147,93 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
         try:
             written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
         except OSError:
-            return None
+            return None, False
         try:
             newer = Path(hydra_yaml).stat().st_mtime_ns > written
         except FileNotFoundError:  # no hydra.yaml: nothing newer to defer to
             newer = False
         except OSError:  # unreadable: let the hydra.yaml path report it
-            return None
+            return None, False
         if newer:
-            return None
+            return None, True
     status = read_cell_status(cell_dir)
     if status is None:
-        return None
+        return None, False
     num = status.get("job_num")
     choices = status.get("choices")
-    return (num, choices) if _records_job_fields(num, choices) else None
+    return ((num, choices) if _records_job_fields(num, choices) else None), False
+
+
+def record_of_another_run(record: dict | None, stamp: Any) -> bool:
+    """Whether a cell's status ``record`` was written by another run than
+    the one whose job wrote the hydra.yaml beside it (``stamp``, its
+    ``hydra.job.mushin_run_id``), asked of a record found older than that
+    hydra.yaml (`sidecar_state`): the job died after Hydra's snapshot and
+    before its first record, so the record is an earlier run's, of this cell
+    or, in a reused directory, another (#355). A record from before
+    ``run_id`` was recorded is an earlier version's, so another run's. A
+    snapshot without the stamp (a sweep from before it) says nothing, and
+    the record stands, as does one a copy without its files' times left
+    older than its hydra.yaml: both carry the same run. A record this run
+    wrote since (the job finished after all) names that run, and stands."""
+    if record is None or not isinstance(stamp, str):
+        return False
+    return record.get("run_id") != stamp
+
+
+def record_predates(cell_dir, hydra_yaml) -> bool:
+    """Whether the cell's status record is older than ``hydra_yaml``, the
+    test `sidecar_state` makes, by the files' ages alone; False when either
+    cannot be stat'ed. Take it before reading the record, as `sidecar_state`
+    does: a record replaced in between is then read in its newer state."""
+    try:
+        written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
+        return Path(hydra_yaml).stat().st_mtime_ns > written
+    except OSError:
+        return False
+
+
+#: The line `OmegaConf.to_yaml` writes for ``hydra.job.mushin_run_id``, inside
+#: the ``  job:`` section of ``hydra:``: a key indented by four spaces.
+_STAMP_KEY = "    mushin_run_id: "
+#: An unquoted YAML scalar that would load as a number, a boolean or null.
+_NOT_A_STRING = re.compile(
+    r"[-+]?(\d[\d_]*(\.\d*)?([eE][-+]?\d+)?|\.\d+([eE][-+]?\d+)?|\.inf|\.nan)"
+    r"|null|~|true|false|yes|no|on|off",
+    re.IGNORECASE,
+)
+
+
+def snapshot_run_stamp(hydra_yaml) -> str | None:
+    """The run a job's hydra.yaml names (``hydra.job.mushin_run_id``),
+    read from its own line in the ``job:`` section, with no YAML parser:
+    ``run()`` writes a plain id, which the emitter quotes when it would read
+    as anything but a string. On every hydra.yaml Hydra or mushin writes it
+    gives what `_hydra_yaml.hydra_run_stamp` gives for the parsed file
+    (a value written by hand, such as an escaped string, may read
+    differently): None for a file that cannot be read or names no run, or a
+    value that is not a plain id (empty, ``???``, an interpolation, or a
+    number)."""
+    try:
+        text = Path(hydra_yaml).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    in_job, value = False, None
+    for line in text.splitlines():
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= 2:
+            in_job = line.rstrip() == "  job:"  # a section of ``hydra:``
+        elif in_job and line.startswith(_STAMP_KEY):
+            value = line[len(_STAMP_KEY) :].strip()
+            break
+    if value is None:
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    elif _NOT_A_STRING.fullmatch(value):
+        return None
+    if not value or value == "???" or "${" in value:
+        return None
+    return value
 
 
 #: What ``resolved_config`` returns for a config that cannot be resolved.
