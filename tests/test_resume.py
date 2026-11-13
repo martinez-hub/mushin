@@ -263,15 +263,22 @@ def test_a_combo_reads_back_as_swept(tmp_path):
     assert read_cell_status(tmp_path)["combo"] == {"__mushin_nonfinite__": "inf"}
 
 
-def test_a_record_too_deep_to_restore_keeps_its_stored_combo(tmp_path):
-    value: object = 1
-    for _ in range(500):
-        value = [value]
+def test_a_record_too_deep_to_restore_keeps_its_stored_combo(tmp_path, monkeypatch):
+    """A combo nested deeper than the restore can recurse reads in its stored
+    form, as it did before combos were restored. (How deep that is depends on
+    the Python version, so the restore is made to raise.)"""
+    from mushin import _sweep_io
+
+    def too_deep(value):
+        raise RecursionError
+
+    monkeypatch.setattr(_sweep_io, "restore_combo_value", too_deep)
+    stored = {"x": {"__mushin_nonfinite__": "nan"}}
     (tmp_path / STATUS_FILE).write_text(
-        json.dumps({"status": "completed", "combo": {"x": value}})
+        json.dumps({"status": "completed", "combo": stored})
     )
     record = read_cell_status(tmp_path)
-    assert record is not None and "x" in record["combo"]
+    assert record is not None and record["combo"] == stored
 
 
 class _NoText:
