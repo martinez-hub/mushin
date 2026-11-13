@@ -145,7 +145,16 @@ def test_recording_a_dead_cell_never_fails_the_run(tmp_path):
     ret.hydra_cfg = OmegaConf.create({"hydra": {"runtime": {"cwd": str(tmp_path)}}})
     OmegaConf.set_struct(ret.hydra_cfg, True)
     dead = _DeadJob(RuntimeError("x"), "RuntimeError('x')")
-    _record_dead_cell(ret, dead, combo={}, status="failed", on_error="nan")
+    _record_dead_cell(
+        ret,
+        dead,
+        combo={},
+        status="failed",
+        on_error="nan",
+        prior={},
+        own=False,
+        run_id="r",
+    )
 
 
 def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
@@ -176,9 +185,91 @@ def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
         write_cell_status(
             tmp_path / "0", status="running", combo={"lr": 0.1}, attempt=1
         )
-        _record_dead_cell(ret, dead, combo=combo, status="failed", on_error="raise")
+        _record_dead_cell(
+            ret,
+            dead,
+            combo=combo,
+            status="failed",
+            on_error="raise",
+            prior=read_cell_status(tmp_path / "0"),
+            own=False,
+            run_id="r",
+        )
         status = read_cell_status(tmp_path / "0")
         assert status["status"] == "failed" and status["combo"] == recorded
+
+
+def _dead_ret(root, *, output_subdir=None, job_id="7"):
+    from hydra.core.utils import JobReturn
+    from omegaconf import OmegaConf
+
+    ret = JobReturn()
+    ret.working_dir = "0"
+    ret.cfg = OmegaConf.create({"lr": 0.2})
+    ret.overrides = ["+lr=0.2"]
+    ret.hydra_cfg = OmegaConf.create(
+        {
+            "hydra": {
+                "runtime": {"cwd": str(root)},
+                "output_subdir": output_subdir,
+                "job": {"num": 0, "id": job_id},
+            }
+        }
+    )
+    return ret
+
+
+@pytest.mark.parametrize("own", [True, False], ids=["this run's", "an earlier run's"])
+def test_a_dead_cell_takes_over_only_this_runs_record(tmp_path, own):
+    """A 'running' record this run wrote is the dead job's own: its attempt
+    and fingerprints stay, and so does the snapshot Hydra wrote for it. An
+    earlier run's record, of this cell or of another, is replaced whole: a
+    fresh snapshot from this job's config, a new attempt count, no
+    fingerprints, and no error file of an earlier attempt."""
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _record_dead_cell
+
+    cell = tmp_path / "0"
+    snapshot = cell / ".hydra"
+    snapshot.mkdir(parents=True)
+    (snapshot / "hydra.yaml").write_text("earlier: true\n")
+    (snapshot / "config.yaml").write_text("lr: 0.1\n")
+    (cell / "mushin_error.txt").write_text("an earlier attempt's error\n")
+    write_cell_status(
+        cell,
+        status="running",
+        combo={"lr": 0.2},
+        attempt=3,
+        config_hash="c",
+        code_hash="k",
+        run_id="this" if own else "earlier",
+    )
+    ret = _dead_ret(tmp_path, output_subdir=".hydra")
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')")
+    _record_dead_cell(
+        ret,
+        dead,
+        combo={"lr": 0.2},
+        status="failed",
+        on_error="raise",
+        prior=read_cell_status(cell),
+        own=own,
+        run_id="this",
+    )
+    status = read_cell_status(cell)
+    assert status["status"] == "failed"
+    assert status["run_id"] == "this" and status["job_id"] == "7"
+    # Under "raise" no error file is written, and an earlier one is gone.
+    assert not (cell / "mushin_error.txt").exists()
+    if own:
+        assert status["attempt"] == 3
+        assert (status["config_hash"], status["code_hash"]) == ("c", "k")
+        assert (snapshot / "config.yaml").read_text() == "lr: 0.1\n"
+    else:
+        assert status["attempt"] == 4  # the same cell, one attempt more
+        assert "config_hash" not in status and "code_hash" not in status
+        assert "lr: 0.2" in (snapshot / "config.yaml").read_text()
+        assert "earlier" not in (snapshot / "hydra.yaml").read_text()
 
 
 @pytest.mark.parametrize(
@@ -356,3 +447,32 @@ def test_the_summary_names_what_ended_the_job_and_its_log():
     # A job of several tasks has a log per task: name their folder.
     several = _summary(_Ended(num_tasks=2), UncompletedJobError("x"), {})
     assert "its log: /logs (one per task)" in several
+
+
+@pytest.mark.parametrize(
+    ("prior", "holds"),
+    [
+        (dict(status="completed", combo={"lr": 0.2}), True),
+        (dict(status="completed", combo={"lr": 0.2}, code_hash="k"), True),
+        (dict(status="completed", combo={"lr": 0.2}, config_hash="OURS"), True),
+        (dict(status="completed", combo={"lr": 0.1}), False),  # another cell
+        (dict(status="completed", combo={"lr": 0.2}, config_hash="other"), False),
+        (dict(status="completed", combo={"lr": 0.2}, code_hash="other"), False),
+        (dict(status="failed", combo={"lr": 0.2}), False),
+        (dict(status="running", combo={"lr": 0.2}), False),
+    ],
+)
+def test_only_a_result_this_run_would_reuse_outlives_a_dead_job(tmp_path, prior, holds):
+    """An earlier run's completed record of the same cell stays when no
+    fingerprint it has differs from this run's (a resume reuses it)."""
+    from mushin._resume import resolved_config, resolved_config_hash
+    from mushin.workflows import _TaskRunner
+
+    runner = object.__new__(_TaskRunner)
+    runner.code_hash = "k"
+    ret = _dead_ret(tmp_path)
+    ours = resolved_config_hash(resolved_config(ret.cfg))
+    if prior.get("config_hash") == "OURS":
+        prior = {**prior, "config_hash": ours}
+    assert runner._result_left_holds(prior, {"lr": 0.2}, ret) is holds
+    assert runner._result_left_holds(prior, None, ret) is False

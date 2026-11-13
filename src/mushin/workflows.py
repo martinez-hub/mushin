@@ -721,6 +721,21 @@ def _current_job_fields() -> tuple[int | None, dict | None]:
     return num, hydra_choices(hydra)
 
 
+def _current_job_id() -> str | None:
+    """The current Hydra job's ``job.id``, or None outside a Hydra job. A
+    submitit launcher sets it to the scheduler's job id (an array task's is
+    ``<array>_<task>``); the basic launcher to ``job_id_for_<num>``."""
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        if not HydraConfig.initialized():
+            return None
+        job_id = HydraConfig.get().job.id
+    except Exception:  # noqa: BLE001 - no job id
+        return None
+    return job_id if isinstance(job_id, str) and job_id else None
+
+
 # What to `pip install` per Hydra launcher name, for the missing-plugin install
 # hint. The submitit launchers come with mushin's `slurm` extra, which also
 # holds the plugin's floor (#344); quoted, as a shell needs `[...]` to be.
@@ -812,38 +827,46 @@ def _record_dead_cell(
     combo: dict | None,
     status: str,
     on_error: str,
+    prior: dict,
+    own: bool,
+    run_id: str | None,
 ) -> None:
     """Record in its cell that the cell's job ended without a result (#345).
 
     ``ret`` is the job as mushin's submitit launcher composed it in the
-    driver. The runner wrote 'running' when it started the cell, and nothing
-    if the job died before that, perhaps before Hydra made the cell's dir.
-    Such a cell gets the ``.hydra/`` snapshot ``run_job`` would have written
-    (so a reload finds it) and the ``status`` the runner would have recorded:
-    'skipped' for a cell ``sample=`` left out, else 'failed', as for a task
-    that raised. A metrics file a prior attempt left is removed, and a failed
-    cell under ``on_error="nan"`` gets mushin_error.txt: the one-line
-    summary, which names the job's log, then submitit's message (under
-    ``"raise"`` the raised error carries submitit's message alone). A terminal status (completed, failed, skipped) is left as it
-    is: telling one this job wrote from an earlier sweep's or attempt's is
-    the next part of #345. Best-effort throughout: the run records the
-    failure through the job's return whatever happens here."""
+    driver; ``prior`` is the cell's record as the runner found it, and
+    ``own`` says whether this run wrote it (`_TaskRunner.record_dead_cell`
+    has already kept a terminal record of this run's). So the job died
+    before its runner recorded an end: in its task (``own``, a 'running'
+    record), or before the runner wrote anything, perhaps before Hydra made
+    the cell's dir. A record ``own`` is not is an earlier run's, of this
+    cell or of another that had this dir.
+
+    The cell gets the ``status`` the runner would have recorded: 'skipped'
+    for a cell ``sample=`` left out, else 'failed', as for a task that
+    raised. Unless the record is this run's, the cell's ``.hydra/`` snapshot
+    is written from this job's config (``run_job`` would have written it, and
+    one an earlier sweep left keys the cell by that sweep's config on a
+    reload), and the attempt and fingerprints are not an earlier run's. A
+    metrics file and a mushin_error.txt a prior attempt left are removed; a
+    failed cell under ``on_error="nan"`` gets a new mushin_error.txt: the
+    one-line summary, which names the job's log, then submitit's message
+    (under ``"raise"`` the raised error carries submitit's message alone).
+    Best-effort throughout: the run records the failure through the job's
+    return whatever happens here."""
     from omegaconf import OmegaConf
 
-    from ._resume import read_cell_status, write_cell_status
+    from ._resume import write_cell_status
     from ._sweep_io import METRICS_FILE
 
     try:
         cell_dir = _job_dir(ret)
-        prior = read_cell_status(cell_dir) or {}
-        if prior.get("status") not in (None, "running"):
-            return
         hydra = ret.hydra_cfg.hydra
         # Written before the status, which must be the newer of the two
         # (`sidecar_job_fields`). As `run_job` saves them, unresolved.
         if hydra.output_subdir is not None:
             snapshot = cell_dir / str(hydra.output_subdir)
-            if not (snapshot / "hydra.yaml").exists():
+            if not own or not (snapshot / "hydra.yaml").exists():
                 snapshot.mkdir(parents=True, exist_ok=True)
                 for name, node in (
                     ("config.yaml", ret.cfg),
@@ -854,6 +877,14 @@ def _record_dead_cell(
                         OmegaConf.to_yaml(node), encoding="utf-8"
                     )
         (cell_dir / METRICS_FILE).unlink(missing_ok=True)
+        (cell_dir / "mushin_error.txt").unlink(missing_ok=True)
+        if own:
+            attempt = prior.get("attempt", 1)
+        elif combo is not None and prior.get("combo") == combo:
+            # As `build_resume_context` counts a cell's attempts.
+            attempt = _int_or(prior.get("attempt"), 0) + 1
+        else:
+            attempt = 1
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
             cell_dir,
@@ -861,11 +892,13 @@ def _record_dead_cell(
             # This sweep's combo (None: it could not be computed); a prior
             # record's may be an earlier sweep's.
             combo=prior.get("combo", {}) if combo is None else combo,
-            attempt=prior.get("attempt", 1),
-            config_hash=prior.get("config_hash"),
-            code_hash=prior.get("code_hash"),
+            attempt=attempt,
+            config_hash=prior.get("config_hash") if own else None,
+            code_hash=prior.get("code_hash") if own else None,
             job_num=hydra.job.num,
             choices=_group_choices_of_job(ret),
+            run_id=run_id,
+            job_id=_str_or_none(OmegaConf.select(hydra, "job.id")),
         )
         if status == "failed" and on_error == "nan":
             # UTF-8 whatever the locale: the error stream is the job's output.
@@ -876,6 +909,17 @@ def _record_dead_cell(
             )
     except Exception:  # noqa: BLE001 - see the docstring: never fails the run
         pass
+
+
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _mushin_launchers_available() -> bool:
@@ -1143,6 +1187,10 @@ class _TaskRunner:
         # earlier run left behind is never read.
         self.max_total_seconds = max_total_seconds
         self.budget_id = uuid.uuid4().hex if max_total_seconds is not None else None
+        # Names this run in every status record its cells write, and is the
+        # same in every pickled copy: a job that ended without a result is
+        # judged by whether its cell's record is this run's (#345).
+        self.run_id = uuid.uuid4().hex
         # True only in an unpickled copy (`__setstate__`).
         self._shared_budget = False
         # True once a launcher has pickled this runner (`__getstate__`): only
@@ -1177,6 +1225,8 @@ class _TaskRunner:
         self.__dict__.setdefault("_code_token", "")
         self.__dict__.setdefault("cache_ok", True)
         self.__dict__.setdefault("script_entries", {})
+        # Such a runner names no run: its records never count as this run's.
+        self.__dict__.setdefault("run_id", None)
 
     def budget_start_path(self, root) -> Path:
         """The file in sweep root ``root`` that holds this run's budget start."""
@@ -1398,12 +1448,28 @@ class _TaskRunner:
         sends for it. Called in the driver, with HydraConfig set to the
         job's config, from which the combo reads config-group choices.
 
-        A cell ``sample=`` left out is skipped, as this runner skips it.
-        Any other is failed: under ``on_error="raise"`` a FAILED return with
-        the job's error, as ``run_job`` returns a task that raised (so the
-        sweeper raises it after the batch); under ``"nan"`` a COMPLETED
-        return with the `_DeadJob`, which ``jobs_post_process`` takes as a
-        failed cell (a FAILED return is raised whatever ``on_error`` says)."""
+        The cell's record says how far the job got. A terminal record this
+        run wrote (its ``run_id``) is the job's own end, kept as it is: a
+        completed cell returns its result from its metrics file, as a resume
+        would (the job finished, but its result did not reach the driver: it
+        came after submitit stopped waiting, could not be read, or another
+        task of the job died after this one returned); a skipped cell is
+        skipped; a failed cell keeps the runner's record and error file.
+
+        Otherwise the job died before its runner recorded an end, and
+        `_record_dead_cell` records it: a cell ``sample=`` left out is
+        skipped, as this runner skips it; any other is failed. A completed
+        record an earlier run left for this cell, with no fingerprint that
+        differs from this run's, is left in place (a resume reuses it), and
+        the cell is failed for this run only. A failed cell is, under
+        ``on_error="raise"``, a FAILED return with the job's error, as
+        ``run_job`` returns a task that raised (so the sweeper raises it after
+        the batch); under ``"nan"`` a COMPLETED return with the `_DeadJob`,
+        which ``jobs_post_process`` takes as a failed cell (a FAILED return
+        is raised whatever ``on_error`` says)."""
+        from ._resume import read_cell_status
+        from ._sweep_io import read_metrics_sidecar
+
         num = ret.hydra_cfg.hydra.job.num
         sampled = getattr(self, "sampled_indices", None)
         skipped = sampled is not None and num is not None and num not in sampled
@@ -1411,18 +1477,55 @@ class _TaskRunner:
             combo = self._combo(ret.cfg, self.swept_names)
         except Exception:  # noqa: BLE001 - the combo itself may not compute
             combo = None
-        _record_dead_cell(
-            ret,
-            dead,
-            combo=combo,
-            status="skipped" if skipped else "failed",
-            on_error=self.on_error,
-        )
+        try:
+            cell_dir = _job_dir(ret)
+            prior = read_cell_status(cell_dir) or {}
+        except Exception:  # noqa: BLE001 - no record to read
+            cell_dir, prior = None, {}
+        own = self.run_id is not None and prior.get("run_id") == self.run_id
+        ended = prior.get("status") if own else None
+        if ended == "completed":
+            return JobStatus.COMPLETED, read_metrics_sidecar(cell_dir)
+        if ended == "skipped":
+            return JobStatus.COMPLETED, _SkippedRun("recorded by its job")
+        if ended != "failed" and not (
+            not own and not skipped and self._result_left_holds(prior, combo, ret)
+        ):
+            _record_dead_cell(
+                ret,
+                dead,
+                combo=combo,
+                status="skipped" if skipped else "failed",
+                on_error=self.on_error,
+                prior=prior,
+                own=own,
+                run_id=self.run_id,
+            )
         if skipped:
             return JobStatus.COMPLETED, _SkippedRun("not sampled")
         if self.on_error == "raise":
             return JobStatus.FAILED, dead.exception
         return JobStatus.COMPLETED, dead
+
+    def _result_left_holds(self, prior: dict, combo: dict | None, ret) -> bool:
+        """Whether a record an earlier run left is a completed result for
+        this cell that this run's config and task code would not contradict:
+        the same combo, and no fingerprint that differs (one the record lacks
+        cannot differ). A resume reuses such a result, so a job that died
+        before its runner does not erase it."""
+        from ._resume import resolved_config, resolved_config_hash
+
+        if prior.get("status") != "completed" or combo is None:
+            return False
+        if prior.get("combo") != combo:
+            return False
+        recorded, ours = prior.get("config_hash"), None
+        if recorded is not None:
+            ours = resolved_config_hash(resolved_config(ret.cfg))
+            if ours is not None and ours != recorded:
+                return False
+        recorded = prior.get("code_hash")
+        return recorded is None or self.code_hash is None or recorded == self.code_hash
 
     def __call__(self, cfg):
         import warnings
@@ -1465,6 +1568,8 @@ class _TaskRunner:
             code_hash=self.code_hash,
             job_num=job_num,
             choices=choices,
+            run_id=self.run_id,
+            job_id=_current_job_id(),
         )
 
         # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra

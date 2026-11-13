@@ -123,6 +123,30 @@ until every job ends, and:
   `launch()` (comments and blank lines dropped; `ast.dump` differs between
   Python versions).
 
+## Decisions (PR 2)
+
+- **E1. A record is the job's own when it carries this run's `run_id`.** The
+  runner gets a `uuid4` per `run()`, pickled into every job, and every status
+  write records it with Hydra's `job.id`. Not the job id alone: a local job's
+  id is a process id, which can recur in a reused dir, and whether SLURM's
+  array id reads the same in the job and the driver is runbook T9.
+- **E2. A dead job keeps its own terminal record.** Completed: the driver
+  returns the cell's metrics file (as a resume returns it; None when the task
+  returned None), under either `on_error`. Skipped: skipped. Failed: the
+  runner's record and error file stay, and the cell fails as before.
+- **E3. Otherwise the dead job's end replaces the record**, with this job's
+  `.hydra/` snapshot (unless the record is this run's, whose snapshot Hydra
+  wrote), a new attempt count (one more than a record of the same combo, as
+  `build_resume_context` counts), no fingerprints from another run, and no
+  error file from an earlier attempt.
+- **E4. Except a completed result of the same cell** that this run's config
+  and task code do not contradict (the same combo; a fingerprint the record
+  lacks cannot differ): a resume reuses it, so a job that died before its
+  runner leaves it, and the cell fails for this run only, as in PR 1.
+- **E5. One read of the record, no retry.** On a slow filesystem the driver
+  can still see an older record of a cell that completed and record the cell
+  failed over it, as PR 1 did; T9 checks how often.
+
 ## Needs a cluster
 
 A probe on `submitit_local` (a cell sleeping past `timeout_min=1`) shows a

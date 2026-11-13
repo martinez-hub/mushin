@@ -94,3 +94,35 @@ OmegaConf.register_new_resolver(
 DIE_BEFORE_START = (
     "hydra.sweep.subdir='${mushin_test_die_before_start:${hydra.job.num}}'"
 )
+
+
+@mushin.sweep
+def raise_when_told(seed):
+    """Raises on the seed `MUSHIN_TEST_RAISE` names, so its cell fails
+    through the runner, with the runner's own error file."""
+    if os.environ.get("MUSHIN_TEST_RAISE") == str(seed):
+        raise RuntimeError("boom")
+    return dict(v=float(seed), pid=float(os.getpid()))
+
+
+@mushin.sweep
+def second_task_dies(seed):
+    """In a job of two tasks, the second dies on seed 1 after the first has
+    started, and the first returns only once it has, so the cell's last
+    record is the first task's completed one. Both tasks run mushin's runner
+    in the cell's dir: submitit's local tasks set none of the variables
+    mushin reads a rank from."""
+    import time
+
+    import submitit
+
+    started = f"rank1_started_{seed}"
+    if submitit.JobEnvironment().global_rank == 1:
+        open(started, "w").close()
+        if seed == 1:
+            os._exit(9)
+    else:
+        deadline = time.monotonic() + 50
+        while not os.path.exists(started) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    return dict(v=float(seed))
