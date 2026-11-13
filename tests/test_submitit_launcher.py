@@ -438,14 +438,14 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
     [
         # This run's record of this cell.
         (
-            dict(status="completed", run_id="this", metrics=True),
+            dict(status="completed", run_id="this", metrics="OURS"),
             True,
             True,
             "metrics",
             False,
         ),
         (
-            dict(status="completed", run_id="this", metrics=True),
+            dict(status="completed", run_id="this", metrics="OURS"),
             True,
             False,
             "dead",
@@ -454,8 +454,16 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
         (dict(status="completed", run_id="this"), False, True, "dead", False),
         # A file the record does not claim (the result was not whole).
         (dict(status="completed", run_id="this"), True, True, "dead", False),
+        # A file other than the one it wrote (another job's, in a shared dir).
         (
-            dict(status="completed", run_id="this", metrics=True),
+            dict(status="completed", run_id="this", metrics="0" * 16),
+            True,
+            True,
+            "dead",
+            False,
+        ),
+        (
+            dict(status="completed", run_id="this", metrics="OURS"),
             False,
             True,
             "dead",
@@ -466,7 +474,7 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
         (dict(status="running", run_id="this"), False, True, "dead", True),
         # This run's record of another cell in the same dir.
         (
-            dict(status="completed", run_id="this", combo=OTHER, metrics=True),
+            dict(status="completed", run_id="this", combo=OTHER, metrics="OURS"),
             True,
             True,
             "dead",
@@ -474,7 +482,7 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
         ),
         # An earlier run's records.
         (
-            dict(status="completed", run_id="earlier", metrics=True),
+            dict(status="completed", run_id="earlier", metrics="OURS"),
             True,
             True,
             "dead",
@@ -517,12 +525,17 @@ def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
 
     cell = tmp_path / "0"
     cell.mkdir()
+    from mushin._sweep_io import _digest
+
+    file = '{"v": 1.0}'
     if prior is not None:
         fields = {"combo": THIS, "attempt": 1, **prior}
+        if fields.get("metrics") == "OURS":
+            fields["metrics"] = _digest(file)
         write_cell_status(cell, **fields)
         (cell / "mushin_error.txt").write_text("boom\n")
     if metrics:
-        (cell / "mushin_metrics.json").write_text('{"v": 1.0}')
+        (cell / "mushin_metrics.json").write_text(file)
     before = read_cell_status(cell)
 
     runner = object.__new__(_TaskRunner)

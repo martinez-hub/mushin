@@ -122,13 +122,36 @@ def _restore_nonfinite(v: Any) -> Any:
     return float("nan") if v is None else v
 
 
-def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> bool:
-    """Write a cell's metrics file, and return whether no value had to be
-    written as its text (an object with no JSON form, say). A launcher that
-    loses a job's result takes the file for it only then (#345)."""
+def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> str | None:
+    """Write a cell's metrics file, and return a digest of what it wrote when
+    no value had to be written as its text (an object with no JSON form,
+    say), else None. A launcher that loses a job's result takes the file for
+    it only when it still holds what the cell's record says it wrote (#345)."""
     as_text: list[str] = []
-    _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics, as_text)
-    return not as_text
+    text = _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics, as_text)
+    return None if as_text else _digest(text)
+
+
+def read_metrics_sidecar_written(job_dir, digest: str) -> dict | None:
+    """The metrics file of ``job_dir`` when it is the one whose digest
+    `write_metrics_sidecar` returned, else None; read once, so what is
+    checked is what is parsed."""
+    try:
+        text = (Path(job_dir) / METRICS_FILE).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if _digest(text) != digest:
+        return None
+    try:
+        return _restore_nonfinite(json.loads(text))
+    except (ValueError, RecursionError):
+        return None
+
+
+def _digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def read_metrics_sidecar(job_dir) -> dict | None:
@@ -159,14 +182,14 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
 
 
-def _atomic_write_json(path: Path, payload: Any, as_text: list | None = None) -> None:
+def _atomic_write_json(path: Path, payload: Any, as_text: list | None = None) -> str:
     # Normalize every sidecar to strict-JSON-native values (nested numpy,
     # non-finite floats -> None, non-native -> str) so a write never emits
     # the invalid `NaN`/`Infinity` literals nor crashes on an exotic value.
-    # `as_text` collects what had to be written as its text.
-    _atomic_write_text(
-        path, json.dumps(_json_normalize(payload, as_text), indent=2, allow_nan=False)
-    )
+    # `as_text` collects what had to be written as its text. Returns the text.
+    text = json.dumps(_json_normalize(payload, as_text), indent=2, allow_nan=False)
+    _atomic_write_text(path, text)
+    return text
 
 
 class Manifest:

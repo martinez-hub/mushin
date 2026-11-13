@@ -392,7 +392,7 @@ def test_a_job_whose_cell_completed_keeps_its_result(tmp_path, monkeypatch, on_e
     assert {c["status"] for c in manifest["cells"].values()} == {"completed"}
     assert not (wd / "1" / "mushin_error.txt").exists()
     record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "completed" and record["metrics"] is True
+    assert record["status"] == "completed" and isinstance(record["metrics"], str)
     assert record["job_id"] == raised[0]  # the job's own id, as submitit names it
 
 

@@ -136,8 +136,10 @@ states under both `on_error` values with main).
   Not `run_id` alone: two cells can share a dir (`hydra.sweep.subdir=${seed}`
   over two learning rates). Every record also names its job (`job_id`).
 - **E2. A completed record of the job's own gives the cell's result** when it
-  says its metrics file holds the result whole (`metrics`, recorded with
-  'completed' when no value had to be written as its text) and the job is
+  names the metrics file it wrote (`metrics`: that file's digest, recorded
+  with 'completed' when no value had to be written as its text), the file in
+  the dir is still that one (read once: another job in a shared dir may have
+  written its own since), and the job is
   `keepable`: submitit counts one task, and the job did not pickle an error
   in place of its result. Every task of a job of several runs mushin's
   runner in the cell's dir, so its record is not known to be the first

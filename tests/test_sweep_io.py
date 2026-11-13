@@ -167,4 +167,10 @@ def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
 def test_write_metrics_sidecar_says_whether_the_file_holds_the_result(
     tmp_path, metrics, whole
 ):
-    assert write_metrics_sidecar(tmp_path, metrics) is whole
+    from mushin._sweep_io import read_metrics_sidecar_written
+
+    written = write_metrics_sidecar(tmp_path, metrics)
+    assert (written is not None) is whole
+    if whole:
+        assert read_metrics_sidecar_written(tmp_path, written) is not None
+        assert read_metrics_sidecar_written(tmp_path, "0" * 16) is None

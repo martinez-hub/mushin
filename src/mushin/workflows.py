@@ -1466,8 +1466,8 @@ class _TaskRunner:
         The cell's record says how far the job got. It is the job's own when
         this run wrote it for this cell (its ``run_id`` and combo). A
         completed one whose attempt wrote a metrics file holding the result
-        whole (its ``metrics``) gives the cell's result from that file, as a
-        resume would, when the job had one task and did not pickle an error
+        whole (its ``metrics``, that file's digest) gives the cell's result
+        from that file, while the file is still that one, as a resume would, when the job had one task and did not pickle an error
         in place of its result (`_DeadJob.keepable`): it finished, but its
         result did not reach the driver, as when it came after submitit
         stopped waiting. A skipped one is skipped. Any other terminal record
@@ -1486,7 +1486,7 @@ class _TaskRunner:
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
         from ._resume import read_cell_status
-        from ._sweep_io import read_metrics_sidecar
+        from ._sweep_io import read_metrics_sidecar_written
 
         num = ret.hydra_cfg.hydra.job.num
         sampled = getattr(self, "sampled_indices", None)
@@ -1505,8 +1505,11 @@ class _TaskRunner:
         own = (
             this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
         )
-        if own and status == "completed" and dead.keepable and prior.get("metrics"):
-            metrics = read_metrics_sidecar(cell_dir)
+        written = prior.get("metrics")
+        if own and status == "completed" and dead.keepable and isinstance(written, str):
+            # Only the file this record names: another job in a shared dir
+            # may have written its own since.
+            metrics = read_metrics_sidecar_written(cell_dir, written)
             if metrics is not None:
                 return JobStatus.COMPLETED, metrics
         if own and status == "skipped":
@@ -1669,7 +1672,7 @@ class _TaskRunner:
                         # manifest and an offline load_from_dir mis-key the cell.
                         # A no-op when the cached cell is already this dir.
                         cwd = Path.cwd()
-                        write_metrics_sidecar(cwd, cached)
+                        written = write_metrics_sidecar(cwd, cached)
                         # Keep the reused cell's prior record (see
                         # merge_project_records): writing this run's keys would
                         # declare it checked against code it was not compared
@@ -1681,7 +1684,7 @@ class _TaskRunner:
                             combo=sc,
                             attempt=1,
                             code_deps=merge_project_records(prior_deps, deps),
-                            metrics=True,
+                            metrics=written,
                         )
                         return cached
 
@@ -1697,14 +1700,14 @@ class _TaskRunner:
             if cached is not None:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
-                write_metrics_sidecar(cwd, cached)
+                written = write_metrics_sidecar(cwd, cached)
                 write_status(
                     cwd,
                     status="completed",
                     combo=combo,
                     attempt=1,
                     code_deps=deps,
-                    metrics=True,
+                    metrics=written,
                 )
                 return cached
 
@@ -1824,9 +1827,9 @@ class _TaskRunner:
                 # raised; the record written above carries this process's view
                 # from before the task.
                 record_accelerator(cwd, written)
-            whole = False
+            written = None
             if isinstance(result, dict):
-                whole = write_metrics_sidecar(cwd, result)
+                written = write_metrics_sidecar(cwd, result)
                 # Store the freshly-computed cell in the content-addressed cache
                 # so a future sweep with the same config+code reuses it. Keyed on
                 # the fingerprints; best-effort (a cache-write failure must never
@@ -1845,10 +1848,11 @@ class _TaskRunner:
                 combo=combo,
                 attempt=rc.attempt,
                 code_deps=deps,
-                # The metrics file is this attempt's and holds the result
-                # whole: a launcher may take it for the job's result if the
-                # job's own return is lost (#345).
-                metrics=whole,
+                # The digest of this attempt's metrics file, when it holds the
+                # result whole: a launcher may take the file for the job's
+                # result if the job's own return is lost, while it is still
+                # this one (#345).
+                metrics=written,
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
