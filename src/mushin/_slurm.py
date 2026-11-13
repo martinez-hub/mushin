@@ -87,9 +87,11 @@ def slurm(
         argument given here warns.
     setup : list of str, optional
         Shell lines each job runs before the cell, such as ``module load
-        cuda`` or ``source .venv/bin/activate``, run as written. A shell
-        variable is written ``$HOME``, not ``${HOME}``: Hydra reads every
-        ``${...}`` as its own interpolation, so no line may hold one.
+        cuda`` or ``export OMP_NUM_THREADS=8``, run as written. They cannot
+        choose the Python: each job runs the driver's own interpreter, by its
+        path. A shell variable is written ``$HOME``, not ``${HOME}``: Hydra
+        reads every ``${...}`` as its own interpolation, so no line may hold
+        one.
     check : bool
         Check the request against the cluster when this is called: see below.
     **extra

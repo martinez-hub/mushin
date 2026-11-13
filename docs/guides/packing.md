@@ -69,6 +69,26 @@ you to devices `4,5`), the helper indexes into that allocation (slot 0 → `4`,
 slot 1 → `5`) instead of overwriting it, so packed jobs stay on their assigned
 devices. `num_gpus` must not exceed the size of that allocation.
 
+## A sweep inside one SLURM allocation
+
+On a cluster, the same recipe packs a sweep into one allocation instead of a
+SLURM job per cell (the [SLURM guide](slurm.md) covers that one). Request the
+GPUs once and run the sweep's script on the allocated node:
+
+```bash
+sbatch --nodes=1 --gpus-per-node=4 --cpus-per-task=16 --time=08:00:00 --wrap "python sweep.py"
+```
+
+(or interactively, in
+`srun --nodes=1 --gpus-per-node=4 --cpus-per-task=16 --time=08:00:00 --pty bash`;
+`--nodes=1` keeps the four GPUs on the node the script runs on), where
+`sweep.py` runs a sweep of up to 8 cells with `launcher="joblib"` and
+`launcher_config={"n_jobs": 8}`, and its task calls
+`pin_gpu_round_robin(num_gpus=4)` first. Where SLURM sets `CUDA_VISIBLE_DEVICES`
+to the allocation's GPUs (check with `echo $CUDA_VISIBLE_DEVICES` in the job),
+the helper indexes into it. The fresh-process rule above still holds: keep
+`n_jobs` at least the number of cells, or use Ray.
+
 ## Ray: true fractional-GPU sharing (recommended for heavier sharing)
 
 `hydra-ray-launcher` supports fractional GPUs natively: no mushin code needed.
