@@ -3166,7 +3166,11 @@ def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
         def task(x):
             # A DictConfig holds a nested dict as a DictConfig of its own.
             inner = dict if kind == "DictConfig" else UserDict
-            return make(v=float(x), nested=inner(a=float(x)))
+            return make(
+                v=float(x),
+                nested=inner(a=float(x)),
+                xs=OmegaConf.create([float(x)]) if kind == "UserDict" else [float(x)],
+            )
 
     wf = W()
     wf.run(x=multirun([1, 2]), working_dir=str(tmp_path))
@@ -3176,4 +3180,4 @@ def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
     import json
 
     written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
-    assert written == {"v": 1.0, "nested": {"a": 1.0}}
+    assert written == {"v": 1.0, "nested": {"a": 1.0}, "xs": [1.0]}

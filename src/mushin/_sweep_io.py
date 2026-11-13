@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +92,8 @@ def _json_normalize(v: Any, as_text: list | None = None) -> Any:
         if as_text is not None:
             as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
         return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
+    if isinstance(v, Sequence) and not isinstance(v, (str, bytes, bytearray)):
+        # A ListConfig too (#369), as a list.
         return [_json_normalize(x, as_text) for x in v]
     if isinstance(v, bool) or v is None:
         return v
