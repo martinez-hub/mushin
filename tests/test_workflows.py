@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 import inspect
 import string
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -2463,6 +2464,394 @@ def test_skipped_cell_removes_stale_metrics_sidecar(tmp_path):
         status = json.loads((d / "mushin_cell_status.json").read_text())["status"]
         if status == "skipped":
             assert not (d / "mushin_metrics.json").exists()
+
+
+class _ReusedDir(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, lr):
+        if x == 13:
+            raise RuntimeError("boom")
+        return dict(v=float(x) * lr)
+
+
+def _a_job_died_before_its_first_record(
+    tmp_path, first, second, *, manifest=False, run_id=True, stamp=True, dead="0"
+):
+    """Sweep ``first`` into a dir, then leave that dir as a later sweep
+    ``second`` leaves it when its job 0 dies after Hydra wrote the cell's
+    ``.hydra/`` and before mushin's runner wrote anything (#355): the later
+    sweep's multirun.yaml, the dead cell's (``dead``, cell 0 by default)
+    snapshot over the earlier cell's record and metrics, and the later
+    sweep's other cells, complete. ``manifest`` brings the
+    later sweep's manifest (it finished the other cells); ``run_id=False``
+    drops the earlier record's run id, as a released version wrote none;
+    ``stamp=False`` drops the run from the later snapshot, as a version
+    before it wrote."""
+    import json
+    import os
+    import shutil
+
+    wd, later = tmp_path / "s", tmp_path / "later"
+    _ReusedDir().run(working_dir=str(wd), **first)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # a failed cell, on purpose
+        _ReusedDir().run(working_dir=str(later), on_error="nan", **second)
+    shutil.copy(later / "multirun.yaml", wd / "multirun.yaml")
+    for cell in later.glob("[0-9]*"):
+        if cell.name == dead:
+            shutil.rmtree(wd / dead / ".hydra")
+            shutil.copytree(cell / ".hydra", wd / dead / ".hydra")
+        else:
+            shutil.rmtree(wd / cell.name, ignore_errors=True)
+            shutil.copytree(cell, wd / cell.name)
+    path = wd / dead / "mushin_cell_status.json"
+    if not run_id:
+        record = json.loads(path.read_text())
+        del record["run_id"]
+        path.write_text(json.dumps(record))
+    if not stamp:
+        hydra = wd / dead / ".hydra" / "hydra.yaml"
+        text = hydra.read_text()
+        assert "mushin_run_id" in text
+        hydra.write_text(
+            "\n".join(line for line in text.splitlines() if "mushin_run_id" not in line)
+        )
+    # Hydra writes the snapshot after the earlier record, whatever the copy did,
+    # and the later sweep's manifest after that.
+    record = path.stat().st_mtime_ns
+    for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
+        os.utime(wd / dead / ".hydra" / name, ns=(record + 10**9, record + 10**9))
+    if manifest:
+        # Written after the snapshot, or in the same tick of a coarse clock.
+        shutil.copy(later / "mushin_sweep_manifest.json", wd)
+        tick = 10**9 if manifest == "same tick" else 2 * 10**9
+        os.utime(wd / "mushin_sweep_manifest.json", ns=(record + tick,) * 2)
+    return wd
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "run_id"),
+    [
+        # Another cell of another grid, with and without a run id in its record.
+        (dict(x=multirun([1, 2]), lr=1.0), dict(x=multirun([3, 4]), lr=1.0), True),
+        (dict(x=multirun([1, 2]), lr=1.0), dict(x=multirun([3, 4]), lr=1.0), False),
+        # The same combo under another fixed value: the earlier run's result.
+        (dict(x=multirun([1, 2]), lr=1.0), dict(x=multirun([1, 2]), lr=10.0), True),
+    ],
+    ids=["another-cell", "another-cell-no-run-id", "another-config"],
+)
+def test_a_reload_does_not_take_an_earlier_runs_record_for_a_job_that_died(
+    tmp_path, first, second, run_id
+):
+    import mushin
+
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second, run_id=run_id)
+    loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
+    values = loaded.to_xarray()["v"].values.tolist()
+    later = float(list(second["x"])[1]) * second["lr"]
+    assert values[0] != values[0]  # NaN: the job left no result
+    assert values[1] == later
+    assert not loaded.is_complete and not loaded.failures
+    # show, best and export read the same: the earlier result is not this run's.
+    from mushin._show import _read_cells
+
+    assert mushin.best(wd, "v", mode="min").value == later
+    assert [cell["dir"].name for cell in _read_cells(wd)] == ["1"]
+
+
+@pytest.mark.parametrize("manifest", [True, "same tick"])
+def test_a_cell_whose_job_died_is_failed_as_its_runs_manifest_says(tmp_path, manifest):
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([13, 4]), lr=1.0)  # 13 fails in the later sweep
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second, manifest=manifest)
+    loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
+    assert [f["combo"] for f in loaded.failures] == ["x=13"]
+    # An earlier run's manifest says nothing about this run's cell, even
+    # where the earlier run failed the same combo.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wd = _a_job_died_before_its_first_record(
+            tmp_path / "b", dict(second, on_error="nan"), dict(second, lr=10.0)
+        )
+    loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
+    assert not loaded.failures
+
+
+def test_a_snapshot_from_before_the_run_stamp_says_nothing(tmp_path):
+    """A snapshot that names no run (written before it was stamped) leaves
+    the record standing, as before. The earlier sweep's value then shows
+    for this cell: a known limit for sweeps from before the stamp, pinned so
+    a change to it is deliberate."""
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second, stamp=False)
+    loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
+    assert loaded.to_xarray()["v"].values.tolist() == [1.0, 4.0]
+
+
+def test_another_runs_record_is_found_whatever_the_dirs_order(tmp_path):
+    """Dirs sort by job number, not by name ("10" after "9"): the cell
+    judged is the dead job's, not the one at its place in name order."""
+    first = dict(x=multirun(list(range(12))), lr=1.0)
+    second = dict(x=multirun(list(range(12))), lr=10.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second, dead="10")
+    values = _ReusedDir().load_from_dir(wd, "mushin_metrics.json").to_xarray()
+    v = values["v"].values.tolist()
+    assert v[10] != v[10]
+    assert [x for i, x in enumerate(v) if i != 10] == [
+        10.0 * i for i in range(12) if i != 10
+    ]
+
+
+def test_a_run_after_a_load_judges_no_record_by_that_load(tmp_path):
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    wf.run(x=multirun([5, 6]), lr=1.0, working_dir=str(tmp_path / "fresh"))
+    assert wf.load_metrics("mushin_metrics.json") == {"v": [5.0, 6.0]}
+
+
+def test_a_cell_that_completes_after_a_load_counts_on_the_next_read(tmp_path):
+    """A reload mid-sweep finds a job between its snapshot and its first
+    record; once that job records its result, the same workflow reads it."""
+    import json
+
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._sweep_io import write_metrics_sidecar
+
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    assert wf._job_metrics_by_index[0] is None
+    # The job finishes: its run's record and metrics.
+    run = hydra_run_stamp(load_hydra_record(wd / "0" / ".hydra" / "hydra.yaml"))
+    path = wd / "0" / "mushin_cell_status.json"
+    record = json.loads(path.read_text())
+    record.update(run_id=run, combo={"x": 3})
+    path.write_text(json.dumps(record))
+    write_metrics_sidecar(wd / "0", {"v": 3.0})
+    assert wf.load_metrics("mushin_metrics.json") == {"v": [3.0, 4.0]}
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        None,
+        "    mushin_run_id: abc123",
+        "    mushin_run_id: '1e500000000000000000000000000000'",
+        '    mushin_run_id: "0123"',
+        "    mushin_run_id: '???'",
+        "    mushin_run_id: ???",
+        "    mushin_run_id: ${hydra.job.name}",
+        "    mushin_run_id: ''",
+        "    mushin_run_id: null",
+        "    mushin_run_id: 12345",
+        "    mushin_run_id: 1e5",
+    ],
+)
+def test_the_stamp_line_reads_as_the_parsed_file(tmp_path, line):
+    """show reads a snapshot's run from its line, without a YAML parser
+    (`snapshot_run_stamp`); it must give what the parse gives."""
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import snapshot_run_stamp
+
+    lines = ["hydra:", "  job:", "    name: abc"] + ([line] if line else [])
+    path = tmp_path / "hydra.yaml"
+    path.write_text("\n".join(lines) + "\n")
+    assert snapshot_run_stamp(path) == hydra_run_stamp(load_hydra_record(path))
+
+
+def test_the_stamp_line_is_read_from_the_job_section_only(tmp_path):
+    """The same key under another node of ``hydra:`` (a user override such
+    as ``++hydra.run.mushin_run_id=x``) is not the job's stamp."""
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import snapshot_run_stamp
+
+    path = tmp_path / "hydra.yaml"
+    path.write_text(
+        "hydra:\n  run:\n    dir: out\n    mushin_run_id: decoy\n"
+        "  job:\n    name: abc\n    mushin_run_id: abc123\n"
+        "  runtime:\n    mushin_run_id: later\n"
+    )
+    assert snapshot_run_stamp(path) == "abc123"
+    assert hydra_run_stamp(load_hydra_record(path)) == "abc123"
+
+
+def test_the_stamp_line_reads_real_snapshots(tmp_path, monkeypatch):
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import snapshot_run_stamp
+    from mushin.workflows import _TaskRunner
+
+    init = _TaskRunner.__init__
+    for run_id in ("1e5" + "0" * 29, "1" * 32, "abc" + "0" * 29):
+
+        def given(self, *args, run_id=run_id, **kwargs):
+            init(self, *args, **kwargs)
+            self.run_id = run_id
+
+        monkeypatch.setattr(_TaskRunner, "__init__", given)
+        wd = tmp_path / run_id[:4]
+        _ReusedDir().run(x=multirun([1]), lr=1.0, working_dir=str(wd))
+        path = wd / "0" / ".hydra" / "hydra.yaml"
+        assert snapshot_run_stamp(path) == run_id
+        assert hydra_run_stamp(load_hydra_record(path)) == run_id
+
+
+@pytest.mark.parametrize("case", ["copied", "before-the-stamp"])
+def test_show_keeps_an_older_record_of_the_same_run(tmp_path, case):
+    """show, best and export keep a record older than its snapshot when both
+    name one run (a copy without its files' times), or when the snapshot
+    names none (written before the stamp)."""
+    import os
+
+    import mushin
+    from mushin._show import _read_cells
+
+    wd = tmp_path / "s"
+    _ReusedDir().run(x=multirun([1, 2]), lr=2.0, working_dir=str(wd))
+    for cell in ("0", "1"):
+        hydra = wd / cell / ".hydra" / "hydra.yaml"
+        if case == "before-the-stamp":
+            text = hydra.read_text()
+            hydra.write_text(
+                "\n".join(x for x in text.splitlines() if "mushin_run_id" not in x)
+            )
+        record = (wd / cell / "mushin_cell_status.json").stat().st_mtime_ns
+        os.utime(hydra, ns=(record + 10**9, record + 10**9))
+    assert [c["dir"].name for c in _read_cells(wd)] == ["0", "1"]
+    assert mushin.best(wd, "v", mode="min").value == 2.0
+
+
+def test_a_run_that_raises_after_a_load_keeps_the_loads_judgment(tmp_path):
+    """A run that raises before its jobs are collected leaves the loaded
+    dirs in place; their record of another run must stay judged."""
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    with pytest.raises(Exception):
+        wf.run(x=multirun([13]), lr=1.0, working_dir=str(tmp_path / "fresh"))
+    v = wf.to_xarray(metrics_filename="mushin_metrics.json")["v"].values.tolist()
+    assert v[0] != v[0] and v[1] == 4.0
+
+
+def test_a_cell_a_later_run_fills_counts_on_the_next_read(tmp_path):
+    """After a load, a resume from elsewhere computes the dead cell: its new
+    record is no longer older than its snapshot, and the same workflow reads
+    it, as a fresh load would."""
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ReusedDir().run(working_dir=str(wd), resume=True, **second)
+    assert wf.load_metrics("mushin_metrics.json") == {"v": [3.0, 4.0]}
+
+
+def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
+    import json
+
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+
+    _ReusedDir().run(x=multirun([1, 2]), lr=1.0, working_dir=str(tmp_path))
+    stamps = set()
+    for cell in ("0", "1"):
+        record = json.loads((tmp_path / cell / "mushin_cell_status.json").read_text())
+        snapshot = load_hydra_record(tmp_path / cell / ".hydra" / "hydra.yaml")
+        assert hydra_run_stamp(snapshot) == record["run_id"]
+        stamps.add(record["run_id"])
+    assert len(stamps) == 1
+
+
+class _Copied(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, lr, tag):
+        return dict(v=float(x) * lr)
+
+
+@pytest.mark.parametrize(
+    "sweep",
+    [
+        dict(x=multirun([1, 2]), lr=2.0, tag="a"),
+        dict(x=multirun([1, 2]), lr=multirun([1.0, float("inf")]), tag="a"),
+        dict(x=multirun([1, 2]), lr=2.0, tag="${now:%H%M%S%f}"),
+    ],
+    ids=["plain", "non-finite", "time"],
+)
+def test_a_reload_keeps_a_cell_whose_snapshot_is_newer_than_its_record(tmp_path, sweep):
+    """A sweep copied without its files' times (`scp -r`, `rsync` without
+    `-t`) can land a cell's hydra.yaml after its record: both name the same
+    run, so its result stays, whatever its config resolves to now."""
+    import os
+
+    wd = tmp_path / "s"
+    wf = _Copied()
+    wf.run(working_dir=str(wd), **sweep)
+    ran = wf.to_xarray()
+    for cell in wd.glob("[0-9]*"):
+        record = (cell / "mushin_cell_status.json").stat().st_mtime_ns
+        for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
+            later = record + 10**9
+            os.utime(cell / ".hydra" / name, ns=(later, later))
+    loaded = _Copied().load_from_dir(wd, "mushin_metrics.json")
+    assert loaded.to_xarray()["v"].values.tolist() == ran["v"].values.tolist()
+    assert loaded.is_complete
+
+
+def test_a_numeric_looking_run_id_stays_the_runs_stamp(tmp_path, monkeypatch):
+    """The stamp is quoted: an id such as 1e5... or all digits must read
+    back as itself, not as a number."""
+    import json
+
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin.workflows import _TaskRunner
+
+    init = _TaskRunner.__init__
+    for run_id in ("1e5" + "0" * 29, "1" * 32):
+
+        def numeric(self, *args, run_id=run_id, **kwargs):
+            init(self, *args, **kwargs)
+            self.run_id = run_id
+
+        monkeypatch.setattr(_TaskRunner, "__init__", numeric)
+        wd = tmp_path / run_id[:4]
+        _ReusedDir().run(x=multirun([1]), lr=1.0, working_dir=str(wd))
+        record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
+        snapshot = load_hydra_record(wd / "0" / ".hydra" / "hydra.yaml")
+        assert record["run_id"] == run_id
+        assert hydra_run_stamp(snapshot) == run_id
+
+
+@pytest.mark.parametrize(
+    ("stamp", "read"),
+    [
+        ("abc123", "abc123"),
+        (None, None),
+        ("", None),
+        ("???", None),
+        ("${hydra.job.name}", None),
+        (5, None),
+        ("interpolated job", None),  # `hydra.job` itself an interpolation
+    ],
+)
+def test_a_run_stamp_reads_alike_on_both_read_paths(stamp, read):
+    from omegaconf import OmegaConf
+
+    from mushin._hydra_yaml import hydra_run_stamp
+
+    job = {"name": "abc"} if stamp is None else {"name": "abc", "mushin_run_id": stamp}
+    tree = {"hydra": {"job": job}}
+    if stamp == "interpolated job":
+        tree = {"hydra": {"job": "${other}"}, "other": {"mushin_run_id": "abc123"}}
+    assert hydra_run_stamp(tree) == read
+    assert hydra_run_stamp(OmegaConf.create(tree)) == read
 
 
 def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_path):

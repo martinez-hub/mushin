@@ -208,7 +208,7 @@ def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
         assert status["status"] == "failed" and status["combo"] == recorded
 
 
-def _dead_ret(root, *, output_subdir=None, job_id="7"):
+def _dead_ret(root, *, output_subdir=None, job_id="7", stamp="this"):
     from hydra.core.utils import JobReturn
     from omegaconf import OmegaConf
 
@@ -221,7 +221,7 @@ def _dead_ret(root, *, output_subdir=None, job_id="7"):
             "hydra": {
                 "runtime": {"cwd": str(root)},
                 "output_subdir": output_subdir,
-                "job": {"num": 0, "id": job_id},
+                "job": {"num": 0, "id": job_id, "mushin_run_id": stamp},
             }
         }
     )
@@ -237,7 +237,9 @@ def test_a_dead_cell_is_recorded_as_350_did_with_its_run_and_job(tmp_path):
     cell = tmp_path / "0"
     snapshot = cell / ".hydra"
     snapshot.mkdir(parents=True)
-    (snapshot / "hydra.yaml").write_text("earlier: true\n")
+    # The job's own: Hydra wrote it, naming this run, before the runner's
+    # 'running' record.
+    (snapshot / "hydra.yaml").write_text("hydra:\n  job:\n    mushin_run_id: this\n")
     (snapshot / "config.yaml").write_text("lr: 0.1\n")
     write_cell_status(
         cell,
@@ -262,6 +264,39 @@ def test_a_dead_cell_is_recorded_as_350_did_with_its_run_and_job(tmp_path):
     assert (status["config_hash"], status["code_hash"]) == ("c", "k")
     assert status["run_id"] == "this" and status["job_id"] == "7"
     assert (snapshot / "config.yaml").read_text() == "lr: 0.1\n"
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    ["hydra:\n  job:\n    mushin_run_id: earlier\n", "earlier: true\n"],
+    ids=["another-run", "before-the-stamp"],
+)
+def test_a_dead_cell_gets_this_jobs_snapshot_over_an_earlier_runs(tmp_path, earlier):
+    """A job that died before Hydra made its dir, in a dir an earlier run
+    used: the snapshot there names another run (or none, from before the
+    stamp), so it is this job's that a reload must find beside its record."""
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _record_dead_cell
+
+    cell = tmp_path / "0"
+    snapshot = cell / ".hydra"
+    snapshot.mkdir(parents=True)
+    (snapshot / "hydra.yaml").write_text(earlier)
+    (snapshot / "config.yaml").write_text("lr: 0.1\n")
+    write_cell_status(cell, status="running", combo={"lr": 0.1}, attempt=1)
+    _record_dead_cell(
+        _dead_ret(tmp_path, output_subdir=".hydra"),
+        _DeadJob(RuntimeError("x"), "RuntimeError('died')"),
+        combo={"lr": 0.2},
+        status="failed",
+        on_error="raise",
+        prior=read_cell_status(cell),
+        run_id="this",
+    )
+    assert hydra_run_stamp(load_hydra_record(snapshot / "hydra.yaml")) == "this"
+    assert "lr: 0.2" in (snapshot / "config.yaml").read_text()
+    assert read_cell_status(cell)["run_id"] == "this"
 
 
 @pytest.mark.parametrize(
