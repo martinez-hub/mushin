@@ -313,3 +313,21 @@ def test_show_sorts_an_int_metric_beyond_float_range(tmp_path):
     rows = mushin.show(wd, sort="acc").rows
     assert rows[0]["acc"] == -(10**400)
     assert rows[-1]["acc"] == 10**400
+
+
+def test_show_lists_a_swept_inf_cell(tmp_path):
+    """A swept inf is stored tagged in the cell's record; show keys it as
+    the manifest does, so the finished cell is listed (#355)."""
+    import mushin
+    from mushin import multirun
+    from mushin._show import _read_cells
+
+    @mushin.sweep
+    def t(x):
+        return dict(v=1.0)
+
+    t.run(x=multirun([1.0, float("inf")]), working_dir=str(tmp_path))
+    assert [c["combo"] for c in _read_cells(tmp_path)] == [
+        {"x": 1.0},
+        {"x": float("inf")},
+    ]

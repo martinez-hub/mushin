@@ -125,6 +125,19 @@ def _restore_nonfinite(v: Any) -> Any:
     return float("nan") if v is None else v
 
 
+def restore_infinities(v: Any) -> Any:
+    """``_restore_nonfinite`` for a cell's combo: only the tagged signed
+    infinities come back. A ``null`` stays None, since a swept None is
+    stored the same way as a swept NaN, and only the first can match."""
+    if isinstance(v, dict):
+        if set(v) == {_NONFINITE_TAG} and v[_NONFINITE_TAG] in _NONFINITE_VALUES:
+            return _NONFINITE_VALUES[v[_NONFINITE_TAG]]
+        return {k: restore_infinities(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [restore_infinities(x) for x in v]
+    return v
+
+
 def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> str | None:
     """Write a cell's metrics file, and return a digest of what it wrote when
     no value had to be written as its text (an object with no JSON form,

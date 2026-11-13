@@ -5380,6 +5380,31 @@ def changed_project_code(prior, current) -> list[str] | None:
     return sorted(k for k in a.keys() & b.keys() if a[k] != b[k])
 
 
+class _NoCombo:
+    """What `stored_combo` gives for a combo it cannot store: equal to
+    nothing, a record's missing combo (None) included."""
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+def stored_combo(combo: Any) -> Any:
+    """``combo`` as `read_cell_status` gives it back from a record: a NaN
+    stored null (None), an infinity restored, a tuple a list. Compare a
+    record's combo with this, never with the live one, which differs for a
+    swept NaN (#355)."""
+    from ._sweep_io import _json_normalize, restore_infinities
+
+    try:
+        return restore_infinities(
+            json.loads(json.dumps(_json_normalize(combo), allow_nan=False))
+        )
+    except (TypeError, ValueError, RecursionError):
+        return _NoCombo()
+
+
 def read_cell_status(cell_dir) -> dict | None:
     """Read a cell status sidecar; a missing/corrupt/wrong-shape one reads as
     None (so callers degrade rather than crash on `.get`)."""
@@ -5394,7 +5419,15 @@ def read_cell_status(cell_dir) -> dict | None:
         # read as a corrupt sidecar, as the MCP server lists a directory of runs
         # it did not write.
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("combo"), dict):
+        # A swept inf is stored tagged: read it back as the value it was, so
+        # the combo keys and compares as the live one does (#355).
+        from ._sweep_io import restore_infinities
+
+        data["combo"] = restore_infinities(data["combo"])
+    return data
 
 
 def discover_last_ckpt(cell_dir) -> Path | None:
@@ -5431,7 +5464,7 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     non-degenerate per-cell combo; an empty combo cannot distinguish cells.)"""
     cell_dir = Path(cell_dir)
     prior = read_cell_status(cell_dir)
-    matches = prior is not None and prior.get("combo") == combo
+    matches = prior is not None and prior.get("combo") == stored_combo(combo)
     last = discover_last_ckpt(cell_dir) if matches else None
     # Coerce a malformed/older-schema `attempt` (missing, null, "3") to an int
     # so it degrades to a fresh attempt instead of raising inside the wrapper.

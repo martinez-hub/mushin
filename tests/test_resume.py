@@ -233,3 +233,46 @@ def test_build_resume_context_tolerates_sidecar_missing_attempt(tmp_path):
     rc = build_resume_context(tmp_path, {"seed": 0})
     assert rc.is_resume is True
     assert rc.attempt == 1  # missing attempt -> 0 + 1
+
+
+# A swept inf is stored tagged in a cell's record; every reader compares it as
+# the value it was (#355).
+
+
+def test_a_combo_reads_back_as_stored():
+    from mushin._resume import stored_combo
+
+    inf = float("inf")
+    assert stored_combo({"x": inf, "y": -inf}) == {"x": inf, "y": -inf}
+    assert stored_combo({"x": float("nan")}) == {"x": None}
+    assert stored_combo({"x": (1, 2)}) == {"x": [1, 2]}
+    unstorable = stored_combo({"x": 10**5000})  # past str()'s digit limit
+    assert unstorable != None  # noqa: E711 - a record without a combo
+    assert unstorable != {"x": 10**5000}
+
+
+@pytest.mark.parametrize("x", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_a_swept_non_finite_cell_resumes_its_own_checkpoint(tmp_path, x):
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen[mushin_resume.attempt] = None if last is None else last.read_text()
+            if mushin_resume.attempt == 1:
+                (Path.cwd() / "last.ckpt").write_text(f"x={x}")
+                raise RuntimeError("first attempt fails")
+            return dict(v=1.0)
+
+    sweep = dict(x=multirun([x]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(on_error="nan", **sweep)
+    W().run(resume=True, **sweep)
+    assert seen == {1: None, 2: f"x={x}"}

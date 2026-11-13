@@ -842,3 +842,34 @@ def test_a_dir_that_cannot_be_resolved_is_taken_as_written(tmp_path):
     os.symlink(tmp_path / "b", tmp_path / "a")
     os.symlink(tmp_path / "a", tmp_path / "b")
     assert _resolved(tmp_path / "a" / "0").is_absolute()
+
+
+def test_a_dead_job_keeps_a_swept_inf_cells_own_result(tmp_path):
+    """The record stores the combo's inf tagged; the dead job still knows the
+    cell's completed record as its own (#355)."""
+    from hydra.core.utils import JobStatus
+    from omegaconf import OmegaConf
+
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _DeadJob, _TaskRunner
+
+    cell = tmp_path / "0"
+    written = write_metrics_sidecar(cell, {"v": 1.0})
+    write_cell_status(
+        cell,
+        status="completed",
+        combo={"lr": float("inf")},
+        attempt=1,
+        run_id="this",
+        metrics=written,
+    )
+    ret = _dead_ret(tmp_path)
+    ret.cfg = OmegaConf.create({"lr": float("inf")})
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "nan", "this"
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')", keepable=True)
+    status, value = runner.record_dead_cell(ret, dead)
+    assert status is JobStatus.COMPLETED
+    assert value == {"v": 1.0}
