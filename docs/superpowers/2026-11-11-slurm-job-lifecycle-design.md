@@ -185,11 +185,15 @@ states under both `on_error` values with main).
   (the job warns about it); either may still be a cache hit, judged as the
   job judges it. A cell whose project-code record lacks a file the prior one
   names (a module only the jobs' path imports) is not judged at all, since
-  its cache key may be another code's, and a reused cell whose prior record
-  has no project-code record keeps none. A config that reads the
-  environment (`${oc.env:...}`) is never reused or cache-hit in the driver,
-  whose environment the jobs' may not match; setting variables
-  (`hydra.job.env_set`) alone changes nothing a config resolves to. Every
+  its cache key may be another code's; a reused cell whose prior record has
+  no project-code record takes the driver's, as it takes the job's. The
+  driver judges a cell under the job's `hydra.job.env_set`, as `run_job`
+  runs it, so a resolver reading those variables resolves as in the job; a
+  config that reads the environment otherwise (`${oc.env:...}`) is never
+  reused or cache-hit in the driver, whose environment the jobs' may not
+  match. Known limit: a cache entry written where a module only the jobs
+  import was absent (a sequential run on the login node) can be a driver
+  hit the jobs would miss. Every
   cell is decided before any dir is written (a resume over a renumbered
   grid reads prior dirs another cell's record would overwrite), and a
   settled cell whose dir a cell left to its job reads its prior result from
@@ -197,7 +201,8 @@ states under both `on_error` values with main).
   snapshot `run_job` would write (`hydra.job.id` `driver_<n>`), then its
   record. Any error settling or writing a cell leaves it to its job, and the
   driver warns once (never raising: settling is best effort); warnings from
-  judging a cell are the job's to give.
+  judging a cell are the job's to give, and the driver's process keeps its
+  warn-once memory as it was (`judging_quietly`).
 - **F3. Only sweeps that can settle a cell pay for it.** The launcher composes
   a cell only when it may need no job (`sample=` leaves it out, a resume
   has completed cells over the same swept names, or a usable `cache_dir`

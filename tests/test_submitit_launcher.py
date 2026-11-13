@@ -651,6 +651,7 @@ def _strictly(runner, cwd, chash):
         (dict(code_deps=_AB), None, None, _A, False),  # a file only the job reaches
         (dict(code_deps=_A), None, None, None, False),  # cannot compare
         (dict(code_deps=_A), None, None, {"code": {"pkg/a.py": "9"}}, False),
+        (dict(code_deps="garbled"), None, None, _A, False),  # not comparable
     ],
 )
 def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
@@ -672,16 +673,15 @@ def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
         assert (tmp_path / "1" / "mushin_metrics.json").is_file()
 
 
-def test_the_driver_keeps_a_reused_cells_record_from_before_the_field(
+def test_a_reused_cell_from_before_the_field_takes_the_drivers_record(
     tmp_path, monkeypatch
 ):
-    """A prior record with no project-code record keeps none: the driver's
-    may lack a file only the jobs reach, which a later resume would then
-    never compare. The job writes its own, as before."""
+    """A prior record with no project-code record takes the driver's, as it
+    takes the job's: a later resume then compares every file it names."""
     runner = _resuming_runner(tmp_path, monkeypatch, dict(), deps=_AB)
     value, written = _strictly(runner, tmp_path / "1", None)
     assert value == {"v": 1.0}
-    assert written[0]["code_deps"] is None
+    assert written[0]["code_deps"] == _AB
 
 
 @pytest.mark.parametrize("lacking", [False, True], ids=["comparable", "lacking-a-file"])
@@ -739,27 +739,59 @@ def test_the_driver_composes_cells_only_when_one_may_be_reused(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("cfg", "env_set", "reads"),
+    ("cfg", "reads"),
     [
-        ({"a": 1, "b": "${x}"}, {}, False),
-        ({"a": "${oc.env:HOME}"}, {}, True),
-        ({"a": {"b": ["x", "${ oc.env : HOME }"]}}, {}, True),  # spaced, nested
-        ({"a": "path/${env:HOME}/x"}, {}, True),  # OmegaConf's older name
-        ({"a": "${oc.decode:${oc.env:N}}"}, {}, True),
-        ({"a": "environment"}, {}, False),
-        ({"a": 1}, {"N": "8"}, False),  # setting variables reads none
-        ({"a": "${oc.env:N}"}, {"N": "8"}, True),
+        ({"a": 1, "b": "${x}"}, False),
+        ({"a": "${oc.env:HOME}"}, True),
+        ({"a": {"b": ["x", "${ oc.env : HOME }"]}}, True),  # spaced, nested
+        ({"a": "path/${env:HOME}/x"}, True),  # OmegaConf's older name
+        ({"a": "${oc.decode:${oc.env:N}}"}, True),
+        ({"a": "environment"}, False),
     ],
 )
-def test_a_config_that_reads_the_environment_is_seen(cfg, env_set, reads):
+def test_a_config_that_reads_the_environment_is_seen(cfg, reads):
     from types import SimpleNamespace
 
     from omegaconf import OmegaConf
 
     from mushin.workflows import _reads_environment
 
-    ret = SimpleNamespace(
-        cfg=OmegaConf.create(cfg),
-        hydra_cfg=OmegaConf.create({"hydra": {"job": {"env_set": env_set}}}),
-    )
-    assert _reads_environment(ret) is reads
+    assert _reads_environment(SimpleNamespace(cfg=OmegaConf.create(cfg))) is reads
+
+
+def test_judging_in_the_driver_keeps_every_warn_once_memory():
+    """A later run in the driver's process must still give the warnings the
+    driver's judging held back."""
+    import warnings
+
+    from mushin import _resume
+
+    key = ("a test module",)
+    _resume._LOAD_BASELINE[key] = ((), "digest", [False])
+    before = list(_resume._TRUNCATION_WARNED)
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            with _resume.judging_quietly():
+                warnings.warn("held back", UserWarning)
+                _resume._TRUNCATION_WARNED.append(True)
+                _resume._LOAD_BASELINE[key][2][0] = True
+        assert not seen
+        assert _resume._TRUNCATION_WARNED == before
+        assert _resume._LOAD_BASELINE[key][2][0] is False
+    finally:
+        _resume._LOAD_BASELINE.pop(key, None)
+        _resume._TRUNCATION_WARNED[:] = before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_a_dir_that_cannot_be_resolved_is_taken_as_written(tmp_path):
+    """A symlink loop raises from `Path.resolve` on some Pythons; judging a
+    cell in the driver must not."""
+    import os
+
+    from mushin.workflows import _resolved
+
+    os.symlink(tmp_path / "b", tmp_path / "a")
+    os.symlink(tmp_path / "a", tmp_path / "b")
+    assert _resolved(tmp_path / "a" / "0").is_absolute()

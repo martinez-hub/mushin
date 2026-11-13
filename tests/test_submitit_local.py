@@ -791,3 +791,20 @@ def test_a_sweep_with_nothing_to_submit_keeps_the_sweep_dirs_mode(tmp_path):
     tasks.record_pid.run(working_dir=str(tmp_path / "b"), **sweep)
     assert not (tmp_path / "b" / ".submitit").exists()
     assert ((tmp_path / "b").stat().st_mode & 0o777) == 0o700
+
+
+def test_the_driver_judges_a_cell_under_the_jobs_env_set(tmp_path, monkeypatch):
+    """A custom resolver reads what `hydra.job.env_set` sets in each job; the
+    driver judges under the same variables, so a resume that changes one
+    recomputes, as the jobs would."""
+    monkeypatch.delenv("MUSHIN_TEST_N", raising=False)
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1]), n="${mushin_test_n:}", working_dir=str(wd))
+
+    def env(value):
+        return [f"++hydra.job.env_set.MUSHIN_TEST_N={value}"]
+
+    first = tasks.env_scaled.run(**sweep, overrides=env(1), **LOCAL)
+    assert first["v"].values.tolist() == [1.0, 1.0]
+    again = tasks.env_scaled.run(**sweep, overrides=env(8), resume=True, **LOCAL)
+    assert again["v"].values.tolist() == [8.0, 8.0]

@@ -138,3 +138,10 @@ def scaled(seed, scale):
 @mushin.sweep
 def env_scaled(seed, n):
     return dict(v=float(n))
+
+
+# A custom resolver reading a variable `hydra.job.env_set` sets for each job:
+# registered in the driver and in every job, which import this module.
+OmegaConf.register_new_resolver(
+    "mushin_test_n", lambda: os.environ.get("MUSHIN_TEST_N", "1"), replace=True
+)

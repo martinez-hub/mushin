@@ -103,16 +103,18 @@ if _plugin_launcher is not None:
                 and not OmegaConf.select(self.config, "hydra.callbacks")
             ):
                 return {}
+            from mushin._resume import judging_quietly
+
             settled, writes, own, reads, errors = {}, {}, {}, {}, []
             environment = 0
+            reuses = runner._reuses()
             for i, overrides in enumerate(job_overrides):
                 idx = initial_job_idx + i
-                if not runner.may_settle(idx):
+                if not runner.may_settle(idx, reuses):
                     continue
                 try:
                     with self._composed(overrides, idx, f"driver_{idx}") as ret:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
+                        with judging_quietly():
                             own[idx], reads[idx] = runner.dirs_of(ret)
                             result = runner.settle_in_driver(ret)
                             if result is None and runner.reads_environment(ret):
