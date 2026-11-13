@@ -2487,24 +2487,14 @@ def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_pat
     assert list(tmp_path.glob("*/mushin_metrics.json")) == []
 
 
-@pytest.mark.parametrize(
-    ("marker", "removed"),
-    [
-        (None, True),
-        ("RANK", False),
-        ("SLURM_PROCID", False),
-        ("SUBMITIT_LOCAL_GLOBALID", False),
-        ("LOCAL_RANK", False),
-        ("NODE_RANK", False),
-    ],
-)
-def test_only_a_jobs_first_task_removes_an_earlier_metrics_file(
-    tmp_path, monkeypatch, marker, removed
-):
-    """In a job of several tasks each runs the cell; one that starts late
-    must not remove what another wrote."""
+@pytest.mark.parametrize("same_run", [False, True], ids=["another-run", "this-run"])
+def test_a_cell_removes_only_another_runs_metrics_file(tmp_path, monkeypatch, same_run):
+    """At its start a cell removes a metrics file only when the record it
+    replaces is another run's: in a job of several tasks each runs the cell,
+    and one that starts after another finished must keep what it wrote. Two
+    runs given one run id stand in for two tasks of one job."""
     from mushin import multirun
-    from mushin.workflows import MultiRunMetricsWorkflow
+    from mushin.workflows import MultiRunMetricsWorkflow, _TaskRunner
 
     class First(MultiRunMetricsWorkflow):
         @staticmethod
@@ -2516,11 +2506,17 @@ def test_only_a_jobs_first_task_removes_an_earlier_metrics_file(
         def task(x):
             return None
 
+    if same_run:
+        init = _TaskRunner.__init__
+
+        def one_run(self, *args, **kwargs):
+            init(self, *args, **kwargs)
+            self.run_id = "one run"
+
+        monkeypatch.setattr(_TaskRunner, "__init__", one_run)
     First().run(x=multirun([1]), working_dir=tmp_path)
-    if marker is not None:
-        monkeypatch.setenv(marker, "1")
     Second().run(x=multirun([1]), working_dir=tmp_path)
-    assert (tmp_path / "0" / "mushin_metrics.json").exists() is not removed
+    assert (tmp_path / "0" / "mushin_metrics.json").exists() is same_run
 
 
 def test_offline_reload_restores_inf_metrics(tmp_path):

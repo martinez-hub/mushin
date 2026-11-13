@@ -140,7 +140,7 @@ def first_task_reports(seed):
 
     if submitit.JobEnvironment().global_rank == 0:
         return dict(v=float(seed))
-    deadline = time.monotonic() + 50
+    deadline = time.monotonic() + 20  # well under the job's time limit
     while not os.path.exists("mushin_metrics.json") and time.monotonic() < deadline:
         time.sleep(0.05)
     time.sleep(0.5)  # past the first task's completed record too

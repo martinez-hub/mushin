@@ -1453,23 +1453,6 @@ class _TaskRunner:
         )
 
     @staticmethod
-    def _rank_zero() -> bool:
-        """False in a task of a multi-task launch other than the first: one
-        whose rank, as submitit (``SUBMITIT_LOCAL_GLOBALID``, ``SLURM_PROCID``),
-        torchrun (``RANK``) or Lightning's launcher (``LOCAL_RANK``,
-        ``NODE_RANK``) sets it, is not 0."""
-        import os
-
-        markers = (
-            "SUBMITIT_LOCAL_GLOBALID",
-            "SLURM_PROCID",
-            "RANK",
-            "LOCAL_RANK",
-            "NODE_RANK",
-        )
-        return all(os.environ.get(name, "0").strip() == "0" for name in markers)
-
-    @staticmethod
     def _combo(cfg, names):
         return _swept_combo(
             cfg,
@@ -1792,6 +1775,8 @@ class _TaskRunner:
             # The prior sidecar (attempt, is_resume) is read before the write
             # below replaces it.
             rc = build_resume_context(cwd, combo)
+            # Whose record the 'running' write below replaces (#355).
+            earlier = read_cell_status(cwd) or {}
             # 'running' is written before the hooks that take time (pre_task,
             # provenance capture), so a job killed in them leaves its own record
             # in the dir, not a prior sweep's: a reload would take that one's
@@ -1807,14 +1792,13 @@ class _TaskRunner:
                 attempt=rc.attempt,
                 budget_id=self.budget_id,
             )
-            # A metrics file here before this attempt starts is an earlier
-            # attempt's or, in a reused dir, another cell's (#355): this attempt
-            # writes its own or none, so a reload never takes that one for its
-            # result. Removed by the job's first task only: in a job of several
-            # tasks each runs this cell, and a task that starts late must not
-            # remove what another wrote (a task that returns metrics on rank 0
-            # only).
-            if self._rank_zero():
+            # A metrics file another run left here (an earlier sweep's cell in a
+            # reused dir, #355) is not this cell's result: this attempt writes
+            # its own or none, so a reload must not take that one for it. Only
+            # the first of this run's writes here removes it: in a job of
+            # several tasks each runs this cell, and a task that starts after
+            # another finished finds this run's record and keeps what it wrote.
+            if earlier.get("run_id") != self.run_id:
                 remove_sidecar(cwd / METRICS_FILE)
             self.pre_task(cfg)
             if rc.is_resume:

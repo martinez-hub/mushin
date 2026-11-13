@@ -509,7 +509,7 @@ def test_a_task_that_returns_none_keeps_the_first_tasks_metrics(tmp_path):
         seed=multirun([0, 1]),
         working_dir=str(wd),
         launcher="submitit_local",
-        launcher_config={"timeout_min": 1, "tasks_per_node": 2},
+        launcher_config={"timeout_min": 2, "tasks_per_node": 2},
     )
     assert ds["v"].values.tolist() == [0.0, 1.0]
     for cell in ("0", "1"):
