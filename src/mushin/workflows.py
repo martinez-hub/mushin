@@ -1798,6 +1798,8 @@ class _TaskRunner:
             # the first of this run's writes here removes it: in a job of
             # several tasks each runs this cell, and a task that starts after
             # another finished finds this run's record and keeps what it wrote.
+            # A runner pickled before `run_id` existed (an array queued before
+            # an upgrade) has none, and leaves the file, as before this rule.
             if earlier.get("run_id") != self.run_id:
                 remove_sidecar(cwd / METRICS_FILE)
             self.pre_task(cfg)
