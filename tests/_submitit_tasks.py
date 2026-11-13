@@ -102,7 +102,7 @@ def second_task_dies(seed):
     started, and the first returns only once it has, so the cell's last
     record is the first task's completed one. Both tasks run mushin's runner
     in the cell's dir: submitit's local tasks set none of the variables
-    mushin reads a rank from."""
+    `_multi_rank_world` reads a rank from."""
     import time
 
     import submitit
@@ -128,3 +128,20 @@ def unpicklable_result(seed):
     if seed == 0:
         return dict(v=float(seed), lock=threading.Lock())
     return dict(v=float(seed))
+
+
+@mushin.sweep
+def first_task_reports(seed):
+    """In a job of two tasks, the first returns metrics at once and the
+    second returns None once the first has written them."""
+    import time
+
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 0:
+        return dict(v=float(seed))
+    deadline = time.monotonic() + 50
+    while not os.path.exists("mushin_metrics.json") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.5)  # past the first task's completed record too
+    return None

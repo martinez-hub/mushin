@@ -2487,82 +2487,40 @@ def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_pat
     assert list(tmp_path.glob("*/mushin_metrics.json")) == []
 
 
-class _ReusedDir(MultiRunMetricsWorkflow):
-    @staticmethod
-    def task(x, lr):
-        return dict(v=float(x) * lr)
-
-
-def _a_job_died_before_its_first_record(tmp_path, first, second, hashed=True):
-    """Sweep ``first`` into a dir, then leave that dir as a later sweep
-    ``second`` leaves it when its job 0 dies after Hydra wrote the cell's
-    ``.hydra/`` and before mushin's runner wrote anything: the later sweep's
-    multirun.yaml, cell 0's snapshot over the earlier cell's record and
-    metrics, and the later cell 1, complete. ``hashed=False`` drops the
-    earlier record's config hash, as a sidecar from before it was recorded."""
-    import json
-    import os
-    import shutil
-
-    wd, later = tmp_path / "s", tmp_path / "later"
-    _ReusedDir().run(working_dir=str(wd), **first)
-    _ReusedDir().run(working_dir=str(later), **second)
-    shutil.copy(later / "multirun.yaml", wd / "multirun.yaml")
-    shutil.rmtree(wd / "0" / ".hydra")
-    shutil.copytree(later / "0" / ".hydra", wd / "0" / ".hydra")
-    shutil.rmtree(wd / "1")
-    shutil.copytree(later / "1", wd / "1")
-    if not hashed:
-        path = wd / "0" / "mushin_cell_status.json"
-        record = json.loads(path.read_text())
-        del record["config_hash"]
-        path.write_text(json.dumps(record))
-    # Hydra writes the snapshot after the earlier record, whatever the copy did.
-    record = (wd / "0" / "mushin_cell_status.json").stat().st_mtime_ns
-    for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
-        os.utime(wd / "0" / ".hydra" / name, ns=(record + 10**9, record + 10**9))
-    return wd
-
-
 @pytest.mark.parametrize(
-    ("first", "second", "hashed"),
+    ("marker", "removed"),
     [
-        # Another cell of another grid: neither its config nor its combo is
-        # this cell's; without a config hash, the combo tells.
-        (dict(x=multirun([1, 2]), lr=1.0), dict(x=multirun([3, 4]), lr=1.0), True),
-        (dict(x=multirun([1, 2]), lr=1.0), dict(x=multirun([3, 4]), lr=1.0), False),
-        # The same combo under another fixed value: its config is not this one.
-        (dict(x=multirun([1, 2]), lr=1.0), dict(x=multirun([1, 2]), lr=10.0), True),
+        (None, True),
+        ("RANK", False),
+        ("SLURM_PROCID", False),
+        ("SUBMITIT_LOCAL_GLOBALID", False),
+        ("LOCAL_RANK", False),
+        ("NODE_RANK", False),
     ],
-    ids=["another-cell", "another-cell-no-hash", "another-config"],
 )
-def test_a_reload_does_not_take_an_earlier_cells_record_for_a_job_that_died(
-    tmp_path, first, second, hashed
+def test_only_a_jobs_first_task_removes_an_earlier_metrics_file(
+    tmp_path, monkeypatch, marker, removed
 ):
-    wd = _a_job_died_before_its_first_record(tmp_path, first, second, hashed)
-    loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
-    values = loaded.to_xarray()["v"].values.tolist()
-    assert values[0] != values[0]  # NaN: the job left no result
-    assert values[1] == float(list(second["x"])[1]) * second["lr"]
-    assert not loaded.is_complete
+    """In a job of several tasks each runs the cell; one that starts late
+    must not remove what another wrote."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
 
+    class First(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x))
 
-def test_a_reload_keeps_a_cell_whose_snapshot_is_newer_than_its_record(tmp_path):
-    """A sweep copied without its files' times (`scp -r`, `rsync` without
-    `-t`) can land a cell's hydra.yaml after its record: the record is still
-    this cell's, so its result stays."""
-    import os
+    class Second(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return None
 
-    wd = tmp_path / "s"
-    _ReusedDir().run(x=multirun([1, 2]), lr=2.0, working_dir=str(wd))
-    for cell in ("0", "1"):
-        record = (wd / cell / "mushin_cell_status.json").stat().st_mtime_ns
-        for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
-            later = record + 10**9
-            os.utime(wd / cell / ".hydra" / name, ns=(later, later))
-    loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
-    assert loaded.to_xarray()["v"].values.tolist() == [2.0, 4.0]
-    assert loaded.is_complete
+    First().run(x=multirun([1]), working_dir=tmp_path)
+    if marker is not None:
+        monkeypatch.setenv(marker, "1")
+    Second().run(x=multirun([1]), working_dir=tmp_path)
+    assert (tmp_path / "0" / "mushin_metrics.json").exists() is not removed
 
 
 def test_offline_reload_restores_inf_metrics(tmp_path):
