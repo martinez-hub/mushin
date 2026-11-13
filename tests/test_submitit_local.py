@@ -523,6 +523,25 @@ def test_a_task_that_returns_none_keeps_the_first_tasks_metrics(tmp_path):
         assert (wd / cell / "mushin_metrics.json").is_file()
 
 
+def test_a_job_of_several_tasks_runs_its_cell_without_the_budget(tmp_path):
+    """submitit's local tasks set only their own variables; each still finds
+    it is one of several and disables a budget, as a SLURM task does, so a
+    late task cannot record the cell skipped (#365)."""
+    wd = tmp_path / "s"
+    ds = tasks.first_task_reports.run(
+        seed=multirun([0, 1]),
+        working_dir=str(wd),
+        launcher="submitit_local",
+        launcher_config={"timeout_min": 2, "tasks_per_node": 2},
+        max_total_seconds=600,
+    )
+    assert ds["v"].values.tolist() == [0.0, 1.0]
+    logs = sorted((wd / ".submitit").glob("*/*_log.err"))
+    assert len(logs) == 4  # two tasks for each cell
+    for log in logs:
+        assert "`max_total_seconds` is disabled" in log.read_text()
+
+
 # Cells that need no job are settled in the driver (#345): only the rest are
 # submitted, under their own job numbers.
 
