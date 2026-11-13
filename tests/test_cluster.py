@@ -75,6 +75,26 @@ def test_submitit_slurm_config_rejects_bad_inputs():
         # per-rank seed must still differ per process, not silently collapse to
         # base+0 on every rank.
         pytest.param({"LOCAL_RANK": "1"}, 100, 101, id="local-rank-fallback"),
+        # A task of a submitit_local job of several sets only submitit's own
+        # variables (#371).
+        pytest.param(
+            {"SUBMITIT_LOCAL_NTASKS": "2", "SUBMITIT_LOCAL_GLOBALID": "1"},
+            100,
+            101,
+            id="submitit-local-task",
+        ),
+        # A job of one local task: its id is inherited by any process the task
+        # starts (HydraDDP's children), so it is not their rank.
+        pytest.param(
+            {
+                "SUBMITIT_LOCAL_NTASKS": "1",
+                "SUBMITIT_LOCAL_GLOBALID": "0",
+                "LOCAL_RANK": "1",
+            },
+            100,
+            101,
+            id="single-local-task-child",
+        ),
     ],
 )
 def test_seed_everything_per_rank_offsets_by_global_rank(
@@ -83,7 +103,13 @@ def test_seed_everything_per_rank_offsets_by_global_rank(
     from mushin.lightning import seed_everything_per_rank
 
     monkeypatch.chdir(tmp_path)  # the helper records the seed into the cwd
-    for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
+    for var in (
+        "RANK",
+        "SLURM_PROCID",
+        "LOCAL_RANK",
+        "SUBMITIT_LOCAL_NTASKS",
+        "SUBMITIT_LOCAL_GLOBALID",
+    ):
         monkeypatch.delenv(var, raising=False)
     for var, value in env.items():
         monkeypatch.setenv(var, value)
