@@ -76,11 +76,13 @@ SLURM job per cell (the [SLURM guide](slurm.md) covers that one). Request the
 GPUs once and run the sweep's script on the allocated node:
 
 ```bash
-sbatch --gpus=4 --cpus-per-task=16 --time=08:00:00 --wrap "python sweep.py"
+sbatch --nodes=1 --gpus-per-node=4 --cpus-per-task=16 --time=08:00:00 --wrap "python sweep.py"
 ```
 
-(or interactively, in `srun --gpus=4 --cpus-per-task=16 --time=08:00:00 --pty bash`),
-where `sweep.py` runs the sweep with `launcher="joblib"` and
+(or interactively, in
+`srun --nodes=1 --gpus-per-node=4 --cpus-per-task=16 --time=08:00:00 --pty bash`;
+`--nodes=1` keeps the four GPUs on the node the script runs on), where
+`sweep.py` runs a sweep of up to 8 cells with `launcher="joblib"` and
 `launcher_config={"n_jobs": 8}`, and its task calls
 `pin_gpu_round_robin(num_gpus=4)` first. Where SLURM sets `CUDA_VISIBLE_DEVICES`
 to the allocation's GPUs (check with `echo $CUDA_VISIBLE_DEVICES` in the job),

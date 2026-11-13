@@ -1,8 +1,8 @@
 # Running a sweep on SLURM
 
 mushin can submit a sweep's cells to a SLURM cluster itself: no `sbatch` script
-to write. Each cell runs as one SLURM job (one task of a job array), in its own
-directory under the sweep's `working_dir`, and `run()` gathers the results into
+to write. Each cell runs as one SLURM job (a task of a job array, when several
+are submitted together), in its own directory under the sweep's `working_dir`, and `run()` gathers the results into
 the same `xarray.Dataset` a local sweep gives. This guide covers ordinary
 sweeps, where each cell runs in one process. For a cell trained with DDP across
 several GPUs or nodes, see the [multi-node guide](multinode.md).
@@ -43,7 +43,7 @@ ds = experiment.run(
         timeout_min=120,
         partition="gpu",
         account="my-lab",
-        setup=["module load cuda/12.4", "source $HOME/envs/ml/bin/activate"],
+        setup=["module load cuda/12.4"],
     ),
     on_error="nan",
 )
@@ -51,35 +51,56 @@ ds = experiment.run(
 
 - `timeout_min` is each job's time limit; a cell that runs past it is
   stopped.
-- `setup` lines run in each job before the cell, for module loads or a
-  virtual environment. Write a shell variable as `$HOME`, not `${HOME}`: mushin
-  passes the config through Hydra, which reads `${...}` as its own.
-- Other fields of the plugin's SLURM config, such as `constraint`, `qos`,
-  `array_parallelism` or `additional_parameters`, pass through as given.
+- `setup` lines run in each job before the cell, for module loads or
+  environment variables. They cannot choose the Python: each job runs the
+  driver's own interpreter, by its path (see below), so start the driver from
+  the environment the jobs should use. Write a shell variable as `$HOME`, not
+  `${HOME}`: mushin passes the config through Hydra, which reads `${...}` as
+  its own.
+- Other fields of the plugin's SLURM config, such as `constraint`, `gres`,
+  `array_parallelism` or `additional_parameters`, pass through unchecked. A
+  field `mushin.slurm` writes itself (`nodes`, `tasks_per_node`, and the one of
+  each argument you gave) is refused there.
 
 When `scontrol` is available, which is where you submit from, `mushin.slurm`
-checks the request before anything is queued. It refuses a partition that
-does not exist, or a time limit past the partition's, and names the partitions
-whose limit fits; `check=False` skips the check. It judges what `sbatch` will
-use: an `SBATCH_PARTITION`, `SBATCH_TIMELIMIT` or `SBATCH_QOS` set in your
-shell overrides the job script, and mushin warns when one overrides an argument
-you gave. It does not choose a partition for you.
+checks the request before anything is queued, against the partition you name
+(or `SBATCH_PARTITION` names). It refuses one that does not exist, or a time
+limit past its `MaxTime`, and names the partitions whose limit fits. It does
+not judge a job that names no partition (the cluster may route it), nor the
+time limit under a QoS (`qos=` or `SBATCH_QOS`), which can lift it;
+`check=False` skips the check. It judges what `sbatch` will use: an
+`SBATCH_PARTITION`, `SBATCH_ACCOUNT`, `SBATCH_TIMELIMIT` or `SBATCH_QOS` set in
+your shell overrides the job script, and mushin warns when one overrides an
+argument you gave. It never chooses a partition for you.
 
 ## Submit, and keep the driver running
 
 `run()` submits the jobs and then waits for every one of them to end before it
 returns the dataset. The process that calls `run()` (the driver) does little
-work, but it has to stay alive for the whole sweep. On a login node that stops
-long-running processes, either:
+work, but it has to stay alive for the whole sweep. Either:
 
-- run the script inside `tmux` or `screen`, so it survives your logout; or
+- run the script inside `tmux` or `screen` on a login node, so it survives your
+  logout (not a login node that stops long-running processes: check your
+  cluster's policy); or
 - submit the driver itself as a small CPU job that lasts as long as the sweep,
   for example `sbatch --time=2-00:00:00 --cpus-per-task=1 --wrap "python sweep.py"`.
-  The driver submits the cells' jobs from inside it.
+  SLURM passes a job's environment on to the jobs it submits, which can upset
+  the cells' requests (memory, GPUs), so call `run()` inside submitit's
+  `clean_env()`, which hides those variables while it submits:
 
-If the driver stops anyway, the jobs keep running. Run the same script again
-with `resume=True` (below) once they are done: it collects the finished cells
-and runs only the rest.
+  ```python
+  import submitit
+
+  with submitit.helpers.clean_env():
+      ds = experiment.run(...)
+  ```
+
+If the driver stops anyway, the jobs keep running. Wait until they have ended
+(`squeue --me` lists none of them), or cancel them (below), then run the same
+script again with `resume=True`: it reuses the finished cells and runs only
+the rest. Do not resume while the earlier run's jobs are still queued or
+running: the resume submits those cells again, and two jobs then write the
+same cell.
 
 ## What the jobs need
 
@@ -90,9 +111,13 @@ and runs only the rest.
 - **Your code, at the same path.** Each job imports the modules your task
   uses, as the driver does.
 
-Each cell runs in its own directory, `<working_dir>/<number>/`. The job logs go
-under `<working_dir>/.submitit/<job id>/`, where an array task's job id is
-`<array id>_<index>`: `<job id>_0_log.out` and `<job id>_0_log.err`.
+Each cell runs in its own directory, `<working_dir>/<number>/`, and its
+`mushin_cell_status.json` names the job that ran it (`job_id`). That job's
+logs are under `<working_dir>/.submitit/<job id>/`: `<job id>_0_log.out` and
+`<job id>_0_log.err`. A submission of several cells is one job array, whose
+tasks' ids are `<array id>_<index>`, the index counting the cells that
+submission sent (a resume sends only some, so it is not the cell's number); a
+submission of one cell is a plain job.
 
 ## Watch a running sweep
 
@@ -100,9 +125,11 @@ under `<working_dir>/.submitit/<job id>/`, where an array task's job id is
 squeue --me
 ```
 
-lists the sweep's array tasks. `mushin.show("/scratch/me/lr-sweep")` prints each
-cell that has started with its status (`running`, `completed`, `failed`,
-`skipped`), from any machine that sees the filesystem.
+lists the sweep's queued and running jobs. `mushin.show("/scratch/me/lr-sweep")`
+prints each cell that has started with its status (`running`, `completed`,
+`failed`, `skipped`), from any machine that sees the filesystem. During a
+resume, a cell sent to a job again shows the earlier run's status (`failed`,
+say) until that job starts.
 
 `array_parallelism` (256 by default) caps how many of the sweep's jobs run at
 once; the rest wait in the queue.
@@ -111,7 +138,10 @@ once; the rest wait in the queue.
 
 A cell that raises is a failed cell, as in a local sweep. A job that is
 stopped at its time limit, or ends without returning (killed out of memory, by
-`scancel`, on a failed node), fails its cell too. With `on_error="nan"`, the
+`scancel`, or on a failed node the cluster does not requeue), fails its cell
+too. A job SLURM requeues (after a preemption, or a node failure on clusters
+that requeue then) runs its cell again instead, from the start or from its
+checkpoint. With `on_error="nan"`, the
 sweep goes on, the cell is NaN in the dataset, and `mushin_error.txt` in the
 cell's directory holds the traceback, or, for a job that ended without
 returning, what ended it and where its log is. The
@@ -123,21 +153,30 @@ Run the same sweep again with `resume=True` and the same `working_dir`.
 Completed cells are reused from their records, and only the others are
 submitted: a resume that fills 3 cells of 1,000 queues 3 jobs. `sample=` and
 `cache_dir=` work the same way, submitting only the cells they leave to
-compute. A cell whose config reads the environment (`${oc.env:...}`), and every
-cell of a sweep with Hydra callbacks, is still submitted, and its job decides,
-since the job's environment and callbacks are not the driver's.
+compute. The driver still submits a cell, for its job to decide, whenever it
+cannot judge the cell as the job would. Among others: a cell whose config
+reads the environment (`${oc.env:...}`), a cell whose job imports modules the
+driver cannot (a `PYTHONPATH` set in `setup`, say), and every cell of a sweep
+with Hydra callbacks, since the job's environment, imports and callbacks are
+not the driver's.
 
-To cancel a sweep, cancel its job array: `scancel <array id>`. The array id is
-in `squeue --me`, and it begins each folder name under
-`<working_dir>/.submitit/`. A driver still running records the cancelled
-cells as failed, and a later `resume=True` runs them again.
+To cancel a sweep, cancel its jobs: `scancel <job id>` for each submission
+`squeue --me` lists (a job array has one id for all its tasks). Each
+submission's folders under `<working_dir>/.submitit/` begin with its id, and a
+resume adds a submission of its own. A driver still running records the
+cancelled cells as failed, and a later `resume=True` runs them again.
 
 ## Many small cells
 
 Each cell is its own job, so a sweep of many short cells spends much of its
-time in the queue. Two ways to do better:
+time in the queue, and a large grid can hit the cluster's limits on a job
+array's size (`MaxArraySize`) or on how many jobs you may have queued. Ways to
+do better:
 
 - give each job more of the sweep's work: fewer, longer cells; or
 - run the sweep inside one allocation: request the GPUs once, in one `sbatch`
   job, then sweep with `launcher="joblib"` and `pin_gpu_round_robin`, as the
-  [packing guide](packing.md#a-sweep-inside-one-slurm-allocation) shows.
+  [packing guide](packing.md#a-sweep-inside-one-slurm-allocation) shows. That
+  suits a sweep of at most `n_jobs` cells, since each cell needs a fresh
+  process to pin its GPU; for more, the same guide's Ray launcher shares GPUs
+  without that limit.
