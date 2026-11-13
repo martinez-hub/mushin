@@ -3143,3 +3143,37 @@ def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_p
     text = next(p.read_text() for p in written if p.exists())
     assert records[1]["metrics"] == _digest(text)  # the file it wrote
     assert "metrics" not in records[2]
+
+
+@pytest.mark.parametrize("kind", ["UserDict", "MappingProxyType", "DictConfig"])
+def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
+    """#369: a task that returns a Mapping that is not a dict gives the run
+    its values; its cell writes them to its metrics file too, so a reload
+    has them (it raised FileNotFoundError)."""
+    from collections import UserDict
+    from types import MappingProxyType
+
+    from omegaconf import OmegaConf
+
+    make = {
+        "UserDict": UserDict,
+        "MappingProxyType": lambda **kw: MappingProxyType(dict(**kw)),
+        "DictConfig": lambda **kw: OmegaConf.create(dict(**kw)),
+    }[kind]
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            # A DictConfig holds a nested dict as a DictConfig of its own.
+            inner = dict if kind == "DictConfig" else UserDict
+            return make(v=float(x), nested=inner(a=float(x)))
+
+    wf = W()
+    wf.run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    back = W().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.to_xarray()["v"].values.tolist() == [1.0, 2.0]
+    assert wf.to_xarray()["v"].values.tolist() == [1.0, 2.0]
+    import json
+
+    written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
+    assert written == {"v": 1.0, "nested": {"a": 1.0}}

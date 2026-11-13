@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +88,7 @@ def _json_normalize(v: Any, as_text: list | None = None) -> Any:
         v = v.item()
     elif hasattr(v, "tolist"):  # numpy/torch array
         return _json_normalize(v.tolist(), as_text)
-    if isinstance(v, dict):
+    if isinstance(v, Mapping):  # a UserDict or DictConfig too (#369)
         if as_text is not None:
             as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
         return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
