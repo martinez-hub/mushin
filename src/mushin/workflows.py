@@ -674,20 +674,6 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
-def _as_authored(cfg):
-    """A job config's plain containers with its interpolations unresolved,
-    or the config itself when it is not an OmegaConf one or cannot be read
-    so."""
-    try:
-        from omegaconf import OmegaConf
-
-        if OmegaConf.is_config(cfg):
-            return OmegaConf.to_container(cfg, resolve=False)
-    except Exception:  # noqa: BLE001 - provenance is best-effort
-        pass
-    return cfg
-
-
 def _resolve_in_place(cfg) -> None:
     """Resolve a job config's interpolations in place, as zen does before it
     calls a task, so everything read from it afterwards sees one value per
@@ -1985,6 +1971,15 @@ class _TaskRunner:
             return JobStatus.FAILED, dead.exception
         return JobStatus.COMPLETED, dead
 
+    def _wrappers_resolve(self) -> bool:
+        """Whether the task's or pre_task's wrapper resolves the config in
+        place before it calls, as zen does by default (``resolve_pre_call``,
+        kept as its ``_resolve``)."""
+        return any(
+            getattr(wrapper, "_resolve", False) is True
+            for wrapper in (self.task, self.pre_task)
+        )
+
     def __call__(self, cfg):
         import warnings
         from pathlib import Path
@@ -2004,18 +1999,9 @@ class _TaskRunner:
             write_metrics_sidecar,
         )
 
-        # Provenance records the config as authored (`_to_plain`): an
-        # `${oc.env:...}` is kept as written, not its value. Kept before the
-        # config is resolved in place, below and by zen (which resolved it
-        # before provenance was written, so the record held the values).
-        authored = _as_authored(cfg)
-        # One resolution per job (#353): zen resolves the config in place
-        # before it calls `pre_task`, and the fingerprint and the record's
-        # combo read it before that, so a resolver that gives a new value each
-        # call (a counter) gave each a different one.
-        _resolve_in_place(cfg)
         # The config is resolved once, for its fingerprint and for the
-        # `_target_`s the project-code record follows.
+        # `_target_`s the project-code record follows, before anything else
+        # resolves it: as the driver's pass resolves it (`settle_in_driver`).
         resolved = resolved_config(cfg)
         chash = resolved_config_hash(resolved)
         # Hydra's job number and config-group choices go into every status
@@ -2033,6 +2019,16 @@ class _TaskRunner:
         if settled is not _COMPUTE:
             record()
             return settled
+
+        # One resolution for what the cell records and what its task runs
+        # with (#353). A zen wrapper resolves the config in place before it
+        # calls (`resolve_pre_call`), so the cell's record, read before
+        # `pre_task`, and the task each resolved it: a resolver that gives a
+        # new value each call (a counter) gave them different values. Done
+        # here, as zen would, only when a wrapper resolves; a task that
+        # opted out gets the config as Hydra composed it.
+        if self._wrappers_resolve():
+            _resolve_in_place(cfg)
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
         # cells (no compute) so a long sweep ends gracefully instead of running
@@ -2134,7 +2130,7 @@ class _TaskRunner:
                 rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
             written = NOT_WRITTEN
             try:
-                written = write_provenance(cwd, authored, base=self.base_provenance)
+                written = write_provenance(cwd, cfg, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             # Set the contextvar AFTER the (fallible) status write, so a failed
