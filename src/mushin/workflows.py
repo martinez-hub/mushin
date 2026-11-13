@@ -1841,6 +1841,10 @@ class _TaskRunner:
                         write_metrics_sidecar(cache_cell, result)
                     except OSError:
                         pass
+            else:
+                # No metrics: a file an earlier sweep or attempt left in this
+                # reused dir is not this cell's result (#355).
+                remove_sidecar(cwd / METRICS_FILE)
             write_status(
                 cwd,
                 status="completed",
@@ -3855,6 +3859,54 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             self._sanitize_coordinate_for_xarray,
         )
 
+    def _cell_record(self, i: int) -> tuple[dict | None, bool]:
+        """Job dir ``i``'s status record, and whether it is another cell's.
+
+        Hydra writes a job's ``.hydra/`` snapshot before its task runs, and
+        mushin's runner writes the record after it, so a record older than
+        the hydra.yaml beside it was written by an earlier job in a reused
+        directory, and this job died before its first write (#355). Such a
+        record is still this cell's when its combo and its config hash match
+        this job's config, or cannot be compared with it (a sweep copied
+        without its files' times also leaves a record older than its
+        hydra.yaml). Otherwise it is another cell's, and the cell has no
+        record and no result: ``(None, True)``."""
+        from ._resume import (
+            STATUS_FILE,
+            read_cell_status,
+            resolved_config,
+            resolved_config_hash,
+        )
+        from ._sweep_io import combo_key
+
+        dir_ = self.multirun_working_dirs[i]
+        record = read_cell_status(dir_)
+        cfgs = getattr(self, "cfgs", None)
+        if record is None or self.output_subdir is None or not cfgs:
+            return record, False
+        if len(cfgs) != len(self.multirun_working_dirs):
+            return record, False
+        try:
+            written = (dir_ / STATUS_FILE).stat().st_mtime_ns
+            snapshot = (dir_ / self.output_subdir / "hydra.yaml").stat().st_mtime_ns
+        except OSError:
+            return record, False
+        if snapshot <= written:
+            return record, False
+        cfg = cfgs[i]
+        try:
+            combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+            if combo_key(record["combo"]) != combo_key(combo):
+                return None, True
+        except Exception:  # noqa: BLE001 - not comparable: the record stands
+            pass
+        prior = record.get("config_hash")
+        if isinstance(prior, str):
+            current = resolved_config_hash(resolved_config(cfg))
+            if current is not None and current != prior:
+                return None, True
+        return record, False
+
     def _job_choices(self, i: int) -> dict | None:
         """``runtime.choices`` for job ``i``, when jobs align with cfgs.
 
@@ -4038,7 +4090,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         status from the sweep manifest when the manifest lists that dir, and
         otherwise counts as completed, as `load_metrics` would load it.
         """
-        from ._resume import STATUS_FILE, read_cell_status
+        from ._resume import STATUS_FILE
         from ._sweep_io import MANIFEST_FILE, Manifest, combo_key
 
         try:
@@ -4062,7 +4114,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
-            sidecar = read_cell_status(dir_)
+            sidecar, foreign = self._cell_record(i)
+            if foreign:  # its job died before its first record: not run
+                dirs[key] = dir_
+                continue
             status = (sidecar or {}).get("status")
             if sidecar is None:  # a sweep from before sidecars: ask the manifest
                 entry = manifest_cells.get(key, {})
@@ -4160,19 +4215,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if isinstance(metrics_filename, str):
             metrics_filename = [metrics_filename]
 
-        from ._resume import read_cell_status
-
         job_metrics: list[Any] = []
-        for dir_ in self.multirun_working_dirs:
+        for i, dir_ in enumerate(self.multirun_working_dirs):
             # A cell recorded 'failed' or 'skipped' (fail-soft, `sample=`, or an
             # exhausted `max_total_seconds` budget) deliberately has no valid
             # metrics: NaN-fill it exactly like the in-process path — never load
             # a stale sidecar a prior attempt left behind, and never raise for
             # its (expected) missing files. A cell still 'running' or 'pending'
             # (a sweep reloaded mid-run, or killed mid-cell) has no result yet
-            # either; `_record_cells_without_result` records it as not run.
-            status = (read_cell_status(dir_) or {}).get("status")
-            if status in ("failed", "skipped", "running", "pending"):
+            # either; `_record_cells_without_result` records it as not run. So
+            # has a cell whose dir holds another cell's record (`_cell_record`).
+            record, foreign = self._cell_record(i)
+            status = (record or {}).get("status")
+            if foreign or status in ("failed", "skipped", "running", "pending"):
                 job_metrics.append(None)
                 continue
             _metrics = {}
