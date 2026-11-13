@@ -154,10 +154,12 @@ def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
     assert back == {"weird": {"__mushin_nonfinite__": "hello"}}
 
 
+@pytest.mark.skipif(
+    __import__("sys").platform != "win32", reason="a reader blocks a replace only there"
+)
 def test_a_status_write_waits_for_a_reader_to_let_go(tmp_path):
     """On Windows a replace fails while another process has the target open
-    (#357): the write waits for the reader rather than fail the cell. On other
-    systems the replace never waited."""
+    (#357): the write waits for the reader rather than fail the cell."""
     import threading
 
     from mushin._resume import STATUS_FILE, read_cell_status, write_cell_status
@@ -174,26 +176,84 @@ def test_a_status_write_waits_for_a_reader_to_let_go(tmp_path):
     assert read_cell_status(tmp_path)["status"] == "completed"
 
 
-def test_a_replace_is_retried_only_on_windows(tmp_path, monkeypatch):
+def _held(monkeypatch, times, ops=("replace", "unlink")):
+    """`Path.replace` and `Path.unlink` (those in ``ops``) raise as Windows
+    does while another process holds the file, ``times`` times; then they
+    act."""
+    from pathlib import Path
+
     from mushin import _sweep_io
 
     calls = []
-    real = type(tmp_path).replace
+    real = {"replace": Path.replace, "unlink": Path.unlink}
 
-    def held_twice(self, target):
-        calls.append(target)
-        if len(calls) <= 2:
-            raise PermissionError(13, "Access is denied")
-        return real(self, target)
+    def stand_in(name):
+        def held(self, *args, **kwargs):
+            calls.append(name)
+            if len(calls) <= times:
+                raise PermissionError(13, "Access is denied")
+            return real[name](self, *args, **kwargs)
 
-    monkeypatch.setattr(type(tmp_path), "replace", held_twice)
-    monkeypatch.setattr(_sweep_io.time, "sleep", lambda s: None)
-    monkeypatch.setattr(_sweep_io.sys, "platform", "win32")
-    _sweep_io._atomic_write_text(tmp_path / "f.json", "{}")
-    assert (tmp_path / "f.json").read_text() == "{}" and len(calls) == 3
+        return held
 
-    calls.clear()
-    monkeypatch.setattr(_sweep_io.sys, "platform", "linux")
+    for name in ops:
+        monkeypatch.setattr(Path, name, stand_in(name))
+    monkeypatch.setattr(_sweep_io, "_HELD_WAITS", (0,) * len(_sweep_io._HELD_WAITS))
+    return calls
+
+
+@pytest.mark.parametrize("windows", [True, False], ids=["windows", "elsewhere"])
+def test_a_held_sidecar_is_waited_for_only_on_windows(tmp_path, monkeypatch, windows):
+    from mushin import _sweep_io
+
+    monkeypatch.setattr(_sweep_io, "_WINDOWS", windows)
+    target = tmp_path / "f.json"
+    target.write_text("old")
+    calls = _held(monkeypatch, times=2)
+    if windows:
+        _sweep_io._atomic_write_text(target, "{}")
+        assert target.read_text() == "{}" and calls.count("replace") == 3
+        calls.clear()
+        _sweep_io.remove_sidecar(target)  # held twice more, then deleted
+        assert not target.exists() and calls == ["unlink"] * 3
+    else:
+        with pytest.raises(PermissionError):
+            _sweep_io._atomic_write_text(target, "{}")
+        assert calls.count("replace") == 1 and target.read_text() == "old"
+
+
+def test_a_sidecar_held_past_the_waits_fails_and_leaves_no_temp_file(
+    tmp_path, monkeypatch
+):
+    from mushin import _sweep_io
+
+    monkeypatch.setattr(_sweep_io, "_WINDOWS", True)
+    # Only the target is held, by its reader: the temp file is not.
+    calls = _held(monkeypatch, times=10**6, ops=("replace",))
     with pytest.raises(PermissionError):
-        _sweep_io._atomic_write_text(tmp_path / "g.json", "{}")
-    assert len(calls) == 1
+        _sweep_io._atomic_write_text(tmp_path / "f.json", "{}")
+    assert calls.count("replace") == len(_sweep_io._HELD_WAITS) + 1
+    monkeypatch.undo()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("metrics", "whole"),
+    [
+        (dict(acc=0.9, loss=[1.0, float("inf")], n=3, name="a", ok=True), True),
+        (dict(nested=dict(acc=0.5)), True),
+        (dict(acc=0.9, lock=__import__("threading").Lock()), False),
+        (dict(when=__import__("datetime").date(2026, 1, 1)), False),
+        ({1: 0.5}, False),  # a key that is not text reads back as text
+    ],
+)
+def test_write_metrics_sidecar_says_whether_the_file_holds_the_result(
+    tmp_path, metrics, whole
+):
+    from mushin._sweep_io import read_metrics_sidecar_written
+
+    written = write_metrics_sidecar(tmp_path, metrics)
+    assert (written is not None) is whole
+    if whole:
+        assert read_metrics_sidecar_written(tmp_path, written) is not None
+        assert read_metrics_sidecar_written(tmp_path, "0" * 16) is None

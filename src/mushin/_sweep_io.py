@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +70,7 @@ _NONFINITE_TAG = "__mushin_nonfinite__"
 _NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
 
 
-def _json_normalize(v: Any) -> Any:
+def _json_normalize(v: Any, as_text: list | None = None) -> Any:
     """Recursively normalize a metric value to strict-JSON-native types.
 
     Handles the full metric shape (nested dicts and lists), converts
@@ -78,18 +79,21 @@ def _json_normalize(v: Any) -> Any:
     to NaN / signed Inf), and stringifies any other type rather than letting an
     otherwise-successful task's sidecar write crash the sweep. A genuine
     ``None`` metric value also encodes as ``null``, so it reads back as NaN,
-    the one remaining lossy case.
+    the one remaining lossy case. ``as_text``, when given, collects the type
+    of each value (and dict key) written as its text instead of as itself.
     """
     import math
 
     if hasattr(v, "item") and getattr(v, "ndim", None) == 0:  # 0-d np/torch scalar
         v = v.item()
     elif hasattr(v, "tolist"):  # numpy/torch array
-        return _json_normalize(v.tolist())
+        return _json_normalize(v.tolist(), as_text)
     if isinstance(v, dict):
-        return {str(k): _json_normalize(x) for k, x in v.items()}
+        if as_text is not None:
+            as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
+        return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
-        return [_json_normalize(x) for x in v]
+        return [_json_normalize(x, as_text) for x in v]
     if isinstance(v, bool) or v is None:
         return v
     if isinstance(v, float):
@@ -100,6 +104,8 @@ def _json_normalize(v: Any) -> Any:
         return {_NONFINITE_TAG: "inf" if v > 0 else "-inf"}
     if isinstance(v, (int, str)):
         return v
+    if as_text is not None:
+        as_text.append(type(v).__name__)
     return str(v)  # datetime, Path, arbitrary objects -> stringify, never crash
 
 
@@ -119,8 +125,36 @@ def _restore_nonfinite(v: Any) -> Any:
     return float("nan") if v is None else v
 
 
-def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> None:
-    _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics)
+def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> str | None:
+    """Write a cell's metrics file, and return a digest of what it wrote when
+    no value had to be written as its text (an object with no JSON form,
+    say), else None. A launcher that loses a job's result takes the file for
+    it only when it still holds what the cell's record says it wrote (#345)."""
+    as_text: list[str] = []
+    text = _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics, as_text)
+    return None if as_text else _digest(text)
+
+
+def read_metrics_sidecar_written(job_dir, digest: str) -> dict | None:
+    """The metrics file of ``job_dir`` when it is the one whose digest
+    `write_metrics_sidecar` returned, else None; read once, so what is
+    checked is what is parsed."""
+    try:
+        text = (Path(job_dir) / METRICS_FILE).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if _digest(text) != digest:
+        return None
+    try:
+        return _restore_nonfinite(json.loads(text))
+    except (ValueError, RecursionError):
+        return None
+
+
+def _digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def read_metrics_sidecar(job_dir) -> dict | None:
@@ -146,41 +180,55 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        _replace(tmp, path)  # atomic on POSIX/Windows
+        _while_held(lambda: tmp.replace(path))  # atomic on POSIX/Windows
     finally:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
 
 
-#: How long, in seconds, each retry of a replace waits on Windows (#357): about
-#: two seconds in all.
-_REPLACE_WAITS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.5, 0.7)
+#: How long, in seconds, each retry waits on Windows while another process
+#: holds a sidecar (#357): about two seconds in all.
+_HELD_WAITS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.5, 0.7)
+
+#: On Windows a file another process has open cannot be replaced or deleted:
+#: Python opens files without sharing them for deletion.
+_WINDOWS = sys.platform == "win32"
 
 
-def _replace(tmp: Path, path: Path) -> None:
-    """``tmp.replace(path)``, retried on Windows while another process has
-    ``path`` open (#357). There a replace raises ``PermissionError`` while any
-    reader holds the target, since Python opens files without sharing them
-    for deletion: `mushin.show` on a running sweep, or a test polling the
-    status files, would otherwise fail the cell whose record it was reading.
-    A reader holds the file only while it reads it, so a short wait does."""
-    for wait in _REPLACE_WAITS:
+def _while_held(operation: Callable[[], object]) -> None:
+    """Run ``operation``, a replace or a delete of a sidecar, retrying it on
+    Windows while another process has the file open (#357): it raises
+    ``PermissionError`` there, so `mushin.show` on a running sweep, or a test
+    polling the status files, would fail the cell whose record it read.
+    mushin's own readers hold a file only while they read it. A process that
+    holds one longer (a sync client, an antivirus scan) still fails the write
+    after about two seconds, as does a share mounted from another system
+    (WSL's /mnt/c, SMB), where this check does not apply."""
+    if not _WINDOWS:
+        operation()
+        return
+    for wait in _HELD_WAITS:
         try:
-            tmp.replace(path)
+            operation()
             return
         except PermissionError:
-            if sys.platform != "win32":
-                raise
             time.sleep(wait)
-    tmp.replace(path)
+    operation()
 
 
-def _atomic_write_json(path: Path, payload: Any) -> None:
+def remove_sidecar(path: Path) -> None:
+    """Delete a sidecar if it is there, waiting on Windows while another
+    process has it open (#357)."""
+    _while_held(lambda: Path(path).unlink(missing_ok=True))
+
+
+def _atomic_write_json(path: Path, payload: Any, as_text: list | None = None) -> str:
     # Normalize every sidecar to strict-JSON-native values (nested numpy,
     # non-finite floats -> None, non-native -> str) so a write never emits
     # the invalid `NaN`/`Infinity` literals nor crashes on an exotic value.
-    _atomic_write_text(
-        path, json.dumps(_json_normalize(payload), indent=2, allow_nan=False)
-    )
+    # `as_text` collects what had to be written as its text. Returns the text.
+    text = json.dumps(_json_normalize(payload, as_text), indent=2, allow_nan=False)
+    _atomic_write_text(path, text)
+    return text
 
 
 class Manifest:

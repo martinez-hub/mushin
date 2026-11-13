@@ -379,23 +379,28 @@ Also preempt (or `scontrol requeue`) a running job on a partition with
 requeue on: note whether `results()` raised before the requeued job ran,
 and what the cell holds once it has.
 
-Two cases the follow-up (split item 2) handles, recorded here so it can be
-checked against what SLURM does:
+Split item 2 keeps a result for a dead job of one task whose cell's record,
+written by this run, says completed with its metrics file. Check against
+what SLURM does:
 
-- with `launcher_config={"nodes": 1, "tasks_per_node": 2}`, a task where rank
-  1 calls `os._exit(9)` after rank 0 has returned its metrics (read the rank
-  from `SLURM_PROCID`; sleep a few seconds on rank 1 first). Record the
-  cell's status in the manifest and in its `mushin_cell_status.json`, whether
-  it has a `mushin_error.txt`, and the error line `run()` warned with;
 - if any cell whose `sacct` state is `COMPLETED` comes back failed with
   "gave no result", note the filesystem of the `.submitit` folder: the result
-  arrived after submitit's 15 to 30 s wait.
+  arrived after submitit's 15 to 30 s wait, and the driver did not yet see
+  the cell's completed record either (it reads the record once). Record the
+  cell's `mushin_cell_status.json` and whether its `mushin_metrics.json`
+  survived;
+- with `launcher_config={"nodes": 1, "tasks_per_node": 2}`, a task where rank
+  1 calls `os._exit(9)` after rank 0 has returned its metrics (read the rank
+  from `SLURM_PROCID`; sleep a few seconds on rank 1 first). The cell fails
+  (a job of several tasks is not kept: every rank writes the cell's
+  record). Record the cell's status in the manifest and its
+  `mushin_cell_status.json`, and the error line `run()` warned with.
 
 **Report:** what `sacct` says for seeds 0, 2 and 3 (`TIMEOUT`,
 `OUT_OF_MEMORY`, `CANCELLED`),
-the first line of each `mushin_error.txt`, and, for the follow-up that keeps a
-result when a job dies after its cell completed, whether the `job_id` in that
-message matches `hydra.job.id` in the cell's `hydra.yaml`.
+the first line of each `mushin_error.txt`, and whether the job id in that
+message matches the `job_id` in the cell's `mushin_cell_status.json` and
+`hydra.job.id` in its `hydra.yaml` (an array task's is `<array>_<task>`).
 
 ---
 

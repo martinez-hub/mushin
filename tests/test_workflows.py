@@ -2586,3 +2586,26 @@ def test_a_job_dir_parameter_swept_by_hand_gets_the_sweep_advice(tmp_path):
     message = str(err.value)
     assert "`job_dir`: 'true' would reach the task as True." in message
     assert "target job directory" not in message
+
+
+def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_path):
+    """A launcher that loses a job's result can take the metrics file for it
+    only when the record names that file, written whole (#345)."""
+    import json
+
+    class Some(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=1.0) if x == 1 else None
+
+    Some().run(x=multirun([1, 2]), working_dir=tmp_path)
+    records = {
+        json.loads(p.read_text())["combo"]["x"]: json.loads(p.read_text())
+        for p in tmp_path.glob("*/mushin_cell_status.json")
+    }
+    from mushin._sweep_io import METRICS_FILE, _digest
+
+    written = (tmp_path / "0" / METRICS_FILE, tmp_path / "1" / METRICS_FILE)
+    text = next(p.read_text() for p in written if p.exists())
+    assert records[1]["metrics"] == _digest(text)  # the file it wrote
+    assert "metrics" not in records[2]

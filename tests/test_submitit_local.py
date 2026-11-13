@@ -214,6 +214,7 @@ def test_a_job_that_fails_before_its_cell_starts_is_a_failed_cell(
         assert _status(wd / cell) == "failed"
         error = (wd / cell / "mushin_error.txt").read_text()
         assert "FailedJobError" in error and "_submitit_tasks" in error
+        assert "ModuleNotFoundError" in error  # the job's own error, kept
     # The one line says the job raised, not that it gave no result.
     manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
     for c in manifest["cells"].values():
@@ -351,3 +352,150 @@ def test_resume_submits_only_the_cells_it_must_compute(tmp_path):
         seed=multirun([0, 1, 2]), working_dir=str(wd), resume=True, **LOCAL
     )
     assert len(_job_dirs(wd)) == before
+
+
+def _result_too_late_for(monkeypatch, seed):
+    """submitit's `results()` raises for `seed`'s job as it does when a job's
+    result appears only after submitit stopped waiting for it (a slow shared
+    filesystem): the job finished, and its cell recorded the result. Patched
+    in this process, the driver; returns the ids it raised for."""
+    from submitit.core import core
+    from submitit.core.utils import UncompletedJobError
+
+    real = core.Job.results
+    raised = []
+
+    def results(self):
+        out = real(self)
+        if out[0].cfg.seed == seed:
+            raised.append(self.job_id)
+            raise UncompletedJobError(
+                f"Job {self.job_id} (task: 0) has not produced any output "
+                "(state: FINISHED)"
+            )
+        return out
+
+    monkeypatch.setattr(core.Job, "results", results)
+    return raised
+
+
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+def test_a_job_whose_cell_completed_keeps_its_result(tmp_path, monkeypatch, on_error):
+    wd = tmp_path / "s"
+    raised = _result_too_late_for(monkeypatch, seed=1)
+    ds = tasks.record_pid.run(
+        seed=multirun([0, 1, 2]), working_dir=str(wd), on_error=on_error, **LOCAL
+    )
+    assert len(raised) == 1  # the dead-job path ran
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
+    manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
+    assert {c["status"] for c in manifest["cells"].values()} == {"completed"}
+    assert not (wd / "1" / "mushin_error.txt").exists()
+    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed" and isinstance(record["metrics"], str)
+    assert record["job_id"] == raised[0]  # the job's own id, as submitit names it
+
+
+def _results_that_raised(monkeypatch):
+    """The ids of the jobs whose `results()` raised in this process, the
+    driver: a job submitit reports as failed. A job of several tasks reads
+    each task's `results()`, under the job's id."""
+    from submitit.core import core
+
+    real = core.Job.results
+    raised = []
+
+    def results(self):
+        try:
+            return real(self)
+        except Exception:
+            raised.append(self.job_id)
+            raise
+
+    monkeypatch.setattr(core.Job, "results", results)
+    return raised
+
+
+def test_a_job_of_several_tasks_fails_its_cell_when_one_dies(tmp_path, monkeypatch):
+    """Every task of the job runs mushin's runner in the cell's dir, so the
+    cell's completed record is not known to be the first task's (the job's
+    result): the cell fails, as when the record could not be read, and the
+    record is left for a resume."""
+    raised = _results_that_raised(monkeypatch)
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
+        ds = tasks.second_task_dies.run(
+            seed=multirun([0, 1]),
+            working_dir=str(wd),
+            on_error="nan",
+            launcher="submitit_local",
+            launcher_config={"timeout_min": 1, "tasks_per_node": 2},
+        )
+    # Seed 1's job (its tasks' `results()` count too): the dead-job path ran.
+    assert len(set(raised)) == 1
+    v = ds["v"].values
+    assert v[0] == 0.0 and np.isnan(v[1])
+    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed"
+
+
+def test_a_result_submitit_could_not_save_fails_its_cell(tmp_path):
+    """The job's runner recorded the cell completed, then submitit could not
+    pickle the result (nor the error, so it left no result file). The
+    metrics file holds that value only as its text, so the record does not
+    say it holds the result, and the cell fails rather than take it."""
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match=r"failed: \['seed=0'\]"):
+        ds = tasks.unpicklable_result.run(
+            seed=multirun([0, 1]), working_dir=str(wd), on_error="nan", **LOCAL
+        )
+    v = ds["v"].values
+    assert np.isnan(v[0]) and v[1] == 1.0
+    record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed" and "metrics" not in record
+
+
+def test_a_dead_job_leaves_another_cells_record_in_a_reused_dir(tmp_path, monkeypatch):
+    """A second sweep over other values reuses the first one's numbered dirs.
+    Its job 1 dies before its cell starts. The dir's record, metrics and any
+    checkpoint are the first sweep's cell: recording this cell over them would
+    let a resume take that checkpoint for this cell's, so they stay, and the
+    cell fails for this run. A resume then starts it afresh."""
+    wd = tmp_path / "s"
+    tasks.die_when_told.run(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+    second = dict(seed=multirun([5, 6, 7]), working_dir=str(wd), **LOCAL)
+    with pytest.warns(UserWarning, match=r"failed: \['seed=6'\]"):
+        tasks.die_when_told.run(
+            on_error="nan", overrides=[tasks.DIE_BEFORE_START], **second
+        )
+    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed" and record["combo"] == {"seed": 1}
+    assert (wd / "1" / "mushin_metrics.json").exists()
+    monkeypatch.delenv("MUSHIN_TEST_DIE_BEFORE_START")
+    again = tasks.die_when_told.run(resume=True, **second)
+    assert again["v"].values.tolist() == [5.0, 6.0, 7.0]
+    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
+    assert record["combo"] == {"seed": 6} and record["attempt"] == 1
+
+
+def test_a_dead_job_leaves_this_cells_earlier_result_for_a_resume(
+    tmp_path, monkeypatch
+):
+    """An earlier run's completed record of the same cell, under the same
+    config and code, is what a resume reuses: a job that dies before its cell
+    starts fails the cell for its own run and leaves that result alone."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
+    first = tasks.die_when_told.run(**sweep)
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+    with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
+        tasks.die_when_told.run(
+            on_error="nan", overrides=[tasks.DIE_BEFORE_START], **sweep
+        )
+    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed"
+    monkeypatch.delenv("MUSHIN_TEST_DIE_BEFORE_START")
+    again = tasks.die_when_told.run(resume=True, **sweep)
+    # The first run's result, reused; the second run recomputed the others.
+    assert again["pid"].values[1] == first["pid"].values[1]
