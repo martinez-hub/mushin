@@ -856,6 +856,19 @@ def _route_to_mushin_launchers(overrides: list[str]) -> list[str]:
     return routed
 
 
+def _snapshot_run(hydra_yaml: Path) -> str | None:
+    """The run a job's hydra.yaml names, or None when there is none, it
+    names none (written before the stamp), or it cannot be read."""
+    from ._hydra_yaml import hydra_run_stamp, load_hydra_record
+
+    if not hydra_yaml.exists():
+        return None
+    try:
+        return hydra_run_stamp(load_hydra_record(hydra_yaml))
+    except Exception:  # noqa: BLE001 - unreadable: not this run's
+        return None
+
+
 def _record_dead_cell(
     ret: JobReturn,
     dead: _DeadJob,
@@ -876,8 +889,10 @@ def _record_dead_cell(
     The cell gets the ``status`` the runner would have recorded: 'skipped'
     for a cell ``sample=`` left out, else 'failed', as for a task that
     raised, with this run's ``run_id`` and the job's id. A cell without
-    Hydra's ``.hydra/`` snapshot gets the one ``run_job`` would have written,
-    so a reload finds it. A metrics file a prior attempt left is removed, and
+    Hydra's ``.hydra/`` snapshot of this run's job (none, or an earlier
+    run's in a reused dir, which names another run or none) gets the one
+    ``run_job`` would have written, so a reload finds this job's config
+    beside its record. A metrics file a prior attempt left is removed, and
     a failed cell under ``on_error="nan"`` gets mushin_error.txt: the
     one-line summary, which names the job's log, then submitit's message
     (under ``"raise"`` the raised error carries submitit's message alone).
@@ -895,7 +910,7 @@ def _record_dead_cell(
         # (`sidecar_job_fields`). As `run_job` saves them, unresolved.
         if hydra.output_subdir is not None:
             snapshot = cell_dir / str(hydra.output_subdir)
-            if not (snapshot / "hydra.yaml").exists():
+            if _snapshot_run(snapshot / "hydra.yaml") != run_id:
                 snapshot.mkdir(parents=True, exist_ok=True)
                 for name, node in (
                     ("config.yaml", ret.cfg),

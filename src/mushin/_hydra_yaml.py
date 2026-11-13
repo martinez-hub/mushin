@@ -4,7 +4,8 @@
 ``OmegaConf.load`` gives.
 
 ``load_from_dir`` and the MCP server need two fields from each job's
-hydra.yaml: the job number and the config-group choices. ``OmegaConf.load``
+hydra.yaml: the job number and the config-group choices; a reload also reads
+the run the job names (``hydra.job.mushin_run_id``). ``OmegaConf.load``
 parses the file with PyYAML's pure-Python loader and then builds a config from
 it, which was about 90% of a 1000-cell reload. Here libyaml parses the file,
 the tree is checked as ``OmegaConf.create`` would check it, and the parse is
@@ -157,17 +158,22 @@ def hydra_job_fields(record: Any) -> tuple[Any, dict | None]:
 def hydra_run_stamp(record: Any) -> str | None:
     """The run a ``load_hydra_record`` result names
     (``hydra.job.mushin_run_id``, which ``run()`` sets for each job), or
-    None for a snapshot from before it."""
+    None for a snapshot from before it. Read as written, on both read paths
+    alike: ``run()`` writes a plain id, so a value that is empty, missing
+    (``???``) or an interpolation was not, and names no run."""
     try:
         if isinstance(record, dict):
             stamp = record["hydra"]["job"].get("mushin_run_id")
         else:
             from omegaconf import OmegaConf
 
-            stamp = OmegaConf.select(record, "hydra.job.mushin_run_id")
+            job = OmegaConf.to_container(record.hydra.job, resolve=False)
+            stamp = job.get("mushin_run_id")
     except Exception:  # noqa: BLE001 - no such node: no stamp
         return None
-    return stamp if isinstance(stamp, str) else None
+    if not isinstance(stamp, str) or not stamp or stamp == "???" or "${" in stamp:
+        return None
+    return stamp
 
 
 def hydra_choices(hydra: Any) -> dict | None:
