@@ -179,12 +179,21 @@ states under both `on_error` values with main).
   task defined in the script, and a fixed `${hydra:runtime.output_dir}`),
   and applies `_settle` strictly: a fingerprint the prior record has but the
   driver cannot take does not count as unchanged, as it does in a job for a
-  sweep from before the fingerprint; that cell is left to its job. A settled
-  cell gets the `.hydra/` snapshot `run_job` would write, then its record.
-  Any error settling a cell leaves it to its job.
+  sweep from before the fingerprint; nor does a project-code record that
+  lacks a file the prior one names (a module only the jobs' path imports);
+  a fingerprint that differs is left to the job to warn about. A config that
+  reads the environment (`${oc.env:...}`, `hydra.job.env_set`) is never
+  reused or cache-hit in the driver, whose environment the jobs' may not
+  match. Every cell is decided before any dir is written (a resume over a
+  renumbered grid reads prior dirs another cell's record would overwrite);
+  a settled cell then gets the `.hydra/` snapshot `run_job` would write
+  (`hydra.job.id` `driver_<n>`), then its record. Any error settling or
+  writing a cell leaves it to its job, and the driver warns once.
 - **F3. Only sweeps that can settle a cell pay for it.** The launcher composes
-  per cell only when `sample=`, a resume or a `cache_dir` is set; a fresh
-  sweep submits as before. The rest are submitted under their own job numbers
+  a cell only when it may need no job (`sample=` leaves it out, or a resume
+  has completed cells, or a usable `cache_dir` is set), and never when the
+  sweep has Hydra callbacks, which `run_job` calls in each job; a fresh sweep
+  submits as before, and one with nothing left to submit builds no executor. The rest are submitted under their own job numbers
   (one line in the copied submission body filters them; the pin test strips
   exactly that edit).
 

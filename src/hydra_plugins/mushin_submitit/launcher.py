@@ -2,15 +2,18 @@
 # SPDX-License-Identifier: MIT
 """The launchers behind `run(launcher="submitit_slurm")` and `"submitit_local"`.
 
-They are hydra-submitit-launcher's own launchers, changed in one place: the
-plugin waits on its jobs in a list comprehension, so the first job that ends
-without a result (killed out of memory, on a failed node, by `scancel` or at
-a time limit before Python could act, or raised outside the task, as when it
-cannot import it) raises from the driver while the later jobs still run,
-unobserved, and the sweep records nothing. Here every job is waited on,
-and a job that ends without a result comes back to mushin as a failed cell,
-which `on_error` then handles as it does a task that raised, unless the
-cell's own record holds the result the job could not return (#345).
+They are hydra-submitit-launcher's own launchers, changed in two places.
+They submit only the cells that need a job: a cell `sample=` leaves out, a
+resume reuses or a `cache_dir` holds is settled in the driver first, by the
+runner's own rules. And they wait on every job: the plugin waits in a list
+comprehension, so the first job that ends without a result (killed out of
+memory, on a failed node, by `scancel` or at a time limit before Python could
+act, or raised outside the task, as when it cannot import it) raises from the
+driver while the later jobs still run, unobserved, and the sweep records
+nothing. Here a job that ends without a result comes back to mushin as a
+failed cell, which `on_error` then handles as it does a task that raised,
+unless the cell's own record holds the result the job could not return
+(#345).
 
 `run()` sends the plugin's two names here (`mushin_submitit_slurm` and
 `mushin_submitit_local`); their config is the plugin's, field for field, so
@@ -54,46 +57,75 @@ if _plugin_launcher is not None:
 
         def launch(self, job_overrides, initial_job_idx):
             settled = self._settled_in_driver(job_overrides, initial_job_idx)
+            numbers = [initial_job_idx + i for i in range(len(job_overrides))]
+            if len(settled) == len(numbers):
+                # Nothing to submit: no executor (on SLURM it wants `srun`).
+                return [settled[n] for n in numbers]
             jobs, job_params = self._submit(
                 job_overrides, initial_job_idx, skip=settled
             )
             waited = self._wait(jobs, job_params)
             returns = dict(zip([p[2] for p in job_params], waited, strict=True))
             returns.update(settled)
-            return [returns[initial_job_idx + i] for i in range(len(job_overrides))]
+            return [returns[n] for n in numbers]
 
         def _settled_in_driver(self, job_overrides, initial_job_idx):
             """The JobReturns of the cells mushin's runner says need no job
             (left out by ``sample=``, reused by a resume, or a ``cache_dir``
-            hit), each recorded in its dir as its job would have recorded it,
-            by job number, so only the rest are submitted, under their own
-            job numbers (#345). Each job is composed in the driver only when
-            some cell may need none; a cell that cannot be settled here, for
-            whatever reason, is left to its job, which decides as before."""
+            hit), by job number, so only the rest are submitted, under their
+            own job numbers (#345). Every cell is decided before any is
+            recorded: a resume over a renumbered grid reads a prior cell's dir
+            that another cell's record would overwrite. A cell is composed in
+            the driver only when it may need no job, and not at all when the
+            sweep has Hydra callbacks, which `run_job` calls for each job. A
+            cell that cannot be settled here, for whatever reason, is left to
+            its job, which decides as before; the driver warns once."""
+            import warnings
+
             runner = self.task_function
             settles = getattr(runner, "settles_in_driver", None)
             if not (
                 getattr(runner, "_mushin_collects_dead_jobs", False)
                 and settles is not None
                 and settles()
+                and not OmegaConf.select(self.config, "hydra.callbacks")
             ):
                 return {}
-            settled = {}
+            settled, writes, errors = {}, {}, []
             for i, overrides in enumerate(job_overrides):
                 idx = initial_job_idx + i
+                if not runner.may_settle(idx):
+                    continue
                 try:
-                    with self._composed(overrides, idx, None) as ret:
-                        result = runner.settle_in_driver(ret)
+                    with self._composed(overrides, idx, f"driver_{idx}") as ret:
+                        defer = []
+                        result = runner.settle_in_driver(ret, defer)
                         if result is not None:
                             ret.status, ret.return_value = result
-                            settled[idx] = ret
+                            settled[idx], writes[idx] = ret, defer
                 except Exception as exc:  # noqa: BLE001 - its job decides
-                    log.debug(f"#{idx} left to its job: {exc!r}")
+                    errors.append((idx, exc))
+            for idx, defer in writes.items():
+                try:
+                    for write in defer:
+                        write()
+                except Exception as exc:  # noqa: BLE001 - its job rewrites the dir
+                    errors.append((idx, exc))
+                    del settled[idx]
+            if errors:
+                idx, exc = errors[0]
+                warnings.warn(
+                    f"{len(errors)} of {len(job_overrides)} cells could not be "
+                    f"settled before submitting (#{idx}: {exc!r}); they are "
+                    "submitted, and their jobs decide as before.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             if settled:
+                listed = ", ".join(f"#{n}" for n in sorted(settled))
                 log.info(
                     f"{len(settled)} of {len(job_overrides)} cells need no job "
-                    "(left out by sample=, reused or cached); submitting "
-                    f"{len(job_overrides) - len(settled)}"
+                    f"(left out by sample=, reused or cached): {listed}"
                 )
             return settled
 

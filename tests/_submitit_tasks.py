@@ -133,3 +133,8 @@ def unpicklable_result(seed):
 @mushin.sweep
 def scaled(seed, scale):
     return dict(v=float(seed) * scale)
+
+
+@mushin.sweep
+def env_scaled(seed, n):
+    return dict(v=float(n))

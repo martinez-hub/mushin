@@ -587,38 +587,53 @@ def test_only_a_one_task_job_that_gave_no_result_may_keep_its_record():
     assert not ours._keepable(_Ended(), _failed_job_error("RuntimeError: x"))
 
 
+_A = {"code": {"pkg/a.py": "1"}}
+_AB = {"code": {"pkg/a.py": "1", "pkg/b.py": "2"}}
+
+
 @pytest.mark.parametrize(
-    ("prior", "chash", "settles"),
+    ("prior", "chash", "code_hash", "deps", "settles"),
     [
-        (dict(config_hash="c"), "c", True),
-        (dict(config_hash="c"), None, False),  # the driver cannot resolve it
-        (dict(), None, True),  # a sweep from before the fingerprint
-        (dict(config_hash="c"), "d", False),  # changed
+        (dict(config_hash="c"), "c", None, None, True),
+        (dict(config_hash="c"), None, None, None, False),  # cannot resolve it
+        (dict(), None, None, None, True),  # a sweep from before the fingerprint
+        (dict(config_hash="c"), "d", None, None, False),  # changed
+        (dict(code_hash="x"), None, "x", None, True),
+        (dict(code_hash="x"), None, None, None, False),  # cannot take it
+        (dict(code_hash="x"), None, "y", None, False),  # changed
+        (dict(code_deps=_A), None, None, _AB, True),
+        (dict(code_deps=_AB), None, None, _AB, True),
+        (dict(code_deps=_AB), None, None, _A, False),  # a file only the job reaches
+        (dict(code_deps=_A), None, None, None, False),  # cannot compare
+        (dict(code_deps=_A), None, None, {"code": {"pkg/a.py": "9"}}, False),
     ],
 )
 def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
-    tmp_path, prior, chash, settles
+    tmp_path, monkeypatch, prior, chash, code_hash, deps, settles
 ):
     """`_settle(strict=True)`: a fingerprint the prior record has and the
-    driver cannot take is not 'unchanged' there, as it is in the job."""
+    driver cannot take, or a project-code record that lacks a file the prior
+    one names, is not 'unchanged' there, as it is in the job."""
     import warnings
 
+    from mushin import _resume
     from mushin._resume import write_cell_status
     from mushin._sweep_io import write_metrics_sidecar
     from mushin.workflows import _COMPUTE, _PriorCells, _TaskRunner
 
+    monkeypatch.setattr(_resume, "cell_project_record", lambda *a, **k: deps)
     cell = tmp_path / "0"
     write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1, **prior)
     write_metrics_sidecar(cell, {"v": 1.0})
     runner = object.__new__(_TaskRunner)
     runner.swept_names, runner.sampled_indices = ["lr"], None
-    runner.code_hash, runner.cache_dir = None, None
+    runner.code_hash, runner.cache_dir = code_hash, None
     runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
     runner.script_entries = {}
     runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
     written = []
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        warnings.simplefilter("error")  # the driver leaves warning to the job
         value, _ = runner._settle(
             {"lr": 0.2},
             tmp_path / "1",
@@ -629,3 +644,36 @@ def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
             strict=True,
         )
     assert (value is not _COMPUTE) is settles
+    assert len(written) == settles
+
+
+def test_the_driver_can_defer_its_writes(tmp_path):
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _PriorCells, _TaskRunner
+
+    cell = tmp_path / "0"
+    write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1)
+    write_metrics_sidecar(cell, {"v": 1.0})
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.code_hash, runner.cache_dir = None, None
+    runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
+    runner.script_entries = {}
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
+    written, defer = [], []
+    value, _ = runner._settle(
+        {"lr": 0.2},
+        tmp_path / "1",
+        {"lr": 0.2},
+        None,
+        0,
+        lambda *a, **k: written.append(k),
+        strict=True,
+        defer=defer,
+    )
+    assert value == {"v": 1.0}
+    assert (written, len(defer)) == ([], 1)
+    defer[0]()
+    assert [w["status"] for w in written] == ["completed"]
+    assert (tmp_path / "1" / "mushin_metrics.json").is_file()

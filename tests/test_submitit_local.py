@@ -51,6 +51,8 @@ def _job_dirs(working_dir: Path) -> list[Path]:
     job's id is a number; the default `submitit_folder` (`.submitit/%j`) also
     leaves a literal `%j` folder behind, which is not a job."""
     root = working_dir / ".submitit"
+    if not root.exists():  # nothing was submitted
+        return []
     return [p for p in root.iterdir() if p.is_dir() and p.name.isdigit()]
 
 
@@ -336,9 +338,6 @@ def test_a_resume_reuses_a_sweep_the_plugins_launcher_ran(tmp_path, monkeypatch)
     assert again["pid"].values.tolist() == first["pid"].values.tolist()
 
 
-# Known gap (#345), pinned so a fix turns it into a failure to update.
-
-
 def test_resume_submits_only_the_cells_it_must_compute(tmp_path):
     wd = tmp_path / "s"
     tasks.record_pid.run(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
@@ -542,6 +541,9 @@ def test_sample_submits_only_the_sampled_cells(tmp_path, monkeypatch, driver):
     ]
     for cell in records:
         assert (wd / cell / ".hydra" / "hydra.yaml").is_file()
+    if driver:  # a settled cell's snapshot names no job, but no missing value
+        snapshots = [(wd / c / ".hydra" / "hydra.yaml").read_text() for c in records]
+        assert sum("id: driver_" in text for text in snapshots) == 3
     reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
     assert len(reloaded.skipped) == 3
 
@@ -598,10 +600,10 @@ def test_a_cache_hit_submits_no_job(tmp_path):
 def test_a_changed_config_on_resume_submits_every_cell(tmp_path):
     wd = tmp_path / "s"
     tasks.scaled.run(seed=multirun([0, 1]), scale=1.0, working_dir=str(wd), **LOCAL)
-    with pytest.warns(UserWarning, match="fingerprint mismatch"):
-        again = tasks.scaled.run(
-            seed=multirun([0, 1]), scale=2.0, working_dir=str(wd), resume=True, **LOCAL
-        )
+    # The driver leaves a changed cell to its job, which says so in its log.
+    again = tasks.scaled.run(
+        seed=multirun([0, 1]), scale=2.0, working_dir=str(wd), resume=True, **LOCAL
+    )
     assert again["v"].values.tolist() == [0.0, 2.0]
     assert len(_job_dirs(wd)) == 4
 
@@ -613,11 +615,86 @@ def test_a_cell_the_driver_cannot_settle_is_left_to_its_job(tmp_path, monkeypatc
     sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
     first = tasks.record_pid.run(**sweep)
 
-    def broken(self, ret):
+    def broken(self, ret, defer):
         raise RuntimeError("cannot settle here")
 
     monkeypatch.setattr(_TaskRunner, "settle_in_driver", broken)
-    again = tasks.record_pid.run(resume=True, **sweep)
+    with pytest.warns(UserWarning, match=r"2 of 2 cells could not be settled.*here"):
+        again = tasks.record_pid.run(resume=True, **sweep)
     # Submitted, and reused by the jobs themselves, as before.
     assert len(_job_dirs(wd)) == 4
     assert again["pid"].values.tolist() == first["pid"].values.tolist()
+
+
+def _cache_twice(tmp_path, monkeypatch, driver):
+    """A sweep into a cache_dir, then the same sweep into a new working_dir;
+    returns the second run's dataset and dir, and the jobs it submitted."""
+    if not driver:
+        _without_the_driver_pass(monkeypatch)
+    sweep = dict(seed=multirun([0, 1]), cache_dir=str(tmp_path / "cache"), **LOCAL)
+    tasks.record_pid.run(working_dir=str(tmp_path / "a"), **sweep)
+    again = tasks.record_pid.run(working_dir=str(tmp_path / "b"), **sweep)
+    wd = tmp_path / "b"
+    return again, wd, len(_job_dirs(wd))
+
+
+def test_a_cache_hit_settled_in_the_driver_leaves_what_its_job_would(
+    tmp_path, monkeypatch
+):
+    outcomes = []
+    for driver in (True, False):
+        with monkeypatch.context() as m:
+            again, wd, submitted = _cache_twice(tmp_path / str(driver), m, driver)
+        outcomes.append(
+            (again["v"].values.tolist(), _cells(wd), _records(wd), submitted)
+        )
+    (v1, cells1, records1, n1), (v2, cells2, records2, n2) = outcomes
+    assert (v1, cells1, records1) == (v2, cells2, records2)
+    assert (n1, n2) == (0, 2)
+
+
+def test_a_resume_over_a_renumbered_grid_reuses_every_earlier_cell(tmp_path):
+    """A value put first on the axis shifts every job number by one, so each
+    cell's earlier result is in the dir the next cell now takes: deciding
+    every cell before writing any keeps them all."""
+    wd = tmp_path / "s"
+    first = tasks.record_pid.run(seed=multirun([1, 2, 3]), working_dir=str(wd), **LOCAL)
+    submitted = len(_job_dirs(wd))
+    again = tasks.record_pid.run(
+        seed=multirun([0, 1, 2, 3]), working_dir=str(wd), resume=True, **LOCAL
+    )
+    assert len(_job_dirs(wd)) - submitted == 1  # only seed 0
+    assert again["v"].values.tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert again["pid"].values.tolist()[1:] == first["pid"].values.tolist()
+
+
+def test_a_config_that_reads_the_environment_is_left_to_its_jobs(tmp_path, monkeypatch):
+    """`hydra.job.env_set` sets a variable in each job but not in the driver,
+    where `${oc.env:...}` gives its default on both runs: the first run's
+    value, so the driver would reuse its cells where the jobs see a new one."""
+    monkeypatch.delenv("MUSHIN_TEST_N", raising=False)
+    wd = tmp_path / "s"
+    sweep = dict(
+        seed=multirun([0, 1]), n="${oc.env:MUSHIN_TEST_N,1}", working_dir=str(wd)
+    )
+
+    def env(value):
+        return [f"++hydra.job.env_set.MUSHIN_TEST_N={value}"]
+
+    first = tasks.env_scaled.run(**sweep, overrides=env(1), **LOCAL)
+    assert first["v"].values.tolist() == [1.0, 1.0]
+    again = tasks.env_scaled.run(**sweep, overrides=env(8), resume=True, **LOCAL)
+    assert again["v"].values.tolist() == [8.0, 8.0]
+
+
+def test_a_sweep_with_hydra_callbacks_settles_nothing_in_the_driver(tmp_path):
+    # A settled cell would skip the callbacks Hydra's run_job calls per job.
+    wd = tmp_path / "s"
+    callback = (
+        "+hydra.callbacks.log_return._target_="
+        "hydra.experimental.callbacks.LogJobReturnCallback"
+    )
+    sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), overrides=[callback])
+    tasks.record_pid.run(**sweep, **LOCAL)
+    tasks.record_pid.run(**sweep, resume=True, **LOCAL)
+    assert len(_job_dirs(wd)) == 4
