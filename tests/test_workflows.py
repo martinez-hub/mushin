@@ -2637,6 +2637,79 @@ def test_a_cell_that_completes_after_a_load_counts_on_the_next_read(tmp_path):
     assert wf.load_metrics("mushin_metrics.json") == {"v": [3.0, 4.0]}
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        None,
+        "    mushin_run_id: abc123",
+        "    mushin_run_id: '1e500000000000000000000000000000'",
+        '    mushin_run_id: "0123"',
+        "    mushin_run_id: '???'",
+        "    mushin_run_id: ???",
+        "    mushin_run_id: ${hydra.job.name}",
+        "    mushin_run_id: ''",
+        "    mushin_run_id: null",
+        "    mushin_run_id: 12345",
+        "    mushin_run_id: 1e5",
+    ],
+)
+def test_the_stamp_line_reads_as_the_parsed_file(tmp_path, line):
+    """show reads a snapshot's run from its line, without a YAML parser
+    (`snapshot_run_stamp`); it must give what the parse gives."""
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import snapshot_run_stamp
+
+    lines = ["hydra:", "  job:", "    name: abc"] + ([line] if line else [])
+    path = tmp_path / "hydra.yaml"
+    path.write_text("\n".join(lines) + "\n")
+    assert snapshot_run_stamp(path) == hydra_run_stamp(load_hydra_record(path))
+
+
+def test_the_stamp_line_reads_real_snapshots(tmp_path, monkeypatch):
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import snapshot_run_stamp
+    from mushin.workflows import _TaskRunner
+
+    init = _TaskRunner.__init__
+    for run_id in ("1e5" + "0" * 29, "1" * 32, "abc" + "0" * 29):
+
+        def given(self, *args, run_id=run_id, **kwargs):
+            init(self, *args, **kwargs)
+            self.run_id = run_id
+
+        monkeypatch.setattr(_TaskRunner, "__init__", given)
+        wd = tmp_path / run_id[:4]
+        _ReusedDir().run(x=multirun([1]), lr=1.0, working_dir=str(wd))
+        path = wd / "0" / ".hydra" / "hydra.yaml"
+        assert snapshot_run_stamp(path) == run_id
+        assert hydra_run_stamp(load_hydra_record(path)) == run_id
+
+
+@pytest.mark.parametrize("case", ["copied", "before-the-stamp"])
+def test_show_keeps_an_older_record_of_the_same_run(tmp_path, case):
+    """show, best and export keep a record older than its snapshot when both
+    name one run (a copy without its files' times), or when the snapshot
+    names none (written before the stamp)."""
+    import os
+
+    import mushin
+    from mushin._show import _read_cells
+
+    wd = tmp_path / "s"
+    _ReusedDir().run(x=multirun([1, 2]), lr=2.0, working_dir=str(wd))
+    for cell in ("0", "1"):
+        hydra = wd / cell / ".hydra" / "hydra.yaml"
+        if case == "before-the-stamp":
+            text = hydra.read_text()
+            hydra.write_text(
+                "\n".join(x for x in text.splitlines() if "mushin_run_id" not in x)
+            )
+        record = (wd / cell / "mushin_cell_status.json").stat().st_mtime_ns
+        os.utime(hydra, ns=(record + 10**9, record + 10**9))
+    assert [c["dir"].name for c in _read_cells(wd)] == ["0", "1"]
+    assert mushin.best(wd, "v", mode="min").value == 2.0
+
+
 def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
     import json
 

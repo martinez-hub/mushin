@@ -860,19 +860,6 @@ def _route_to_mushin_launchers(overrides: list[str]) -> list[str]:
     return routed
 
 
-def _snapshot_run(hydra_yaml: Path) -> str | None:
-    """The run a job's hydra.yaml names, or None when there is none, it
-    names none (written before the stamp), or it cannot be read."""
-    from ._hydra_yaml import hydra_run_stamp, load_hydra_record
-
-    if not hydra_yaml.exists():
-        return None
-    try:
-        return hydra_run_stamp(load_hydra_record(hydra_yaml))
-    except Exception:  # noqa: BLE001 - unreadable: not this run's
-        return None
-
-
 def _record_dead_cell(
     ret: JobReturn,
     dead: _DeadJob,
@@ -904,7 +891,7 @@ def _record_dead_cell(
     return whatever happens here."""
     from omegaconf import OmegaConf
 
-    from ._resume import write_cell_status
+    from ._resume import snapshot_run_stamp, write_cell_status
     from ._sweep_io import METRICS_FILE, remove_sidecar
 
     try:
@@ -916,7 +903,7 @@ def _record_dead_cell(
         if hydra.output_subdir is not None:
             existing = cell_dir / str(hydra.output_subdir) / "hydra.yaml"
             _write_hydra_snapshot(
-                ret, cell_dir, replace=_snapshot_run(existing) != run_id
+                ret, cell_dir, replace=snapshot_run_stamp(existing) != run_id
             )
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(

@@ -76,21 +76,26 @@ def _read_cells(root) -> list[dict]:
     which marks a cell of a newer sweep currently in flight (the mid-sweep
     view). Without a manifest (fresh dir mid-sweep, pre-manifest sweeps) every
     cell dir is kept. A dir whose record is older than its ``.hydra/hydra.yaml``
-    and another run's (`record_of_another_run`: its job died before its first
-    record) is excluded too, as a cell that wrote nothing."""
+    (the default snapshot folder) and another run's (`record_of_another_run`:
+    its job died before its first record) is excluded too, as a cell that
+    wrote nothing."""
     return _scan(root)[0]
 
 
 def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
     """``_read_cells`` plus the mtime of the manifest that scoped the scan
-    (0.0 when none did), read once so the two never disagree. ``mtimes``
-    records every cell's ``status_mtime``; otherwise only the cells the
-    manifest does not list are stat'ed, as the stale-dir rule needs, and the
-    field is 0.0 (``show`` and ``export`` never read it)."""
+    (0.0 when none did), read once so the two never disagree. Each cell's
+    record and ``.hydra/hydra.yaml`` are stat'ed (their ages), and the
+    hydra.yaml is read only when it is the newer. ``mtimes`` records every
+    cell's ``status_mtime``; otherwise only the cells the manifest does not
+    list get one, as the stale-dir rule needs, and the field is 0.0 (``show``
+    and ``export`` never read it)."""
     from ._resume import (
         STATUS_FILE,
-        hydra_yaml_record_of_another_run,
         read_cell_status,
+        record_of_another_run,
+        record_predates,
+        snapshot_run_stamp,
     )
     from ._sweep_io import combo_key, read_metrics_sidecar
 
@@ -105,10 +110,12 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
         (p for p in root.iterdir() if p.is_dir()),
         key=lambda p: _numeric_dir_key(p.name),
     ):
+        snapshot = d / ".hydra" / "hydra.yaml"
+        older = record_predates(d, snapshot)  # its age before its content
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
-        if hydra_yaml_record_of_another_run(d, d / ".hydra" / "hydra.yaml"):
+        if older and record_of_another_run(s, snapshot_run_stamp(snapshot)):
             continue  # its job died before its first record: an earlier run's
         status_mtime = 0.0
         if manifest_cells:
