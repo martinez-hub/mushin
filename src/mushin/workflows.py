@@ -633,6 +633,37 @@ class _PriorCells:
 _MISSING_SWEPT = object()
 
 
+def _override_texts(overrides) -> list[str]:
+    """A sweep's override strings, read back from its YAML (#351).
+
+    Each is read as before, its interpolations resolved, except a fixed
+    value whose resolution fails, which is read unresolved, as the file
+    holds it. An override such as ``+out='${hydra:runtime.output_dir}'``
+    cannot be resolved once the jobs have run: there is no ``HydraConfig``
+    for the ``hydra`` resolver to read (in a new process, no such resolver).
+    It stopped ``run()`` after every cell had completed, and stopped a
+    reload. A sweep's own values (a ``choice`` in its ``multirun.yaml``) key
+    the grid's cells, which each job resolved for itself, so one that cannot
+    be resolved still raises (#353)."""
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    texts = []
+    for i in range(len(overrides)):
+        try:
+            texts.append(overrides[i])
+        except InterpolationResolutionError:
+            text = OmegaConf.to_container(overrides, resolve=False)[i]  # type: ignore[index]
+            try:
+                swept = _override_parser().parse_override(text).is_sweep_override()
+            except Exception:  # noqa: BLE001 - one Hydra cannot parse fails as before
+                swept = True
+            if swept:
+                raise
+            texts.append(text)
+    return texts
+
+
 def _read_swept_value(cfg, name: str):
     """Read swept param ``name`` from a job config. A literal flat key wins;
     otherwise ``name`` is treated as a nested config *path* (``model.width``),
@@ -2228,9 +2259,9 @@ class BaseWorkflow:
         {'foo': ['val'], 'bar': multirun(['a', 'b']), 'apple': 1}
         """
         if not self._multirun_task_overrides:
-            overrides = load_from_yaml(
-                self.working_dir / "multirun.yaml"
-            ).hydra.overrides.task
+            overrides = _override_texts(
+                load_from_yaml(self.working_dir / "multirun.yaml").hydra.overrides.task
+            )
 
             output = self._parse_overrides(overrides)
             self._multirun_task_overrides = output
@@ -3650,27 +3681,29 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         assert self.output_subdir is not None
 
         multirun_cfg = self.working_dir / "multirun.yaml"
-        self._target_dir_multirun_overrides = defaultdict(list)
+        # Cached only once every dir has been read: a read that raises
+        # partway must not leave a part of the dirs to be returned next time.
+        found: defaultdict[str, list[Any]] = defaultdict(list)
 
-        overrides = load_from_yaml(multirun_cfg).hydra.overrides.task
-        self.overrides = overrides
+        self.overrides = load_from_yaml(multirun_cfg).hydra.overrides.task
 
         # Use Hydra's override parser (rather than naive string splitting) so
         # that the job-dir sweep – e.g. `+job_dir=choice('a','b')` – and any
         # quoted values containing '=' / commas are parsed correctly.
-        parsed = self._parse_overrides(list(overrides))
+        parsed = self._parse_overrides(_override_texts(self.overrides))
         jobdir_value = parsed.get(self._JOBDIR_NAME, [])
         dirs = list(jobdir_value) if _non_str_sequence(jobdir_value) else []
 
         for d in dirs:
-            overrides: list[str] = list(
+            overrides = _override_texts(
                 load_from_yaml(Path(d) / f"{self.output_subdir}/overrides.yaml")
             )
             output = self._parse_overrides(overrides)
 
             for ko, vo in output.items():
-                self._target_dir_multirun_overrides[ko].append(vo)
-        return dict(self._target_dir_multirun_overrides)
+                found[ko].append(vo)
+        self._target_dir_multirun_overrides = found
+        return dict(found)
 
     def jobs_post_process(self):
         assert len(self.jobs) > 0
