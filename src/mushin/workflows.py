@@ -600,6 +600,10 @@ class _DeadJob(_FailedRun):
         self.keepable = keepable
 
 
+#: What `_TaskRunner._settle` returns for a cell that must compute.
+_COMPUTE = object()
+
+
 class _SkippedRun:
     """Sentinel returned in place of a cell that was intentionally not run: the
     wall-clock budget (``max_total_seconds``) was exhausted, or the cell was not
@@ -1457,6 +1461,165 @@ class _TaskRunner:
             MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray,
         )
 
+    def _settle(self, cfg, cwd, resolved, chash, job_num, write_status):
+        """The steps that can settle a cell without computing it: a cell
+        ``sample=`` left out, a completed cell a resume reuses, and a
+        ``cache_dir`` hit. Each records the cell in ``cwd``, its dir, and
+        returns ``(value, deps)``: the value the cell's job returns, or
+        `_COMPUTE` for a cell that must compute, and the cell's project-code
+        record (None for an unsampled cell, which never takes one). One copy
+        of these rules for the job that runs the cell (#345)."""
+        import warnings
+        from pathlib import Path
+
+        from ._resume import (
+            cell_project_record,
+            changed_project_code,
+            merge_project_records,
+            read_cell_status,
+        )
+        from ._sweep_io import (
+            METRICS_FILE,
+            combo_key,
+            read_metrics_sidecar,
+            write_metrics_sidecar,
+        )
+
+        # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
+        # job number is not in the selected sample never runs (NaN); keying on
+        # the job index (not the combo) makes the selection launcher- and
+        # axis-type-agnostic and identical across a resume. An un-sampled cell is
+        # recorded 'skipped', so a later resume WITHOUT `sample` fills it in.
+        # No job number -> don't skip.
+        if self.sampled_indices is not None:
+            if job_num is not None and job_num not in self.sampled_indices:
+                combo = self._combo(cfg, self.swept_names)
+                write_status(cwd, status="skipped", combo=combo, attempt=1)
+                # A skipped cell has no valid metrics; drop any sidecar a prior
+                # sweep left in this reused dir so show/export don't list old
+                # metrics on a 'skipped' row while to_xarray NaN-fills it.
+                try:
+                    (cwd / METRICS_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return _SkippedRun("not sampled"), None
+
+        # This cell's project-code record, taken here, in the process that will
+        # run (or reuse) it (see cell_project_record), and only by a cell that
+        # can compare or store it: an unsampled cell above never does.
+        deps = cell_project_record(
+            self._code_token,
+            self.code_roots,
+            self.code_body_roots,
+            resolved,
+            scripts=self.script_entries,
+        )
+
+        # (1) resume short-circuit — before pre_task/instrument, only when resuming
+        if self.prior_manifest is not None:
+            # Key the lookup on the CURRENT swept names, not the prior sweep's:
+            # if the grid shape changed (an axis added/removed), the current
+            # cell's key won't match any completed cell, so it re-runs instead
+            # of projecting onto the old params and reusing the wrong cell.
+            sc = self._combo(cfg, self.swept_names)
+            key = combo_key(sc)
+            dir_ = self.prior_manifest.completed.get(key)
+            if dir_ is not None:
+                cell_dir = Path(self.prior_manifest.root) / dir_
+                prior = read_cell_status(cell_dir) or {}
+                prior_config = prior.get("config_hash")
+                prior_code = prior.get("code_hash")
+                prior_deps = prior.get("code_deps")
+                # A completed cell is reused only if the resolved config, the
+                # task source AND the project code the task reaches all still
+                # match. A missing prior hash (a pre-fingerprint sweep) can't be
+                # checked, so it isn't a reason to re-run — legacy sweeps still
+                # resume.
+                config_changed = (
+                    prior_config is not None
+                    and chash is not None
+                    and prior_config != chash
+                )
+                code_changed = (
+                    prior_code is not None
+                    and self.code_hash is not None
+                    and prior_code != self.code_hash
+                )
+                # Judged on the files both records have, on any Python version
+                # (for one exception, see its docstring);
+                # None when they cannot be compared (a sidecar from before the
+                # field, an unknown record).
+                changed_deps = changed_project_code(prior_deps, deps)
+                deps_changed = bool(changed_deps)
+                if config_changed or code_changed or deps_changed:
+                    parts = []
+                    if config_changed:
+                        parts.append("config")
+                    if code_changed:
+                        parts.append("task code")
+                    if deps_changed:
+                        # Name where the change is, so the user sees which
+                        # helper or constant the edit was in.
+                        parts.append(
+                            f"code the task reaches ({', '.join(changed_deps)})"
+                        )
+                    what = " and ".join(parts)
+                    warnings.warn(
+                        f"resume: cell {key!r} was completed under a different "
+                        f"{what} (fingerprint mismatch); re-running it instead "
+                        "of reusing the cached result.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                else:
+                    cached = read_metrics_sidecar(cell_dir)
+                    if cached is not None:
+                        # Refresh THIS job dir so its metrics/status match the
+                        # config Hydra just wrote here. Otherwise, when a resume
+                        # reuses a numeric dir that a prior sweep filled with a
+                        # DIFFERENT cell, the dir keeps stale metrics -> the
+                        # manifest and an offline load_from_dir mis-key the cell.
+                        # A no-op when the cached cell is already this dir.
+                        written = write_metrics_sidecar(cwd, cached)
+                        # Keep the reused cell's prior record (see
+                        # merge_project_records): writing this run's keys would
+                        # declare it checked against code it was not compared
+                        # with, and dropping the record would let a later resume
+                        # reuse the cell unchecked.
+                        write_status(
+                            cwd,
+                            status="completed",
+                            combo=sc,
+                            attempt=1,
+                            code_deps=merge_project_records(prior_deps, deps),
+                            metrics=written,
+                        )
+                        return cached, deps
+
+        # (1.4) content-addressed cache: reuse a cell computed under the same
+        # resolved config, task source AND project code in ANY working_dir. Keyed on the
+        # fingerprints (not the combo/dir), so it survives a fresh working_dir.
+        # The cache hit refreshes this job dir (metrics + completed status) so
+        # the manifest and an offline load see a normal completed cell.
+        cache_key = self._cache_key(chash, deps)
+        if cache_key is not None:
+            cache_cell = Path(self.cache_dir) / cache_key
+            cached = read_metrics_sidecar(cache_cell)
+            if cached is not None:
+                combo = self._combo(cfg, self.swept_names)
+                written = write_metrics_sidecar(cwd, cached)
+                write_status(
+                    cwd,
+                    status="completed",
+                    combo=combo,
+                    attempt=1,
+                    code_deps=deps,
+                    metrics=written,
+                )
+                return cached, deps
+
+        return _COMPUTE, deps
+
     def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
         """Record a cell whose job ended without a result (#345), and return
         the status and value of the JobReturn mushin's submitit launcher
@@ -1538,19 +1701,13 @@ class _TaskRunner:
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
-            cell_project_record,
-            changed_project_code,
             discover_last_ckpt,
-            merge_project_records,
-            read_cell_status,
             resolved_config,
             resolved_config_hash,
             write_cell_status,
         )
         from ._sweep_io import (
             METRICS_FILE,
-            combo_key,
-            read_metrics_sidecar,
             write_metrics_sidecar,
         )
 
@@ -1575,141 +1732,11 @@ class _TaskRunner:
             job_id=_current_job_id(),
         )
 
-        # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
-        # job number is not in the selected sample never runs (NaN); keying on
-        # the job index (not the combo) makes the selection launcher- and
-        # axis-type-agnostic and identical across a resume. An un-sampled cell is
-        # recorded 'skipped', so a later resume WITHOUT `sample` fills it in.
-        # No job number -> don't skip.
-        if self.sampled_indices is not None:
-            if job_num is not None and job_num not in self.sampled_indices:
-                cwd = Path.cwd()
-                combo = self._combo(cfg, self.swept_names)
-                write_status(cwd, status="skipped", combo=combo, attempt=1)
-                # A skipped cell has no valid metrics; drop any sidecar a prior
-                # sweep left in this reused dir so show/export don't list old
-                # metrics on a 'skipped' row while to_xarray NaN-fills it.
-                try:
-                    (cwd / METRICS_FILE).unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return _SkippedRun("not sampled")
-
-        # This cell's project-code record, taken here, in the process that will
-        # run (or reuse) it (see cell_project_record), and only by a cell that
-        # can compare or store it: an unsampled cell above never does.
-        deps = cell_project_record(
-            self._code_token,
-            self.code_roots,
-            self.code_body_roots,
-            resolved,
-            scripts=self.script_entries,
+        settled, deps = self._settle(
+            cfg, Path.cwd(), resolved, chash, job_num, write_status
         )
-
-        # (1) resume short-circuit — before pre_task/instrument, only when resuming
-        if self.prior_manifest is not None:
-            # Key the lookup on the CURRENT swept names, not the prior sweep's:
-            # if the grid shape changed (an axis added/removed), the current
-            # cell's key won't match any completed cell, so it re-runs instead
-            # of projecting onto the old params and reusing the wrong cell.
-            sc = self._combo(cfg, self.swept_names)
-            key = combo_key(sc)
-            dir_ = self.prior_manifest.completed.get(key)
-            if dir_ is not None:
-                cell_dir = Path(self.prior_manifest.root) / dir_
-                prior = read_cell_status(cell_dir) or {}
-                prior_config = prior.get("config_hash")
-                prior_code = prior.get("code_hash")
-                prior_deps = prior.get("code_deps")
-                # A completed cell is reused only if the resolved config, the
-                # task source AND the project code the task reaches all still
-                # match. A missing prior hash (a pre-fingerprint sweep) can't be
-                # checked, so it isn't a reason to re-run — legacy sweeps still
-                # resume.
-                config_changed = (
-                    prior_config is not None
-                    and chash is not None
-                    and prior_config != chash
-                )
-                code_changed = (
-                    prior_code is not None
-                    and self.code_hash is not None
-                    and prior_code != self.code_hash
-                )
-                # Judged on the files both records have, on any Python version
-                # (for one exception, see its docstring);
-                # None when they cannot be compared (a sidecar from before the
-                # field, an unknown record).
-                changed_deps = changed_project_code(prior_deps, deps)
-                deps_changed = bool(changed_deps)
-                if config_changed or code_changed or deps_changed:
-                    parts = []
-                    if config_changed:
-                        parts.append("config")
-                    if code_changed:
-                        parts.append("task code")
-                    if deps_changed:
-                        # Name where the change is, so the user sees which
-                        # helper or constant the edit was in.
-                        parts.append(
-                            f"code the task reaches ({', '.join(changed_deps)})"
-                        )
-                    what = " and ".join(parts)
-                    warnings.warn(
-                        f"resume: cell {key!r} was completed under a different "
-                        f"{what} (fingerprint mismatch); re-running it instead "
-                        "of reusing the cached result.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                else:
-                    cached = read_metrics_sidecar(cell_dir)
-                    if cached is not None:
-                        # Refresh THIS job dir so its metrics/status match the
-                        # config Hydra just wrote here. Otherwise, when a resume
-                        # reuses a numeric dir that a prior sweep filled with a
-                        # DIFFERENT cell, the dir keeps stale metrics -> the
-                        # manifest and an offline load_from_dir mis-key the cell.
-                        # A no-op when the cached cell is already this dir.
-                        cwd = Path.cwd()
-                        written = write_metrics_sidecar(cwd, cached)
-                        # Keep the reused cell's prior record (see
-                        # merge_project_records): writing this run's keys would
-                        # declare it checked against code it was not compared
-                        # with, and dropping the record would let a later resume
-                        # reuse the cell unchecked.
-                        write_status(
-                            cwd,
-                            status="completed",
-                            combo=sc,
-                            attempt=1,
-                            code_deps=merge_project_records(prior_deps, deps),
-                            metrics=written,
-                        )
-                        return cached
-
-        # (1.4) content-addressed cache: reuse a cell computed under the same
-        # resolved config, task source AND project code in ANY working_dir. Keyed on the
-        # fingerprints (not the combo/dir), so it survives a fresh working_dir.
-        # The cache hit refreshes this job dir (metrics + completed status) so
-        # the manifest and an offline load see a normal completed cell.
-        cache_key = self._cache_key(chash, deps)
-        if cache_key is not None:
-            cache_cell = Path(self.cache_dir) / cache_key
-            cached = read_metrics_sidecar(cache_cell)
-            if cached is not None:
-                cwd = Path.cwd()
-                combo = self._combo(cfg, self.swept_names)
-                written = write_metrics_sidecar(cwd, cached)
-                write_status(
-                    cwd,
-                    status="completed",
-                    combo=combo,
-                    attempt=1,
-                    code_deps=deps,
-                    metrics=written,
-                )
-                return cached
+        if settled is not _COMPUTE:
+            return settled
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
         # cells (no compute) so a long sweep ends gracefully instead of running
