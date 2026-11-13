@@ -58,7 +58,7 @@ def _no_cluster(monkeypatch):
     """No test asks a real cluster: the check sees no `scontrol` unless a
     test hands it partitions; and no SBATCH_* of this machine leaks in."""
     monkeypatch.setattr(_slurm, "_partitions", lambda: None)
-    for name in (*_slurm._ENV.values(), "SUBMITIT_EXECUTOR"):
+    for name in (*_slurm._ENV.values(), "SBATCH_CLUSTERS", "SUBMITIT_EXECUTOR"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -108,52 +108,31 @@ def test_the_fields_given_pass_to_the_launcher():
 
 
 @pytest.mark.parametrize(
-    "extra",
+    ("given", "extra"),
     [
-        dict(nodes=2),
-        dict(tasks_per_node=2),
-        dict(additional_parameters={"ntasks": 4}),
-        dict(additional_parameters={"ntasks_per_node": 2}),
-        dict(additional_parameters={"ntasks-per-node": 2}),
-        dict(additional_parameters={"ntasks_per_gpu": 2}),
-        dict(additional_parameters={"nodes": 2}),
+        ({}, dict(nodes=2)),
+        ({}, dict(tasks_per_node=2)),
+        (dict(cpus=4), dict(cpus_per_task=8)),
+        (dict(gpus=1), dict(gpus_per_node=4)),
     ],
     ids=str,
 )
-def test_a_job_of_several_tasks_is_refused(extra):
-    # Every task of a job runs the cell (shown with submitit_local's
-    # tasks_per_node=2 in #354): several tasks are DDP's, and its helper's.
-    with pytest.raises(ValueError, match="submitit_slurm_config"):
-        mushin.slurm(**extra)
+def test_a_field_the_helper_wrote_is_not_taken_again(given, extra):
+    # In `extra` it would override the job of one task, or an argument given,
+    # unchecked.
+    with pytest.raises(ValueError, match="already writes"):
+        mushin.slurm(**given, **extra)
 
 
-@pytest.mark.parametrize(
-    "key",
-    [
-        "cpus_per_task",
-        "gpus_per_node",
-        "cpus_per_gpu",
-        "gpus_per_task",
-        "mem_per_cpu",
-        "mem_per_gpu",
-        "gres",
-    ],
-)
-def test_a_field_the_helper_sets_is_not_taken_again(key):
-    # Given in `extra` it would override the argument unchecked (or give
-    # sbatch two options it refuses together).
-    with pytest.raises(ValueError, match=f"sets {key} itself"):
-        mushin.slurm(**{key: 2})
-
-
-@pytest.mark.parametrize(
-    "option",
-    ["gpus_per_node", "gres", "mem", "mem-per-gpu", "cpus_per_task", "account"],
-)
-def test_additional_parameters_cannot_redo_the_helpers_fields(option):
-    # Written after the helper's fields in the job script, they would win.
-    with pytest.raises(ValueError, match="would redo"):
-        mushin.slurm(gpus=1, additional_parameters={option: "4"})
+def test_other_fields_pass_through_unchecked():
+    # A typed GPU request, or memory per CPU, when gpus= and mem_gb= are unset.
+    config = mushin.slurm(
+        gres="gpu:a100:1",
+        mem_per_cpu=4,
+        additional_parameters={"gres-flags": "enforce-binding"},
+    )
+    assert config["gres"] == "gpu:a100:1" and config["mem_per_cpu"] == 4
+    assert config["additional_parameters"] == {"gres-flags": "enforce-binding"}
 
 
 @pytest.mark.parametrize(
@@ -208,32 +187,15 @@ def test_setup_must_be_a_list_of_lines(setup):
     [
         "export DATA=${HOME}/data",
         "cd ${SLURM_SUBMIT_DIR:-/tmp}",
-        "x=${A-b}",
-        "echo ${HOME%/*}",
         "echo ${#PATH}",
-        "echo ${1}",
-        "echo ${PATH:0:3}",
-        "cd ${data_root}",  # a key of the config: no resolver either
+        "cd ${hydra:runtime.cwd}",  # Hydra's own: changed by the writer too
     ],
 )
 def test_a_braced_variable_in_setup_is_refused(line):
-    # run() writes launcher_config as Hydra overrides; OmegaConf would read
-    # any `${...}` but a resolver call as its own interpolation, and no escape
-    # survives the writer.
-    with pytest.raises(ValueError, match="not one of Hydra's resolvers"):
+    # run() writes launcher_config as Hydra overrides; OmegaConf reads any
+    # `${...}` as its own interpolation, and no escape survives the writer.
+    with pytest.raises(ValueError, match="own interpolation"):
         mushin.slurm(setup=[line])
-
-
-def test_hydras_own_resolvers_in_setup_pass():
-    lines = ["cd ${hydra:runtime.cwd}", "export X=${oc.env:HOME}", "echo $HOME"]
-    assert mushin.slurm(setup=lines)["setup"] == lines
-
-
-def test_a_backslash_beside_an_interpolation_is_refused():
-    # The override writer doubles every backslash in a line holding `${`.
-    with pytest.raises(ValueError, match="backslash"):
-        mushin.slurm(setup=[r"printf 'a\n' > ${oc.env:HOME}/x"])
-    mushin.slurm(setup=[r"printf 'a\n'"])  # without one, as written
 
 
 def test_every_key_is_a_field_of_the_plugins_slurm_config():
@@ -294,7 +256,12 @@ def test_the_setup_lines_reach_the_launcher_as_written():
 
     from mushin.workflows import _to_override_element
 
-    setup = ["export X=$HOME", "echo 'a b' \"c\"", "source ~/.venv/bin/activate"]
+    setup = [
+        "export X=$HOME",
+        "echo 'a b' \"c\"",
+        r"printf 'a\n'",
+        "source ~/.venv/bin/activate",
+    ]
     override = "hydra.launcher.setup=" + _to_override_element(
         mushin.slurm(setup=setup)["setup"]
     )
@@ -324,6 +291,17 @@ def test_an_environment_that_overrides_an_argument_warns(
     monkeypatch.setenv(name, value)
     with pytest.warns(UserWarning, match=f"{name}='{value}'.*overrides"):
         mushin.slurm(**given)
+
+
+@pytest.mark.parametrize(
+    "given", [dict(timeout_min=60), {}], ids=["the same minutes", "not given"]
+)
+def test_a_time_limit_the_environment_agrees_with_does_not_warn(
+    monkeypatch, recwarn, given
+):
+    monkeypatch.setenv("SBATCH_TIMELIMIT", "1:00:00")
+    mushin.slurm(**given)
+    assert not [w for w in recwarn if "overrides" in str(w.message)]
 
 
 def test_inside_a_job_nothing_warns(monkeypatch, recwarn):
@@ -383,6 +361,11 @@ def test_the_environment_sbatch_will_read_is_what_is_judged(cluster, monkeypatch
     monkeypatch.setenv("SBATCH_TIMELIMIT", "1:00:00")
     with pytest.warns(UserWarning), pytest.raises(ValueError, match="60 minutes"):
         mushin.slurm(partition="short", timeout_min=10)
+    # SBATCH_TIMELIMIT=0 asks sbatch for no time limit.
+    monkeypatch.setenv("SBATCH_TIMELIMIT", "0")
+    with pytest.warns(UserWarning), pytest.raises(ValueError, match="past partition"):
+        mushin.slurm(partition="short", timeout_min=10)
+    monkeypatch.setenv("SBATCH_TIMELIMIT", "1:00:00")
     # SBATCH_QOS is a QoS, which may lift the partition's limit.
     monkeypatch.setenv("SBATCH_QOS", "long")
     with pytest.warns(UserWarning, match="SBATCH_TIMELIMIT"):
@@ -456,6 +439,7 @@ REAL_PARTITIONS = _slurm._partitions
 def test_scontrol_missing_slow_failing_or_garbled_judges_nothing(
     monkeypatch, real_partitions
 ):
+    monkeypatch.setattr(_slurm, "_ANSWER_TTL_S", 0)  # ask anew each time
     monkeypatch.setattr(_slurm.shutil, "which", lambda name: None)
     assert _slurm._partitions() is None
 
@@ -481,14 +465,29 @@ def test_scontrol_missing_slow_failing_or_garbled_judges_nothing(
         seen.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, CLUSTER, "")
 
-    # No answer above was kept: the next call asks again, and keeps this one.
     monkeypatch.setattr(_slurm.subprocess, "run", answering)
     names = [p["PartitionName"] for p in _slurm._partitions()]
     assert names == ["short", "debug", "gpu", "night"]
-    _slurm._partitions()
-    assert len(seen) == 1
     cmd, kwargs = seen[0]
     assert cmd[1:] == ["--all", "--oneliner", "show", "partition"]
     assert kwargs["timeout"] == _slurm._SCONTROL_TIMEOUT_S
     assert kwargs["errors"] == "replace"  # a byte not UTF-8 is not an error
     assert "shell" not in kwargs
+
+
+def test_an_answer_is_kept_for_a_while(monkeypatch, real_partitions):
+    monkeypatch.setattr(_slurm.shutil, "which", lambda name: "/usr/bin/scontrol")
+    seen = []
+
+    def failing(*args, **kwargs):
+        seen.append(1)
+        return subprocess.CompletedProcess(args[0], 1, "", "")
+
+    monkeypatch.setattr(_slurm.subprocess, "run", failing)
+    clock = iter([0.0, 1.0, _slurm._ANSWER_TTL_S + 1.0])
+    monkeypatch.setattr(_slurm.time, "monotonic", lambda: next(clock))
+    _slurm._partitions()
+    _slurm._partitions()  # within the TTL: not asked again
+    assert len(seen) == 1
+    _slurm._partitions()  # past it: asked again
+    assert len(seen) == 2

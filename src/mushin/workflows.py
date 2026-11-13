@@ -4460,9 +4460,10 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
         launcher_config: Mapping[str, Any] | None (default: None)
             Fields for the selected ``launcher``, applied as
             ``hydra.launcher.<key>=<value>`` overrides: no hand-rolled
-            strings. Pair with `mushin.submitit_slurm_config`, e.g.
-            ``run(launcher="submitit_slurm",
-            launcher_config=submitit_slurm_config(nodes=2, gpus_per_node=4))``.
+            strings. Pair with `mushin.slurm` for cells that each run as
+            one SLURM job, e.g. ``run(launcher="submitit_slurm",
+            launcher_config=mushin.slurm(gpus=1, partition="gpu"))``, or
+            with `mushin.submitit_slurm_config` for DDP cells, a task per GPU.
             Requires ``launcher=``.
 
         overrides: List[str] | None (default: None)

@@ -14,38 +14,20 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import warnings
 from typing import Any
 
 #: How long the check waits for `scontrol` before leaving the request unjudged.
 _SCONTROL_TIMEOUT_S = 10
 
-#: Fields the helper sets from its own arguments, or SLURM's other ways to
-#: ask for the same, which sbatch refuses beside them (`--cpus-per-gpu` with
-#: `--cpus-per-task`, `--mem-per-*` with `--mem`): given in ``extra`` they
-#: would override the arguments unchecked. Its named arguments cannot reach
-#: ``extra`` at all.
-_OWN_FIELDS = {
-    "nodes": "a job of one task has one node",
-    "tasks_per_node": "a job of one task",
-    "cpus_per_task": "cpus=",
-    "gpus_per_node": "gpus=",
-    "cpus_per_gpu": "cpus=",
-    "gpus_per_task": "gpus=",
-    "mem_per_cpu": "mem_gb=",
-    "mem_per_gpu": "mem_gb=",
-    "gres": "gpus=",
-}
-
-#: sbatch options in ``additional_parameters`` (written last into the job
-#: script, so they win) that would redo the helper's fields, give a job
-#: several tasks (any `ntasks...`), or send it where the check does not look.
-_REDONE = ("nodes", "cpus", "gpus", "gres", "mem", "account")
+#: `additional_parameters` options (written into the job script with the
+#: helper's) that send the job where the check does not look.
 _ELSEWHERE = ("partition", "time", "qos", "clusters", "cluster")
 
 #: sbatch reads these from its environment over the job script's #SBATCH
 #: lines, so they decide where and how long a job runs (sbatch's INPUT
-#: ENVIRONMENT VARIABLES).
+#: ENVIRONMENT VARIABLES). Its other SBATCH_* variables are not looked at.
 _ENV = {
     "partition": "SBATCH_PARTITION",
     "account": "SBATCH_ACCOUNT",
@@ -53,9 +35,8 @@ _ENV = {
     "time": "SBATCH_TIMELIMIT",
 }
 
-#: Resolvers a setup line may call: Hydra registers these when a sweep
-#: starts (`setup_globals`), so they may not be registered yet here.
-_HYDRA_RESOLVERS = ("hydra", "now", "python_version")
+#: How long an answer from `scontrol` (or its absence) is kept.
+_ANSWER_TTL_S = 300
 
 
 def slurm(
@@ -63,7 +44,7 @@ def slurm(
     gpus: int = 0,
     cpus: int | None = None,
     mem_gb: int | None = None,
-    timeout_min: int = 60,
+    timeout_min: int | None = None,
     partition: str | None = None,
     account: str | None = None,
     qos: str | None = None,
@@ -95,8 +76,9 @@ def slurm(
         default (which can depend on the GPUs asked for).
     mem_gb : int, optional
         Memory per job, in whole GB (``--mem``); unset leaves SLURM's default.
-    timeout_min : int
-        The job's time limit, in minutes (``--time``).
+    timeout_min : int, optional
+        The job's time limit, in minutes (``--time``); 60 when unset, as in
+        hydra-submitit-launcher.
     partition, account, qos : str, optional
         Written into each job's script; unset leaves SLURM's defaults. An
         ``SBATCH_PARTITION``, ``SBATCH_ACCOUNT``, ``SBATCH_QOS`` or
@@ -105,17 +87,17 @@ def slurm(
         argument given here warns.
     setup : list of str, optional
         Shell lines each job runs before the cell, such as ``module load
-        cuda`` or ``source .venv/bin/activate``. A shell variable is written
-        ``$HOME``, not ``${HOME}``: Hydra reads every ``${...}`` as its own
-        interpolation, so only its resolvers (``${oc.env:HOME}``,
-        ``${hydra:runtime.cwd}``) may appear, in a line without a backslash
-        (Hydra's override writer doubles it there).
+        cuda`` or ``source .venv/bin/activate``, run as written. A shell
+        variable is written ``$HOME``, not ``${HOME}``: Hydra reads every
+        ``${...}`` as its own interpolation, so no line may hold one.
     check : bool
         Check the request against the cluster when this is called: see below.
     **extra
         Other fields of hydra-submitit-launcher's SLURM config, passed through
-        (``array_parallelism``, ``constraint``, ``additional_parameters``,
-        ...), but none that redoes an argument above.
+        unchecked (``array_parallelism``, ``constraint``, ``gres``,
+        ``additional_parameters``, ...), except one the helper has already
+        written (``nodes``, ``tasks_per_node``, and the field of each argument
+        given). What they ask of SLURM, including more tasks, is yours.
 
     Returns
     -------
@@ -136,35 +118,12 @@ def slurm(
     the cluster accounts for them, and an account may run in a partition
     through its parent account. Nothing is judged when ``scontrol`` is
     missing, slow or unreadable, when ``additional_parameters`` sets the
-    partition, time, QoS or cluster, or inside a job. The answer is kept for
-    the process, so the cluster is asked once.
+    partition, time, QoS or cluster (or ``SBATCH_CLUSTERS`` is set), or
+    inside a job. The answer is kept for five minutes.
     """
-    for key, instead in _OWN_FIELDS.items():
-        if key in extra:
-            raise ValueError(
-                f"mushin.slurm sets {key} itself ({instead}). For multi-node or "
-                "DDP jobs, where every GPU is a task, use "
-                "mushin.submitit_slurm_config."
-            )
-    # sbatch's options, as submitit writes them: `ntasks-per-node` and
-    # `ntasks_per_node` are one option.
-    sbatch_options = {
-        str(key).replace("-", "_") for key in extra.get("additional_parameters") or {}
-    }
-    redone = sorted(
-        key
-        for key in sbatch_options
-        if key.startswith("ntasks") or key.startswith(_REDONE)
-    )
-    if redone:
-        raise ValueError(
-            f"additional_parameters {redone!r} would redo what mushin.slurm sets "
-            "(a job of one task, and its gpus=, cpus=, mem_gb= and account=), "
-            "written after it in the job script. For DDP, where every GPU is a "
-            "task, use mushin.submitit_slurm_config."
-        )
     gpus = _whole("gpus", gpus, 0)
-    timeout_min = _whole("timeout_min", timeout_min, 1)
+    timeout_min_given = timeout_min is not None
+    timeout_min = _whole("timeout_min", 60 if timeout_min is None else timeout_min, 1)
     config: dict[str, Any] = {
         "nodes": 1,
         "tasks_per_node": 1,
@@ -185,31 +144,55 @@ def slurm(
             config[key] = value
     if setup is not None:
         config["setup"] = _setup_lines(setup)
+    clash = sorted(config.keys() & extra.keys())
+    if clash:
+        raise ValueError(
+            f"mushin.slurm already writes {clash!r} (a job of one task, and the "
+            "field of each argument given); pass them as its arguments. For DDP, "
+            "a task per GPU, use mushin.submitit_slurm_config."
+        )
     config.update(extra)
     if os.environ.get("SUBMITIT_EXECUTOR"):
         # Inside a job: a module that builds its config at import is imported
         # by every job, which must neither query the controller nor warn.
         return config
-    given = {**named, "time": timeout_min}
     environ = {key: os.environ.get(name) for key, name in _ENV.items()}
-    for key, value in given.items():
-        if value is not None and environ[key] and environ[key] != str(value):
-            warnings.warn(
-                f"{_ENV[key]}={environ[key]!r} in this environment overrides "
-                f"{'timeout_min' if key == 'time' else key}={value!r}: sbatch "
-                "reads its environment over the job script.",
-                UserWarning,
-                stacklevel=2,
-            )
+    env_minutes = _requested_minutes(environ["time"])
+    overridden = [
+        (key, value)
+        for key, value in named.items()
+        if value is not None and environ[key] and environ[key] != value
+    ]
+    if timeout_min_given and environ["time"] and env_minutes != timeout_min:
+        overridden.append(("timeout_min", timeout_min))
+    for key, value in overridden:
+        name = _ENV["time" if key == "timeout_min" else key]
+        warnings.warn(
+            f"{name}={os.environ[name]!r} in this environment overrides "
+            f"{key}={value!r}: sbatch reads its environment over the job script.",
+            UserWarning,
+            stacklevel=2,
+        )
+    sbatch_options = {
+        str(key).replace("-", "_") for key in extra.get("additional_parameters") or {}
+    }
     elsewhere = sbatch_options & set(_ELSEWHERE) or os.environ.get("SBATCH_CLUSTERS")
     if check and not elsewhere:
         _check(
             environ["partition"] or partition,
-            _minutes(environ["time"]) if environ["time"] else timeout_min,
+            env_minutes if environ["time"] else timeout_min,
             environ["qos"] or qos,
             source=_ENV["partition"] if environ["partition"] else None,
         )
     return config
+
+
+def _requested_minutes(text: str | None) -> float | None:
+    """A time limit as sbatch reads one (`--time`): 0 asks for none."""
+    if not text:
+        return None
+    minutes = _minutes(text)
+    return math.inf if minutes == 0 else minutes
 
 
 def _whole(name: str, value: Any, least: int) -> int:
@@ -235,36 +218,16 @@ def _setup_lines(setup: Any) -> list[str]:
         isinstance(line, str) for line in setup
     ):
         raise ValueError(f"setup must be a list of shell lines, got {setup!r}")
-    for line in setup:
-        # run() writes launcher_config as Hydra overrides, and OmegaConf takes
-        # every `${...}` for its own interpolation; no escape survives
-        # (`_quoted` doubles a backslash before it, and every other backslash
-        # in such a line).
-        for head in _INTERPOLATION_HEAD.findall(line):
-            if head not in _HYDRA_RESOLVERS and not _has_resolver(head):
-                raise ValueError(
-                    f"setup line {line!r} holds a ${{...}} that is not one of "
-                    "Hydra's resolvers, and Hydra would read it as its own "
-                    'interpolation: write a shell variable as $VAR (or "$VAR"'
-                    "suffix), or ${oc.env:VAR} to have Hydra read it."
-                )
-        if "${" in line and "\\" in line:
-            raise ValueError(
-                f"setup line {line!r} holds both ${{...}} and a backslash, which "
-                "Hydra's override writer doubles in such a line."
-            )
+    braced = [line for line in setup if "${" in line]
+    if braced:
+        # run() writes launcher_config as Hydra overrides: OmegaConf reads
+        # `${...}` as its own interpolation, and the override writer changes
+        # backslashes and quotes in a line holding one (`_quoted`).
+        raise ValueError(
+            f"setup lines {braced!r} hold ${{...}}, which Hydra would read as its "
+            'own interpolation: write a shell variable as $VAR (or "$VAR"suffix).'
+        )
     return list(setup)
-
-
-#: The head of each interpolation in a line: a resolver's name before its
-#: `:`, or whatever else opens it (a key, a shell expansion).
-_INTERPOLATION_HEAD = re.compile(r"\$\{([^:}]*)")
-
-
-def _has_resolver(name: str) -> bool:
-    from omegaconf import OmegaConf
-
-    return bool(name) and OmegaConf.has_resolver(name)
 
 
 def _check(
@@ -314,18 +277,24 @@ def _fitting(partitions: list[dict[str, str]], minutes: float | None) -> str:
     return f"Partitions whose time limit allows {minutes:g} minutes: {', '.join(fit)}. "
 
 
-#: `scontrol`'s answer, once it has given one: asked once per process.
-_ANSWER: list[dict[str, str]] | None = None
+#: `scontrol`'s last answer (None for none) and when it was asked.
+_ANSWER: tuple[float, list[dict[str, str]] | None] | None = None
 
 
 def _partitions() -> list[dict[str, str]] | None:
     """Every partition `scontrol` reports, hidden ones too, as its fields; None
     when there is no `scontrol`, it fails, it takes too long, or it reports
-    nothing readable. A readable answer is kept for the process; no answer is
-    asked again next time."""
+    nothing readable. Kept for `_ANSWER_TTL_S`, so a script that builds many
+    configs asks (or waits on a slow controller) once."""
     global _ANSWER
-    if _ANSWER is not None:
-        return _ANSWER
+    now = time.monotonic()
+    if _ANSWER is not None and now - _ANSWER[0] < _ANSWER_TTL_S:
+        return _ANSWER[1]
+    _ANSWER = (now, _ask_scontrol())
+    return _ANSWER[1]
+
+
+def _ask_scontrol() -> list[dict[str, str]] | None:
     exe = shutil.which("scontrol")
     if exe is None:
         return None
@@ -343,8 +312,7 @@ def _partitions() -> list[dict[str, str]] | None:
         return None
     if out.returncode != 0:
         return None
-    _ANSWER = _parse_partitions(out.stdout)
-    return _ANSWER
+    return _parse_partitions(out.stdout)
 
 
 def _parse_partitions(text: str) -> list[dict[str, str]] | None:
