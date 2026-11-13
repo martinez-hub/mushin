@@ -2665,6 +2665,22 @@ def test_the_stamp_line_reads_as_the_parsed_file(tmp_path, line):
     assert snapshot_run_stamp(path) == hydra_run_stamp(load_hydra_record(path))
 
 
+def test_the_stamp_line_is_read_from_the_job_section_only(tmp_path):
+    """The same key under another node of ``hydra:`` (a user override such
+    as ``++hydra.run.mushin_run_id=x``) is not the job's stamp."""
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._resume import snapshot_run_stamp
+
+    path = tmp_path / "hydra.yaml"
+    path.write_text(
+        "hydra:\n  run:\n    dir: out\n    mushin_run_id: decoy\n"
+        "  job:\n    name: abc\n    mushin_run_id: abc123\n"
+        "  runtime:\n    mushin_run_id: later\n"
+    )
+    assert snapshot_run_stamp(path) == "abc123"
+    assert hydra_run_stamp(load_hydra_record(path)) == "abc123"
+
+
 def test_the_stamp_line_reads_real_snapshots(tmp_path, monkeypatch):
     from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
     from mushin._resume import snapshot_run_stamp

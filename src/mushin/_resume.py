@@ -193,9 +193,9 @@ def record_predates(cell_dir, hydra_yaml) -> bool:
         return False
 
 
-#: The line `OmegaConf.to_yaml` writes for ``hydra.job.mushin_run_id``: a key
-#: two levels down (``hydra:`` then ``job:``), indented by four spaces.
-_STAMP_LINE = re.compile(r"^    mushin_run_id: (.*)$", re.MULTILINE)
+#: The line `OmegaConf.to_yaml` writes for ``hydra.job.mushin_run_id``, inside
+#: the ``  job:`` section of ``hydra:``: a key indented by four spaces.
+_STAMP_KEY = "    mushin_run_id: "
 #: An unquoted YAML scalar that would load as a number, a boolean or null.
 _NOT_A_STRING = re.compile(
     r"[-+]?(\d[\d_]*(\.\d*)?([eE][-+]?\d+)?|\.\d+([eE][-+]?\d+)?|\.inf|\.nan)"
@@ -206,19 +206,27 @@ _NOT_A_STRING = re.compile(
 
 def snapshot_run_stamp(hydra_yaml) -> str | None:
     """The run a job's hydra.yaml names (``hydra.job.mushin_run_id``),
-    read from its own line, with no YAML parser: ``run()`` writes a plain id,
-    which the emitter quotes when it would read as anything but a string.
-    The same as `_hydra_yaml.hydra_run_stamp` gives for a parsed file: None
-    for a file that cannot be read or names no run, or a value that is not a
-    plain id (empty, ``???``, an interpolation, or a number)."""
+    read from its own line in the ``job:`` section, with no YAML parser:
+    ``run()`` writes a plain id, which the emitter quotes when it would read
+    as anything but a string. On every hydra.yaml Hydra or mushin writes it
+    gives what `_hydra_yaml.hydra_run_stamp` gives for the parsed file
+    (a value written by hand, such as an escaped string, may read
+    differently): None for a file that cannot be read or names no run, or a
+    value that is not a plain id (empty, ``???``, an interpolation, or a
+    number)."""
     try:
         text = Path(hydra_yaml).read_text(encoding="utf-8")
     except (OSError, ValueError):
         return None
-    found = _STAMP_LINE.search(text)
-    if found is None:
+    in_job, value = False, None
+    for line in text.splitlines():
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= 2:
+            in_job = line.rstrip() == "  job:"  # a section of ``hydra:``
+        elif in_job and line.startswith(_STAMP_KEY):
+            value = line[len(_STAMP_KEY) :].strip()
+            break
+    if value is None:
         return None
-    value = found.group(1).strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
         value = value[1:-1]
     elif _NOT_A_STRING.fullmatch(value):

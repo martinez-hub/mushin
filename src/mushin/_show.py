@@ -66,7 +66,8 @@ def _read_cells(root) -> list[dict]:
     """Scan a sweep ``root`` and return one dict per cell:
     ``{"combo", "status", "metrics", "dir", "status_mtime"}`` (``dir`` is the
     job dir Path, ``status_mtime`` its status sidecar's mtime, 0.0 if unknown).
-    Reads only the per-cell JSON sidecars: no Hydra/xarray. Raises
+    Reads the per-cell JSON sidecars, and a cell's ``.hydra/hydra.yaml`` as
+    text when its record is older than it: no Hydra/xarray. Raises
     ``FileNotFoundError`` if ``root`` is not a directory.
 
     When a sweep manifest exists it scopes the result to the LATEST sweep's
