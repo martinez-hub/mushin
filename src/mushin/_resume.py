@@ -6,6 +6,7 @@ opts in via a ``mushin_resume`` parameter (see the resume-hardening design)."""
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import hashlib
@@ -5367,3 +5368,39 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
 # In a running IPython shell, watch its cells from this import on, so a class
 # statement run after it is pinned to its cell (``_class_sites``).
 _cell_watch()
+
+
+@contextlib.contextmanager
+def judging_quietly():
+    """Warnings off, and every warn-once memory as it was on the way out.
+    What mushin's submitit driver sees while it judges a cell (a module it
+    finds edited, a project past the file cap) is the job's to warn about, in
+    the job's process; a later run in this process must still warn (#345)."""
+    import warnings
+
+    flags = (
+        _TRUNCATION_WARNED,
+        _FAILURE_WARNED,
+        _LATER_TRUNCATION_WARNED,
+        _NOTEBOOK_TRUNCATION_WARNED,
+        _NOTEBOOK_ANNOTATION_WARNED,
+        _NOTEBOOK_FAILURE_WARNED,
+        _CELL_SCAN_WARNED,
+        _HISTORY_WARNED,
+    )
+    saved = [list(flag) for flag in flags]
+    # By list, not by key: a load seen anew inside (a module reloaded since)
+    # replaces its entry, whose flag must start unwarned, not the old load's.
+    loads = {id(seen[2]): (seen[2], seen[2][0]) for seen in _LOAD_BASELINE.values()}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        for flag, before in zip(flags, saved, strict=True):
+            flag[:] = before
+        for warned, value in loads.values():
+            warned[0] = value
+        for seen in _LOAD_BASELINE.values():
+            if id(seen[2]) not in loads:
+                seen[2][0] = False

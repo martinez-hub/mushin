@@ -2,15 +2,18 @@
 # SPDX-License-Identifier: MIT
 """The launchers behind `run(launcher="submitit_slurm")` and `"submitit_local"`.
 
-They are hydra-submitit-launcher's own launchers, changed in one place: the
-plugin waits on its jobs in a list comprehension, so the first job that ends
-without a result (killed out of memory, on a failed node, by `scancel` or at
-a time limit before Python could act, or raised outside the task, as when it
-cannot import it) raises from the driver while the later jobs still run,
-unobserved, and the sweep records nothing. Here every job is waited on,
-and a job that ends without a result comes back to mushin as a failed cell,
-which `on_error` then handles as it does a task that raised, unless the
-cell's own record holds the result the job could not return (#345).
+They are hydra-submitit-launcher's own launchers, changed in two places.
+They submit only the cells that need a job: a cell `sample=` leaves out, a
+resume reuses or a `cache_dir` holds is settled in the driver first, by the
+runner's own rules. And they wait on every job: the plugin waits in a list
+comprehension, so the first job that ends without a result (killed out of
+memory, on a failed node, by `scancel` or at a time limit before Python could
+act, or raised outside the task, as when it cannot import it) raises from the
+driver while the later jobs still run, unobserved, and the sweep records
+nothing. Here a job that ends without a result comes back to mushin as a
+failed cell, which `on_error` then handles as it does a task that raised,
+unless the cell's own record holds the result the job could not return
+(#345).
 
 `run()` sends the plugin's two names here (`mushin_submitit_slurm` and
 `mushin_submitit_local`); their config is the plugin's, field for field, so
@@ -22,6 +25,7 @@ under `-W error`). So this module imports nothing heavy, and without the
 plugin it defines nothing. mushin itself is imported only when a job died.
 """
 
+import contextlib
 import copy
 import logging
 import os
@@ -46,18 +50,139 @@ if _plugin_launcher is not None:
     from omegaconf import OmegaConf, open_dict, read_write
 
     class _MushinSubmititMixin:
-        """Submit as the plugin does; wait on every job (#345).
+        """Submit as the plugin does, but only the cells that need a job;
+        wait on every job (#345).
 
         Holds no state of its own: the launcher is pickled into every job
         (`map_array(self, ...)`) and into `checkpoint()`'s resubmission."""
 
         def launch(self, job_overrides, initial_job_idx):
-            jobs, job_params = self._submit(job_overrides, initial_job_idx)
-            return self._wait(jobs, job_params)
+            settled = self._settled_in_driver(job_overrides, initial_job_idx)
+            numbers = [initial_job_idx + i for i in range(len(job_overrides))]
+            if len(settled) == len(numbers):
+                # Nothing to submit: no executor (on SLURM it wants `srun`),
+                # but the sweep dir as `_submit` leaves it.
+                sweep_dir = Path(str(self.config.hydra.sweep.dir))
+                sweep_dir.mkdir(parents=True, exist_ok=True)
+                if "mode" in self.config.hydra.sweep:
+                    mode = int(str(self.config.hydra.sweep.mode), 8)
+                    os.chmod(sweep_dir, mode=mode)
+                return [settled[n] for n in numbers]
+            jobs, job_params = self._submit(
+                job_overrides, initial_job_idx, skip=settled
+            )
+            waited = self._wait(jobs, job_params)
+            returns = dict(zip([p[2] for p in job_params], waited, strict=True))
+            returns.update(settled)
+            return [returns[n] for n in numbers]
 
-        def _submit(self, job_overrides, initial_job_idx):
+        def _settled_in_driver(self, job_overrides, initial_job_idx):
+            """The JobReturns of the cells mushin's runner says need no job
+            (left out by ``sample=``, reused by a resume, or a ``cache_dir``
+            hit), by job number, so only the rest are submitted, under their
+            own job numbers (#345).
+
+            A cell is composed in the driver only when it may need no job, and
+            not at all when the sweep has Hydra callbacks, which `run_job`
+            calls for each job. Every cell is decided before any is recorded,
+            and a settled cell whose dir a cell left to its job reads its
+            prior result from is not recorded but submitted, as before (a
+            resume over a renumbered grid finds cells' prior results in dirs
+            other cells now take). A cell that cannot be settled here, for
+            whatever reason, is left to its job, which decides as before; the
+            driver warns once. Warnings from judging a cell are the job's to
+            give, and are not shown here."""
+            import warnings
+
+            runner = self.task_function
+            settles = getattr(runner, "settles_in_driver", None)
+            if not (
+                getattr(runner, "_mushin_collects_dead_jobs", False)
+                and settles is not None
+                and settles()
+                and not OmegaConf.select(self.config, "hydra.callbacks")
+            ):
+                return {}
+            from mushin._resume import judging_quietly
+
+            settled, writes, own, reads, errors = {}, {}, {}, {}, []
+            environment = 0
+            reuses = runner._reuses()
+            for i, overrides in enumerate(job_overrides):
+                idx = initial_job_idx + i
+                if not runner.may_settle(idx, reuses):
+                    continue
+                try:
+                    with self._composed(overrides, idx, f"driver_{idx}") as ret:
+                        with judging_quietly():
+                            own[idx], reads[idx] = runner.dirs_of(ret)
+                            result = runner.settle_in_driver(ret)
+                            if result is None and runner.reads_environment(ret):
+                                environment += 1
+                        if result is not None:
+                            ret.status, ret.return_value, writes[idx] = result
+                            settled[idx] = ret
+                except Exception as exc:  # noqa: BLE001 - its job decides
+                    errors.append((idx, exc))
+            # The prior dirs the jobs will read; all but the settled cells'
+            # when a cell's is unknown.
+            if any(idx not in reads for idx, _ in errors):
+                taken = {reads[n] for n in settled}
+                protected = runner.prior_dirs() - taken
+            else:
+                protected = {d for n, d in reads.items() if n not in settled}
+            # A cell submitted for that reads its own prior dir in its job, which
+            # no settled cell may then take either: drop until none does.
+            kept = 0
+            while dropped := [n for n in settled if own[n] in protected]:
+                for idx in dropped:
+                    del settled[idx]
+                    kept += 1
+                    if reads[idx] is not None:
+                        protected.add(reads[idx])
+            for idx in list(settled):
+                try:
+                    for write in writes[idx]:
+                        write()
+                except Exception as exc:  # noqa: BLE001 - its job rewrites the dir
+                    errors.append((idx, exc))
+                    del settled[idx]
+            if errors:
+                idx, exc = errors[0]
+                try:
+                    warnings.warn(
+                        f"{len(errors)} of {len(job_overrides)} cells could not "
+                        f"be settled before submitting (#{idx}: {exc!r}); they "
+                        "are submitted, and their jobs decide as before.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                except Warning:  # warnings as errors: settling is best effort
+                    pass
+            if environment:
+                log.info(
+                    f"{environment} of {len(job_overrides)} cells read the "
+                    "environment (${oc.env:...}), which their jobs' may hold "
+                    "differently: they are submitted, and their jobs decide."
+                )
+            if kept:
+                log.info(
+                    f"{kept} of {len(job_overrides)} cells that need no job are "
+                    "submitted anyway: their dirs hold the prior results other "
+                    "cells' jobs read."
+                )
+            if settled:
+                listed = ", ".join(f"#{n}" for n in sorted(settled))
+                log.info(
+                    f"{len(settled)} of {len(job_overrides)} cells need no job "
+                    f"(left out by sample=, reused or cached): {listed}"
+                )
+            return settled
+
+        def _submit(self, job_overrides, initial_job_idx, skip=()):
             """hydra-submitit-launcher 1.2.0's `launch()` up to its submission,
-            unchanged (`tests/test_submitit_launcher.py` pins that body, so a
+            but for the cells in ``skip``, which need no job
+            (`tests/test_submitit_launcher.py` pins that body, so a
             plugin release that changes it fails until this is compared)."""
             import submitit
 
@@ -102,6 +227,9 @@ if _plugin_launcher is not None:
             job_params: list[Any] = []
             for idx, overrides in enumerate(job_overrides):
                 idx = initial_job_idx + idx
+                # mushin's: a cell settled in the driver needs no job.
+                if idx in skip:
+                    continue
                 lst = " ".join(filter_overrides(overrides))
                 log.info(f"\t#{idx} : {lst}")
                 job_params.append(
@@ -157,33 +285,24 @@ if _plugin_launcher is not None:
                 raise unrecorded
             return returns
 
-        def _dead_return(self, job, overrides, idx, exc):
-            """The JobReturn for a job that ended without a result, with the
-            status and value mushin's runner gives it once it has recorded
-            the cell (`_TaskRunner.record_dead_cell`). The job is composed
-            as the plugin's `__call__` and Hydra's `run_job` compose it
+        @contextlib.contextmanager
+        def _composed(self, overrides, idx, job_id):
+            """The JobReturn of the job for ``overrides``, composed as the
+            plugin's `__call__` and Hydra's `run_job` compose it
             (`tests/test_submitit_launcher.py` pins the part of `run_job`
-            mirrored here), in the driver, with the global HydraConfig
-            restored after."""
+            mirrored here), in the driver, with the global HydraConfig set to
+            the job's config inside and restored after. ``job_id`` is the
+            scheduler's, or ``driver_<n>`` for a cell the driver settles."""
             from hydra.core.hydra_config import HydraConfig
 
-            from mushin.workflows import _DeadJob
-
             assert self.hydra_context is not None and self.config is not None
-            runner = self.task_function
-            # The summary reads the whole message; the cell keeps a bounded one.
-            dead = _DeadJob(
-                _bounded(exc, job.paths.folder),
-                _summary(job, exc, self.params),
-                keepable=_keepable(job, exc),
-            )
             outer = HydraConfig.instance().cfg
             try:
                 config = self.hydra_context.config_loader.load_sweep_config(
                     self.config, list(overrides)
                 )
                 with open_dict(config.hydra.job) as hydra_job:
-                    hydra_job.id = str(job.job_id)
+                    hydra_job.id = job_id
                     config.hydra.job.num = idx
                 HydraConfig.instance().set_config(config)
                 output_dir = os.path.join(
@@ -206,16 +325,32 @@ if _plugin_launcher is not None:
                 # run_job's rule; mushin sets chdir, so this is the cell dir.
                 chdir = config.hydra.job.chdir
                 ret.working_dir = output_dir if chdir else os.getcwd()
-                # Inside the try: the cell's config-group choices come from
-                # the HydraConfig set above.
-                ret.status, ret.return_value = runner.record_dead_cell(ret, dead)
-                if isinstance(ret.return_value, dict):
-                    log.info(
-                        f"submitit job {job.job_id} gave no result; its cell's "
-                        "record holds one, which stands for it (#345)"
-                    )
+                yield ret
             finally:
                 HydraConfig.instance().cfg = outer
+
+        def _dead_return(self, job, overrides, idx, exc):
+            """The JobReturn for a job that ended without a result, with the
+            status and value mushin's runner gives it once it has recorded
+            the cell (`_TaskRunner.record_dead_cell`)."""
+            from mushin.workflows import _DeadJob
+
+            runner = self.task_function
+            # The summary reads the whole message; the cell keeps a bounded one.
+            dead = _DeadJob(
+                _bounded(exc, job.paths.folder),
+                _summary(job, exc, self.params),
+                keepable=_keepable(job, exc),
+            )
+            with self._composed(overrides, idx, str(job.job_id)) as ret:
+                # Inside: the cell's config-group choices come from the
+                # HydraConfig the composition set.
+                ret.status, ret.return_value = runner.record_dead_cell(ret, dead)
+            if isinstance(ret.return_value, dict):
+                log.info(
+                    f"submitit job {job.job_id} gave no result; its cell's "
+                    "record holds one, which stands for it (#345)"
+                )
             return ret
 
     def _keepable(job, exc) -> bool:
