@@ -410,7 +410,8 @@ message matches the `job_id` in the cell's `mushin_cell_status.json` and
    failure fixed. `sacct -X --starttime <resume start> --format=JobID,JobName`
    must list one array task for the resume, and the dataset all six values.
 2. `sample=2` on a fresh 6-cell sweep must submit an array of 2 tasks.
-3. The same sweep with `cache_dir=` into a new `working_dir` must submit
+3. Run a fresh 6-cell sweep with `cache_dir=<cache>`, then the same sweep
+   with the same `cache_dir` into a new `working_dir`: the second must submit
    nothing (the driver's log says "6 of 6 cells need no job").
 
 **Report:** the `sacct` lines for each step.

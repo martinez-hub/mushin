@@ -101,16 +101,16 @@ def test_the_submission_is_the_plugins_own():
         "jobs = executor.map_array",
     )
     original = body(theirs, "import submitit", "jobs = executor.map_array")
-    # mushin's edits, exactly: the cells settled in the driver need no job.
+    # mushin's edit, exactly: a cell settled in the driver needs no job.
     lines = copied.splitlines()
-    for ours_only in (
-        "# mushin's: the cells settled in the driver need no job.",
-        "job_params = [p for p in job_params if p[2] not in skip]",
-    ):
-        lines.remove(ours_only)
-    guarded = "jobs = executor.map_array(self, *zip(*job_params)) if job_params else []"
-    assert lines[-1] == guarded
-    lines[-1] = "jobs = executor.map_array(self, *zip(*job_params))"
+    edit = [
+        "# mushin's: a cell settled in the driver needs no job.",
+        "if idx in skip:",
+        "continue",
+    ]
+    at = lines.index(edit[0])
+    assert lines[at : at + 3] == edit
+    del lines[at : at + 3]
     copied = "\n".join(lines)
     # The copy's only edits: names it reaches through the plugin's modules,
     # and the builtin generic.
@@ -591,6 +591,51 @@ _A = {"code": {"pkg/a.py": "1"}}
 _AB = {"code": {"pkg/a.py": "1", "pkg/b.py": "2"}}
 
 
+def _resuming_runner(tmp_path, monkeypatch, prior, *, code_hash=None, deps=None):
+    """A `_TaskRunner` resuming a sweep whose cell ``lr=0.2`` completed in
+    dir 0 with the record ``prior``; its own project-code record is
+    ``deps``."""
+    from mushin import _resume
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _PriorCells, _TaskRunner
+
+    monkeypatch.setattr(_resume, "cell_project_record", lambda *a, **k: deps)
+    cell = tmp_path / "0"
+    write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1, **prior)
+    write_metrics_sidecar(cell, {"v": 1.0})
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.code_hash, runner.cache_dir, runner.cache_ok = code_hash, None, True
+    runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
+    runner.script_entries = {}
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
+    return runner
+
+
+def _strictly(runner, cwd, chash):
+    """`_settle(strict=True)` for cell ``lr=0.2`` in ``cwd``: its value, and
+    the records its record function writes."""
+    import warnings
+
+    written = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the driver leaves warning to the job
+        value, _, record = runner._settle(
+            {"lr": 0.2},
+            cwd,
+            {"lr": 0.2},
+            chash,
+            0,
+            lambda *a, **k: written.append(k),
+            strict=True,
+        )
+    assert written == []  # nothing is recorded before the driver decides
+    if record is not None:
+        record()
+    return value, written
+
+
 @pytest.mark.parametrize(
     ("prior", "chash", "code_hash", "deps", "settles"),
     [
@@ -614,69 +659,83 @@ def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
     """`_settle(strict=True)`: a fingerprint the prior record has and the
     driver cannot take, or a project-code record that lacks a file the prior
     one names, is not 'unchanged' there, as it is in the job."""
-    import warnings
+    from mushin.workflows import _COMPUTE
 
-    from mushin import _resume
-    from mushin._resume import write_cell_status
-    from mushin._sweep_io import write_metrics_sidecar
-    from mushin.workflows import _COMPUTE, _PriorCells, _TaskRunner
-
-    monkeypatch.setattr(_resume, "cell_project_record", lambda *a, **k: deps)
-    cell = tmp_path / "0"
-    write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1, **prior)
-    write_metrics_sidecar(cell, {"v": 1.0})
-    runner = object.__new__(_TaskRunner)
-    runner.swept_names, runner.sampled_indices = ["lr"], None
-    runner.code_hash, runner.cache_dir = code_hash, None
-    runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
-    runner.script_entries = {}
-    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
-    written = []
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # the driver leaves warning to the job
-        value, _ = runner._settle(
-            {"lr": 0.2},
-            tmp_path / "1",
-            {"lr": 0.2},
-            chash,
-            0,
-            lambda *a, **k: written.append(k),
-            strict=True,
-        )
+    runner = _resuming_runner(
+        tmp_path, monkeypatch, prior, code_hash=code_hash, deps=deps
+    )
+    value, written = _strictly(runner, tmp_path / "1", chash)
     assert (value is not _COMPUTE) is settles
     assert len(written) == settles
+    if settles:
+        assert written[0]["status"] == "completed"
+        assert (tmp_path / "1" / "mushin_metrics.json").is_file()
 
 
-def test_the_driver_can_defer_its_writes(tmp_path):
-    from mushin._resume import write_cell_status
+def test_the_driver_keeps_a_reused_cells_record_from_before_the_field(
+    tmp_path, monkeypatch
+):
+    """A prior record with no project-code record keeps none: the driver's
+    may lack a file only the jobs reach, which a later resume would then
+    never compare. The job writes its own, as before."""
+    runner = _resuming_runner(tmp_path, monkeypatch, dict(), deps=_AB)
+    value, written = _strictly(runner, tmp_path / "1", None)
+    assert value == {"v": 1.0}
+    assert written[0]["code_deps"] is None
+
+
+@pytest.mark.parametrize("lacking", [False, True], ids=["comparable", "lacking-a-file"])
+def test_a_changed_cell_may_still_be_a_cache_hit_in_the_driver(
+    tmp_path, monkeypatch, lacking
+):
+    """As in the job, a resume that will not reuse a changed cell still looks
+    in the cache, unless the driver's project-code record lacks a file the
+    prior one names (its cache key may then be another code's)."""
     from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _COMPUTE
+
+    if lacking:  # the driver's record lacks pkg/b.py
+        prior, deps = dict(config_hash="c", code_deps=_AB), _A
+    else:
+        prior, deps = dict(config_hash="c"), None
+    runner = _resuming_runner(tmp_path, monkeypatch, prior, code_hash="x", deps=deps)
+    runner.cache_dir = str(tmp_path / "cache")
+    write_metrics_sidecar(tmp_path / "cache" / runner._cache_key("d", deps), {"v": 2.0})
+    value, written = _strictly(runner, tmp_path / "1", "d")
+    if lacking:
+        assert (value, written) == (_COMPUTE, [])
+    else:
+        assert value == {"v": 2.0}
+        assert [w["status"] for w in written] == ["completed"]
+
+
+def test_the_driver_composes_cells_only_when_one_may_be_reused(tmp_path):
     from mushin.workflows import _PriorCells, _TaskRunner
 
-    cell = tmp_path / "0"
-    write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1)
-    write_metrics_sidecar(cell, {"v": 1.0})
     runner = object.__new__(_TaskRunner)
     runner.swept_names, runner.sampled_indices = ["lr"], None
-    runner.code_hash, runner.cache_dir = None, None
-    runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
-    runner.script_entries = {}
-    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
-    written, defer = [], []
-    value, _ = runner._settle(
-        {"lr": 0.2},
-        tmp_path / "1",
-        {"lr": 0.2},
-        None,
-        0,
-        lambda *a, **k: written.append(k),
-        strict=True,
-        defer=defer,
-    )
-    assert value == {"v": 1.0}
-    assert (written, len(defer)) == ([], 1)
-    defer[0]()
-    assert [w["status"] for w in written] == ["completed"]
-    assert (tmp_path / "1" / "mushin_metrics.json").is_file()
+    runner.prior_manifest, runner.cache_dir, runner.cache_ok = None, None, True
+    assert not runner._reuses()
+    # A cache that holds nothing yet: nothing to reuse.
+    runner.cache_dir = str(tmp_path / "cache")
+    assert not runner._reuses()
+    (tmp_path / "cache").mkdir()
+    assert not runner._reuses()
+    (tmp_path / "cache" / "k").mkdir()
+    assert runner._reuses()
+    runner.cache_ok = False
+    assert not runner._reuses()
+    # A resume over another grid shape matches no cell.
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr", "seed"), {"x": "0"})
+    assert not runner._reuses()
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"x": "0"})
+    assert runner._reuses()
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {})
+    assert not runner._reuses()
+    # sample= leaves cells out whatever else holds.
+    runner.sampled_indices = {0}
+    assert runner.settles_in_driver()
+    assert runner.may_settle(1) and not runner.may_settle(0)
 
 
 @pytest.mark.parametrize(
@@ -688,7 +747,8 @@ def test_the_driver_can_defer_its_writes(tmp_path):
         ({"a": "path/${env:HOME}/x"}, {}, True),  # OmegaConf's older name
         ({"a": "${oc.decode:${oc.env:N}}"}, {}, True),
         ({"a": "environment"}, {}, False),
-        ({"a": 1}, {"N": "8"}, True),
+        ({"a": 1}, {"N": "8"}, False),  # setting variables reads none
+        ({"a": "${oc.env:N}"}, {"N": "8"}, True),
     ],
 )
 def test_a_config_that_reads_the_environment_is_seen(cfg, env_set, reads):

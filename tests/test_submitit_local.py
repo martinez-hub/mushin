@@ -616,7 +616,7 @@ def test_a_cell_the_driver_cannot_settle_is_left_to_its_job(tmp_path, monkeypatc
     sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
     first = tasks.record_pid.run(**sweep)
 
-    def broken(self, ret, defer):
+    def broken(self, ret):
         raise RuntimeError("cannot settle here")
 
     monkeypatch.setattr(_TaskRunner, "settle_in_driver", broken)
@@ -699,3 +699,94 @@ def test_a_sweep_with_hydra_callbacks_settles_nothing_in_the_driver(tmp_path):
     tasks.record_pid.run(**sweep, **LOCAL)
     tasks.record_pid.run(**sweep, resume=True, **LOCAL)
     assert len(_job_dirs(wd)) == 4
+
+
+def test_a_cell_whose_prior_dir_a_job_reads_is_left_to_its_job(tmp_path, monkeypatch):
+    """A resume over a renumbered grid, where one cell (seed 1) is left to
+    its job: its job reads seed 1's prior result from dir 0, which seed 3,
+    settled, would take. Seed 3 is submitted instead of recorded there."""
+    from mushin.workflows import _TaskRunner
+
+    wd = tmp_path / "s"
+    tasks.record_pid.run(seed=multirun([1, 2, 3]), working_dir=str(wd), **LOCAL)
+    submitted = len(_job_dirs(wd))
+    original = _TaskRunner.settle_in_driver
+
+    def picky(self, ret):
+        return None if ret.cfg.seed == 1 else original(self, ret)
+
+    monkeypatch.setattr(_TaskRunner, "settle_in_driver", picky)
+    again = tasks.record_pid.run(
+        seed=multirun([3, 1, 4]), working_dir=str(wd), resume=True, **LOCAL
+    )
+    assert again["v"].values.tolist() == [3.0, 1.0, 4.0]
+    assert len(_job_dirs(wd)) - submitted == 3
+
+
+def test_setting_variables_alone_still_settles_in_the_driver(tmp_path):
+    wd = tmp_path / "s"
+    sweep = dict(
+        seed=multirun([0, 1]),
+        working_dir=str(wd),
+        overrides=["++hydra.job.env_set.OMP_NUM_THREADS=1"],
+    )
+    tasks.record_pid.run(**sweep, **LOCAL)
+    submitted = len(_job_dirs(wd))
+    tasks.record_pid.run(**sweep, resume=True, **LOCAL)
+    assert len(_job_dirs(wd)) == submitted
+
+
+def test_settling_is_best_effort_under_warnings_as_errors(tmp_path, monkeypatch):
+    import warnings
+
+    from mushin.workflows import _TaskRunner
+
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    first = tasks.record_pid.run(**sweep)
+
+    def broken(self, ret):
+        raise RuntimeError("cannot settle here")
+
+    monkeypatch.setattr(_TaskRunner, "settle_in_driver", broken)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        again = tasks.record_pid.run(resume=True, **sweep)
+    assert again["pid"].values.tolist() == first["pid"].values.tolist()
+
+
+def test_the_drivers_judging_shows_no_warning(tmp_path, monkeypatch):
+    """What the driver sees while judging a cell (a module it finds edited,
+    say) is the job's to warn about, in the job's process."""
+    import warnings
+
+    from mushin.workflows import _TaskRunner
+
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    tasks.record_pid.run(**sweep)
+    original = _TaskRunner.settle_in_driver
+
+    def noisy(self, ret):
+        warnings.warn("seen while judging", UserWarning)
+        return original(self, ret)
+
+    monkeypatch.setattr(_TaskRunner, "settle_in_driver", noisy)
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        tasks.record_pid.run(resume=True, **sweep)
+    assert not [w for w in seen if "while judging" in str(w.message)]
+    assert len(_job_dirs(wd)) == 2  # both settled: nothing submitted
+
+
+def test_a_sweep_with_nothing_to_submit_keeps_the_sweep_dirs_mode(tmp_path):
+    sweep = dict(
+        seed=multirun([0, 1]),
+        cache_dir=str(tmp_path / "cache"),
+        overrides=["+hydra.sweep.mode=700"],
+        **LOCAL,
+    )
+    tasks.record_pid.run(working_dir=str(tmp_path / "a"), **sweep)
+    tasks.record_pid.run(working_dir=str(tmp_path / "b"), **sweep)
+    assert not (tmp_path / "b" / ".submitit").exists()
+    assert ((tmp_path / "b").stat().st_mode & 0o777) == 0o700

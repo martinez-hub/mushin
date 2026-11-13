@@ -50,7 +50,8 @@ if _plugin_launcher is not None:
     from omegaconf import OmegaConf, open_dict, read_write
 
     class _MushinSubmititMixin:
-        """Submit as the plugin does; wait on every job (#345).
+        """Submit as the plugin does, but only the cells that need a job;
+        wait on every job (#345).
 
         Holds no state of its own: the launcher is pickled into every job
         (`map_array(self, ...)`) and into `checkpoint()`'s resubmission."""
@@ -59,7 +60,13 @@ if _plugin_launcher is not None:
             settled = self._settled_in_driver(job_overrides, initial_job_idx)
             numbers = [initial_job_idx + i for i in range(len(job_overrides))]
             if len(settled) == len(numbers):
-                # Nothing to submit: no executor (on SLURM it wants `srun`).
+                # Nothing to submit: no executor (on SLURM it wants `srun`),
+                # but the sweep dir as `_submit` leaves it.
+                sweep_dir = Path(str(self.config.hydra.sweep.dir))
+                sweep_dir.mkdir(parents=True, exist_ok=True)
+                if "mode" in self.config.hydra.sweep:
+                    mode = int(str(self.config.hydra.sweep.mode), 8)
+                    os.chmod(sweep_dir, mode=mode)
                 return [settled[n] for n in numbers]
             jobs, job_params = self._submit(
                 job_overrides, initial_job_idx, skip=settled
@@ -73,13 +80,18 @@ if _plugin_launcher is not None:
             """The JobReturns of the cells mushin's runner says need no job
             (left out by ``sample=``, reused by a resume, or a ``cache_dir``
             hit), by job number, so only the rest are submitted, under their
-            own job numbers (#345). Every cell is decided before any is
-            recorded: a resume over a renumbered grid reads a prior cell's dir
-            that another cell's record would overwrite. A cell is composed in
-            the driver only when it may need no job, and not at all when the
-            sweep has Hydra callbacks, which `run_job` calls for each job. A
-            cell that cannot be settled here, for whatever reason, is left to
-            its job, which decides as before; the driver warns once."""
+            own job numbers (#345).
+
+            A cell is composed in the driver only when it may need no job, and
+            not at all when the sweep has Hydra callbacks, which `run_job`
+            calls for each job. Every cell is decided before any is recorded,
+            and a settled cell whose dir a cell left to its job reads its
+            prior result from is not recorded but submitted, as before (a
+            resume over a renumbered grid finds cells' prior results in dirs
+            other cells now take). A cell that cannot be settled here, for
+            whatever reason, is left to its job, which decides as before; the
+            driver warns once. Warnings from judging a cell are the job's to
+            give, and are not shown here."""
             import warnings
 
             runner = self.task_function
@@ -91,35 +103,66 @@ if _plugin_launcher is not None:
                 and not OmegaConf.select(self.config, "hydra.callbacks")
             ):
                 return {}
-            settled, writes, errors = {}, {}, []
+            settled, writes, own, reads, errors = {}, {}, {}, {}, []
+            environment = 0
             for i, overrides in enumerate(job_overrides):
                 idx = initial_job_idx + i
                 if not runner.may_settle(idx):
                     continue
                 try:
                     with self._composed(overrides, idx, f"driver_{idx}") as ret:
-                        defer = []
-                        result = runner.settle_in_driver(ret, defer)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            own[idx], reads[idx] = runner.dirs_of(ret)
+                            result = runner.settle_in_driver(ret)
+                            if result is None and runner.reads_environment(ret):
+                                environment += 1
                         if result is not None:
-                            ret.status, ret.return_value = result
-                            settled[idx], writes[idx] = ret, defer
+                            ret.status, ret.return_value, writes[idx] = result
+                            settled[idx] = ret
                 except Exception as exc:  # noqa: BLE001 - its job decides
                     errors.append((idx, exc))
-            for idx, defer in writes.items():
+            # The prior dirs the jobs will read; all but the settled cells'
+            # when a cell's is unknown.
+            if any(idx not in reads for idx, _ in errors):
+                taken = {reads[n] for n in settled}
+                protected = runner.prior_dirs() - taken
+            else:
+                protected = {d for n, d in reads.items() if n not in settled}
+            kept = 0
+            for idx in [n for n in settled if own[n] in protected]:
+                del settled[idx]
+                kept += 1
+            for idx in list(settled):
                 try:
-                    for write in defer:
+                    for write in writes[idx]:
                         write()
                 except Exception as exc:  # noqa: BLE001 - its job rewrites the dir
                     errors.append((idx, exc))
                     del settled[idx]
             if errors:
                 idx, exc = errors[0]
-                warnings.warn(
-                    f"{len(errors)} of {len(job_overrides)} cells could not be "
-                    f"settled before submitting (#{idx}: {exc!r}); they are "
-                    "submitted, and their jobs decide as before.",
-                    UserWarning,
-                    stacklevel=2,
+                try:
+                    warnings.warn(
+                        f"{len(errors)} of {len(job_overrides)} cells could not "
+                        f"be settled before submitting (#{idx}: {exc!r}); they "
+                        "are submitted, and their jobs decide as before.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                except Warning:  # warnings as errors: settling is best effort
+                    pass
+            if environment:
+                log.info(
+                    f"{environment} of {len(job_overrides)} cells read the "
+                    "environment (${oc.env:...}), which their jobs' may hold "
+                    "differently: they are submitted, and their jobs decide."
+                )
+            if kept:
+                log.info(
+                    f"{kept} of {len(job_overrides)} cells that need no job are "
+                    "submitted anyway: their dirs hold the prior results other "
+                    "cells' jobs read."
                 )
             if settled:
                 listed = ", ".join(f"#{n}" for n in sorted(settled))
@@ -177,6 +220,9 @@ if _plugin_launcher is not None:
             job_params: list[Any] = []
             for idx, overrides in enumerate(job_overrides):
                 idx = initial_job_idx + idx
+                # mushin's: a cell settled in the driver needs no job.
+                if idx in skip:
+                    continue
                 lst = " ".join(filter_overrides(overrides))
                 log.info(f"\t#{idx} : {lst}")
                 job_params.append(
@@ -189,9 +235,7 @@ if _plugin_launcher is not None:
                     )
                 )
 
-            # mushin's: the cells settled in the driver need no job.
-            job_params = [p for p in job_params if p[2] not in skip]
-            jobs = executor.map_array(self, *zip(*job_params)) if job_params else []  # noqa: B905
+            jobs = executor.map_array(self, *zip(*job_params))  # noqa: B905
             return jobs, job_params
 
         def _wait(self, jobs, job_params):
@@ -241,7 +285,7 @@ if _plugin_launcher is not None:
             (`tests/test_submitit_launcher.py` pins the part of `run_job`
             mirrored here), in the driver, with the global HydraConfig set to
             the job's config inside and restored after. ``job_id`` is the
-            scheduler's, or None for a cell no job ran."""
+            scheduler's, or ``driver_<n>`` for a cell the driver settles."""
             from hydra.core.hydra_config import HydraConfig
 
             assert self.hydra_context is not None and self.config is not None
@@ -251,8 +295,7 @@ if _plugin_launcher is not None:
                     self.config, list(overrides)
                 )
                 with open_dict(config.hydra.job) as hydra_job:
-                    if job_id is not None:
-                        hydra_job.id = job_id
+                    hydra_job.id = job_id
                     config.hydra.job.num = idx
                 HydraConfig.instance().set_config(config)
                 output_dir = os.path.join(
