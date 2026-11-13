@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -177,9 +180,56 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)  # atomic on POSIX/Windows
+        _while_held(lambda: tmp.replace(path))  # atomic on POSIX/Windows
     finally:
-        tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
+        # No residue if the replace raced or failed; a delete that fails here
+        # must not mask the replace's own error.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+#: How long, in seconds, each retry waits on Windows while another process
+#: holds a sidecar (#357): about two seconds in all.
+_HELD_WAITS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.5, 0.7)
+
+#: On Windows a file another process has open cannot be replaced or deleted:
+#: Python opens files without sharing them for deletion.
+_WINDOWS = sys.platform == "win32"
+
+
+def _while_held(operation: Callable[[], object]) -> None:
+    """Run ``operation``, a replace or a delete of a sidecar, retrying it on
+    Windows while another process has the file open (#357): it raises
+    ``PermissionError`` there, so `mushin.show` on a running sweep, or a test
+    polling the status files, would fail the cell whose record it read.
+    mushin's own readers hold a file only while they read it. A process that
+    holds one longer (a sync client, an antivirus scan) still fails the write
+    after about two seconds. A Windows share mounted from another system
+    (WSL's /mnt/c, SMB) is not seen as Windows: there it fails at once, as
+    before."""
+    if not _WINDOWS:
+        operation()
+        return
+    for wait in _HELD_WAITS:
+        try:
+            operation()
+            return
+        except PermissionError:
+            time.sleep(wait)
+    operation()
+
+
+def remove_sidecar(path: Path) -> bool:
+    """Delete a sidecar if it is there, waiting on Windows while another
+    process has it open (#357); best-effort, as every caller wants it:
+    returns whether it is gone, and never raises an ``OSError``."""
+    try:
+        _while_held(lambda: Path(path).unlink(missing_ok=True))
+    except OSError:
+        return False
+    return True
 
 
 def _atomic_write_json(path: Path, payload: Any, as_text: list | None = None) -> str:
