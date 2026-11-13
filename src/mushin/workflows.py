@@ -674,6 +674,20 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
+def _as_authored(cfg):
+    """A job config's plain containers with its interpolations unresolved,
+    or the config itself when it is not an OmegaConf one or cannot be read
+    so."""
+    try:
+        from omegaconf import OmegaConf
+
+        if OmegaConf.is_config(cfg):
+            return OmegaConf.to_container(cfg, resolve=False)
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        pass
+    return cfg
+
+
 def _resolve_in_place(cfg) -> None:
     """Resolve a job config's interpolations in place, as zen does before it
     calls a task, so everything read from it afterwards sees one value per
@@ -1990,10 +2004,15 @@ class _TaskRunner:
             write_metrics_sidecar,
         )
 
+        # Provenance records the config as authored (`_to_plain`): an
+        # `${oc.env:...}` is kept as written, not its value. Kept before the
+        # config is resolved in place, below and by zen (which resolved it
+        # before provenance was written, so the record held the values).
+        authored = _as_authored(cfg)
         # One resolution per job (#353): zen resolves the config in place
-        # before it calls `pre_task`, and the fingerprint, the record's combo
-        # and the provenance read it before that, so a resolver that gives a
-        # new value each call (a clock, a counter) gave each a different one.
+        # before it calls `pre_task`, and the fingerprint and the record's
+        # combo read it before that, so a resolver that gives a new value each
+        # call (a counter) gave each a different one.
         _resolve_in_place(cfg)
         # The config is resolved once, for its fingerprint and for the
         # `_target_`s the project-code record follows.
@@ -2115,7 +2134,7 @@ class _TaskRunner:
                 rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
             written = NOT_WRITTEN
             try:
-                written = write_provenance(cwd, cfg, base=self.base_provenance)
+                written = write_provenance(cwd, authored, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             # Set the contextvar AFTER the (fallible) status write, so a failed

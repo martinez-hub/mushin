@@ -3083,5 +3083,24 @@ def test_a_job_resolves_its_config_once(tmp_path):
         OmegaConf.clear_resolver("mushin_test_count")
     for cell, value in zip(sorted(tmp_path.glob("[0-9]*")), seen, strict=True):
         record = json.loads((cell / "mushin_cell_status.json").read_text())
-        provenance = json.loads((cell / "mushin_provenance.json").read_text())
-        assert record["combo"]["x"] == provenance["config"]["x"] == value
+        assert record["combo"]["x"] == value
+
+
+def test_provenance_records_an_interpolation_as_authored(tmp_path, monkeypatch):
+    """Provenance keeps an `${oc.env:...}` as written, not the value it
+    resolves to (a database URL, say): zen resolved the config in place
+    before provenance was written, so the record held the value."""
+    import json
+
+    monkeypatch.setenv("MUSHIN_TEST_DB_URL", "postgres://user:pw@host")
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, db):
+            return dict(v=float(x))
+
+    W().run(
+        x=multirun([1]), db="${oc.env:MUSHIN_TEST_DB_URL}", working_dir=str(tmp_path)
+    )
+    provenance = json.loads((tmp_path / "0" / "mushin_provenance.json").read_text())
+    assert provenance["config"]["db"] == "${oc.env:MUSHIN_TEST_DB_URL}"
