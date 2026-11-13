@@ -75,7 +75,9 @@ def _read_cells(root) -> list[dict]:
     and is excluded, unless its status sidecar is newer than the manifest,
     which marks a cell of a newer sweep currently in flight (the mid-sweep
     view). Without a manifest (fresh dir mid-sweep, pre-manifest sweeps) every
-    cell dir is kept."""
+    cell dir is kept. A dir whose record is older than its ``.hydra/hydra.yaml``
+    and another run's (`record_of_another_run`: its job died before its first
+    record) is excluded too, as a cell that wrote nothing."""
     return _scan(root)[0]
 
 
@@ -85,7 +87,11 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
     records every cell's ``status_mtime``; otherwise only the cells the
     manifest does not list are stat'ed, as the stale-dir rule needs, and the
     field is 0.0 (``show`` and ``export`` never read it)."""
-    from ._resume import STATUS_FILE, read_cell_status
+    from ._resume import (
+        STATUS_FILE,
+        hydra_yaml_record_of_another_run,
+        read_cell_status,
+    )
     from ._sweep_io import combo_key, read_metrics_sidecar
 
     root = Path(root)
@@ -102,6 +108,8 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
+        if hydra_yaml_record_of_another_run(d, d / ".hydra" / "hydra.yaml"):
+            continue  # its job died before its first record: an earlier run's
         status_mtime = 0.0
         if manifest_cells:
             entry = manifest_cells.get(combo_key(s["combo"]))

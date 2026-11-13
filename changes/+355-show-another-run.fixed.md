@@ -1,0 +1,1 @@
+`mushin.show`, `mushin.best` and the CSV export no longer list an earlier sweep's record and metrics for a cell whose job died after Hydra wrote its `.hydra/` snapshot and before the cell recorded anything, in a directory a later sweep reused, by the same rule as `load_from_dir`.

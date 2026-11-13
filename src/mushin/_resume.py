@@ -180,6 +180,21 @@ def record_of_another_run(older: dict | None, stamp: Any) -> bool:
     return older.get("run_id") != stamp
 
 
+def hydra_yaml_record_of_another_run(cell_dir, hydra_yaml) -> bool:
+    """`record_of_another_run` for one cell, reading its hydra.yaml only
+    when its record is older (rare outside a reused directory)."""
+    from ._hydra_yaml import hydra_run_stamp, load_hydra_record
+
+    _, older = sidecar_state(cell_dir, hydra_yaml)
+    if older is None:
+        return False
+    try:
+        stamp = hydra_run_stamp(load_hydra_record(hydra_yaml))
+    except Exception:  # noqa: BLE001 - an unreadable snapshot says nothing
+        return False
+    return record_of_another_run(older, stamp)
+
+
 #: What ``resolved_config`` returns for a config that cannot be resolved.
 _UNRESOLVED = object()
 

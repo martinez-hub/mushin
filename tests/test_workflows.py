@@ -2537,6 +2537,8 @@ def _a_job_died_before_its_first_record(
 def test_a_reload_does_not_take_an_earlier_runs_record_for_a_job_that_died(
     tmp_path, first, second, run_id
 ):
+    import mushin
+
     wd = _a_job_died_before_its_first_record(tmp_path, first, second, run_id=run_id)
     loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
     values = loaded.to_xarray()["v"].values.tolist()
@@ -2544,6 +2546,11 @@ def test_a_reload_does_not_take_an_earlier_runs_record_for_a_job_that_died(
     assert values[0] != values[0]  # NaN: the job left no result
     assert values[1] == later
     assert not loaded.is_complete and not loaded.failures
+    # show, best and export read the same: the earlier result is not this run's.
+    from mushin._show import _read_cells
+
+    assert mushin.best(wd, "v", mode="min").value == later
+    assert [cell["dir"].name for cell in _read_cells(wd)] == ["1"]
 
 
 def test_a_cell_whose_job_died_is_failed_as_its_runs_manifest_says(tmp_path):
