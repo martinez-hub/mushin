@@ -654,7 +654,8 @@ def _override_texts(overrides) -> list[str]:
     It stopped ``run()`` after every cell had completed, and stopped a
     reload. A sweep's own values (a ``choice`` in its ``multirun.yaml``) key
     the grid's cells, which each job resolved for itself, so one that cannot
-    be resolved still raises (#353)."""
+    be resolved still raises here; a MultiRunMetricsWorkflow reads such a
+    value from its cells instead (`_overrides_from_cells`, #353)."""
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
@@ -694,10 +695,78 @@ def _value_key(value: Any) -> str:
     return combo_key({"_": value})
 
 
-def _coord(value: Any) -> Any:
-    """One element of a swept axis as `_sanitize_coordinate_for_xarray`
-    gives it: a sequence as its text."""
-    return str(value) if _non_str_sequence(value) else value
+# The value of an interpolated swept param that cannot be keyed (`_unkeyed_value`):
+# no grid coordinate equals it, so its dir falls outside the grid.
+_UNKEYED = "\x00mushin-unkeyed"
+
+
+def _restore_tags(value: Any) -> Any:
+    """A value as a record or manifest stores it, its tagged NaN or
+    infinity restored (a null stays None: a swept None)."""
+    from ._sweep_io import _NONFINITE_TAG
+
+    tags = {"inf": float("inf"), "-inf": -float("inf"), "nan": float("nan")}
+    if isinstance(value, dict):
+        if set(value) == {_NONFINITE_TAG} and value[_NONFINITE_TAG] in tags:
+            return tags[value[_NONFINITE_TAG]]
+        return {k: _restore_tags(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_restore_tags(v) for v in value]
+    return value
+
+
+def _interpolation_spans(text: str) -> list[str]:
+    """The top-level interpolations in an override's text (a nested
+    ``${a:${b}}`` is one)."""
+    try:
+        from omegaconf import grammar_parser
+
+        tree = grammar_parser.parse(text)
+    except Exception:  # noqa: BLE001 - none found
+        return []
+    spans: list[str] = []
+
+    def walk(node) -> None:
+        if type(node).__name__ == "InterpolationContext":
+            spans.append(node.getText())
+            return
+        for child in getattr(node, "children", None) or []:
+            walk(child)
+
+    walk(tree)
+    return spans
+
+
+def _read_override(loaded, i: int, text: str, parse, name: str):
+    """The driver's reading of override ``i`` of a sweep's YAML (as main
+    reads it: resolved there, then parsed). Where it cannot be read whole,
+    each interpolation that cannot be resolved there is read as written, so
+    its siblings read as main would read them; an element that still holds
+    an interpolation reads as None (a swept override: a list, an element
+    None where unread; a fixed one: its value or None)."""
+    import copy
+
+    task = loaded.hydra.overrides.task
+    try:
+        value = parse([task[i]])[name]
+    except Exception:  # noqa: BLE001 - read it span by span
+        escaped = text
+        for span in _interpolation_spans(text):
+            probe = copy.deepcopy(loaded)
+            probe.hydra.overrides.task[i] = span
+            try:
+                probe.hydra.overrides.task[i]  # noqa: B018 - resolves it
+            except Exception:  # noqa: BLE001 - read as written
+                escaped = escaped.replace(span, "\\" + span)
+        probe = copy.deepcopy(loaded)
+        probe.hydra.overrides.task[i] = escaped
+        try:
+            value = parse([probe.hydra.overrides.task[i]])[name]
+        except Exception:  # noqa: BLE001 - not readable here at all
+            return None
+    if isinstance(value, multirun):
+        return [None if _holds_interpolation(str(v)) else v for v in value]
+    return None if _holds_interpolation(str(value)) else value
 
 
 def _index_of(elements: list, value: Any) -> int | None:
@@ -2535,6 +2604,8 @@ class BaseWorkflow:
         self.workflow_overrides = {}
         self._multirun_task_overrides = {}
         self._interpolated_cells = None
+        self._interpolated_records = {}
+        self._interpolated_decision = None
         self.jobs = []
         self._working_dir = None
         # combo_key(sanitized swept-param combo) -> that cell's metrics dict.
@@ -2626,14 +2697,17 @@ class BaseWorkflow:
         {'foo': ['val'], 'bar': multirun(['a', 'b']), 'apple': 1}
         """
         if not self._multirun_task_overrides:
-            task = load_from_yaml(
-                self.working_dir / "multirun.yaml"
-            ).hydra.overrides.task
+            loaded = load_from_yaml(self.working_dir / "multirun.yaml")
+            task = loaded.hydra.overrides.task
             raw = _raw_override_texts(task)
-            if not any(_holds_interpolation(text) for text in raw):
+            # Only a sweep with an interpolated override, and only a workflow
+            # that keeps its cells, reads its coordinates from them (#353).
+            if not any(_holds_interpolation(t) for t in raw) or not hasattr(
+                self, "_cell_record"
+            ):
                 output = self._parse_overrides(_override_texts(task))
             else:
-                output, cells_known = self._overrides_from_cells(task, raw)
+                output, cells_known = self._overrides_from_cells(loaded, raw)
                 if not cells_known:
                     # Read again once the sweep's cells are known.
                     return output
@@ -2641,16 +2715,15 @@ class BaseWorkflow:
 
         return self._multirun_task_overrides
 
-    def _overrides_from_cells(self, task, raw: list[str]) -> tuple[dict, bool]:
-        """`multirun_task_overrides` for a sweep with an interpolated override
-        (#353), and whether its cells were known. Each override is read on its
-        own; a fixed one as before (resolved, else as written, #351). A swept
-        one whose text holds an interpolation was resolved by each of its
-        jobs, so each element's coordinate comes from its cells: the value
-        the cells that completed in this run agree on (the driver's own
-        reading of it, where that keys the same, so a value that resolves
-        alike keys as it always has), the element's text where they differ,
-        and the driver's reading, else the text, where none completed."""
+    def _overrides_from_cells(self, loaded, raw: list[str]) -> tuple[dict, bool]:
+        """`multirun_task_overrides` for a sweep with an interpolated
+        override (#353), and whether its cells were known. Each override is
+        read on its own: a fixed one as before (resolved, else as written,
+        #351); a swept one whose text holds an interpolation gets each
+        element's coordinate from `_axis_coordinates`, since each job
+        resolved it for itself."""
+        from ._hydra_yaml import hydra_run_stamp
+
         output: dict = {}
         axes: dict[str, tuple[list, list | None]] = {}
         for i, text in enumerate(raw):
@@ -2658,61 +2731,121 @@ class BaseWorkflow:
             if not _holds_interpolation(text):
                 output[name] = written
                 continue
-            try:
-                read = self._parse_overrides([task[i]])[name]
-            except Exception:  # noqa: BLE001 - it cannot be resolved here
-                read = None
+            read = _read_override(loaded, i, text, self._parse_overrides, name)
             if isinstance(written, multirun):
-                axes[name] = (list(written), None if read is None else list(read))
+                axes[name] = (list(written), read)
                 output[name] = written
             else:
                 output[name] = written if read is None else read
-        coordinates, known = self._axis_coordinates(axes)
+        coordinates, known = self._axis_coordinates(axes, hydra_run_stamp(loaded))
         for name, values in coordinates.items():
             output[name] = multirun(values)
         return output, known
 
-    def _axis_coordinates(self, axes) -> tuple[dict[str, list], bool]:
-        """Each interpolated axis's coordinates (see `_overrides_from_cells`)
-        and whether the sweep's cells were known; records which element each
-        cell got, for `_combo_of_cfg`."""
+    def _axis_coordinates(self, axes, run_id) -> tuple[dict[str, list], bool]:
+        """Each interpolated axis's coordinates, and whether the sweep's
+        cells were known. The run decides them once and saves them in its
+        manifest (`Manifest.interpolated`); a reload of this run reads them
+        there. Otherwise, for each element: the value this run's records of
+        its cells hold (its completed cells', else any of its cells', as a
+        sampled-out or failed cell is recorded too), as the driver reads it
+        where that keys the same; the element's text where they differ; and,
+        with no record, the driver's reading, else the text. Records which
+        element each of this run's cells got, for `_combo_of_cfg`."""
         dirs, cfgs = self.multirun_working_dirs, self.cfgs
         known = bool(dirs) and cfgs is not None and len(dirs) == len(cfgs)
-        elements_of = {name: [None] * (len(dirs) if known else 0) for name in axes}
-        votes: dict[str, list[list]] = {
+        self._interpolated_cells, self._interpolated_records = None, {}
+        if not axes:
+            if known:
+                self._interpolated_cells = {}
+            return {}, known
+        n = len(dirs) if known else 0
+        elements_of: dict[str, list] = {name: [None] * n for name in axes}
+        completed: dict[str, list[list]] = {
             name: [[] for _ in written] for name, (written, _) in axes.items()
         }
-        for i in range(len(dirs) if known else 0):
+        any_status: dict[str, list[list]] = {
+            name: [[] for _ in written] for name, (written, _) in axes.items()
+        }
+        for i in range(n):
+            record = self._this_runs_record(i, run_id)
+            if record is None:
+                continue
+            self._interpolated_records[i] = record
             own = self._cell_overrides(i)
-            record, another_runs = self._cell_record(i)
-            combo = (record or {}).get("combo")
-            voted = (
-                not another_runs
-                and (record or {}).get("status") == "completed"
-                and isinstance(combo, dict)
-            )
+            combo = record.get("combo") if isinstance(record.get("combo"), dict) else {}
             for name, (written, _) in axes.items():
                 j = _index_of(written, own.get(name, _MISSING_SWEPT))
                 elements_of[name][i] = j
-                if j is not None and voted and name in combo:
-                    votes[name][j].append(combo[name])
+                if j is None or name not in combo:
+                    continue
+                any_status[name][j].append(combo[name])
+                if record.get("status") == "completed":
+                    completed[name][j].append(combo[name])
+        saved = self._saved_coordinates(run_id, axes)
         coordinates = {}
         for name, (written, read) in axes.items():
+            if saved is not None:
+                coordinates[name] = saved[name]
+                continue
             values = []
             for j, text in enumerate(written):
                 driver = None if read is None else read[j]
-                cast = [_value_key(v) for v in votes[name][j]]
+                voters = completed[name][j] or any_status[name][j]
+                cast = [_value_key(v) for v in voters]
                 if not cast:
-                    values.append(text if read is None else driver)
+                    values.append(text if driver is None else driver)
                 elif len(set(cast)) == 1:
-                    agreed = votes[name][j][0]
-                    same = read is not None and _value_key(_coord(driver)) == cast[0]
-                    values.append(driver if same else agreed)
+                    same = (
+                        driver is not None
+                        and _value_key(self._element_coord(driver)) == cast[0]
+                    )
+                    values.append(driver if same else voters[0])
                 else:
                     values.append(text)
             coordinates[name] = values
-        self._interpolated_cells = elements_of if known else None
+        if known:
+            self._interpolated_cells = elements_of
+            self._interpolated_decision = {
+                "run_id": run_id,
+                "coords": {name: list(v) for name, v in coordinates.items()},
+            }
         return coordinates, known
+
+    def _saved_coordinates(self, run_id, axes) -> dict | None:
+        """The coordinates this run saved in its manifest, when the manifest
+        is this run's (its ``run_id``) and they fit the sweep's axes."""
+        from ._sweep_io import MANIFEST_FILE, Manifest
+
+        if run_id is None or not (self.working_dir / MANIFEST_FILE).exists():
+            return None
+        saved = Manifest.load_or_new(self.working_dir, []).interpolated
+        if not isinstance(saved, dict) or saved.get("run_id") != run_id:
+            return None
+        coords = saved.get("coords")
+        if not isinstance(coords, dict) or set(coords) != set(axes):
+            return None
+        if any(
+            not isinstance(coords[name], list) or len(coords[name]) != len(written)
+            for name, (written, _) in axes.items()
+        ):
+            return None
+        return {name: [_restore_tags(v) for v in coords[name]] for name in axes}
+
+    def _this_runs_record(self, i: int, run_id) -> dict | None:
+        """Job dir ``i``'s status record when this run (``run_id``) wrote
+        it, its combo's tagged values restored; else None."""
+        from ._resume import read_cell_status
+
+        if run_id is None:
+            return None
+        record = read_cell_status(self.multirun_working_dirs[i])
+        if not isinstance(record, dict) or record.get("run_id") != run_id:
+            return None
+        combo = record.get("combo")
+        if isinstance(combo, dict):
+            record = dict(record, combo={k: _restore_tags(v) for k, v in combo.items()})
+        return record
 
     def _cell_overrides(self, i: int) -> dict:
         """Job ``i``'s own overrides, parsed as the sweep's are, its
@@ -2728,14 +2861,19 @@ class BaseWorkflow:
                 path = dir_ / str(self.output_subdir) / "overrides.yaml"
                 texts = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
             return self._parse_overrides(texts)
-        except Exception:  # noqa: BLE001 - its cell keys as before
+        except Exception:  # noqa: BLE001 - its cell keys by its record
             return {}
 
     def _interpolated_names(self) -> dict[str, list]:
-        """{swept name: the element of each cell} for the swept overrides that
-        hold an interpolation, once the cells are known; else {}."""
+        """{swept name: the element of each of this run's cells} for the
+        swept overrides that hold an interpolation, once the cells are
+        known; else {}."""
         self.multirun_task_overrides  # noqa: B018 - computes it
         return self._interpolated_cells or {}
+
+    def _element_coord(self, value: Any) -> Any:
+        """One element of a swept axis as the grid's coordinates hold it."""
+        return self._sanitize_coordinate_for_xarray(multirun([value]))[0]
 
     @staticmethod
     def pre_task(*args: Any, **kwargs: Any) -> None:
@@ -3469,6 +3607,8 @@ class BaseWorkflow:
         # loaded workflow does not wipe state its next to_xarray() needs.
         self._multirun_task_overrides = {}
         self._interpolated_cells = None
+        self._interpolated_records = {}
+        self._interpolated_decision = None
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -4269,7 +4409,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # which differs only for an interpolated swept value (#353).
             choices = _group_choices_of_job(job)
             swept_combo = self._combo_of_cfg(cfg, choices=choices, i=i)
-            job_combo = self._job_combo(cfg, choices, i)
+            job_combo = self._job_combo(swept_combo, i)
             key = combo_key(swept_combo)
 
             # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
@@ -4318,6 +4458,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         self.metrics = self._process_metrics(job_metrics)
 
+        # The coordinates this run gave an interpolated axis, which a reload
+        # of this run reads rather than deciding them again (#353).
+        manifest.interpolated = getattr(self, "_interpolated_decision", None)
         manifest.save()
         self._manifest = manifest
 
@@ -4356,8 +4499,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     ) -> dict[str, Any]:
         """`_swept_combo` of one job config; ``choices`` is the job's
         ``hydra.runtime.choices``. For job ``i``, an interpolated swept value
-        is its element's coordinate (`_overrides_from_cells`), never resolved
-        again: after the run it resolves differently, or not at all."""
+        is never resolved again (after the run it resolves differently, or
+        not at all): this run's cell keys by its element's coordinate, and
+        another run's dir by its record's value (#353)."""
 
         def choice_of(name: str) -> str | None:
             choice = (choices or {}).get(name)
@@ -4365,29 +4509,50 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
         names = self._swept_param_names()
         cells = self._interpolated_names() if i is not None else {}
-        own = {n: cells[n][i] for n in cells if i < len(cells[n])}
-        own = {n: j for n, j in own.items() if j is not None}
         combo = _swept_combo(
             cfg,
-            [n for n in names if n not in own],
+            [n for n in names if n not in cells],
             choice_of,
             self._sanitize_coordinate_for_xarray,
         )
         overrides = self.multirun_task_overrides
-        for n, j in own.items():
-            combo[n] = _coord(overrides[n][j])
+        for n, elements in cells.items():
+            j = elements[i] if i is not None and i < len(elements) else None
+            if j is not None:
+                combo[n] = self._element_coord(overrides[n][j])
+            else:
+                combo[n] = self._unkeyed_value(cfg, n, i, choice_of)
         return {n: combo[n] for n in names if n in combo}
 
-    def _job_combo(self, cfg: Any, choices: dict | None, i: int) -> dict[str, Any]:
+    def _unkeyed_value(self, cfg: Any, name: str, i: int | None, choice_of) -> Any:
+        """An interpolated swept value of a dir that is not this run's cell
+        (an earlier sweep's, left in a reused working_dir): its record's
+        value, else its config read as before, else a value no coordinate
+        has, so it falls outside the grid instead of raising."""
+        from ._resume import read_cell_status
+
+        if i is not None:
+            record = read_cell_status(self.multirun_working_dirs[i]) or {}
+            combo = record.get("combo")
+            if isinstance(combo, dict) and name in combo:
+                return _restore_tags(combo[name])
+        try:
+            return _swept_combo(
+                cfg, [name], choice_of, self._sanitize_coordinate_for_xarray
+            )[name]
+        except Exception:  # noqa: BLE001 - e.g. ${hydra:...} offline
+            return _UNKEYED
+
+    def _job_combo(self, grid_combo: dict[str, Any], i: int) -> dict[str, Any]:
         """Job ``i``'s combo as its job resolved it, as the manifest keys it
         (a resume looks a cell up by its job's own combo): an interpolated
-        value from the cell's record, else its grid coordinate."""
-        combo = self._combo_of_cfg(cfg, choices, i)
+        value from this run's record of the cell, else its grid key's."""
+        combo = dict(grid_combo)
         cells = self._interpolated_names()
         if cells:
-            record, another_runs = self._cell_record(i)
-            recorded = (record or {}).get("combo")
-            if not another_runs and isinstance(recorded, dict):
+            record = (self._interpolated_records or {}).get(i) or {}
+            recorded = record.get("combo")
+            if isinstance(recorded, dict):
                 for n in cells:
                     if n in recorded:
                         combo[n] = recorded[n]
@@ -4471,6 +4636,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # stale overrides/coordinates from a previously loaded directory.
         self._multirun_task_overrides = {}
         self._interpolated_cells = None
+        self._interpolated_records = {}
+        self._interpolated_decision = None
+        # A previous run's jobs are not this sweep's cells.
+        self.jobs = []
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -4630,8 +4799,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         ):
             try:
                 choices = self._job_choices(i)
-                key = combo_key(self._combo_of_cfg(cfg, choices=choices, i=i))
-                job_key = combo_key(self._job_combo(cfg, choices, i))
+                grid_combo = self._combo_of_cfg(cfg, choices=choices, i=i)
+                key = combo_key(grid_combo)
+                job_key = combo_key(self._job_combo(grid_combo, i))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
             # The manifest keys a cell as its job resolved it (#353).

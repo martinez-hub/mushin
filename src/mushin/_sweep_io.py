@@ -254,6 +254,7 @@ class Manifest:
         cells: dict | None = None,
         notes: str | None = None,
         tags: list[str] | None = None,
+        interpolated: dict | None = None,
     ):
         self.root = Path(root)
         self.params = list(params)
@@ -261,6 +262,9 @@ class Manifest:
         # Free-form sweep-level lineage annotations (see run(notes=, tags=)).
         self.notes = notes
         self.tags = list(tags) if tags else []
+        # The coordinates the run gave each swept axis whose override holds
+        # an interpolation, with the run's id (#353): {"run_id", "coords"}.
+        self.interpolated = interpolated
 
     @classmethod
     def load_or_new(cls, root, params: list[str]) -> Manifest:
@@ -292,6 +296,7 @@ class Manifest:
                 cells,
                 notes=d.get("notes"),
                 tags=d.get("tags"),
+                interpolated=d.get("interpolated"),
             )
         return cls(root, params)
 
@@ -345,4 +350,6 @@ class Manifest:
             payload["notes"] = self.notes
         if self.tags:
             payload["tags"] = self.tags
+        if self.interpolated:
+            payload["interpolated"] = self.interpolated
         _atomic_write_json(self.root / MANIFEST_FILE, payload)
