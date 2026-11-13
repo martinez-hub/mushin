@@ -352,6 +352,36 @@ def launcher(monkeypatch):
 PARAMS = [([f"seed={i}"], "hydra.sweep.dir", 10 + i) for i in range(4)]
 
 
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+def test_a_job_of_several_tasks_returns_its_failing_task(launcher, on_error):
+    """A task that raised before the runner's fail-soft guard comes back
+    FAILED. Under "nan" the job's return is the runner's failure, which
+    fails the cell; a FAILED return would stop the whole sweep (#365)."""
+    from hydra.core.utils import JobReturn, JobStatus
+
+    from mushin.workflows import _FailedRun
+
+    launcher.task_function.on_error, launcher.task_function.run_id = on_error, "r"
+    ok, bad = JobReturn(), JobReturn()
+    ok.status, ok._return_value = JobStatus.COMPLETED, {"v": 1.0}
+    bad.status, bad._return_value = JobStatus.FAILED, RuntimeError("task 1")
+
+    class Several(_Job):
+        job_id = "7"
+
+        def results(self):
+            self.waited = True
+            return [ok, bad]
+
+    (ret,) = launcher._wait([Several(None)], PARAMS[:1])
+    if on_error == "raise":
+        assert ret.status is JobStatus.FAILED
+    else:
+        assert ret.status is JobStatus.COMPLETED
+        assert isinstance(ret._return_value, _FailedRun)
+        assert str(ret._return_value.exception) == "task 1"
+
+
 def test_every_job_is_waited_on_and_each_dead_one_comes_back(launcher):
     """The plugin waited in submission order and stopped at the first job
     that ended without a result; every job is waited on here, in order."""

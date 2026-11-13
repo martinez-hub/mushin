@@ -434,7 +434,8 @@ def _results_that_raised(monkeypatch):
 def test_a_job_of_several_tasks_fails_its_cell_when_one_dies(tmp_path, monkeypatch):
     """Every task of the job runs mushin's runner in the cell's dir, so the
     cell's completed record is not known to be the first task's (the job's
-    result): the cell fails, as when the record could not be read."""
+    result): the cell fails, as when the record could not be read, and the
+    record is left for a resume."""
     raised = _results_that_raised(monkeypatch)
     wd = tmp_path / "s"
     with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
@@ -449,11 +450,8 @@ def test_a_job_of_several_tasks_fails_its_cell_when_one_dies(tmp_path, monkeypat
     assert len(set(raised)) == 1
     v = ds["v"].values
     assert v[0] == 0.0 and np.isnan(v[1])
-    # The first task's completed record is not the job's result: the cell
-    # failed, and its record says so (#365).
     record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "failed"
-    assert not (wd / "1" / "mushin_metrics.json").exists()
+    assert record["status"] == "completed"
 
 
 def test_a_result_submitit_could_not_save_fails_its_cell(tmp_path):
@@ -566,7 +564,10 @@ def test_a_job_of_several_tasks_runs_its_cell_without_the_budget(tmp_path):
 
 
 @pytest.mark.parametrize("on_error", ["raise", "nan"])
-@pytest.mark.parametrize("task", ["second_task_raises_late", "first_task_raises_early"])
+@pytest.mark.parametrize(
+    "task",
+    ["second_task_raises_late", "first_task_raises_early", "second_task_raises_early"],
+)
 def test_a_job_whose_task_raises_fails_its_cell_and_its_record(
     tmp_path, on_error, task
 ):
