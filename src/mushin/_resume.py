@@ -59,7 +59,7 @@ def write_cell_status(
     budget_id: str | None = None,
     run_id: str | None = None,
     job_id: str | None = None,
-    task: int | None = None,
+    metrics: bool = False,
 ) -> None:
     """Atomically write this cell's status sidecar into its own dir.
 
@@ -76,13 +76,13 @@ def write_cell_status(
     scheduler requeues after the deadline is known to have started before
     it.
 
-    ``run_id`` names the ``run()`` that wrote the record, ``job_id`` the
+    ``run_id`` names the ``run()`` that wrote the record and ``job_id`` the
     job it ran in (Hydra's ``job.id``, which a submitit launcher sets to the
-    scheduler's id), and ``task`` which of the job's tasks wrote it. A
-    launcher that finds a job ended without a result tells by ``run_id`` and
-    the combo whether the cell's record is that job's own, and keeps a
-    completed one only from the first task, whose result is the job's
-    (#345)."""
+    scheduler's id), and ``metrics`` says a completed cell wrote its metrics
+    file in this attempt. A launcher that finds a job ended without a result
+    tells by ``run_id`` and the combo whether the cell's record is that
+    job's own, and can then take a completed record's metrics file as the
+    job's result (#345)."""
 
     payload: dict[str, Any] = {
         "status": status,
@@ -104,8 +104,8 @@ def write_cell_status(
         payload["run_id"] = run_id
     if job_id is not None:
         payload["job_id"] = job_id
-    if task is not None:
-        payload["task"] = task
+    if metrics:
+        payload["metrics"] = True
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
 
 

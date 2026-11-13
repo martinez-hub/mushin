@@ -67,7 +67,7 @@ _NONFINITE_TAG = "__mushin_nonfinite__"
 _NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
 
 
-def _json_normalize(v: Any) -> Any:
+def _json_normalize(v: Any, as_text: list | None = None) -> Any:
     """Recursively normalize a metric value to strict-JSON-native types.
 
     Handles the full metric shape (nested dicts and lists), converts
@@ -76,18 +76,21 @@ def _json_normalize(v: Any) -> Any:
     to NaN / signed Inf), and stringifies any other type rather than letting an
     otherwise-successful task's sidecar write crash the sweep. A genuine
     ``None`` metric value also encodes as ``null``, so it reads back as NaN,
-    the one remaining lossy case.
+    the one remaining lossy case. ``as_text``, when given, collects the type
+    of each value (and dict key) written as its text instead of as itself.
     """
     import math
 
     if hasattr(v, "item") and getattr(v, "ndim", None) == 0:  # 0-d np/torch scalar
         v = v.item()
     elif hasattr(v, "tolist"):  # numpy/torch array
-        return _json_normalize(v.tolist())
+        return _json_normalize(v.tolist(), as_text)
     if isinstance(v, dict):
-        return {str(k): _json_normalize(x) for k, x in v.items()}
+        if as_text is not None:
+            as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
+        return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
-        return [_json_normalize(x) for x in v]
+        return [_json_normalize(x, as_text) for x in v]
     if isinstance(v, bool) or v is None:
         return v
     if isinstance(v, float):
@@ -98,6 +101,8 @@ def _json_normalize(v: Any) -> Any:
         return {_NONFINITE_TAG: "inf" if v > 0 else "-inf"}
     if isinstance(v, (int, str)):
         return v
+    if as_text is not None:
+        as_text.append(type(v).__name__)
     return str(v)  # datetime, Path, arbitrary objects -> stringify, never crash
 
 
@@ -117,8 +122,17 @@ def _restore_nonfinite(v: Any) -> Any:
     return float("nan") if v is None else v
 
 
-def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> None:
-    _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics)
+def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> bool:
+    """Write a cell's metrics file, and return whether it holds every value
+    as itself: False when one had no JSON form and was written as its text
+    (an object of the task's own, say). A launcher that loses a job's result
+    takes the file for it only then (#345)."""
+    as_text: list[str] = []
+    payload = _json_normalize(metrics, as_text)
+    _atomic_write_text(
+        Path(job_dir) / METRICS_FILE, json.dumps(payload, indent=2, allow_nan=False)
+    )
+    return not as_text
 
 
 def read_metrics_sidecar(job_dir) -> dict | None:

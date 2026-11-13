@@ -2588,22 +2588,20 @@ def test_a_job_dir_parameter_swept_by_hand_gets_the_sweep_advice(tmp_path):
     assert "target job directory" not in message
 
 
-def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_path):
-    """A rerun into the same working_dir reuses the numbered dirs. A cell
-    whose task now returns None writes no metrics file, so the earlier
-    sweep's must not stay to be read back as this cell's result (#345)."""
+def test_a_completed_record_says_whether_this_attempt_wrote_metrics(tmp_path):
+    """A launcher that loses a job's result can take the metrics file for it
+    only when the record says this attempt wrote it (#345)."""
+    import json
 
-    class First(MultiRunMetricsWorkflow):
+    class Some(MultiRunMetricsWorkflow):
         @staticmethod
         def task(x):
-            return dict(v=float(x))
+            return dict(v=1.0) if x == 1 else None
 
-    class Second(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(x):
-            return None
-
-    First().run(x=multirun([1, 2]), working_dir=tmp_path)
-    assert len(list(tmp_path.glob("*/mushin_metrics.json"))) == 2
-    Second().run(x=multirun([1, 2]), working_dir=tmp_path)
-    assert list(tmp_path.glob("*/mushin_metrics.json")) == []
+    Some().run(x=multirun([1, 2]), working_dir=tmp_path)
+    records = {
+        json.loads(p.read_text())["combo"]["x"]: json.loads(p.read_text())
+        for p in tmp_path.glob("*/mushin_cell_status.json")
+    }
+    assert records[1]["metrics"] is True
+    assert "metrics" not in records[2]

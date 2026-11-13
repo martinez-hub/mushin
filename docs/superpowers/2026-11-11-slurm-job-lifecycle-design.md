@@ -125,37 +125,42 @@ until every job ends, and:
 
 ## Decisions (PR 2)
 
+Two review rounds narrowed this PR; outside the rows below, a dead job's
+cell is recorded as PR 1 recorded it.
+
 - **E1. A record is the job's own when this run wrote it for this cell:** its
   `run_id` (a `uuid4` per `run()`, pickled into every job) and its combo. Not
   the job id: a local job's id is a process id, which can recur, and whether
   SLURM's array id reads the same in the job and the driver is runbook T9.
   Not `run_id` alone: two cells can share a dir (`hydra.sweep.subdir=${seed}`
-  over two learning rates). Every record also names its job (`job_id`) and
-  the task of the job that wrote it (`task`).
-- **E2. A dead job keeps its own end.** A completed record its first task
-  wrote, with a metrics file, gives the cell's result (as a resume returns
-  it). The plugin's result is task 0's, and every task of a job runs mushin's
-  runner in the cell's dir, so a completed record another task wrote is not
-  the job's. Skipped: skipped. Any other own terminal record (failed, or
-  completed without a metrics file, which may be a value the sidecar cannot
-  hold) stays, and the cell fails for this run, as in PR 1.
-- **E3. The dead job records its end over a 'running' record or none (PR 1),
-  and over an earlier run's failed or skipped record of this cell** (with
-  this job's `.hydra/` snapshot, the attempt counted by `build_resume_context`,
-  no earlier fingerprints, and no earlier error file).
-- **E4. It leaves an earlier run's completed record, and another cell's
-  terminal record**, as PR 1 did. A completed result is what a resume reuses,
-  and judging it stale would mean resolving the config in the driver, where
-  an environment or clock interpolation differs from the job's. Recording
-  this cell over another cell's dir would let a resume take that cell's
-  checkpoint for this one's (`build_resume_context` matches on the combo).
-- **E5. A cell that starts computing removes a metrics file an earlier sweep
-  left** (by the job's first task only), so a completed record's metrics
-  file is this attempt's.
+  over two learning rates). Every record also names its job (`job_id`).
+- **E2. A completed record of the job's own gives the cell's result** when it
+  says the attempt wrote a metrics file that holds the result whole
+  (`metrics`, recorded with 'completed' when no value had to be written as
+  its text) and the job is `keepable`: it had one task, and did not pickle
+  an error in place of its result. Every task of a job of several runs
+  mushin's runner in the cell's dir, so its record is not known to be the
+  first task's (the job's result). A result submitit could not pickle (a
+  lock, say) can leave no result file at all, which the driver cannot tell
+  from a late one; the metrics file holds such a value only as its text, so
+  the record does not claim it. Such cells fail, as in PR 1, and the record
+  stays for a resume (which reuses the file as it always has). HydraDDP's
+  child ranks run their own Hydra app, not mushin's runner, so a one-task
+  job has one writer.
+- **E3. A skipped record of the job's own is skipped.** Any other own
+  terminal record stays and the cell fails, as in PR 1.
+- **E4. An earlier run's failed or skipped record of this cell is
+  replaced**: this job's `.hydra/` snapshot, the attempt counted by
+  `build_resume_context` (before anything changes the dir), no earlier
+  fingerprints, and no earlier error file. The dir's files are this cell's.
+- **E5. Every other record is as PR 1 left it:** a 'running' record or none
+  is recorded over (snapshot written only where missing); an earlier run's
+  completed record, and another cell's terminal record, stay. A dir another
+  cell used keeps that cell's metrics and checkpoints, which predates this
+  work (#355).
 - **E6. One read of the record, no retry.** On a slow filesystem the driver
-  can still see an older record of a cell that completed, as in PR 1; and a
-  task of the job that starts after the first one completed overwrites its
-  record with 'running'. T9 checks both.
+  can still see an older record of a cell that completed, as in PR 1. T9
+  checks how often.
 
 ## Needs a cluster
 

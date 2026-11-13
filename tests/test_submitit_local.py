@@ -392,7 +392,7 @@ def test_a_job_whose_cell_completed_keeps_its_result(tmp_path, monkeypatch, on_e
     assert {c["status"] for c in manifest["cells"].values()} == {"completed"}
     assert not (wd / "1" / "mushin_error.txt").exists()
     record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "completed"
+    assert record["status"] == "completed" and record["metrics"] is True
     assert record["job_id"] == raised[0]  # the job's own id, as submitit names it
 
 
@@ -416,43 +416,43 @@ def _results_that_raised(monkeypatch):
     return raised
 
 
-def test_a_job_whose_second_task_died_keeps_the_first_tasks_result(
-    tmp_path, monkeypatch
-):
-    raised = _results_that_raised(monkeypatch)
-    wd = tmp_path / "s"
-    ds = tasks.second_task_dies.run(
-        seed=multirun([0, 1]),
-        working_dir=str(wd),
-        on_error="nan",
-        launcher="submitit_local",
-        launcher_config={"timeout_min": 1, "tasks_per_node": 2},
-    )
-    # Seed 1's job (its tasks' `results()` count too): the dead-job path ran.
-    assert len(set(raised)) == 1
-    assert ds["v"].values.tolist() == [0.0, 1.0]
-    record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "completed" and record["task"] == 0
-
-
-def test_a_job_whose_first_task_died_last_fails_its_cell(tmp_path, monkeypatch):
-    """The job's result is its first task's. A completed record the second
-    task wrote is not it: the cell fails, and the record is left."""
+def test_a_job_of_several_tasks_fails_its_cell_when_one_dies(tmp_path, monkeypatch):
+    """Every task of the job runs mushin's runner in the cell's dir, so the
+    cell's completed record is not known to be the first task's (the job's
+    result): the cell fails, as when the record could not be read, and the
+    record is left for a resume."""
     raised = _results_that_raised(monkeypatch)
     wd = tmp_path / "s"
     with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
-        ds = tasks.first_task_dies_last.run(
+        ds = tasks.second_task_dies.run(
             seed=multirun([0, 1]),
             working_dir=str(wd),
             on_error="nan",
             launcher="submitit_local",
             launcher_config={"timeout_min": 1, "tasks_per_node": 2},
         )
+    # Seed 1's job (its tasks' `results()` count too): the dead-job path ran.
     assert len(set(raised)) == 1
     v = ds["v"].values
     assert v[0] == 0.0 and np.isnan(v[1])
     record = json.loads((wd / "1" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "completed" and record["task"] == 1
+    assert record["status"] == "completed"
+
+
+def test_a_result_submitit_could_not_save_fails_its_cell(tmp_path):
+    """The job's runner recorded the cell completed, then submitit could not
+    pickle the result (nor the error, so it left no result file). The
+    metrics file holds that value only as its text, so the record does not
+    say it holds the result, and the cell fails rather than take it."""
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match=r"failed: \['seed=0'\]"):
+        ds = tasks.unpicklable_result.run(
+            seed=multirun([0, 1]), working_dir=str(wd), on_error="nan", **LOCAL
+        )
+    v = ds["v"].values
+    assert np.isnan(v[0]) and v[1] == 1.0
+    record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed" and "metrics" not in record
 
 
 def test_a_dead_job_leaves_another_cells_record_in_a_reused_dir(tmp_path, monkeypatch):

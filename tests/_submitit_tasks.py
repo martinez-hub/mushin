@@ -129,25 +129,11 @@ def second_task_dies(seed):
 
 
 @mushin.sweep
-def first_task_dies_last(seed):
-    """In a job of two tasks, on seed 1 the first task dies once the second
-    has recorded its cell completed, so the cell's last record is the second
-    task's."""
-    import json
-    import time
+def unpicklable_result(seed):
+    """On seed 0, returns a value a JSON sidecar holds only as text and pickle
+    cannot hold at all, so submitit cannot save the job's result."""
+    import threading
 
-    import submitit
-
-    if submitit.JobEnvironment().global_rank == 0 and seed == 1:
-        deadline = time.monotonic() + 50
-        while time.monotonic() < deadline:
-            try:
-                with open("mushin_cell_status.json") as f:
-                    record = json.load(f)
-            except (OSError, ValueError):
-                record = {}
-            if record.get("status") == "completed" and record.get("task") == 1:
-                break
-            time.sleep(0.05)
-        os._exit(9)
+    if seed == 0:
+        return dict(v=float(seed), lock=threading.Lock())
     return dict(v=float(seed))
