@@ -83,17 +83,17 @@ def test_submitit_slurm_config_rejects_bad_inputs():
             101,
             id="submitit-local-task",
         ),
-        # A job of one local task: its id is inherited by any process the task
-        # starts (HydraDDP's children), so it is not their rank.
+        # A process a local task starts (a HydraDDP child) inherits the task's
+        # id, which is not its rank: its LOCAL_RANK still comes first.
         pytest.param(
             {
-                "SUBMITIT_LOCAL_NTASKS": "1",
-                "SUBMITIT_LOCAL_GLOBALID": "0",
-                "LOCAL_RANK": "1",
+                "SUBMITIT_LOCAL_NTASKS": "2",
+                "SUBMITIT_LOCAL_GLOBALID": "1",
+                "LOCAL_RANK": "0",
             },
             100,
-            101,
-            id="single-local-task-child",
+            100,
+            id="child-of-a-local-task",
         ),
     ],
 )

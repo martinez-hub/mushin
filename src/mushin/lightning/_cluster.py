@@ -60,17 +60,13 @@ def submitit_slurm_config(
 
 def _rank_from_env() -> int:
     """Best-effort global rank: ``RANK`` (torchrun/external launchers), then
-    ``SLURM_PROCID``, then ``SUBMITIT_LOCAL_GLOBALID`` in a ``submitit_local``
-    job of several tasks (which set no other rank, #371), then ``LOCAL_RANK``
-    (the only variable a plain single-node HydraDDP child exports, equal to
-    the global rank there). A job of one local task is not read: any process
-    its task starts, such as HydraDDP's children, inherits its id. A
-    malformed value degrades to the next source rather than crashing."""
-    local_tasks = os.environ.get("SUBMITIT_LOCAL_NTASKS", "")
-    several_local = local_tasks.strip().isdigit() and int(local_tasks) > 1
-    for var in ("RANK", "SLURM_PROCID", "SUBMITIT_LOCAL_GLOBALID", "LOCAL_RANK"):
-        if var == "SUBMITIT_LOCAL_GLOBALID" and not several_local:
-            continue
+    ``SLURM_PROCID``, then ``LOCAL_RANK`` (the only variable a plain
+    single-node HydraDDP child exports, equal to the global rank there), then
+    ``SUBMITIT_LOCAL_GLOBALID``, the only one a task of a ``submitit_local``
+    job of several sets (#371). That id comes last because any process a task
+    starts, such as HydraDDP's children, inherits it. A malformed value
+    degrades to the next source rather than crashing."""
+    for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK", "SUBMITIT_LOCAL_GLOBALID"):
         v = os.environ.get(var)
         if v:
             try:
@@ -84,8 +80,9 @@ def seed_everything_per_rank(base: int, workers: bool = True) -> int:
     """Seed each process with ``base + global_rank`` so a multi-GPU/-node run is as
     reproducible as a single-GPU run (each rank gets a distinct but deterministic
     seed). Reads the global rank from ``RANK`` (preferred), ``SLURM_PROCID``,
-    ``SUBMITIT_LOCAL_GLOBALID`` (a task of a ``submitit_local`` job of several),
-    or ``LOCAL_RANK`` (single-node), defaulting to 0. Returns the seed used."""
+    ``LOCAL_RANK`` (single-node), or ``SUBMITIT_LOCAL_GLOBALID`` (a task of a
+    ``submitit_local`` job of several), defaulting to 0. Returns the seed
+    used."""
     rank = _rank_from_env()
     seed = int(base) + rank
     seed_everything(seed, workers=workers)
