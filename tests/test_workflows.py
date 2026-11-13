@@ -3052,3 +3052,36 @@ def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_p
     text = next(p.read_text() for p in written if p.exists())
     assert records[1]["metrics"] == _digest(text)  # the file it wrote
     assert "metrics" not in records[2]
+
+
+def test_a_job_resolves_its_config_once(tmp_path):
+    """#353: a resolver that gives a new value each call (a clock, a counter)
+    is resolved once per job, so the cell's record, its provenance and the
+    task all hold the value the task ran with."""
+    import itertools
+    import json
+
+    from omegaconf import OmegaConf
+
+    counter = itertools.count()
+    OmegaConf.register_new_resolver("mushin_test_count", lambda: f"c{next(counter)}")
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, seed):
+            seen.append(x)
+            return dict(v=float(seed))
+
+    try:
+        W().run(
+            x=multirun(["${mushin_test_count:}"]),
+            seed=multirun([0, 1]),
+            working_dir=str(tmp_path),
+        )
+    finally:
+        OmegaConf.clear_resolver("mushin_test_count")
+    for cell, value in zip(sorted(tmp_path.glob("[0-9]*")), seen, strict=True):
+        record = json.loads((cell / "mushin_cell_status.json").read_text())
+        provenance = json.loads((cell / "mushin_provenance.json").read_text())
+        assert record["combo"]["x"] == provenance["config"]["x"] == value

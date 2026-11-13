@@ -1,0 +1,1 @@
+A job now resolves its config's interpolations once, before anything reads them. A resolver that gives a new value on each call (a clock, a counter) gave the cell's record, its provenance and the task each a different value; they now hold the one the task ran with.

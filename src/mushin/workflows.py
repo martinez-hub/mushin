@@ -674,6 +674,20 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
+def _resolve_in_place(cfg) -> None:
+    """Resolve a job config's interpolations in place, as zen does before it
+    calls a task, so everything read from it afterwards sees one value per
+    interpolation. A config that cannot be resolved is left as it is, to fail
+    where it did."""
+    try:
+        from omegaconf import OmegaConf
+
+        if OmegaConf.is_config(cfg):
+            OmegaConf.resolve(cfg)
+    except Exception:  # noqa: BLE001 - zen raises it when it resolves
+        pass
+
+
 def _read_swept_value(cfg, name: str):
     """Read swept param ``name`` from a job config. A literal flat key wins;
     otherwise ``name`` is treated as a nested config *path* (``model.width``),
@@ -1976,6 +1990,11 @@ class _TaskRunner:
             write_metrics_sidecar,
         )
 
+        # One resolution per job (#353): zen resolves the config in place
+        # before it calls `pre_task`, and the fingerprint, the record's combo
+        # and the provenance read it before that, so a resolver that gives a
+        # new value each call (a clock, a counter) gave each a different one.
+        _resolve_in_place(cfg)
         # The config is resolved once, for its fingerprint and for the
         # `_target_`s the project-code record follows.
         resolved = resolved_config(cfg)
