@@ -153,14 +153,19 @@ def none_on_one(seed):
 
 
 def _wait_for(name, text=""):
+    """Wait until file ``name`` exists (and holds ``text``), then a moment
+    more; raise if it never does, so a test runs the order it means to."""
     import time
+    from pathlib import Path
 
     deadline = time.monotonic() + 20  # well under the job's time limit
     while time.monotonic() < deadline:
-        if os.path.exists(name) and text in open(name).read():
-            break
+        path = Path(name)
+        if path.exists() and text in path.read_text():
+            time.sleep(0.5)  # past the other task's record too
+            return
         time.sleep(0.05)
-    time.sleep(0.5)  # past the other task's record too
+    raise TimeoutError(f"{name} never held {text!r}")
 
 
 @mushin.sweep
@@ -185,6 +190,19 @@ def first_task_raises_early(seed):
         raise RuntimeError(f"task 0 of seed {seed}")
     _wait_for("mushin_cell_status.json", '"failed"')
     return dict(v=float(seed) + 100)
+
+
+@mushin.sweep
+def second_task_raises_early(seed):
+    """In a job of two tasks, the second raises at once and the first
+    returns metrics once the second has recorded its failure, so the
+    cell's last record is the first task's completed one (#365)."""
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 1:
+        raise RuntimeError(f"task 1 of seed {seed}")
+    _wait_for("mushin_cell_status.json", '"failed"')
+    return dict(v=float(seed))
 
 
 @mushin.sweep
