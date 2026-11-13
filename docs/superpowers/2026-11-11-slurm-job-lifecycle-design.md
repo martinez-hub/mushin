@@ -166,6 +166,53 @@ states under both `on_error` values with main).
   waiting for a job SLURM reports COMPLETED and reading its result again is
   the fix for that case on every job shape (T9 checks how often it happens).
 
+## Decisions (PR 3)
+
+- **F1. One copy of the rules.** The runner's sample skip, resume reuse and
+  cache hit move into `_TaskRunner._settle`, which the job still calls
+  first; the driver calls the same function before submitting. It returns
+  the value and the function that records the cell, which the job calls at
+  once and the driver once every cell is decided.
+- **F2. The driver settles a cell only when its answer is the job's.**
+  `settle_in_driver` composes the job as the dead-job path does (HydraConfig
+  set), resolves its config and takes its project-code record in the driver
+  (checked against the job's own record on `submitit_local`: the config hash
+  and `code_deps` matched for a plain task, a `_target_` in the config, a
+  task defined in the script, and a fixed `${hydra:runtime.output_dir}`),
+  and applies `_settle` strictly: a resume does not reuse a cell whose
+  prior record has a fingerprint the driver cannot take (as a job does for
+  a sweep from before the fingerprint), nor one whose fingerprint changed
+  (the job warns about it); either may still be a cache hit, judged as the
+  job judges it. A cell whose project-code record lacks a file the prior one
+  names (a module only the jobs' path imports) is not judged at all, since
+  its cache key may be another code's; a reused cell whose prior record has
+  no project-code record takes the driver's, as it takes the job's. The
+  driver judges a cell under the job's `hydra.job.env_set`, as `run_job`
+  runs it, so a resolver reading those variables resolves as in the job; a
+  config that reads the environment otherwise (`${oc.env:...}`) is never
+  reused or cache-hit in the driver, whose environment the jobs' may not
+  match. Known limit: a cache entry written where a module only the jobs
+  import was absent (a sequential run on the login node) can be a driver
+  hit the jobs would miss. Every
+  cell is decided before any dir is written (a resume over a renumbered
+  grid reads prior dirs another cell's record would overwrite), and a
+  settled cell whose dir a cell left to its job reads its prior result from
+  is submitted instead, as before. A settled cell then gets the `.hydra/`
+  snapshot `run_job` would write (`hydra.job.id` `driver_<n>`), then its
+  record. Any error settling or writing a cell leaves it to its job, and the
+  driver warns once (never raising: settling is best effort); warnings from
+  judging a cell are the job's to give, and the driver's process keeps its
+  warn-once memory as it was (`judging_quietly`).
+- **F3. Only sweeps that can settle a cell pay for it.** The launcher composes
+  a cell only when it may need no job (`sample=` leaves it out, a resume
+  has completed cells over the same swept names, or a usable `cache_dir`
+  holds an entry), and never when the sweep has Hydra callbacks, which
+  `run_job` calls in each job; a fresh sweep submits as before, and one with
+  nothing left to submit builds no executor (but makes the sweep dir with
+  `hydra.sweep.mode`, as the plugin does). The rest are submitted under
+  their own job numbers (three lines in the copied submission body skip the
+  others; the pin test strips exactly that edit).
+
 ## Needs a cluster
 
 A probe on `submitit_local` (a cell sleeping past `timeout_min=1`) shows a
