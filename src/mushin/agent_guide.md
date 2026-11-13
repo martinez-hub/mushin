@@ -47,7 +47,8 @@ Python 3.11 to 3.15 is supported. Intel macOS is not.
 | Inspect finished runs | `mushin.show`, `mushin.best`, `mushin.diff`, or the MCP server |
 | Run cells in parallel on one machine | `launcher="joblib"` |
 | Run several jobs on each GPU | Ray; see the GPU packing guide (Going further). `pin_gpu_round_robin` needs a fresh process per job, which joblib stops giving once cells outnumber `n_jobs` |
-| Run on a cluster | the multi-node guide (see Going further) |
+| Run each cell as a SLURM job | `launcher="submitit_slurm"` with `launcher_config=mushin.slurm(...)`; see the SLURM guide (Going further) |
+| Train one cell across several GPUs or nodes | the multi-node guide (see Going further) |
 
 ## A template experiment
 
@@ -359,6 +360,7 @@ Check each of these:
 - [Comparing methods](https://martinez-hub.github.io/mushin/guides/compare/) and [the metric batteries](https://martinez-hub.github.io/mushin/guides/batteries/)
 - [Studies](https://martinez-hub.github.io/mushin/guides/study/)
 - [LLM evaluation](https://martinez-hub.github.io/mushin/guides/llm/)
+- [Running a sweep on SLURM](https://martinez-hub.github.io/mushin/guides/slurm/)
 - [Packing small jobs onto GPUs](https://martinez-hub.github.io/mushin/guides/packing/)
 - [Multi-node](https://martinez-hub.github.io/mushin/guides/multinode/) and [sharded](https://martinez-hub.github.io/mushin/guides/sharding/) training
 - [Analyzing runs from Claude Code (MCP)](https://martinez-hub.github.io/mushin/guides/mcp/)

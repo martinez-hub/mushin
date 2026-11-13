@@ -50,6 +50,7 @@ experiment.workflow.to_dataframe()  # the same results as a tidy pandas table
 - [Studies](https://martinez-hub.github.io/mushin/guides/study/): `Study` runs the training sweep and feeds it into `compare`
 - [Resilient & resumable sweeps](https://martinez-hub.github.io/mushin/guides/resilience/): `on_error="nan"`, `resume=True` across hard kills and preemption, per-run provenance
 - [From exploration to a paper](https://martinez-hub.github.io/mushin/guides/exploration-to-paper/): moving from a quick exploratory grid to a paper-ready sweep
+- [Running a sweep on SLURM](https://martinez-hub.github.io/mushin/guides/slurm/): each cell as a SLURM job with `mushin.slurm`, from submitting and watching to resuming and cancelling
 - [Packing small jobs onto GPUs](https://martinez-hub.github.io/mushin/guides/packing/): `pin_gpu_round_robin` to co-locate small sweep jobs
 - [Multi-node training](https://martinez-hub.github.io/mushin/guides/multinode/): `HydraDDP` on SLURM or Elastic clusters, including preemption and resume
 - [Sharded training](https://martinez-hub.github.io/mushin/guides/sharding/): `HydraFSDP` for models that do not fit on one GPU
