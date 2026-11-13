@@ -68,13 +68,11 @@ def test_a_fixed_hydra_interpolation_reloads_in_a_new_process(tmp_path):
         "print(json.dumps([wf.to_xarray().score.values.tolist(),"
         " wf.multirun_task_overrides['out']]))\n"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert json.loads(out.splitlines()[-1]) == [[1.0, 2.0], HYDRA_DIR]
+    child = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True
+    )
+    assert child.returncode == 0, child.stderr
+    assert json.loads(child.stdout.splitlines()[-1]) == [[1.0, 2.0], HYDRA_DIR]
 
 
 def test_target_dir_overrides_read_a_fixed_hydra_interpolation(tmp_path):
@@ -126,5 +124,25 @@ def test_a_swept_interpolation_that_cannot_be_resolved_still_raises(tmp_path):
     # by its text (#353): raising, as before, beats a cell silently NaN.
     from omegaconf.errors import InterpolationResolutionError
 
-    with pytest.raises(InterpolationResolutionError):
+    with pytest.raises(InterpolationResolutionError, match="HydraConfig was not set"):
         Plain().run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)
+    # Raised reading the sweep back, after both cells completed.
+    records = [
+        json.loads(p.read_text()) for p in tmp_path.glob("*/mushin_cell_status.json")
+    ]
+    assert [r["status"] for r in records] == ["completed", "completed"]
+
+
+def test_target_dir_overrides_cache_nothing_from_a_read_that_raised(tmp_path):
+    first = Plain()
+    first.run(x=multirun(["a", "b"]), working_dir=tmp_path / "a")
+    second = Plain()
+    second.run(
+        target_job_dirs=first.multirun_working_dirs,
+        x="c",
+        working_dir=tmp_path / "b",
+    )
+    (first.multirun_working_dirs[1] / ".hydra" / "overrides.yaml").unlink()
+    for _ in range(2):  # not half the dirs on the second read
+        with pytest.raises(FileNotFoundError):
+            second.target_dir_multirun_overrides  # noqa: B018
