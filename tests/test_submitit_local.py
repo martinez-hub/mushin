@@ -808,3 +808,27 @@ def test_the_driver_judges_a_cell_under_the_jobs_env_set(tmp_path, monkeypatch):
     assert first["v"].values.tolist() == [1.0, 1.0]
     again = tasks.env_scaled.run(**sweep, overrides=env(8), resume=True, **LOCAL)
     assert again["v"].values.tolist() == [8.0, 8.0]
+
+
+def test_a_variable_only_the_jobs_have_still_lets_sample_settle(tmp_path, monkeypatch):
+    """`hydra.job.env_set` may read what only a job's environment holds; a
+    cell `sample=` leaves out resolves none of it in the driver, and a cell
+    that would need it is left to its job, quietly."""
+    import warnings
+
+    monkeypatch.delenv("SUBMITIT_LOCAL_JOB_ID", raising=False)
+    wd = tmp_path / "s"
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        ds = tasks.record_pid.run(
+            seed=multirun([0, 1, 2, 3]),
+            sample=1,
+            working_dir=str(wd),
+            overrides=[
+                "++hydra.job.env_set.MUSHIN_JOB=${oc.env:SUBMITIT_LOCAL_JOB_ID}"
+            ],
+            **LOCAL,
+        )
+    assert int((~np.isnan(ds["v"].values)).sum()) == 1
+    assert len(_job_dirs(wd)) == 1
+    assert not [w for w in seen if "could not be settled" in str(w.message)]

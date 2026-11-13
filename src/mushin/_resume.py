@@ -5389,7 +5389,9 @@ def judging_quietly():
         _HISTORY_WARNED,
     )
     saved = [list(flag) for flag in flags]
-    warned = {key: seen[2][0] for key, seen in _LOAD_BASELINE.items()}
+    # By list, not by key: a load seen anew inside (a module reloaded since)
+    # replaces its entry, whose flag must start unwarned, not the old load's.
+    loads = {id(seen[2]): (seen[2], seen[2][0]) for seen in _LOAD_BASELINE.values()}
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -5397,5 +5399,8 @@ def judging_quietly():
     finally:
         for flag, before in zip(flags, saved, strict=True):
             flag[:] = before
-        for key, seen in _LOAD_BASELINE.items():
-            seen[2][0] = warned.get(key, False)
+        for warned, value in loads.values():
+            warned[0] = value
+        for seen in _LOAD_BASELINE.values():
+            if id(seen[2]) not in loads:
+                seen[2][0] = False

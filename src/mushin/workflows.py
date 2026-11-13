@@ -953,12 +953,12 @@ def _resolved(path: Path) -> Path:
 
 def _reads_environment(ret: JobReturn) -> bool:
     """Whether a job's config may resolve differently in its own process:
-    it reads the environment (``${oc.env:...}``, OmegaConf's older
-    ``${env:...}``, spaced as OmegaConf allows), which the job's may hold
-    differently (``hydra.job.env_set``, a scheduler's variables). Setting
-    variables alone (``hydra.job.env_set`` with no such read) changes
-    nothing the config resolves to. A custom resolver that reads
-    ``os.environ`` is not seen."""
+    it, or a variable ``hydra.job.env_set`` sets for the job, reads the
+    environment (``${oc.env:...}``, OmegaConf's older ``${env:...}``,
+    spaced as OmegaConf allows), which the job's may hold differently (a
+    scheduler's variables). Setting variables to fixed values changes
+    nothing the driver cannot apply itself (`settle_in_driver`). A custom
+    resolver that reads ``os.environ`` is not seen."""
     import re
 
     from omegaconf import OmegaConf
@@ -975,7 +975,16 @@ def _reads_environment(ret: JobReturn) -> bool:
         return False
 
     try:
-        return reads(OmegaConf.to_container(ret.cfg, resolve=False))
+        hydra_cfg = getattr(ret, "hydra_cfg", None)
+        env_set = (
+            OmegaConf.select(hydra_cfg, "hydra.job.env_set")
+            if hydra_cfg is not None
+            else None
+        )
+        return reads(OmegaConf.to_container(ret.cfg, resolve=False)) or (
+            env_set is not None
+            and reads(OmegaConf.to_container(env_set, resolve=False))
+        )
     except Exception:  # noqa: BLE001 - not examinable: as if it did
         return True
 
@@ -1836,13 +1845,22 @@ class _TaskRunner:
         from ._resume import resolved_config, resolved_config_hash
 
         job_num, choices = _current_job_fields()
-        if _reads_environment(ret) and not self._left_out(job_num):
+        left_out = self._left_out(job_num)
+        if _reads_environment(ret) and not left_out:
             return None
         cell_dir = _job_dir(ret)
         # Under the variables Hydra sets for the job (`hydra.job.env_set`),
         # as `run_job` runs it: a resolver that reads them (a custom one,
-        # which `_reads_environment` does not see) resolves as in the job.
-        with env_override(dict(ret.hydra_cfg.hydra.job.env_set or {})):
+        # which `_reads_environment` does not see) resolves as in the job. A
+        # cell ``sample=`` leaves out resolves nothing it needs, and one whose
+        # variables cannot be resolved here is left to its job.
+        env: dict = {}
+        if not left_out:
+            try:
+                env = dict(ret.hydra_cfg.hydra.job.env_set or {})
+            except Exception:  # noqa: BLE001 - its job resolves them
+                return None
+        with env_override(env):
             resolved = resolved_config(ret.cfg)
             chash = resolved_config_hash(resolved)
             value, _, record = self._settle(
@@ -3081,9 +3099,10 @@ class BaseWorkflow:
 
         # `sample=` bounds what actually COMPUTES; the dry-run preview reports
         # that. The gate below still fires on the full grid: Hydra enumerates
-        # and launches every cell regardless of sampling (a job dir, composed
-        # config, and — under submitit — a scheduler submission per cell), so
-        # the typo'd-grid rail must cap launch cost, not just compute.
+        # and composes every cell regardless of sampling, and launches each
+        # (a job dir and, but under mushin's submitit launchers, which usually
+        # submit only the sampled cells, a launch per cell), so the typo'd-grid
+        # rail must cap that cost, not just compute.
         effective_cells = num_cells if sample is None else min(sample, num_cells)
 
         if dry_run:
@@ -3125,8 +3144,8 @@ class BaseWorkflow:
                 ""
                 if sample is None
                 else f" `sample={sample}` limits compute but not the grid: all "
-                f"{num_cells} cells are still composed (and, but on mushin's "
-                "submitit launchers, launched)."
+                f"{num_cells} cells are still composed (and, except usually on "
+                "mushin's submitit launchers, launched)."
             )
             raise ValueError(
                 f"this sweep has {num_cells} cells, above the {limit_src} limit "
@@ -3738,9 +3757,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             huge grid. The ``MUSHIN_MAX_CELLS`` environment variable supplies a
             default ceiling when this is not set (an explicit value wins). Use
             ``dry_run=True`` to preview an over-limit sweep. ``sample=`` does
-            not lower this gate: every grid cell is still composed, and, but on
-            mushin's submitit launchers (which submit jobs only for the sampled
-            cells), launched.
+            not lower this gate: every grid cell is still composed, and
+            launched, but on mushin's submitit launchers, which usually submit
+            jobs only for the sampled cells (not when the sweep has Hydra
+            callbacks).
         max_total_seconds : float | None (default: None)
             A graceful wall-clock budget. Once it is exhausted the remaining
             cells are skipped (recorded ``'skipped'``, NaN in the dataset,
@@ -3783,8 +3803,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ``sample_seed``) so it is reproducible and identical across a resume;
             resuming WITHOUT ``sample`` fills in the remaining cells. The full
             grid is still composed by Hydra, and launched too (only the sampled
-            cells run), but on mushin's submitit launchers, which submit jobs
-            only for the sampled cells. ``sample >= n_cells`` runs
+            cells run), but on mushin's submitit launchers, which usually submit
+            jobs only for the sampled cells (not when the sweep has Hydra
+            callbacks). ``sample >= n_cells`` runs
             everything. A sampled sweep is intentionally incomplete
             (``is_complete`` is False).
         sample_seed : int (default: 0)

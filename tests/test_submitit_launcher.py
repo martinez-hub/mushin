@@ -739,24 +739,30 @@ def test_the_driver_composes_cells_only_when_one_may_be_reused(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("cfg", "reads"),
+    ("cfg", "env_set", "reads"),
     [
-        ({"a": 1, "b": "${x}"}, False),
-        ({"a": "${oc.env:HOME}"}, True),
-        ({"a": {"b": ["x", "${ oc.env : HOME }"]}}, True),  # spaced, nested
-        ({"a": "path/${env:HOME}/x"}, True),  # OmegaConf's older name
-        ({"a": "${oc.decode:${oc.env:N}}"}, True),
-        ({"a": "environment"}, False),
+        ({"a": 1, "b": "${x}"}, {}, False),
+        ({"a": "${oc.env:HOME}"}, {}, True),
+        ({"a": {"b": ["x", "${ oc.env : HOME }"]}}, {}, True),  # spaced, nested
+        ({"a": "path/${env:HOME}/x"}, {}, True),  # OmegaConf's older name
+        ({"a": "${oc.decode:${oc.env:N}}"}, {}, True),
+        ({"a": "environment"}, {}, False),
+        ({"a": 1}, {"N": "8"}, False),  # a fixed value: applied in the driver
+        ({"a": 1}, {"N": "${oc.env:SLURM_JOB_ID}"}, True),  # the job's own
     ],
 )
-def test_a_config_that_reads_the_environment_is_seen(cfg, reads):
+def test_a_config_that_reads_the_environment_is_seen(cfg, env_set, reads):
     from types import SimpleNamespace
 
     from omegaconf import OmegaConf
 
     from mushin.workflows import _reads_environment
 
-    assert _reads_environment(SimpleNamespace(cfg=OmegaConf.create(cfg))) is reads
+    ret = SimpleNamespace(
+        cfg=OmegaConf.create(cfg),
+        hydra_cfg=OmegaConf.create({"hydra": {"job": {"env_set": env_set}}}),
+    )
+    assert _reads_environment(ret) is reads
 
 
 def test_judging_in_the_driver_keeps_every_warn_once_memory():
@@ -778,6 +784,12 @@ def test_judging_in_the_driver_keeps_every_warn_once_memory():
                 _resume._LOAD_BASELINE[key][2][0] = True
         assert not seen
         assert _resume._TRUNCATION_WARNED == before
+        assert _resume._LOAD_BASELINE[key][2][0] is False
+        # A module reloaded since is a new load, seen anew inside: its entry
+        # starts unwarned, whatever the old load's flag was.
+        _resume._LOAD_BASELINE[key][2][0] = True
+        with _resume.judging_quietly():
+            _resume._LOAD_BASELINE[key] = ((), "digest 2", [True])
         assert _resume._LOAD_BASELINE[key][2][0] is False
     finally:
         _resume._LOAD_BASELINE.pop(key, None)
