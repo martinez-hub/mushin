@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -144,9 +146,32 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)  # atomic on POSIX/Windows
+        _replace(tmp, path)  # atomic on POSIX/Windows
     finally:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
+
+
+#: How long, in seconds, each retry of a replace waits on Windows (#357): about
+#: two seconds in all.
+_REPLACE_WAITS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.5, 0.7)
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """``tmp.replace(path)``, retried on Windows while another process has
+    ``path`` open (#357). There a replace raises ``PermissionError`` while any
+    reader holds the target, since Python opens files without sharing them
+    for deletion: `mushin.show` on a running sweep, or a test polling the
+    status files, would otherwise fail the cell whose record it was reading.
+    A reader holds the file only while it reads it, so a short wait does."""
+    for wait in _REPLACE_WAITS:
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if sys.platform != "win32":
+                raise
+            time.sleep(wait)
+    tmp.replace(path)
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:

@@ -1,0 +1,1 @@
+On Windows, a cell's status (or metrics) write no longer fails while another process is reading the file, such as `mushin.show` on a running sweep: mushin retries the replace for up to about two seconds instead of failing the cell.

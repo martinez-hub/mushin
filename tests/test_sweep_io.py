@@ -152,3 +152,48 @@ def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
     write_metrics_sidecar(tmp_path, {"weird": {"__mushin_nonfinite__": "hello"}})
     back = read_metrics_sidecar(tmp_path)
     assert back == {"weird": {"__mushin_nonfinite__": "hello"}}
+
+
+def test_a_status_write_waits_for_a_reader_to_let_go(tmp_path):
+    """On Windows a replace fails while another process has the target open
+    (#357): the write waits for the reader rather than fail the cell. On other
+    systems the replace never waited."""
+    import threading
+
+    from mushin._resume import STATUS_FILE, read_cell_status, write_cell_status
+
+    write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
+    reader = open(tmp_path / STATUS_FILE, encoding="utf-8")  # noqa: SIM115
+    timer = threading.Timer(0.3, reader.close)
+    timer.start()
+    try:
+        write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    finally:
+        timer.join()
+        reader.close()
+    assert read_cell_status(tmp_path)["status"] == "completed"
+
+
+def test_a_replace_is_retried_only_on_windows(tmp_path, monkeypatch):
+    from mushin import _sweep_io
+
+    calls = []
+    real = type(tmp_path).replace
+
+    def held_twice(self, target):
+        calls.append(target)
+        if len(calls) <= 2:
+            raise PermissionError(13, "Access is denied")
+        return real(self, target)
+
+    monkeypatch.setattr(type(tmp_path), "replace", held_twice)
+    monkeypatch.setattr(_sweep_io.time, "sleep", lambda s: None)
+    monkeypatch.setattr(_sweep_io.sys, "platform", "win32")
+    _sweep_io._atomic_write_text(tmp_path / "f.json", "{}")
+    assert (tmp_path / "f.json").read_text() == "{}" and len(calls) == 3
+
+    calls.clear()
+    monkeypatch.setattr(_sweep_io.sys, "platform", "linux")
+    with pytest.raises(PermissionError):
+        _sweep_io._atomic_write_text(tmp_path / "g.json", "{}")
+    assert len(calls) == 1
