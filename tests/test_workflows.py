@@ -2521,6 +2521,7 @@ def test_a_numeric_looking_run_id_stays_the_runs_stamp(tmp_path, monkeypatch):
         ("???", None),
         ("${hydra.job.name}", None),
         (5, None),
+        ("interpolated job", None),  # `hydra.job` itself an interpolation
     ],
 )
 def test_a_run_stamp_reads_alike_on_both_read_paths(stamp, read):
@@ -2530,6 +2531,8 @@ def test_a_run_stamp_reads_alike_on_both_read_paths(stamp, read):
 
     job = {"name": "abc"} if stamp is None else {"name": "abc", "mushin_run_id": stamp}
     tree = {"hydra": {"job": job}}
+    if stamp == "interpolated job":
+        tree = {"hydra": {"job": "${other}"}, "other": {"mushin_run_id": "abc123"}}
     assert hydra_run_stamp(tree) == read
     assert hydra_run_stamp(OmegaConf.create(tree)) == read
 
