@@ -231,7 +231,7 @@ class Train(MultiRunMetricsWorkflow):
         # mushin_resume.dir       -> this cell's directory (write your checkpoint here)
         # mushin_resume.is_resume -> True when a prior attempt of THIS cell left artifacts
         # mushin_resume.last_ckpt -> newest checkpoint in dir, or None
-        ckpt = mushin_resume.last_ckpt if mushin_resume else None
+        ckpt = mushin_resume.last_ckpt  # None on a cell's first attempt
         # Lightning: save last.ckpt at the top of the cell's directory
         trainer = Trainer(
             callbacks=[ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)]
