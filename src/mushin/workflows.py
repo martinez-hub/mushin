@@ -1912,7 +1912,7 @@ class _TaskRunner:
         sweeper raises it after the batch); under ``"nan"`` a COMPLETED
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
-        from ._resume import read_cell_status, stored_combo
+        from ._resume import read_cell_status, same_cell
         from ._sweep_io import read_metrics_sidecar_written
 
         num = ret.hydra_cfg.hydra.job.num
@@ -1928,7 +1928,7 @@ class _TaskRunner:
         except Exception:  # noqa: BLE001 - no record to read
             cell_dir, prior = None, {}
         status = prior.get("status")
-        this_cell = combo is not None and prior.get("combo") == stored_combo(combo)
+        this_cell = combo is not None and same_cell(prior.get("combo"), combo)
         own = (
             this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
         )
