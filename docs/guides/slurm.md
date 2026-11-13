@@ -86,7 +86,8 @@ work, but it has to stay alive for the whole sweep. Either:
   for example `sbatch --time=2-00:00:00 --cpus-per-task=1 --wrap "python sweep.py"`.
   SLURM passes a job's environment on to the jobs it submits, which can upset
   the cells' requests (memory, GPUs), so call `run()` inside submitit's
-  `clean_env()`, which hides those variables while it submits:
+  `clean_env()` (submitit 1.4.6 or later), which hides those variables while it
+  submits:
 
   ```python
   import submitit
@@ -94,6 +95,10 @@ work, but it has to stay alive for the whole sweep. Either:
   with submitit.helpers.clean_env():
       ds = experiment.run(...)
   ```
+
+  It hides every `SBATCH_*` variable too, so under it a partition, account,
+  QoS or time limit has to be passed to `mushin.slurm` itself, called inside
+  the block as above.
 
 If the driver stops anyway, the jobs keep running. Wait until they have ended
 (`squeue --me` lists none of them), or cancel them (below), then run the same
