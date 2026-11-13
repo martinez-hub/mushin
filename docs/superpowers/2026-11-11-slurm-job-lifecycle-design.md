@@ -125,27 +125,37 @@ until every job ends, and:
 
 ## Decisions (PR 2)
 
-- **E1. A record is the job's own when it carries this run's `run_id`.** The
-  runner gets a `uuid4` per `run()`, pickled into every job, and every status
-  write records it with Hydra's `job.id`. Not the job id alone: a local job's
-  id is a process id, which can recur in a reused dir, and whether SLURM's
-  array id reads the same in the job and the driver is runbook T9.
-- **E2. A dead job keeps its own terminal record.** Completed: the driver
-  returns the cell's metrics file (as a resume returns it; None when the task
-  returned None), under either `on_error`. Skipped: skipped. Failed: the
-  runner's record and error file stay, and the cell fails as before.
-- **E3. Otherwise the dead job's end replaces the record**, with this job's
-  `.hydra/` snapshot (unless the record is this run's, whose snapshot Hydra
-  wrote), a new attempt count (one more than a record of the same combo, as
-  `build_resume_context` counts), no fingerprints from another run, and no
-  error file from an earlier attempt.
-- **E4. Except a completed result of the same cell** that this run's config
-  and task code do not contradict (the same combo; a fingerprint the record
-  lacks cannot differ): a resume reuses it, so a job that died before its
-  runner leaves it, and the cell fails for this run only, as in PR 1.
-- **E5. One read of the record, no retry.** On a slow filesystem the driver
-  can still see an older record of a cell that completed and record the cell
-  failed over it, as PR 1 did; T9 checks how often.
+- **E1. A record is the job's own when this run wrote it for this cell:** its
+  `run_id` (a `uuid4` per `run()`, pickled into every job) and its combo. Not
+  the job id: a local job's id is a process id, which can recur, and whether
+  SLURM's array id reads the same in the job and the driver is runbook T9.
+  Not `run_id` alone: two cells can share a dir (`hydra.sweep.subdir=${seed}`
+  over two learning rates). Every record also names its job (`job_id`) and
+  the task of the job that wrote it (`task`).
+- **E2. A dead job keeps its own end.** A completed record its first task
+  wrote, with a metrics file, gives the cell's result (as a resume returns
+  it). The plugin's result is task 0's, and every task of a job runs mushin's
+  runner in the cell's dir, so a completed record another task wrote is not
+  the job's. Skipped: skipped. Any other own terminal record (failed, or
+  completed without a metrics file, which may be a value the sidecar cannot
+  hold) stays, and the cell fails for this run, as in PR 1.
+- **E3. The dead job records its end over a 'running' record or none (PR 1),
+  and over an earlier run's failed or skipped record of this cell** (with
+  this job's `.hydra/` snapshot, the attempt counted by `build_resume_context`,
+  no earlier fingerprints, and no earlier error file).
+- **E4. It leaves an earlier run's completed record, and another cell's
+  terminal record**, as PR 1 did. A completed result is what a resume reuses,
+  and judging it stale would mean resolving the config in the driver, where
+  an environment or clock interpolation differs from the job's. Recording
+  this cell over another cell's dir would let a resume take that cell's
+  checkpoint for this one's (`build_resume_context` matches on the combo).
+- **E5. A cell that starts computing removes a metrics file an earlier sweep
+  left** (by the job's first task only), so a completed record's metrics
+  file is this attempt's.
+- **E6. One read of the record, no retry.** On a slow filesystem the driver
+  can still see an older record of a cell that completed, as in PR 1; and a
+  task of the job that starts after the first one completed overwrites its
+  record with 'running'. T9 checks both.
 
 ## Needs a cluster
 

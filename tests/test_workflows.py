@@ -2586,3 +2586,24 @@ def test_a_job_dir_parameter_swept_by_hand_gets_the_sweep_advice(tmp_path):
     message = str(err.value)
     assert "`job_dir`: 'true' would reach the task as True." in message
     assert "target job directory" not in message
+
+
+def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_path):
+    """A rerun into the same working_dir reuses the numbered dirs. A cell
+    whose task now returns None writes no metrics file, so the earlier
+    sweep's must not stay to be read back as this cell's result (#345)."""
+
+    class First(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x))
+
+    class Second(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return None
+
+    First().run(x=multirun([1, 2]), working_dir=tmp_path)
+    assert len(list(tmp_path.glob("*/mushin_metrics.json"))) == 2
+    Second().run(x=multirun([1, 2]), working_dir=tmp_path)
+    assert list(tmp_path.glob("*/mushin_metrics.json")) == []

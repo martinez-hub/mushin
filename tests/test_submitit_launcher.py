@@ -449,30 +449,86 @@ def test_the_summary_names_what_ended_the_job_and_its_log():
     assert "its log: /logs (one per task)" in several
 
 
+THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
+
+
 @pytest.mark.parametrize(
-    ("prior", "holds"),
+    ("prior", "metrics", "returns", "recorded"),
     [
-        (dict(status="completed", combo={"lr": 0.2}), True),
-        (dict(status="completed", combo={"lr": 0.2}, code_hash="k"), True),
-        (dict(status="completed", combo={"lr": 0.2}, config_hash="OURS"), True),
-        (dict(status="completed", combo={"lr": 0.1}), False),  # another cell
-        (dict(status="completed", combo={"lr": 0.2}, config_hash="other"), False),
-        (dict(status="completed", combo={"lr": 0.2}, code_hash="other"), False),
-        (dict(status="failed", combo={"lr": 0.2}), False),
-        (dict(status="running", combo={"lr": 0.2}), False),
+        # This run's record of this cell.
+        (dict(status="completed", run_id="this", task=0), True, "metrics", False),
+        (dict(status="completed", run_id="this", task=0), False, "dead", False),
+        (dict(status="completed", run_id="this", task=1), True, "dead", False),
+        (dict(status="skipped", run_id="this"), False, "skipped", False),
+        (dict(status="failed", run_id="this"), False, "dead", False),
+        (dict(status="running", run_id="this"), False, "dead", True),
+        # This run's record of another cell in the same dir.
+        (dict(status="completed", run_id="this", combo=OTHER), True, "dead", False),
+        # An earlier run's records.
+        (dict(status="completed", run_id="earlier"), True, "dead", False),
+        (dict(status="completed", run_id="earlier", combo=OTHER), True, "dead", False),
+        (dict(status="failed", run_id="earlier"), False, "dead", True),
+        (dict(status="failed", run_id="earlier", combo=OTHER), False, "dead", False),
+        (dict(status="running", run_id="earlier", combo=OTHER), False, "dead", True),
+        (None, False, "dead", True),
     ],
 )
-def test_only_a_result_this_run_would_reuse_outlives_a_dead_job(tmp_path, prior, holds):
-    """An earlier run's completed record of the same cell stays when no
-    fingerprint it has differs from this run's (a resume reuses it)."""
-    from mushin._resume import resolved_config, resolved_config_hash
-    from mushin.workflows import _TaskRunner
+def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
+    tmp_path, prior, metrics, returns, recorded
+):
+    """Which record a dead job keeps, which it records its end over, and
+    which it leaves: an earlier run's completed result, and another cell's
+    terminal record, stay (a resume reuses the one; the other's files, a
+    checkpoint among them, must not pass for this cell's)."""
+    from hydra.core.utils import JobStatus
+
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _SkippedRun, _TaskRunner
+
+    cell = tmp_path / "0"
+    cell.mkdir()
+    if prior is not None:
+        fields = {"combo": THIS, "attempt": 1, **prior}
+        write_cell_status(cell, **fields)
+        (cell / "mushin_error.txt").write_text("boom\n")
+    if metrics:
+        (cell / "mushin_metrics.json").write_text('{"v": 1.0}')
+    before = read_cell_status(cell)
 
     runner = object.__new__(_TaskRunner)
-    runner.code_hash = "k"
-    ret = _dead_ret(tmp_path)
-    ours = resolved_config_hash(resolved_config(ret.cfg))
-    if prior.get("config_hash") == "OURS":
-        prior = {**prior, "config_hash": ours}
-    assert runner._result_left_holds(prior, {"lr": 0.2}, ret) is holds
-    assert runner._result_left_holds(prior, None, ret) is False
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "nan", "this"
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')")
+    status, value = runner.record_dead_cell(_dead_ret(tmp_path), dead)
+
+    assert status is JobStatus.COMPLETED
+    if returns == "metrics":
+        assert value == {"v": 1.0}
+    elif returns == "skipped":
+        assert isinstance(value, _SkippedRun)
+    else:
+        assert value is dead
+    after = read_cell_status(cell)
+    if recorded:
+        assert after["status"] == "failed" and after["combo"] == THIS
+        assert after["run_id"] == "this" and after["job_id"] == "7"
+        assert "died" in (cell / "mushin_error.txt").read_text()
+        assert not (cell / "mushin_metrics.json").exists()
+    else:
+        assert after == before
+        if prior is not None:
+            assert (cell / "mushin_error.txt").read_text() == "boom\n"
+        assert (cell / "mushin_metrics.json").exists() == metrics
+
+
+def test_a_dead_job_counts_an_attempt_as_the_runner_does(tmp_path):
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _TaskRunner
+
+    cell = tmp_path / "0"
+    write_cell_status(cell, status="failed", combo=THIS, attempt=2, run_id="earlier")
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "raise", "this"
+    runner.record_dead_cell(_dead_ret(tmp_path), _DeadJob(RuntimeError("x"), "x"))
+    assert read_cell_status(cell)["attempt"] == 3
