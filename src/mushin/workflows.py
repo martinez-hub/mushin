@@ -3523,7 +3523,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
     # Per job dir (job-num order), the run its hydra.yaml names when
     # `load_from_dir` found its status record older than that file, else
     # None: a record of another run there is not the cell's
-    # (`_record_is_another_runs`, #355).
+    # (`_cell_record`, #355).
     _run_stamps: list[str | None] | None = None
     output_subdir: str | None = None
 
