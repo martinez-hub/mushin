@@ -8,19 +8,56 @@ runs only when the helper is called.
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 import re
 import shutil
 import subprocess
+import warnings
 from typing import Any
 
 #: How long the check waits for `scontrol` before leaving the request unjudged.
 _SCONTROL_TIMEOUT_S = 10
 
-#: `launcher_config` keys that would give a job several tasks: a job of one
-#: cell runs one task, and DDP's several are `submitit_slurm_config`'s.
-_SEVERAL_TASKS = ("nodes", "tasks_per_node", "ntasks_per_node")
+#: Fields the helper sets from its own arguments; given again in ``extra``
+#: they would override them unchecked. `cpus_per_gpu` and `gpus_per_task`
+#: are SLURM's other way to ask for the same, which sbatch refuses beside
+#: `--cpus-per-task` and `--gpus-per-node`.
+_OWN_FIELDS = {
+    "nodes": "a job of one task has one node",
+    "tasks_per_node": "a job of one task",
+    "cpus_per_task": "cpus=",
+    "gpus_per_node": "gpus=",
+    "timeout_min": "timeout_min=",
+    "mem_gb": "mem_gb=",
+    "partition": "partition=",
+    "account": "account=",
+    "qos": "qos=",
+    "setup": "setup=",
+    "cpus_per_gpu": "cpus=",
+    "gpus_per_task": "gpus=",
+}
+
+#: sbatch options in ``additional_parameters`` (written last into the job
+#: script) that would give a job several tasks, or that send it somewhere the
+#: check does not look.
+_SEVERAL_TASKS = ("nodes", "ntasks", "ntasks_per_node")
+_ELSEWHERE = ("partition", "time", "qos", "clusters", "cluster")
+
+#: sbatch reads these from its environment over the job script's #SBATCH
+#: lines, so they decide where and how long a job runs (sbatch's INPUT
+#: ENVIRONMENT VARIABLES).
+_ENV = {
+    "partition": "SBATCH_PARTITION",
+    "account": "SBATCH_ACCOUNT",
+    "qos": "SBATCH_QOS",
+    "time": "SBATCH_TIMELIMIT",
+}
+
+#: A shell parameter expansion, ``${NAME}`` or ``${NAME:-word}`` and the like,
+#: which Hydra would read as its own interpolation (a key ``NAME``).
+_SHELL_PARAMETER = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-=?+][^}]*)?\}")
 
 
 def slurm(
@@ -47,9 +84,9 @@ def slurm(
         )
 
     Each job runs one task, with ``gpus`` GPUs and ``cpus`` CPUs, so a cell
-    runs once (a job of several tasks runs the cell once per task). For
-    multi-node DDP, where every GPU is a task, use
-    ``mushin.submitit_slurm_config`` instead.
+    runs once (a job of several tasks runs the cell once per task). A cell
+    that trains with DDP, on one node or several, runs a task per GPU: build
+    its config with ``mushin.submitit_slurm_config`` instead.
 
     Parameters
     ----------
@@ -58,23 +95,26 @@ def slurm(
     cpus : int
         CPUs for the job's task (``--cpus-per-task``).
     mem_gb : int, optional
-        Memory per job, in GB (``--mem``); unset leaves SLURM's default.
+        Memory per job, in whole GB (``--mem``); unset leaves SLURM's default.
     timeout_min : int
         The job's time limit, in minutes (``--time``).
     partition, account, qos : str, optional
-        Passed to SLURM as written; unset leaves SLURM's defaults (an
-        ``SBATCH_PARTITION`` or ``SBATCH_ACCOUNT`` in the environment, then
-        the cluster's).
+        Written into each job's script; unset leaves SLURM's defaults. An
+        ``SBATCH_PARTITION``, ``SBATCH_ACCOUNT``, ``SBATCH_QOS`` or
+        ``SBATCH_TIMELIMIT`` in the environment that submits the jobs
+        overrides the script (sbatch reads them first); one that overrides an
+        argument given here warns.
     setup : list of str, optional
-        Shell lines the job runs before the cell, such as ``module load cuda``
-        or ``source .venv/bin/activate``, run as written. A line cannot hold
-        ``${...}``, which Hydra reads as its own interpolation: write
-        ``$HOME``, not ``${HOME}``.
+        Shell lines each job runs before the cell, such as ``module load
+        cuda`` or ``source .venv/bin/activate``. A shell variable is written
+        ``$HOME``, not ``${HOME}``, which Hydra would read as its own
+        interpolation (``"$HOME"suffix`` where text follows it).
     check : bool
         Check the request against the cluster when this is called: see below.
     **extra
         Other fields of hydra-submitit-launcher's SLURM config, passed through
-        (``array_parallelism``, ``constraint``, ``additional_parameters``, ...).
+        (``array_parallelism``, ``constraint``, ``additional_parameters``,
+        ...), but none that redoes an argument above.
 
     Returns
     -------
@@ -84,111 +124,153 @@ def slurm(
     Notes
     -----
     With ``check=True``, on a machine with ``scontrol`` (where ``run()`` will
-    submit from), it refuses a request SLURM would reject or never start: a
-    partition that does not exist, or a ``timeout_min`` past the partition's
-    ``MaxTime`` (judged only without ``qos``, which can lift that limit). It
-    names the partitions whose time limit fits, and never picks one for you.
-    GPUs and accounts are not judged: ``scontrol`` lists a partition's GPUs
-    only where the cluster accounts for them, and an account may run in a
-    partition through its parent account. When ``scontrol`` is missing, slow
-    or unreadable, and inside a job, nothing is judged.
+    submit from), it refuses a request SLURM would reject or never start, as
+    ``scontrol`` states it: a partition that does not exist, or a time limit
+    past the partition's ``MaxTime``. It names the partitions whose time limit
+    fits, and never picks one for you. It judges only a partition named here
+    or in ``SBATCH_PARTITION`` (a job that names none can be routed by the
+    cluster), and no time limit under a QoS, which can lift it (one that the
+    account's default QoS lifts is not seen: pass ``check=False``). GPUs and
+    accounts are not judged: ``scontrol`` lists a partition's GPUs only where
+    the cluster accounts for them, and an account may run in a partition
+    through its parent account. Nothing is judged when ``scontrol`` is
+    missing, slow or unreadable, when ``additional_parameters`` sets the
+    partition, time, QoS or cluster, or inside a job. The answer is kept for
+    the process, so the cluster is asked once.
     """
-    for key in _SEVERAL_TASKS:
+    for key, instead in _OWN_FIELDS.items():
         if key in extra:
             raise ValueError(
-                f"mushin.slurm runs each cell as a job of one task; {key}= would "
-                "give a job several tasks, each running the cell. For multi-node "
-                "DDP, where every GPU is a task, use mushin.submitit_slurm_config."
+                f"mushin.slurm sets {key} itself ({instead}). For multi-node or "
+                "DDP jobs, where every GPU is a task, use "
+                "mushin.submitit_slurm_config."
             )
-    if int(gpus) < 0 or int(cpus) < 1 or int(timeout_min) < 1:
+    sbatch_options = extra.get("additional_parameters") or {}
+    several = [key for key in _SEVERAL_TASKS if key in sbatch_options]
+    if several:
         raise ValueError(
-            f"gpus must be >= 0, cpus and timeout_min >= 1; got gpus={gpus}, "
-            f"cpus={cpus}, timeout_min={timeout_min}"
+            f"additional_parameters {several!r} would give a job several tasks, "
+            "each running the cell: mushin.slurm runs a cell as a job of one task. "
+            "For DDP, use mushin.submitit_slurm_config."
         )
+    gpus = _whole("gpus", gpus, 0)
+    cpus = _whole("cpus", cpus, 1)
+    timeout_min = _whole("timeout_min", timeout_min, 1)
     config: dict[str, Any] = {
         "nodes": 1,
         "tasks_per_node": 1,
-        "cpus_per_task": int(cpus),
-        "timeout_min": int(timeout_min),
+        "cpus_per_task": cpus,
+        "timeout_min": timeout_min,
     }
-    if int(gpus) > 0:
-        config["gpus_per_node"] = int(gpus)
+    if gpus > 0:
+        config["gpus_per_node"] = gpus
     if mem_gb is not None:
-        config["mem_gb"] = int(mem_gb)
-    for key, value in (("partition", partition), ("account", account), ("qos", qos)):
+        # Whole GB, at least one: `--mem=0` asks SLURM for a whole node's.
+        config["mem_gb"] = _whole("mem_gb", mem_gb, 1)
+    named = {"partition": partition, "account": account, "qos": qos}
+    for key, value in named.items():
         if value is not None:
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{key} must be a non-empty string, got {value!r}")
             config[key] = value
     if setup is not None:
-        braced = [line for line in setup if "${" in line]
-        if braced:
-            # run() writes launcher_config as Hydra overrides, and OmegaConf
-            # takes `${...}` for its own interpolation; no escape survives
-            # (`_quoted` doubles a backslash before it).
-            raise ValueError(
-                f"setup lines {braced!r} hold `${{`, which Hydra would read as "
-                "its own interpolation rather than the shell's variable: write "
-                "$VAR without braces."
-            )
-        config["setup"] = list(setup)
+        config["setup"] = _setup_lines(setup)
     config.update(extra)
-    if check and not os.environ.get("SUBMITIT_EXECUTOR"):
+    effective = {
+        key: os.environ.get(_ENV[key]) or value for key, value in named.items()
+    }
+    for key, value in named.items():
+        if value is not None and effective[key] != value:
+            warnings.warn(
+                f"{_ENV[key]}={effective[key]!r} in this environment overrides "
+                f"{key}={value!r}: sbatch reads its environment over the job "
+                "script.",
+                UserWarning,
+                stacklevel=2,
+            )
+    elsewhere = [key for key in _ELSEWHERE if key in sbatch_options]
+    if check and not elsewhere and not os.environ.get("SUBMITIT_EXECUTOR"):
         # Not inside a job: a module that builds its config at import is
         # imported by every job, which must not query the controller.
-        _check(partition or os.environ.get("SBATCH_PARTITION"), int(timeout_min), qos)
+        _check(
+            effective["partition"],
+            _minutes(os.environ[_ENV["time"]])
+            if os.environ.get(_ENV["time"])
+            else timeout_min,
+            effective["qos"],
+        )
     return config
 
 
-def _check(partition: str | None, timeout_min: int, qos: str | None) -> None:
+def _whole(name: str, value: Any, least: int) -> int:
+    """``value`` as an int of at least ``least``; a fraction is refused, not
+    truncated."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a whole number, got {value!r}")
+    if value != int(value) or int(value) < least:
+        raise ValueError(f"{name} must be a whole number >= {least}, got {value!r}")
+    return int(value)
+
+
+def _setup_lines(setup: Any) -> list[str]:
+    if isinstance(setup, str) or not all(isinstance(line, str) for line in setup):
+        raise ValueError(f"setup must be a list of shell lines, got {setup!r}")
+    braced = [line for line in setup if _SHELL_PARAMETER.search(line)]
+    if braced:
+        # run() writes launcher_config as Hydra overrides, and OmegaConf takes
+        # `${NAME}` for its own interpolation; no escape survives (`_quoted`
+        # doubles a backslash before it).
+        raise ValueError(
+            f"setup lines {braced!r} hold a shell variable in braces, which Hydra "
+            'would read as its own interpolation: write $VAR (or "$VAR"suffix).'
+        )
+    return list(setup)
+
+
+def _check(partition: str | None, minutes: float | None, qos: str | None) -> None:
     """Refuse a partition SLURM does not have, or a time limit past its
     MaxTime, as `scontrol` states them; judge nothing it does not state."""
+    if partition is None or "," in partition:
+        return  # none (the cluster may route it), or several for SLURM to pick
     partitions = _partitions()
-    if partitions is None or (partition is not None and "," in partition):
-        return  # no answer; or several partitions, for SLURM to choose among
+    if partitions is None:
+        return
     names = {p["PartitionName"]: p for p in partitions}
-    if partition is None:
-        defaults = [p for p in partitions if p.get("Default") == "YES"]
-        if len(defaults) != 1:
-            return
-        target, what = (
-            defaults[0],
-            f"the default partition, {defaults[0]['PartitionName']!r}",
-        )
-    elif partition not in names:
+    if partition not in names:
         raise ValueError(
-            f"SLURM has no partition {partition!r}. {_fitting(partitions, timeout_min)}"
-            f" {_SKIP}"
+            f"SLURM has no partition {partition!r}. {_fitting(partitions, minutes)}"
+            f"{_SKIP}"
         )
-    else:
-        target, what = names[partition], f"partition {partition!r}"
+    target = names[partition]
     limit = _minutes(target.get("MaxTime", ""))
-    if qos is None and limit is not None and timeout_min > limit:
+    if qos is None and limit is not None and minutes is not None and minutes > limit:
         raise ValueError(
-            f"timeout_min={timeout_min} is past the time limit of {what} "
-            f"(MaxTime={target['MaxTime']}). {_fitting(partitions, timeout_min)} {_SKIP}"
+            f"A time limit of {minutes:g} minutes is past partition {partition!r}'s "
+            f"(MaxTime={target['MaxTime']}). {_fitting(partitions, minutes)}{_SKIP}"
         )
 
 
 _SKIP = "Pass check=False to submit without this check."
 
 
-def _fitting(partitions: list[dict[str, str]], timeout_min: int) -> str:
+def _fitting(partitions: list[dict[str, str]], minutes: float | None) -> str:
+    if minutes is None:
+        return ""
     fit = [
         p["PartitionName"]
         for p in partitions
-        if (limit := _minutes(p.get("MaxTime", ""))) is not None
-        and timeout_min <= limit
+        if (limit := _minutes(p.get("MaxTime", ""))) is not None and minutes <= limit
     ]
     if not fit:
-        return f"No partition here allows {timeout_min} minutes."
-    return (
-        f"Partitions whose time limit allows {timeout_min} minutes: {', '.join(fit)}."
-    )
+        return f"No partition here allows {minutes:g} minutes. "
+    return f"Partitions whose time limit allows {minutes:g} minutes: {', '.join(fit)}. "
 
 
+@functools.lru_cache(maxsize=1)
 def _partitions() -> list[dict[str, str]] | None:
     """Every partition `scontrol` reports, hidden ones too, as its fields; None
     when there is no `scontrol`, it fails, it takes too long, or it reports
-    nothing readable."""
+    nothing readable. Asked once per process."""
     exe = shutil.which("scontrol")
     if exe is None:
         return None
@@ -197,6 +279,8 @@ def _partitions() -> list[dict[str, str]] | None:
             [exe, "--all", "--oneliner", "show", "partition"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_SCONTROL_TIMEOUT_S,
             check=False,
         )

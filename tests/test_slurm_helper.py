@@ -34,9 +34,7 @@ DEBUG = (
 )
 
 
-def _like_debug(
-    name: str, max_time: str, default: str = "NO", hidden: str = "NO"
-) -> str:
+def _like_debug(name: str, max_time: str, default: str = "NO", hidden: str = "NO"):
     return (
         DEBUG.replace("PartitionName=debug", f"PartitionName={name}")
         .replace("MaxTime=UNLIMITED", f"MaxTime={max_time}")
@@ -47,8 +45,8 @@ def _like_debug(
 
 CLUSTER = "\n".join(
     [
-        DEBUG,
-        _like_debug("short", "00:30:00"),
+        _like_debug("short", "00:30:00", default="YES"),
+        DEBUG.replace("Default=YES", "Default=NO"),
         _like_debug("gpu", "2-00:00:00"),
         _like_debug("night", "12:00:00", hidden="YES"),
     ]
@@ -58,10 +56,10 @@ CLUSTER = "\n".join(
 @pytest.fixture(autouse=True)
 def _no_cluster(monkeypatch):
     """No test asks a real cluster: the check sees no `scontrol` unless a
-    test hands it partitions."""
+    test hands it partitions; and no SBATCH_* of this machine leaks in."""
     monkeypatch.setattr(_slurm, "_partitions", lambda: None)
-    monkeypatch.delenv("SBATCH_PARTITION", raising=False)
-    monkeypatch.delenv("SUBMITIT_EXECUTOR", raising=False)
+    for name in (*_slurm._ENV.values(), "SUBMITIT_EXECUTOR"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -114,27 +112,83 @@ def test_the_fields_given_pass_to_the_launcher():
     }
 
 
-@pytest.mark.parametrize("key", ["nodes", "tasks_per_node", "ntasks_per_node"])
-def test_a_job_of_several_tasks_is_refused(key):
+@pytest.mark.parametrize(
+    "extra",
+    [
+        dict(nodes=2),
+        dict(tasks_per_node=2),
+        dict(additional_parameters={"ntasks": 4}),
+        dict(additional_parameters={"ntasks_per_node": 2}),
+        dict(additional_parameters={"nodes": 2}),
+    ],
+    ids=str,
+)
+def test_a_job_of_several_tasks_is_refused(extra):
     # Every task of a job runs the cell (shown with submitit_local's
     # tasks_per_node=2 in #354): several tasks are DDP's, and its helper's.
     with pytest.raises(ValueError, match="submitit_slurm_config"):
+        mushin.slurm(**extra)
+
+
+@pytest.mark.parametrize(
+    "key", ["cpus_per_task", "gpus_per_node", "cpus_per_gpu", "gpus_per_task"]
+)
+def test_a_field_the_helper_sets_is_not_taken_again(key):
+    # Given in `extra` it would override the argument unchecked (cpus_per_gpu
+    # also gives sbatch two options it refuses together).
+    with pytest.raises(ValueError, match=f"sets {key} itself"):
         mushin.slurm(**{key: 2})
 
 
 @pytest.mark.parametrize(
-    "bad", [dict(gpus=-1), dict(cpus=0), dict(timeout_min=0)], ids=str
+    "bad",
+    [
+        dict(gpus=-1),
+        dict(cpus=0),
+        dict(timeout_min=0),
+        dict(mem_gb=0.5),  # `--mem=0` would ask for a whole node's
+        dict(mem_gb=1.5),
+        dict(cpus=True),
+        dict(timeout_min="60"),
+        dict(partition=""),
+        dict(account=3),
+    ],
+    ids=str,
 )
-def test_a_resource_out_of_range_is_refused(bad):
+def test_a_request_out_of_shape_is_refused(bad):
     with pytest.raises(ValueError, match="must be"):
         mushin.slurm(**bad)
 
 
-def test_a_setup_line_with_a_braced_variable_is_refused():
+def test_a_whole_float_is_taken_as_its_int():
+    config = mushin.slurm(mem_gb=4.0, cpus=2.0)
+    assert (config["mem_gb"], config["cpus_per_task"]) == (4, 2)
+
+
+@pytest.mark.parametrize(
+    "setup",
+    ["module load cuda", ["module load cuda", 3]],
+    ids=["a string", "not all strings"],
+)
+def test_setup_must_be_a_list_of_lines(setup):
+    with pytest.raises(ValueError, match="list of shell lines"):
+        mushin.slurm(setup=setup)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["export DATA=${HOME}/data", "cd ${SLURM_SUBMIT_DIR:-/tmp}", "x=${A-b}"],
+)
+def test_a_braced_shell_variable_in_setup_is_refused(line):
     # run() writes launcher_config as Hydra overrides; OmegaConf would read
     # `${HOME}` as its own interpolation, and no escape survives the writer.
-    with pytest.raises(ValueError, match="without braces"):
-        mushin.slurm(setup=["export DATA=${HOME}/data"])
+    with pytest.raises(ValueError, match="in braces"):
+        mushin.slurm(setup=[line])
+
+
+def test_hydras_own_interpolations_in_setup_pass():
+    lines = ["cd ${hydra:runtime.cwd}", "export X=${oc.env:HOME}"]
+    assert mushin.slurm(setup=lines)["setup"] == lines
 
 
 def test_every_key_is_a_field_of_the_plugins_slurm_config():
@@ -207,6 +261,23 @@ def test_the_setup_lines_reach_the_launcher_as_written():
     assert list(cfg.hydra.launcher.setup) == setup
 
 
+# The environment sbatch reads over the job script.
+
+
+@pytest.mark.parametrize(
+    ("key", "name"),
+    [
+        ("partition", "SBATCH_PARTITION"),
+        ("qos", "SBATCH_QOS"),
+        ("account", "SBATCH_ACCOUNT"),
+    ],
+)
+def test_an_environment_that_overrides_an_argument_warns(monkeypatch, key, name):
+    monkeypatch.setenv(name, "elsewhere")
+    with pytest.warns(UserWarning, match=f"{name}='elsewhere'.*overrides {key}="):
+        mushin.slurm(**{key: "here"})
+
+
 # The check against `scontrol`.
 
 
@@ -237,26 +308,40 @@ def test_a_time_past_the_partitions_limit_is_refused(
     cluster, partition, minutes, refused
 ):
     if refused:
-        with pytest.raises(ValueError, match="past the time limit") as info:
+        with pytest.raises(ValueError, match="past partition") as info:
             mushin.slurm(partition=partition, timeout_min=minutes)
         assert "check=False" in str(info.value)
     else:
         mushin.slurm(partition=partition, timeout_min=minutes)
 
 
-def test_no_partition_is_judged_as_the_default_one(cluster, monkeypatch):
-    # 'debug' is Default=YES and UNLIMITED.
-    mushin.slurm(timeout_min=10**5)
-    # sbatch takes SBATCH_PARTITION from the environment when -p is unset.
+def test_the_environment_sbatch_will_read_is_what_is_judged(cluster, monkeypatch):
+    # SBATCH_PARTITION decides the partition, over partition=.
     monkeypatch.setenv("SBATCH_PARTITION", "short")
-    with pytest.raises(ValueError, match="'short'"):
-        mushin.slurm(timeout_min=60)
+    with pytest.warns(UserWarning), pytest.raises(ValueError, match="'short'"):
+        mushin.slurm(partition="gpu", timeout_min=60)
+    monkeypatch.delenv("SBATCH_PARTITION")
+    # SBATCH_TIMELIMIT decides the time limit, over timeout_min=.
+    monkeypatch.setenv("SBATCH_TIMELIMIT", "1:00:00")
+    with pytest.raises(ValueError, match="60 minutes"):
+        mushin.slurm(partition="short", timeout_min=10)
+    # SBATCH_QOS is a QoS, which may lift the partition's limit.
+    monkeypatch.setenv("SBATCH_QOS", "long")
+    mushin.slurm(partition="short", timeout_min=10)
 
 
 def test_what_scontrol_does_not_state_is_not_judged(cluster, monkeypatch):
-    mushin.slurm(partition="short", timeout_min=600, qos="long")  # a QoS may lift it
+    # No partition: the default ('short', 30 minutes) is not assumed, since
+    # the cluster may route a job that names none.
+    mushin.slurm(timeout_min=10**5)
+    mushin.slurm(partition="short", timeout_min=600, qos="long")  # QoS may lift it
     mushin.slurm(partition="short,gpu", timeout_min=600)  # SLURM picks among them
     mushin.slurm(partition="short", timeout_min=600, check=False)
+    for option in ("partition", "time", "qos", "clusters"):
+        # additional_parameters, written last, decide instead.
+        mushin.slurm(
+            partition="nowhere", additional_parameters={option: "x"}, timeout_min=60
+        )
     # Inside a job (an import of a module that builds its config), never.
     monkeypatch.setenv("SUBMITIT_EXECUTOR", "slurm")
     calls = len(cluster)
@@ -293,10 +378,15 @@ def test_slurms_time_formats(text, minutes):
     assert _slurm._minutes(text) == minutes
 
 
-def test_scontrol_missing_slow_or_failing_judges_nothing(monkeypatch):
-    monkeypatch.undo()  # the real `_partitions`, with its runner stood in
+def test_scontrol_missing_slow_failing_or_garbled_judges_nothing(monkeypatch):
+    monkeypatch.undo()  # the real, memoized `_partitions`, its runner stood in
+
+    def asked():
+        _slurm._partitions.cache_clear()
+        return _slurm._partitions()
+
     monkeypatch.setattr(_slurm.shutil, "which", lambda name: None)
-    assert _slurm._partitions() is None
+    assert asked() is None
 
     monkeypatch.setattr(_slurm.shutil, "which", lambda name: "/usr/bin/scontrol")
 
@@ -304,25 +394,30 @@ def test_scontrol_missing_slow_or_failing_judges_nothing(monkeypatch):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
     monkeypatch.setattr(_slurm.subprocess, "run", slow)
-    assert _slurm._partitions() is None
+    assert asked() is None
 
     def failing(*args, **kwargs):
         return subprocess.CompletedProcess(
-            args[0], 1, "", "slurm_load_partitions: Unable to contact slurm controller"
+            args[0], 1, "", "Unable to contact slurm controller"
         )
 
     monkeypatch.setattr(_slurm.subprocess, "run", failing)
-    assert _slurm._partitions() is None
+    assert asked() is None
 
-    seen = {}
+    seen = []
 
     def answering(cmd, **kwargs):
-        seen.update(cmd=cmd, kwargs=kwargs)
+        seen.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, CLUSTER, "")
 
     monkeypatch.setattr(_slurm.subprocess, "run", answering)
-    names = [p["PartitionName"] for p in _slurm._partitions()]
-    assert names == ["debug", "short", "gpu", "night"]
-    assert seen["cmd"][1:] == ["--all", "--oneliner", "show", "partition"]
-    assert seen["kwargs"]["timeout"] == _slurm._SCONTROL_TIMEOUT_S
-    assert "shell" not in seen["kwargs"]
+    names = [p["PartitionName"] for p in asked()]
+    assert names == ["short", "debug", "gpu", "night"]
+    _slurm._partitions()  # kept for the process: not asked again
+    assert len(seen) == 1
+    cmd, kwargs = seen[0]
+    assert cmd[1:] == ["--all", "--oneliner", "show", "partition"]
+    assert kwargs["timeout"] == _slurm._SCONTROL_TIMEOUT_S
+    assert kwargs["errors"] == "replace"  # a byte not UTF-8 is not an error
+    assert "shell" not in kwargs
+    _slurm._partitions.cache_clear()
