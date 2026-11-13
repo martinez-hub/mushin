@@ -886,7 +886,7 @@ def _record_dead_cell(
     from omegaconf import OmegaConf
 
     from ._resume import write_cell_status
-    from ._sweep_io import METRICS_FILE
+    from ._sweep_io import METRICS_FILE, remove_sidecar
 
     try:
         cell_dir = _job_dir(ret)
@@ -905,7 +905,6 @@ def _record_dead_cell(
                     (snapshot / name).write_text(
                         OmegaConf.to_yaml(node), encoding="utf-8"
                     )
-        (cell_dir / METRICS_FILE).unlink(missing_ok=True)
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
             cell_dir,
@@ -921,6 +920,9 @@ def _record_dead_cell(
             run_id=run_id,
             job_id=_job_id_or_none(OmegaConf.select(hydra, "job.id")),
         )
+        # After the record: a metrics file that cannot be removed must not keep
+        # the cell's end from being recorded.
+        remove_sidecar(cell_dir / METRICS_FILE)
         if status == "failed" and on_error == "nan":
             # UTF-8 whatever the locale: the error stream is the job's output.
             (cell_dir / "mushin_error.txt").write_text(
@@ -1095,6 +1097,8 @@ def _remove_budget_start(runner, jobs, working_dir) -> None:
     import os
 
     stop = None if working_dir is None else Path(os.getcwd(), working_dir)
+    from ._sweep_io import remove_sidecar
+
     name = f"{_BUDGET_START_PREFIX}{runner.budget_id}"
     seen: set[Path] = set()
     for job in jobs:
@@ -1110,7 +1114,7 @@ def _remove_budget_start(runner, jobs, working_dir) -> None:
         for _ in range(depth + 1):
             try:
                 if (d / name).exists():
-                    (d / name).unlink()
+                    remove_sidecar(d / name)
                     return
             except OSError:
                 pass
@@ -1551,6 +1555,7 @@ class _TaskRunner:
             METRICS_FILE,
             combo_key,
             read_metrics_sidecar,
+            remove_sidecar,
             write_metrics_sidecar,
         )
 
@@ -1589,10 +1594,7 @@ class _TaskRunner:
                 # A skipped cell has no valid metrics; drop any sidecar a prior
                 # sweep left in this reused dir so show/export don't list old
                 # metrics on a 'skipped' row while to_xarray NaN-fills it.
-                try:
-                    (cwd / METRICS_FILE).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                remove_sidecar(cwd / METRICS_FILE)
                 return _SkippedRun("not sampled")
 
         # This cell's project-code record, taken here, in the process that will
@@ -1762,10 +1764,7 @@ class _TaskRunner:
                 combo = self._combo(cfg, self.swept_names)
                 write_status(cwd, status="skipped", combo=combo, attempt=1)
                 # Same reused-dir hygiene as the sampling skip above.
-                try:
-                    (cwd / METRICS_FILE).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                remove_sidecar(cwd / METRICS_FILE)
                 return _SkippedRun()
 
         # (2) fail-soft wraps everything below, only when on_error == "nan"
@@ -1809,14 +1808,14 @@ class _TaskRunner:
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
-                write_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
+                try:
+                    write_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
+                except OSError:
+                    pass  # best-effort: never mask the task's own failure
                 # A metrics sidecar left by a prior successful attempt no longer
                 # describes this cell — remove it so offline tools (show/best/
                 # diff/load) cannot present stale metrics as current results.
-                try:
-                    (cwd / METRICS_FILE).unlink(missing_ok=True)
-                except OSError:
-                    pass  # best-effort: never mask the task's own failure
+                remove_sidecar(cwd / METRICS_FILE)
                 failed_recorded = True
                 raise
             finally:
@@ -1864,9 +1863,8 @@ class _TaskRunner:
                 # failure and remove the stale sidecar so offline tools cannot
                 # present the old metrics as this sweep's results. Best-effort:
                 # the combo itself may be what failed to compute.
+                cwd = Path.cwd()
                 try:
-                    cwd = Path.cwd()
-                    (cwd / METRICS_FILE).unlink(missing_ok=True)
                     write_status(
                         cwd,
                         status="failed",
@@ -1875,6 +1873,9 @@ class _TaskRunner:
                     )
                 except Exception:  # noqa: BLE001 - never mask the real failure
                     pass
+                # Apart from the status write: a metrics file that cannot be
+                # removed must not keep the failure from being recorded.
+                remove_sidecar(cwd / METRICS_FILE)
             if self.on_error == "nan":
                 # The sentinel keeps only repr(exc); persist the full stack in
                 # the cell dir so a fail-soft sweep stays debuggable. (Hydra's
