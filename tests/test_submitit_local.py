@@ -812,8 +812,7 @@ def test_the_driver_judges_a_cell_under_the_jobs_env_set(tmp_path, monkeypatch):
 
 def test_a_variable_only_the_jobs_have_still_lets_sample_settle(tmp_path, monkeypatch):
     """`hydra.job.env_set` may read what only a job's environment holds; a
-    cell `sample=` leaves out resolves none of it in the driver, and a cell
-    that would need it is left to its job, quietly."""
+    cell `sample=` leaves out resolves none of it in the driver."""
     import warnings
 
     monkeypatch.delenv("SUBMITIT_LOCAL_JOB_ID", raising=False)
@@ -832,3 +831,27 @@ def test_a_variable_only_the_jobs_have_still_lets_sample_settle(tmp_path, monkey
     assert int((~np.isnan(ds["v"].values)).sum()) == 1
     assert len(_job_dirs(wd)) == 1
     assert not [w for w in seen if "could not be settled" in str(w.message)]
+
+
+def test_variables_the_driver_cannot_resolve_leave_the_cell_to_its_job(
+    tmp_path, monkeypatch
+):
+    """A resume whose `hydra.job.env_set` holds a value only the jobs can
+    resolve (a resolver reading their environment) leaves each cell to its
+    job, quietly, and the jobs reuse the cells."""
+    import warnings
+
+    monkeypatch.delenv("SUBMITIT_LOCAL_JOB_ID", raising=False)
+    wd = tmp_path / "s"
+    sweep = dict(
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        overrides=["++hydra.job.env_set.MUSHIN_JOB=${mushin_test_job_only:}"],
+    )
+    first = tasks.record_pid.run(**sweep, **LOCAL)
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        again = tasks.record_pid.run(**sweep, resume=True, **LOCAL)
+    assert not [w for w in seen if "could not be settled" in str(w.message)]
+    assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
+    assert again["pid"].values.tolist() == first["pid"].values.tolist()

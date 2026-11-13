@@ -145,3 +145,11 @@ def env_scaled(seed, n):
 OmegaConf.register_new_resolver(
     "mushin_test_n", lambda: os.environ.get("MUSHIN_TEST_N", "1"), replace=True
 )
+
+
+def _job_only():
+    """What only a job's environment holds: raises in the driver."""
+    return os.environ["SUBMITIT_LOCAL_JOB_ID"]
+
+
+OmegaConf.register_new_resolver("mushin_test_job_only", _job_only, replace=True)
