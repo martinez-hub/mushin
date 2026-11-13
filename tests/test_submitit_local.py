@@ -703,8 +703,9 @@ def test_a_sweep_with_hydra_callbacks_settles_nothing_in_the_driver(tmp_path):
 
 def test_a_cell_whose_prior_dir_a_job_reads_is_left_to_its_job(tmp_path, monkeypatch):
     """A resume over a renumbered grid, where one cell (seed 1) is left to
-    its job: its job reads seed 1's prior result from dir 0, which seed 3,
-    settled, would take. Seed 3 is submitted instead of recorded there."""
+    its job, which reads seed 1's prior result from dir 0. Seed 3 would take
+    dir 0, so it is submitted, and its job reads seed 3's prior result from
+    dir 2; seed 2 would take dir 2, so it is submitted too."""
     from mushin.workflows import _TaskRunner
 
     wd = tmp_path / "s"
@@ -717,9 +718,9 @@ def test_a_cell_whose_prior_dir_a_job_reads_is_left_to_its_job(tmp_path, monkeyp
 
     monkeypatch.setattr(_TaskRunner, "settle_in_driver", picky)
     again = tasks.record_pid.run(
-        seed=multirun([3, 1, 4]), working_dir=str(wd), resume=True, **LOCAL
+        seed=multirun([3, 1, 2]), working_dir=str(wd), resume=True, **LOCAL
     )
-    assert again["v"].values.tolist() == [3.0, 1.0, 4.0]
+    assert again["v"].values.tolist() == [3.0, 1.0, 2.0]
     assert len(_job_dirs(wd)) - submitted == 3
 
 

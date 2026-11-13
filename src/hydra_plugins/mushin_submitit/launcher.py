@@ -129,10 +129,15 @@ if _plugin_launcher is not None:
                 protected = runner.prior_dirs() - taken
             else:
                 protected = {d for n, d in reads.items() if n not in settled}
+            # A cell submitted for that reads its own prior dir in its job, which
+            # no settled cell may then take either: drop until none does.
             kept = 0
-            for idx in [n for n in settled if own[n] in protected]:
-                del settled[idx]
-                kept += 1
+            while dropped := [n for n in settled if own[n] in protected]:
+                for idx in dropped:
+                    del settled[idx]
+                    kept += 1
+                    if reads[idx] is not None:
+                        protected.add(reads[idx])
             for idx in list(settled):
                 try:
                     for write in writes[idx]:
