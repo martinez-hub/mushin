@@ -75,9 +75,10 @@ sweep that actually recorded failures triggers the guard.
 
 A sweep reloaded from disk carries the same signal.
 `MultiRunMetricsWorkflow().load_from_dir(working_dir, "mushin_metrics.json")`
-records every cell of the sweep's grid that has no metrics: as failed if its
+records every cell of the sweep's grid that has no result: as failed if its
 status says so, otherwise as skipped (not run), which covers a cell still
-`running` and one a killed sweep never started. Its `to_xarray()` then has the
+`running` and one a killed sweep never started. A completed cell whose task
+returned None has a result with no metrics (NaN), as it does in the run. Its `to_xarray()` then has the
 same attrs, `is_complete` is `False`, and `compare_methods` refuses it too.
 Give each sweep its own `working_dir` (resuming it is fine): job dirs that an
 earlier sweep left in a reused one can stand in for cells the new sweep has not

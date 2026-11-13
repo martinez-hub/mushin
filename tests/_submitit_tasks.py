@@ -148,6 +148,11 @@ def first_task_reports(seed):
 
 
 @mushin.sweep
+def none_on_one(seed):
+    return None if seed == 1 else dict(v=float(seed))
+
+
+@mushin.sweep
 def scaled(seed, scale):
     return dict(v=float(seed) * scale)
 

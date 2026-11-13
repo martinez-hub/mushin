@@ -1894,7 +1894,9 @@ class _TaskRunner:
         this run wrote it for this cell (its ``run_id`` and combo). A
         completed one whose attempt wrote a metrics file holding the result
         whole (its ``metrics``, that file's digest) gives the cell's result
-        from that file, while the file is still that one, as a resume would, when the job had one task and did not pickle an error
+        from that file, while the file is still that one, as a resume would,
+        and one whose task returned None (its ``no_metrics``) gives None,
+        when the job had one task and did not pickle an error
         in place of its result (`_DeadJob.keepable`): it finished, but its
         result did not reach the driver, as when it came after submitit
         stopped waiting. A skipped one is skipped. Any other terminal record
@@ -1912,7 +1914,7 @@ class _TaskRunner:
         sweeper raises it after the batch); under ``"nan"`` a COMPLETED
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
-        from ._resume import read_cell_status
+        from ._resume import read_cell_status, wrote_no_metrics
         from ._sweep_io import read_metrics_sidecar_written
 
         num = ret.hydra_cfg.hydra.job.num
@@ -1933,6 +1935,10 @@ class _TaskRunner:
             this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
         )
         written = prior.get("metrics")
+        if own and status == "completed" and dead.keepable and wrote_no_metrics(prior):
+            # Its task returned None and wrote no metrics (#364): that is the
+            # result, as the run would have had it.
+            return JobStatus.COMPLETED, None
         if own and status == "completed" and dead.keepable and isinstance(written, str):
             # Only the file this record names: another job in a shared dir
             # may have written its own since.
@@ -4565,8 +4571,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     continue
                 if not files:
                     hint = ""
-                    if (record or {}).get("status") == "completed" and "run_id" not in (
-                        record or {}
+                    if (
+                        Path(name) == Path(METRICS_FILE)
+                        and (record or {}).get("status") == "completed"
+                        and "run_id" not in (record or {})
                     ):
                         hint = (
                             " (this completed cell's record is from an earlier "

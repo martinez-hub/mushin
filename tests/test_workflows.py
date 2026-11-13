@@ -2902,6 +2902,21 @@ def test_a_record_from_before_the_flag_still_raises_with_a_hint(tmp_path):
         _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
 
 
+def test_the_earlier_version_hint_is_only_for_the_sidecar(tmp_path):
+    import json
+
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    path = tmp_path / "0" / "mushin_cell_status.json"
+    record = json.loads(path.read_text())
+    del record["run_id"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(FileNotFoundError, match="fit_metrics.pt") as info:
+        _SometimesNone().load_from_dir(
+            tmp_path, ["mushin_metrics.json", "fit_metrics.pt"]
+        )
+    assert "earlier mushin version" not in str(info.value)
+
+
 @pytest.mark.parametrize("name", ["fit_metrics.pt", "nothing_*.json"])
 def test_a_missing_file_of_the_users_own_still_raises(tmp_path, name):
     """A cell that returned None: only the sidecar is not looked for. Its

@@ -85,7 +85,12 @@ def write_cell_status(
     (no value written as its text). A launcher that finds a job ended without a result
     tells by ``run_id`` and the combo whether the cell's record is that
     job's own, and can then take a completed record's metrics file, if it is
-    still the one the record names, as the job's result (#345)."""
+    still the one the record names, as the job's result (#345).
+
+    ``no_metrics`` marks a completed cell whose task returned None, so it
+    wrote no metrics file: a reload gives it no metrics instead of looking
+    for the file (#364). A completed record without it, from this version
+    on, comes from an attempt that wrote one."""
 
     payload: dict[str, Any] = {
         "status": status,

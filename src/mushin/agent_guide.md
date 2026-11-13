@@ -305,7 +305,7 @@ runs/compare-v1/
   mushin_sweep_manifest.json   every cell's status, written when the run ends
   0/, 1/, ...                  one directory per cell, holding:
     mushin_cell_status.json    completed, failed, skipped or running
-    mushin_metrics.json        the dict the task returned (completed cells)
+    mushin_metrics.json        the dict the task returned (none if it returned None)
     mushin_error.txt           the traceback or job log path (failed cells, on_error="nan")
     mushin_provenance.json     git commit, package versions, hardware if torch ran (cells that ran)
     mushin_workflow.log, .hydra/
