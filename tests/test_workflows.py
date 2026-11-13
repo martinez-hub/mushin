@@ -2475,13 +2475,14 @@ class _ReusedDir(MultiRunMetricsWorkflow):
 
 
 def _a_job_died_before_its_first_record(
-    tmp_path, first, second, *, manifest=False, run_id=True, stamp=True
+    tmp_path, first, second, *, manifest=False, run_id=True, stamp=True, dead="0"
 ):
     """Sweep ``first`` into a dir, then leave that dir as a later sweep
     ``second`` leaves it when its job 0 dies after Hydra wrote the cell's
     ``.hydra/`` and before mushin's runner wrote anything (#355): the later
-    sweep's multirun.yaml, cell 0's snapshot over the earlier cell's record
-    and metrics, and the later cell 1, complete. ``manifest`` brings the
+    sweep's multirun.yaml, the dead cell's (``dead``, cell 0 by default)
+    snapshot over the earlier cell's record and metrics, and the later
+    sweep's other cells, complete. ``manifest`` brings the
     later sweep's manifest (it finished the other cells); ``run_id=False``
     drops the earlier record's run id, as a released version wrote none;
     ``stamp=False`` drops the run from the later snapshot, as a version
@@ -2496,17 +2497,20 @@ def _a_job_died_before_its_first_record(
         warnings.simplefilter("ignore")  # a failed cell, on purpose
         _ReusedDir().run(working_dir=str(later), on_error="nan", **second)
     shutil.copy(later / "multirun.yaml", wd / "multirun.yaml")
-    shutil.rmtree(wd / "0" / ".hydra")
-    shutil.copytree(later / "0" / ".hydra", wd / "0" / ".hydra")
-    shutil.rmtree(wd / "1")
-    shutil.copytree(later / "1", wd / "1")
-    path = wd / "0" / "mushin_cell_status.json"
+    for cell in later.glob("[0-9]*"):
+        if cell.name == dead:
+            shutil.rmtree(wd / dead / ".hydra")
+            shutil.copytree(cell / ".hydra", wd / dead / ".hydra")
+        else:
+            shutil.rmtree(wd / cell.name, ignore_errors=True)
+            shutil.copytree(cell, wd / cell.name)
+    path = wd / dead / "mushin_cell_status.json"
     if not run_id:
         record = json.loads(path.read_text())
         del record["run_id"]
         path.write_text(json.dumps(record))
     if not stamp:
-        hydra = wd / "0" / ".hydra" / "hydra.yaml"
+        hydra = wd / dead / ".hydra" / "hydra.yaml"
         text = hydra.read_text()
         assert "mushin_run_id" in text
         hydra.write_text(
@@ -2516,10 +2520,12 @@ def _a_job_died_before_its_first_record(
     # and the later sweep's manifest after that.
     record = path.stat().st_mtime_ns
     for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
-        os.utime(wd / "0" / ".hydra" / name, ns=(record + 10**9, record + 10**9))
+        os.utime(wd / dead / ".hydra" / name, ns=(record + 10**9, record + 10**9))
     if manifest:
+        # Written after the snapshot, or in the same tick of a coarse clock.
         shutil.copy(later / "mushin_sweep_manifest.json", wd)
-        os.utime(wd / "mushin_sweep_manifest.json", ns=(record + 2 * 10**9,) * 2)
+        tick = 10**9 if manifest == "same tick" else 2 * 10**9
+        os.utime(wd / "mushin_sweep_manifest.json", ns=(record + tick,) * 2)
     return wd
 
 
@@ -2553,10 +2559,11 @@ def test_a_reload_does_not_take_an_earlier_runs_record_for_a_job_that_died(
     assert [cell["dir"].name for cell in _read_cells(wd)] == ["1"]
 
 
-def test_a_cell_whose_job_died_is_failed_as_its_runs_manifest_says(tmp_path):
+@pytest.mark.parametrize("manifest", [True, "same tick"])
+def test_a_cell_whose_job_died_is_failed_as_its_runs_manifest_says(tmp_path, manifest):
     first = dict(x=multirun([1, 2]), lr=1.0)
     second = dict(x=multirun([13, 4]), lr=1.0)  # 13 fails in the later sweep
-    wd = _a_job_died_before_its_first_record(tmp_path, first, second, manifest=True)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second, manifest=manifest)
     loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
     assert [f["combo"] for f in loaded.failures] == ["x=13"]
     # An earlier run's manifest says nothing about this run's cell, even
@@ -2572,12 +2579,62 @@ def test_a_cell_whose_job_died_is_failed_as_its_runs_manifest_says(tmp_path):
 
 def test_a_snapshot_from_before_the_run_stamp_says_nothing(tmp_path):
     """A snapshot that names no run (written before it was stamped) leaves
-    the record standing, as before."""
+    the record standing, as before. The earlier sweep's value then shows
+    for this cell: a known limit for sweeps from before the stamp, pinned so
+    a change to it is deliberate."""
     first = dict(x=multirun([1, 2]), lr=1.0)
     second = dict(x=multirun([3, 4]), lr=1.0)
     wd = _a_job_died_before_its_first_record(tmp_path, first, second, stamp=False)
     loaded = _ReusedDir().load_from_dir(wd, "mushin_metrics.json")
     assert loaded.to_xarray()["v"].values.tolist() == [1.0, 4.0]
+
+
+def test_another_runs_record_is_found_whatever_the_dirs_order(tmp_path):
+    """Dirs sort by job number, not by name ("10" after "9"): the cell
+    judged is the dead job's, not the one at its place in name order."""
+    first = dict(x=multirun(list(range(12))), lr=1.0)
+    second = dict(x=multirun(list(range(12))), lr=10.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second, dead="10")
+    values = _ReusedDir().load_from_dir(wd, "mushin_metrics.json").to_xarray()
+    v = values["v"].values.tolist()
+    assert v[10] != v[10]
+    assert [x for i, x in enumerate(v) if i != 10] == [
+        10.0 * i for i in range(12) if i != 10
+    ]
+
+
+def test_a_run_after_a_load_judges_no_record_by_that_load(tmp_path):
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    wf.run(x=multirun([5, 6]), lr=1.0, working_dir=str(tmp_path / "fresh"))
+    assert wf.load_metrics("mushin_metrics.json") == {"v": [5.0, 6.0]}
+
+
+def test_a_cell_that_completes_after_a_load_counts_on_the_next_read(tmp_path):
+    """A reload mid-sweep finds a job between its snapshot and its first
+    record; once that job records its result, the same workflow reads it."""
+    import json
+
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+    from mushin._sweep_io import write_metrics_sidecar
+
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    assert wf._job_metrics_by_index[0] is None
+    # The job finishes: its run's record and metrics.
+    run = hydra_run_stamp(load_hydra_record(wd / "0" / ".hydra" / "hydra.yaml"))
+    path = wd / "0" / "mushin_cell_status.json"
+    record = json.loads(path.read_text())
+    record.update(run_id=run, combo={"x": 3})
+    path.write_text(json.dumps(record))
+    write_metrics_sidecar(wd / "0", {"v": 3.0})
+    assert wf.load_metrics("mushin_metrics.json") == {"v": [3.0, 4.0]}
 
 
 def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
