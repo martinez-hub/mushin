@@ -6,6 +6,11 @@ process launching to a cluster scheduler; Hydra's
 Lightning's auto-detected `SLURMEnvironment`. Under an external launcher,
 `HydraDDP` steps aside and Lightning uses the scheduler-launched ranks directly.
 
+This guide is about one cell trained across several GPUs or nodes. For a sweep
+whose cells each run as an ordinary SLURM job (one task, any number of GPUs),
+build the launcher config with [`mushin.slurm`](../reference/workflows.md#running-on-slurm)
+instead: a job of several tasks runs the cell once per task.
+
 ## The one contract: one SLURM task per GPU
 
 For DDP there must be exactly one process (rank) per GPU:

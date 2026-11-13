@@ -42,10 +42,11 @@ def run_parallel(working_dir=None, launcher="joblib"):
         experiment.run(
             lr=mushin.multirun([...]), seed=mushin.multirun([...]),
             launcher="submitit_slurm",
-            launcher_config=mushin.submitit_slurm_config(
-                nodes=1, gpus_per_node=1, timeout_min=60
-            ),
+            launcher_config=mushin.slurm(gpus=1, timeout_min=60, partition="gpu"),
         )
+
+    ``mushin.slurm`` runs each cell as a job of one task, and checks the
+    partition and time limit against ``scontrol`` where it can.
     """
     return experiment.run(
         lr=mushin.multirun([0.01, 0.1, 1.0]),

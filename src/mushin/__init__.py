@@ -29,6 +29,7 @@ from ._extras import eval_available as _eval_available
 from ._packing import pin_gpu_round_robin
 from ._resume import ResumeContext
 from ._show import best, diff, show
+from ._slurm import slurm
 from ._sweep_decorator import sweep
 from ._tuning import tune_batch_size, tune_learning_rate
 from ._utils import load_experiment, load_from_checkpoint, original_cwd
@@ -139,6 +140,7 @@ __all__ = [
     "HydraDDP",
     "pin_gpu_round_robin",
     "HydraFSDP",
+    "slurm",
     "submitit_slurm_config",
     "seed_everything_per_rank",
     "multirun",

@@ -414,3 +414,24 @@ When a PR's tests pass, remove its `do-not-merge:needs-cluster` gate, rebase ont
 `main`, and merge. Record the run (cluster, GPUs, date, logs) on the PR so the
 "HPC-validated" claim is auditable. See the [[cluster-gated-prs]] memory for the
 current parked-PR status and rebase notes.
+
+### T10: `mushin.slurm` and its check of the request (#346)
+
+The check is written from SLURM's documentation; its tests stand in
+`scontrol` output. On the cluster:
+
+1. Save the output of `scontrol --all --oneliner show partition`, and of
+   `sinfo -o "%P %l %G"`. Report both (redact names if needed): the tests'
+   stand-in output should match their shape, and whether GPU partitions list
+   `gres/gpu` in `TRES` decides whether a GPU check could be added.
+2. `mushin.slurm(partition="<a partition that does not exist>")` must raise,
+   naming the partitions whose time limit fits; `mushin.slurm(partition="<P>",
+   timeout_min=<one minute past P's MaxTime>)` must raise; the same with
+   `qos="<a QoS>"` must not.
+3. Run a two-cell sweep with `launcher="submitit_slurm",
+   launcher_config=mushin.slurm(gpus=1, timeout_min=10, partition="<P>",
+   setup=["echo setup ran on $HOSTNAME"])`. Each cell's job log must show the
+   setup line once and the cell once (`sacct -j <array id> --format=JobID,NTasks`
+   shows one task per job).
+
+**Report:** the saved output, the two error messages, and the `sacct` lines.
