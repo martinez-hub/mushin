@@ -154,87 +154,133 @@ def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
     assert back == {"weird": {"__mushin_nonfinite__": "hello"}}
 
 
-@pytest.mark.skipif(
-    __import__("sys").platform != "win32", reason="a reader blocks a replace only there"
-)
-def test_a_status_write_waits_for_a_reader_to_let_go(tmp_path):
-    """On Windows a replace fails while another process has the target open
-    (#357): the write waits for the reader rather than fail the cell."""
-    import threading
-
-    from mushin._resume import STATUS_FILE, read_cell_status, write_cell_status
-
-    write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
-    reader = open(tmp_path / STATUS_FILE, encoding="utf-8")  # noqa: SIM115
-    timer = threading.Timer(0.3, reader.close)
-    timer.start()
-    try:
-        write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
-    finally:
-        timer.join()
-        reader.close()
-    assert read_cell_status(tmp_path)["status"] == "completed"
-
-
-def _held(monkeypatch, times, ops=("replace", "unlink")):
-    """`Path.replace` and `Path.unlink` (those in ``ops``) raise as Windows
-    does while another process holds the file, ``times`` times; then they
-    act."""
-    from pathlib import Path
-
-    from mushin import _sweep_io
-
+def _operation(fails):
+    """A stand-in replace or delete that raises as Windows does while another
+    process holds the file, ``fails`` times, then succeeds."""
     calls = []
-    real = {"replace": Path.replace, "unlink": Path.unlink}
 
-    def stand_in(name):
-        def held(self, *args, **kwargs):
-            calls.append(name)
-            if len(calls) <= times:
-                raise PermissionError(13, "Access is denied")
-            return real[name](self, *args, **kwargs)
+    def operation():
+        calls.append(1)
+        if len(calls) <= fails:
+            raise PermissionError(13, "Access is denied")
 
-        return held
-
-    for name in ops:
-        monkeypatch.setattr(Path, name, stand_in(name))
-    monkeypatch.setattr(_sweep_io, "_HELD_WAITS", (0,) * len(_sweep_io._HELD_WAITS))
-    return calls
+    return operation, calls
 
 
-@pytest.mark.parametrize("windows", [True, False], ids=["windows", "elsewhere"])
-def test_a_held_sidecar_is_waited_for_only_on_windows(tmp_path, monkeypatch, windows):
+@pytest.fixture
+def no_waits(monkeypatch):
     from mushin import _sweep_io
 
-    monkeypatch.setattr(_sweep_io, "_WINDOWS", windows)
-    target = tmp_path / "f.json"
-    target.write_text("old")
-    calls = _held(monkeypatch, times=2)
-    if windows:
-        _sweep_io._atomic_write_text(target, "{}")
-        assert target.read_text() == "{}" and calls.count("replace") == 3
-        calls.clear()
-        _sweep_io.remove_sidecar(target)  # held twice more, then deleted
-        assert not target.exists() and calls == ["unlink"] * 3
-    else:
-        with pytest.raises(PermissionError):
-            _sweep_io._atomic_write_text(target, "{}")
-        assert calls.count("replace") == 1 and target.read_text() == "old"
+    monkeypatch.setattr(_sweep_io, "_HELD_WAITS", (0,) * len(_sweep_io._HELD_WAITS))
 
 
-def test_a_sidecar_held_past_the_waits_fails_and_leaves_no_temp_file(
+@pytest.mark.usefixtures("no_waits")
+def test_a_held_file_is_waited_for_only_on_windows(monkeypatch):
+    from mushin import _sweep_io
+
+    monkeypatch.setattr(_sweep_io, "_WINDOWS", True)
+    operation, calls = _operation(fails=2)
+    _sweep_io._while_held(operation)
+    assert len(calls) == 3
+
+    monkeypatch.setattr(_sweep_io, "_WINDOWS", False)
+    operation, calls = _operation(fails=2)
+    with pytest.raises(PermissionError):
+        _sweep_io._while_held(operation)
+    assert len(calls) == 1  # at once, as before
+
+
+@pytest.mark.usefixtures("no_waits")
+def test_a_file_held_past_the_waits_raises(monkeypatch):
+    from mushin import _sweep_io
+
+    monkeypatch.setattr(_sweep_io, "_WINDOWS", True)
+    operation, calls = _operation(fails=10**6)
+    with pytest.raises(PermissionError):
+        _sweep_io._while_held(operation)
+    assert len(calls) == len(_sweep_io._HELD_WAITS) + 1
+
+
+def test_a_failed_replace_raises_its_own_error_and_leaves_no_temp_file(
     tmp_path, monkeypatch
 ):
     from mushin import _sweep_io
 
-    monkeypatch.setattr(_sweep_io, "_WINDOWS", True)
-    # Only the target is held, by its reader: the temp file is not.
-    calls = _held(monkeypatch, times=10**6, ops=("replace",))
-    with pytest.raises(PermissionError):
+    def held(operation):
+        raise PermissionError(13, "the target is held")
+
+    monkeypatch.setattr(_sweep_io, "_while_held", held)
+    with pytest.raises(PermissionError, match="the target is held"):
         _sweep_io._atomic_write_text(tmp_path / "f.json", "{}")
-    assert calls.count("replace") == len(_sweep_io._HELD_WAITS) + 1
-    monkeypatch.undo()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_removing_a_sidecar_is_best_effort(tmp_path, monkeypatch):
+    from mushin import _sweep_io
+
+    target = tmp_path / "mushin_metrics.json"
+    target.write_text("{}")
+    assert _sweep_io.remove_sidecar(target) is True and not target.exists()
+    assert _sweep_io.remove_sidecar(target) is True  # already gone
+
+    target.write_text("{}")
+
+    def held(operation):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(_sweep_io, "_while_held", held)
+    assert _sweep_io.remove_sidecar(target) is False  # no raise: the caller goes on
+
+
+def _held_open(path, seconds):
+    """Open ``path`` for reading, as a reader in another process would, and
+    close it after ``seconds``; returns the timer to join."""
+    import threading
+
+    reader = open(path, encoding="utf-8")  # noqa: SIM115
+    timer = threading.Timer(seconds, reader.close)
+    timer.start()
+    return timer
+
+
+WINDOWS_ONLY = pytest.mark.skipif(
+    __import__("sys").platform != "win32",
+    reason="a reader keeps a file from being replaced or deleted only there",
+)
+
+
+@WINDOWS_ONLY
+def test_a_status_write_waits_for_a_reader_to_let_go(tmp_path):
+    import time
+
+    from mushin._resume import STATUS_FILE, read_cell_status, write_cell_status
+
+    write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
+    start = time.monotonic()
+    timer = _held_open(tmp_path / STATUS_FILE, 0.3)
+    try:
+        write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    finally:
+        timer.join()
+    assert time.monotonic() - start >= 0.25  # it waited
+    assert read_cell_status(tmp_path)["status"] == "completed"
+
+
+@WINDOWS_ONLY
+def test_a_metrics_file_is_removed_once_its_reader_lets_go(tmp_path):
+    import time
+
+    from mushin._sweep_io import remove_sidecar
+
+    target = tmp_path / "mushin_metrics.json"
+    target.write_text("{}")
+    start = time.monotonic()
+    timer = _held_open(target, 0.3)
+    try:
+        assert remove_sidecar(target) is True
+    finally:
+        timer.join()
+    assert time.monotonic() - start >= 0.25 and not target.exists()
 
 
 @pytest.mark.parametrize(

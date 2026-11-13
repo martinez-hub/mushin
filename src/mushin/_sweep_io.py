@@ -182,7 +182,12 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
         tmp.write_text(text, encoding="utf-8")
         _while_held(lambda: tmp.replace(path))  # atomic on POSIX/Windows
     finally:
-        tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
+        # No residue if the replace raced or failed; a delete that fails here
+        # must not mask the replace's own error.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 #: How long, in seconds, each retry waits on Windows while another process
@@ -201,8 +206,9 @@ def _while_held(operation: Callable[[], object]) -> None:
     polling the status files, would fail the cell whose record it read.
     mushin's own readers hold a file only while they read it. A process that
     holds one longer (a sync client, an antivirus scan) still fails the write
-    after about two seconds, as does a share mounted from another system
-    (WSL's /mnt/c, SMB), where this check does not apply."""
+    after about two seconds. A Windows share mounted from another system
+    (WSL's /mnt/c, SMB) is not seen as Windows: there it fails at once, as
+    before."""
     if not _WINDOWS:
         operation()
         return
@@ -215,10 +221,15 @@ def _while_held(operation: Callable[[], object]) -> None:
     operation()
 
 
-def remove_sidecar(path: Path) -> None:
+def remove_sidecar(path: Path) -> bool:
     """Delete a sidecar if it is there, waiting on Windows while another
-    process has it open (#357)."""
-    _while_held(lambda: Path(path).unlink(missing_ok=True))
+    process has it open (#357); best-effort, as every caller wants it:
+    returns whether it is gone, and never raises an ``OSError``."""
+    try:
+        _while_held(lambda: Path(path).unlink(missing_ok=True))
+    except OSError:
+        return False
+    return True
 
 
 def _atomic_write_json(path: Path, payload: Any, as_text: list | None = None) -> str:
