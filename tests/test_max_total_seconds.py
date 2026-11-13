@@ -217,3 +217,38 @@ def test_multi_rank_detection_branches(monkeypatch):
     monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "2")
     monkeypatch.delenv("SUBMITIT_LOCAL_GLOBALID")
     assert not _TaskRunner._multi_rank_world()
+
+
+@pytest.mark.parametrize(
+    "config, warns",
+    [
+        ({"tasks_per_node": 2}, True),
+        ({"nodes": 2, "tasks_per_node": 1}, True),
+        ({"tasks_per_node": "4"}, True),
+        ({"tasks_per_node": 1, "timeout_min": 5}, False),
+        ({"timeout_min": 5}, False),
+    ],
+)
+def test_the_driver_warns_when_a_launch_disables_the_budget(tmp_path, config, warns):
+    """#370: a launch that gives each cell several tasks disables the budget
+    in every task, where the warning lands in each job's log; the session
+    that called run() hears it too, before anything is submitted."""
+    import warnings
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        W().run(
+            a=multirun([1, 2]),
+            working_dir=str(tmp_path / "s"),
+            max_total_seconds=60,
+            launcher="submitit_local",
+            launcher_config=config,
+            dry_run=True,
+        )
+    disabled = [w for w in caught if "is disabled for this sweep" in str(w.message)]
+    assert bool(disabled) == warns

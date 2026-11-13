@@ -674,6 +674,19 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
+def _tasks_per_cell(launcher_config) -> int:
+    """How many tasks a submitit launcher config gives each cell's job:
+    ``tasks_per_node`` times ``nodes``, each 1 when absent or unreadable."""
+
+    def count(name: str) -> int:
+        try:
+            return max(int(launcher_config.get(name, 1)), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    return count("tasks_per_node") * count("nodes")
+
+
 def _read_swept_value(cfg, name: str):
     """Read swept param ``name`` from a job config. A literal flat key wins;
     otherwise ``name`` is treated as a nested config *path* (``model.width``),
@@ -2738,7 +2751,8 @@ class BaseWorkflow:
             several ranks or tasks (a multi-rank DDP launch, or a submitit job
             with ``tasks_per_node > 1``, ``submitit_local`` included), because
             each checks it at its own moment: DDP could hang, or a late task
-            record the cell skipped.
+            record the cell skipped. When ``launcher_config`` gives each cell
+            several tasks, ``run()`` also warns before it submits anything.
 
         sample : int | None (default: None)
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast
@@ -2830,6 +2844,22 @@ class BaseWorkflow:
                 f"hydra.launcher.{k}={_to_override_element(v)}"
                 for k, v in launcher_config.items()
             )
+            tasks = _tasks_per_cell(launcher_config)
+            if max_total_seconds is not None and tasks > 1:
+                # Each task disables the budget for itself and says so in its
+                # job's log (`_TaskRunner._multi_rank_world`); say it here
+                # too, where the caller sees it (#370).
+                import warnings
+
+                warnings.warn(
+                    "`max_total_seconds` is disabled for this sweep's cells: "
+                    f"`launcher_config` gives each cell {tasks} tasks "
+                    "(`tasks_per_node` x `nodes`), which would check the "
+                    "deadline at different moments. Bound the jobs with the "
+                    "launcher's time limit (e.g. `timeout_min`) instead.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # The workflow depends on Hydra changing the working directory per job
         # at runtime: each job writes and reads its metrics sidecar in its own
