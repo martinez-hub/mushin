@@ -123,7 +123,9 @@ Run the same sweep again with `resume=True` and the same `working_dir`.
 Completed cells are reused from their records, and only the others are
 submitted: a resume that fills 3 cells of 1,000 queues 3 jobs. `sample=` and
 `cache_dir=` work the same way, submitting only the cells they leave to
-compute.
+compute. A cell whose config reads the environment (`${oc.env:...}`), and every
+cell of a sweep with Hydra callbacks, is still submitted, and its job decides,
+since the job's environment and callbacks are not the driver's.
 
 To cancel a sweep, cancel its job array: `scancel <array id>`. The array id is
 in `squeue --me`, and it begins each folder name under
