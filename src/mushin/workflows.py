@@ -688,6 +688,41 @@ def _as_authored(cfg):
     return cfg
 
 
+def _raw_override_texts(overrides) -> list[str]:
+    """A sweep's override strings as its YAML holds them, unresolved."""
+    from omegaconf import OmegaConf
+
+    return [str(t) for t in OmegaConf.to_container(overrides, resolve=False)]  # type: ignore[union-attr]
+
+
+def _holds_interpolation(text: str) -> bool:
+    """Whether an override's text holds an interpolation, which each job
+    resolves for itself (#353)."""
+    return "${" in text
+
+
+def _value_key(value: Any) -> str:
+    """How a coordinate keys a cell (`combo_key`), for one value."""
+    from ._sweep_io import combo_key
+
+    return combo_key({"_": value})
+
+
+def _coord(value: Any) -> Any:
+    """One element of a swept axis as `_sanitize_coordinate_for_xarray`
+    gives it: a sequence as its text."""
+    return str(value) if _non_str_sequence(value) else value
+
+
+def _index_of(elements: list, value: Any) -> int | None:
+    """The index of the element of an axis that a job's own override gave
+    it, or None."""
+    for j, element in enumerate(elements):
+        if type(element) is type(value) and element == value:
+            return j
+    return None
+
+
 def _resolve_in_place(cfg) -> None:
     """Resolve a job config's interpolations in place, as zen does before it
     calls a task, so everything read from it afterwards sees one value per
@@ -2489,6 +2524,7 @@ class BaseWorkflow:
         self.metrics = {}
         self.workflow_overrides = {}
         self._multirun_task_overrides = {}
+        self._interpolated_cells = None
         self.jobs = []
         self._working_dir = None
         # combo_key(sanitized swept-param combo) -> that cell's metrics dict.
@@ -2580,14 +2616,116 @@ class BaseWorkflow:
         {'foo': ['val'], 'bar': multirun(['a', 'b']), 'apple': 1}
         """
         if not self._multirun_task_overrides:
-            overrides = _override_texts(
-                load_from_yaml(self.working_dir / "multirun.yaml").hydra.overrides.task
-            )
-
-            output = self._parse_overrides(overrides)
+            task = load_from_yaml(
+                self.working_dir / "multirun.yaml"
+            ).hydra.overrides.task
+            raw = _raw_override_texts(task)
+            if not any(_holds_interpolation(text) for text in raw):
+                output = self._parse_overrides(_override_texts(task))
+            else:
+                output, cells_known = self._overrides_from_cells(task, raw)
+                if not cells_known:
+                    # Read again once the sweep's cells are known.
+                    return output
             self._multirun_task_overrides = output
 
         return self._multirun_task_overrides
+
+    def _overrides_from_cells(self, task, raw: list[str]) -> tuple[dict, bool]:
+        """`multirun_task_overrides` for a sweep with an interpolated override
+        (#353), and whether its cells were known. Each override is read on its
+        own; a fixed one as before (resolved, else as written, #351). A swept
+        one whose text holds an interpolation was resolved by each of its
+        jobs, so each element's coordinate comes from its cells: the value
+        the cells that completed in this run agree on (the driver's own
+        reading of it, where that keys the same, so a value that resolves
+        alike keys as it always has), the element's text where they differ,
+        and the driver's reading, else the text, where none completed."""
+        output: dict = {}
+        axes: dict[str, tuple[list, list | None]] = {}
+        for i, text in enumerate(raw):
+            ((name, written),) = self._parse_overrides([text]).items()
+            if not _holds_interpolation(text):
+                output[name] = written
+                continue
+            try:
+                read = self._parse_overrides([task[i]])[name]
+            except Exception:  # noqa: BLE001 - it cannot be resolved here
+                read = None
+            if isinstance(written, multirun):
+                axes[name] = (list(written), None if read is None else list(read))
+                output[name] = written
+            else:
+                output[name] = written if read is None else read
+        coordinates, known = self._axis_coordinates(axes)
+        for name, values in coordinates.items():
+            output[name] = multirun(values)
+        return output, known
+
+    def _axis_coordinates(self, axes) -> tuple[dict[str, list], bool]:
+        """Each interpolated axis's coordinates (see `_overrides_from_cells`)
+        and whether the sweep's cells were known; records which element each
+        cell got, for `_combo_of_cfg`."""
+        dirs, cfgs = self.multirun_working_dirs, self.cfgs
+        known = bool(dirs) and cfgs is not None and len(dirs) == len(cfgs)
+        elements_of = {name: [None] * (len(dirs) if known else 0) for name in axes}
+        votes: dict[str, list[list]] = {
+            name: [[] for _ in written] for name, (written, _) in axes.items()
+        }
+        for i in range(len(dirs) if known else 0):
+            own = self._cell_overrides(i)
+            record, another_runs = self._cell_record(i)
+            combo = (record or {}).get("combo")
+            voted = (
+                not another_runs
+                and (record or {}).get("status") == "completed"
+                and isinstance(combo, dict)
+            )
+            for name, (written, _) in axes.items():
+                j = _index_of(written, own.get(name, _MISSING_SWEPT))
+                elements_of[name][i] = j
+                if j is not None and voted and name in combo:
+                    votes[name][j].append(combo[name])
+        coordinates = {}
+        for name, (written, read) in axes.items():
+            values = []
+            for j, text in enumerate(written):
+                driver = None if read is None else read[j]
+                cast = [_value_key(v) for v in votes[name][j]]
+                if not cast:
+                    values.append(text if read is None else driver)
+                elif len(set(cast)) == 1:
+                    agreed = votes[name][j][0]
+                    same = read is not None and _value_key(_coord(driver)) == cast[0]
+                    values.append(driver if same else agreed)
+                else:
+                    values.append(text)
+            coordinates[name] = values
+        self._interpolated_cells = elements_of if known else None
+        return coordinates, known
+
+    def _cell_overrides(self, i: int) -> dict:
+        """Job ``i``'s own overrides, parsed as the sweep's are, its
+        interpolations unresolved; empty when they cannot be read."""
+        from omegaconf import OmegaConf
+
+        try:
+            jobs = getattr(self, "jobs", None)
+            if jobs and len(jobs) == len(self.cfgs) and jobs[i].overrides is not None:
+                texts = list(jobs[i].overrides)
+            else:
+                dir_ = self.multirun_working_dirs[i]
+                path = dir_ / str(self.output_subdir) / "overrides.yaml"
+                texts = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
+            return self._parse_overrides(texts)
+        except Exception:  # noqa: BLE001 - its cell keys as before
+            return {}
+
+    def _interpolated_names(self) -> dict[str, list]:
+        """{swept name: the element of each cell} for the swept overrides that
+        hold an interpolation, once the cells are known; else {}."""
+        self.multirun_task_overrides  # noqa: B018 - computes it
+        return self._interpolated_cells or {}
 
     @staticmethod
     def pre_task(*args: Any, **kwargs: Any) -> None:
@@ -3318,6 +3456,7 @@ class BaseWorkflow:
         # the dry_run early-return — so a preview or a rejected call on a
         # loaded workflow does not wipe state its next to_xarray() needs.
         self._multirun_task_overrides = {}
+        self._interpolated_cells = None
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -4108,13 +4247,16 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self.failures = []
         self.skipped = []
         job_metrics: list[Any] = []
-        for job, cfg, wdir in zip(
-            self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
+        for i, (job, cfg, wdir) in enumerate(
+            zip(self.jobs, self.cfgs, self.multirun_working_dirs, strict=True)
         ):
             # Keyed on the swept params only (all `_combo_of_cfg` returns), as
-            # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and manifest
-            # keys align.
-            swept_combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
+            # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and the
+            # grid align. The manifest keys a cell as its job resolved it,
+            # which differs only for an interpolated swept value (#353).
+            choices = _group_choices_of_job(job)
+            swept_combo = self._combo_of_cfg(cfg, choices=choices, i=i)
+            job_combo = self._job_combo(cfg, choices, i)
             key = combo_key(swept_combo)
 
             # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
@@ -4125,7 +4267,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 job.return_value, _SkippedRun
             ):
                 self.skipped.append({"combo": key, "working_dir": str(wdir)})
-                manifest.mark(swept_combo, dir=wdir.name, status="skipped")
+                manifest.mark(job_combo, dir=wdir.name, status="skipped")
                 job_metrics.append(None)
                 continue
 
@@ -4153,13 +4295,13 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                         "working_dir": str(wdir),
                     }
                 )
-                manifest.mark(swept_combo, dir=wdir.name, status="failed", error=error)
+                manifest.mark(job_combo, dir=wdir.name, status="failed", error=error)
                 job_metrics.append(None)
             else:
                 job_metrics.append(rv)
                 if rv is not None:
                     self._metrics_by_combo[key] = rv
-                manifest.mark(swept_combo, dir=wdir.name, status="completed")
+                manifest.mark(job_combo, dir=wdir.name, status="completed")
 
         self.metrics = self._process_metrics(job_metrics)
 
@@ -4196,20 +4338,47 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if isinstance(v, multirun)
         ]
 
-    def _combo_of_cfg(self, cfg: Any, choices: dict | None = None) -> dict[str, Any]:
+    def _combo_of_cfg(
+        self, cfg: Any, choices: dict | None = None, i: int | None = None
+    ) -> dict[str, Any]:
         """`_swept_combo` of one job config; ``choices`` is the job's
-        ``hydra.runtime.choices``."""
+        ``hydra.runtime.choices``. For job ``i``, an interpolated swept value
+        is its element's coordinate (`_overrides_from_cells`), never resolved
+        again: after the run it resolves differently, or not at all."""
 
         def choice_of(name: str) -> str | None:
             choice = (choices or {}).get(name)
             return None if choice is None else str(choice)
 
-        return _swept_combo(
+        names = self._swept_param_names()
+        cells = self._interpolated_names() if i is not None else {}
+        own = {n: cells[n][i] for n in cells if i < len(cells[n])}
+        own = {n: j for n, j in own.items() if j is not None}
+        combo = _swept_combo(
             cfg,
-            self._swept_param_names(),
+            [n for n in names if n not in own],
             choice_of,
             self._sanitize_coordinate_for_xarray,
         )
+        overrides = self.multirun_task_overrides
+        for n, j in own.items():
+            combo[n] = _coord(overrides[n][j])
+        return {n: combo[n] for n in names if n in combo}
+
+    def _job_combo(self, cfg: Any, choices: dict | None, i: int) -> dict[str, Any]:
+        """Job ``i``'s combo as its job resolved it, as the manifest keys it
+        (a resume looks a cell up by its job's own combo): an interpolated
+        value from the cell's record, else its grid coordinate."""
+        combo = self._combo_of_cfg(cfg, choices, i)
+        cells = self._interpolated_names()
+        if cells:
+            record, another_runs = self._cell_record(i)
+            recorded = (record or {}).get("combo")
+            if not another_runs and isinstance(recorded, dict):
+                for n in cells:
+                    if n in recorded:
+                        combo[n] = recorded[n]
+        return combo
 
     def _cell_record(self, i: int) -> tuple[dict | None, bool]:
         """Job dir ``i``'s status record, read now, and whether it is another
@@ -4288,6 +4457,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # Reset memoized caches so a reused workflow object does not return
         # stale overrides/coordinates from a previously loaded directory.
         self._multirun_task_overrides = {}
+        self._interpolated_cells = None
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -4434,6 +4604,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             manifest_cells, manifest_mtime = {}, 0.0
 
         with_result: set[str] = set()
+        job_keys: dict[str, str] = {}
         dirs: dict[str, Path] = {}
         failed: set[str] = set()
         if job_metrics is None:
@@ -4445,16 +4616,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             zip(self.multirun_working_dirs, self.cfgs, job_metrics, strict=True)
         ):
             try:
-                key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
+                choices = self._job_choices(i)
+                key = combo_key(self._combo_of_cfg(cfg, choices=choices, i=i))
+                job_key = combo_key(self._job_combo(cfg, choices, i))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
+            # The manifest keys a cell as its job resolved it (#353).
+            job_keys[key] = job_key
             sidecar, another_runs = self._cell_record(i)
             if another_runs:
                 # Its job died before its first record. The manifest knows
                 # how it ended when this run wrote it, after Hydra's snapshot
                 # (an earlier run's would call the earlier cell completed);
                 # in the same tick of a coarse clock counts as after.
-                entry = manifest_cells.get(key, {})
+                entry = manifest_cells.get(job_key, {})
                 snapshot = dir_ / f"{self.output_subdir}/hydra.yaml"
                 ours = manifest_mtime >= _mtime(snapshot)
                 if (
@@ -4467,7 +4642,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 continue
             status = (sidecar or {}).get("status")
             if sidecar is None:  # a sweep from before sidecars: ask the manifest
-                entry = manifest_cells.get(key, {})
+                entry = manifest_cells.get(job_key, {})
                 if entry.get("dir") == dir_.name:
                     status = entry.get("status")
                 elif no_sidecar_counts:
@@ -4494,7 +4669,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 # The manifest's error text, if it describes this attempt: it
                 # lists this dir, and was written after the cell's status (a
                 # resume killed before its own manifest leaves the old one).
-                entry = manifest_cells.get(key, {})
+                entry = manifest_cells.get(job_keys.get(key, key), {})
                 current = (
                     entry.get("dir") == dir_.name
                     and _mtime(dir_ / STATUS_FILE) <= manifest_mtime
@@ -4750,13 +4925,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     zip(self.cfgs, aligned, strict=True)
                 ):
                     if per_job:
-                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        combo = self._combo_of_cfg(
+                            cfg, choices=self._job_choices(i), i=i
+                        )
                         self._metrics_by_combo[combo_key(combo)] = per_job
             elif all(len(col) == n_jobs for col in self.metrics.values()):
                 for i, cfg in enumerate(self.cfgs):
                     per_job = {k: col[i] for k, col in self.metrics.items()}
                     if per_job:
-                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        combo = self._combo_of_cfg(
+                            cfg, choices=self._job_choices(i), i=i
+                        )
                         self._metrics_by_combo[combo_key(combo)] = per_job
 
         grid_names = list(orig_coords)
@@ -4812,9 +4991,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # its working dir (cfgs and working dirs are job-aligned), then look
             # up per grid cell; a missing cell gets an empty string.
             workdir_by_combo = {
-                combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i))): str(
-                    wd
-                )
+                combo_key(
+                    self._combo_of_cfg(cfg, choices=self._job_choices(i), i=i)
+                ): str(wd)
                 for i, (cfg, wd) in enumerate(
                     zip(self.cfgs, self.multirun_working_dirs, strict=True)
                 )

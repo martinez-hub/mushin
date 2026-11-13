@@ -5,14 +5,18 @@ sweep's jobs have run is read as written, instead of stopping `run()` and a
 reload (#351). One that can be resolved reads as before, and a swept one
 that cannot still raises (#353)."""
 
+import itertools
 import json
+import math
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pytest
 from hydra_zen import make_config
+from omegaconf import OmegaConf
 
 from mushin import MultiRunMetricsWorkflow, multirun
 from mushin._sweep_io import MANIFEST_FILE
@@ -119,18 +123,28 @@ def test_an_interpolation_that_resolves_reads_its_value(tmp_path, swept):
     assert np.ravel(loaded.to_xarray().score.values).tolist() == scores
 
 
-def test_a_swept_interpolation_that_cannot_be_resolved_still_raises(tmp_path):
-    # Each job resolves it to a value of its own, which the grid cannot key
-    # by its text (#353): raising, as before, beats a cell silently NaN.
-    from omegaconf.errors import InterpolationResolutionError
-
-    with pytest.raises(InterpolationResolutionError, match="HydraConfig was not set"):
-        Plain().run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)
-    # Raised reading the sweep back, after both cells completed.
-    records = [
-        json.loads(p.read_text()) for p in tmp_path.glob("*/mushin_cell_status.json")
-    ]
-    assert [r["status"] for r in records] == ["completed", "completed"]
+def test_a_swept_interpolation_that_cannot_be_resolved_reads_its_cells(tmp_path):
+    # Each job resolves it for itself, to its own dir: main raised reading
+    # the sweep back after both cells completed (#353). Its one cell's value
+    # is the coordinate, in the run and in a reload.
+    wf = Plain()
+    wf.run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)
+    own = str(tmp_path / "0" / "a")
+    assert wf.multirun_task_overrides["x"] == [own, "b"]
+    assert _scores(wf) == [1.0, 1.0] and wf.is_complete
+    loaded = Plain()
+    loaded.load_from_dir(tmp_path, "mushin_metrics.json")
+    assert loaded.multirun_task_overrides["x"] == [own, "b"]
+    assert _scores(loaded) == [1.0, 1.0] and loaded.is_complete
+    # With two cells per element, which resolve it differently, its text.
+    two = Plain()
+    two.run(
+        x=multirun([f"{HYDRA_DIR}/a", "b"]),
+        overrides=["+seed=0,1"],
+        working_dir=tmp_path / "two",
+    )
+    assert two.multirun_task_overrides["x"] == [f"{HYDRA_DIR}/a", "b"]
+    assert two.is_complete
 
 
 def test_target_dir_overrides_cache_nothing_from_a_read_that_raised(tmp_path):
@@ -146,3 +160,131 @@ def test_target_dir_overrides_cache_nothing_from_a_read_that_raised(tmp_path):
     for _ in range(2):  # not half the dirs on the second read
         with pytest.raises(FileNotFoundError):
             second.target_dir_multirun_overrides  # noqa: B018
+
+
+# A swept value written as an interpolation is keyed by what its cells
+# resolved: the value they agree on, else the element's text (#353).
+
+
+@pytest.fixture
+def counter():
+    """A resolver that gives a new value on each call."""
+    count = itertools.count()
+    OmegaConf.register_new_resolver("mushin_test_count", lambda: f"c{next(count)}")
+    yield "${mushin_test_count:}"
+    OmegaConf.clear_resolver("mushin_test_count")
+
+
+def _values(wf, name="v"):
+    return np.ravel(wf.to_xarray()[name].values).tolist()
+
+
+class Seeded(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, seed):
+        return dict(v=float(seed))
+
+
+def test_a_value_its_cells_resolve_differently_keys_by_its_text(tmp_path, counter):
+    """The issue's first case: each cell of the element resolved its own
+    value, so the coordinate is the element's text, and every completed cell
+    holds its result (main left them NaN)."""
+    wf = Seeded()
+    wf.run(x=multirun([counter, "b"]), seed=multirun([0, 1]), working_dir=tmp_path)
+    assert [str(x) for x in wf.to_xarray()["x"].values] == [counter, "b"]
+    assert _values(wf) == [0.0, 1.0, 0.0, 1.0] and wf.is_complete
+    back = Seeded().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert [str(x) for x in back.to_xarray()["x"].values] == [counter, "b"]
+    assert _values(back) == [0.0, 1.0, 0.0, 1.0] and back.is_complete
+
+
+class Named(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(model_name, name):
+        return dict(v=float(len(name)))
+
+
+def test_an_interpolation_of_another_swept_value(tmp_path):
+    """`${model_name}_x` cannot be resolved in multirun.yaml (main raised);
+    its cells resolve it to m1_x and m2_x, so it keys by its text."""
+    wf = Named()
+    wf.run(
+        model_name=multirun(["m1", "m2"]),
+        name=multirun(["${model_name}_x", "b"]),
+        working_dir=tmp_path,
+    )
+    assert [str(x) for x in wf.to_xarray()["name"].values] == ["${model_name}_x", "b"]
+    assert _values(wf) == [4.0, 1.0, 4.0, 1.0]
+    back = Named().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert _values(back) == [4.0, 1.0, 4.0, 1.0]
+
+
+class SampledRate(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr, seed, base_lr=None):
+        return dict(v=float(lr) + seed)
+
+
+def test_an_element_no_cell_ran_keys_as_the_driver_reads_it(tmp_path):
+    """With `sample=` leaving out every cell of `${base_lr}`, nothing votes:
+    the coordinate is the driver's reading, as on main, not the text."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for sample_seed in range(30):
+            wf = SampledRate()
+            wf.run(
+                base_lr=0.01,
+                lr=multirun(["${base_lr}", 0.1]),
+                seed=multirun([0, 1]),
+                working_dir=tmp_path / str(sample_seed),
+                sample=2,
+                sample_seed=sample_seed,
+            )
+            left_out = wf.to_xarray()["v"].sel(lr="0.01").values
+            if all(math.isnan(x) for x in left_out):
+                break
+        else:
+            pytest.skip("no sample left out every ${base_lr} cell")
+    assert wf.multirun_task_overrides["lr"] == ["0.01", 0.1]
+
+
+class Listed(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(xs, base_lr=None):
+        return dict(v=float(len(xs)))
+
+
+def test_an_interpolation_inside_a_swept_list(tmp_path):
+    """main keyed the element as the driver read it (['0.01', 1]) and the
+    cell as it resolved it ([0.01, 1]): a NaN cell."""
+    wf = Listed()
+    wf.run(base_lr=0.01, xs=multirun([["${base_lr}", 1], [3]]), working_dir=tmp_path)
+    assert _values(wf) == [2.0, 1.0]
+    back = Listed().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert _values(back) == [2.0, 1.0]
+
+
+class FailsOnB(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, seed):
+        if x == "b":
+            raise RuntimeError("b fails")
+        return dict(v=float(seed))
+
+
+def test_failures_key_the_same_in_the_run_and_a_reload(tmp_path, counter):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wf = FailsOnB()
+        wf.run(
+            x=multirun([counter, "b"]),
+            seed=multirun([0, 1]),
+            working_dir=tmp_path,
+            on_error="nan",
+        )
+    back = FailsOnB().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert sorted(f["combo"] for f in wf.failures) == ["seed=0,x=b", "seed=1,x=b"]
+    assert sorted(f["combo"] for f in back.failures) == sorted(
+        f["combo"] for f in wf.failures
+    )
+    assert _values(wf)[:2] == [0.0, 1.0] == _values(back)[:2]
