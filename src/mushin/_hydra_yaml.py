@@ -154,6 +154,22 @@ def hydra_job_fields(record: Any) -> tuple[Any, dict | None]:
     return hydra.job.num, hydra_choices(hydra)
 
 
+def hydra_run_stamp(record: Any) -> str | None:
+    """The run a ``load_hydra_record`` result names
+    (``hydra.job.mushin_run_id``, which ``run()`` sets for each job), or
+    None for a snapshot from before it."""
+    try:
+        if isinstance(record, dict):
+            stamp = record["hydra"]["job"].get("mushin_run_id")
+        else:
+            from omegaconf import OmegaConf
+
+            stamp = OmegaConf.select(record, "hydra.job.mushin_run_id")
+    except Exception:  # noqa: BLE001 - no such node: no stamp
+        return None
+    return stamp if isinstance(stamp, str) else None
+
+
 def hydra_choices(hydra: Any) -> dict | None:
     """``runtime.choices`` of a ``hydra`` node, or None where it has none."""
     try:

@@ -2990,7 +2990,14 @@ class BaseWorkflow:
             jobs = launch(
                 self.eval_task_cfg,
                 task_call,
-                overrides=_route_to_mushin_launchers(launch_overrides),
+                # Each job's hydra.yaml names this run, as its status records
+                # do, so a reload can tell a record an earlier run left in a
+                # reused dir (#355). Quoted: an id such as 1e5... must not
+                # read as a number.
+                overrides=[
+                    *_route_to_mushin_launchers(launch_overrides),
+                    f"++hydra.job.mushin_run_id='{task_call.run_id}'",
+                ],
                 multirun=True,
                 version_base=version_base,
                 to_dictconfig=to_dictconfig,

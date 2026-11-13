@@ -2465,6 +2465,29 @@ def test_skipped_cell_removes_stale_metrics_sidecar(tmp_path):
             assert not (d / "mushin_metrics.json").exists()
 
 
+class _ReusedDir(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, lr):
+        if x == 13:
+            raise RuntimeError("boom")
+        return dict(v=float(x) * lr)
+
+
+def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
+    import json
+
+    from mushin._hydra_yaml import hydra_run_stamp, load_hydra_record
+
+    _ReusedDir().run(x=multirun([1, 2]), lr=1.0, working_dir=str(tmp_path))
+    stamps = set()
+    for cell in ("0", "1"):
+        record = json.loads((tmp_path / cell / "mushin_cell_status.json").read_text())
+        snapshot = load_hydra_record(tmp_path / cell / ".hydra" / "hydra.yaml")
+        assert hydra_run_stamp(snapshot) == record["run_id"]
+        stamps.add(record["run_id"])
+    assert len(stamps) == 1
+
+
 def test_offline_reload_restores_inf_metrics(tmp_path):
     """The tagged ±Inf sidecar marker must be decoded by the default
     metric_load_fn too — an offline reload must yield real Inf values, not
