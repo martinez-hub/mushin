@@ -142,6 +142,31 @@ def test_budget_disabled_under_multi_rank_launch(tmp_path, monkeypatch):
     assert wf.is_complete
 
 
+def test_the_disabled_budget_warning_never_fails_a_cell(tmp_path, monkeypatch):
+    """A filter that turns the warning into an error (PYTHONWARNINGS=error,
+    which a job inherits) must not fail a cell over a disabled budget."""
+    import warnings
+
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "0")
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(a):
+            return dict(m=float(a))
+
+    wf = W()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message="`max_total_seconds` is disabled")
+        wf.run(
+            a=multirun([1, 2]),
+            working_dir=str(tmp_path / "s"),
+            max_total_seconds=600,
+            on_error="nan",
+        )
+    assert wf.failures == [] and wf.is_complete
+
+
 def test_multi_rank_detection_branches(monkeypatch):
     """The multi-rank signal must be a real per-rank launch, not just an
     allocation-wide variable: SLURM_NTASKS>1 needs SLURM_PROCID (srun sets it
@@ -150,7 +175,14 @@ def test_multi_rank_detection_branches(monkeypatch):
     exports WORLD_SIZE but never a per-rank var)."""
     from mushin.workflows import _TaskRunner
 
-    for var in ("WORLD_SIZE", "RANK", "SLURM_NTASKS", "SLURM_PROCID"):
+    for var in (
+        "WORLD_SIZE",
+        "RANK",
+        "SLURM_NTASKS",
+        "SLURM_PROCID",
+        "SUBMITIT_LOCAL_NTASKS",
+        "SUBMITIT_LOCAL_GLOBALID",
+    ):
         monkeypatch.delenv(var, raising=False)
     assert not _TaskRunner._multi_rank_world()
 
@@ -171,4 +203,17 @@ def test_multi_rank_detection_branches(monkeypatch):
 
     # negative: WORLD_SIZE leaked without a per-rank marker
     monkeypatch.delenv("RANK")
+    assert not _TaskRunner._multi_rank_world()
+    monkeypatch.delenv("WORLD_SIZE")
+
+    # submitit_local positive: a task of a job of several (#365)
+    monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "2")
+    monkeypatch.setenv("SUBMITIT_LOCAL_GLOBALID", "1")
+    assert _TaskRunner._multi_rank_world()
+
+    # submitit_local negatives: a job of one task, and no per-task marker
+    monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "1")
+    assert not _TaskRunner._multi_rank_world()
+    monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "2")
+    monkeypatch.delenv("SUBMITIT_LOCAL_GLOBALID")
     assert not _TaskRunner._multi_rank_world()

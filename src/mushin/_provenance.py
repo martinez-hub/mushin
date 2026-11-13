@@ -329,13 +329,8 @@ def _to_plain(cfg):
 
         # resolve=False: never evaluate interpolations (e.g. `${oc.env:SECRET}`),
         # which would bake a resolved secret into the on-disk record; the config
-        # is recorded as authored. Literal secret values are then redacted. The
-        # runner passes the plain containers it kept before resolving.
-        plain = (
-            cfg
-            if isinstance(cfg, (dict, list))
-            else OmegaConf.to_container(cfg, resolve=False)
-        )
+        # is recorded as authored. Literal secret values are then redacted.
+        plain = OmegaConf.to_container(cfg, resolve=False)
     except Exception:
         return None
     return _redact_config(plain)

@@ -3055,9 +3055,9 @@ def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_p
 
 
 def test_a_job_resolves_its_config_once(tmp_path):
-    """#353: a resolver that gives a new value each call (a clock, a counter)
-    is resolved once per job, so the cell's record, its provenance and the
-    task all hold the value the task ran with."""
+    """#353: a resolver that gives a new value each call (a counter) is
+    resolved once for the cell's record and its task, so the record holds
+    the value the task ran with."""
     import itertools
     import json
 
@@ -3086,21 +3086,60 @@ def test_a_job_resolves_its_config_once(tmp_path):
         assert record["combo"]["x"] == value
 
 
-def test_provenance_records_an_interpolation_as_authored(tmp_path, monkeypatch):
-    """Provenance keeps an `${oc.env:...}` as written, not the value it
-    resolves to (a database URL, say): zen resolved the config in place
-    before provenance was written, so the record held the value."""
+def test_a_jobs_fingerprint_is_its_config_as_composed(tmp_path):
+    """The fingerprint is taken before the config is resolved in place, as
+    the driver takes it from the composed config: an escaped interpolation
+    (resolved in place, it becomes a live one) keeps its fingerprint."""
     import json
 
-    monkeypatch.setenv("MUSHIN_TEST_DB_URL", "postgres://user:pw@host")
+    from omegaconf import OmegaConf
+
+    from mushin._resume import resolved_config, resolved_config_hash
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod
-        def task(x, db):
+        def task(x, tmpl):
             return dict(v=float(x))
 
+    from hydra_zen import make_config
+
+    W(make_config(tmpl="\\${x}")).run(x=multirun([1]), working_dir=str(tmp_path))
+    cell = tmp_path / "0"
+    composed = OmegaConf.load(cell / ".hydra" / "config.yaml")
+    record = json.loads((cell / "mushin_cell_status.json").read_text())
+    assert record["config_hash"] == resolved_config_hash(resolved_config(composed))
+
+
+def test_a_wrapper_that_does_not_resolve_reads_after_pre_task(tmp_path, monkeypatch):
+    """Only a wrapper that resolves the config before it calls (zen's
+    default) has it resolved in place; with one that opted out, the task
+    resolves its interpolations when it reads them, after `pre_task`."""
+    import os
+
+    from hydra_zen import zen
+
+    monkeypatch.setenv("MUSHIN_TEST_PRE", "unset")
+    monkeypatch.delenv("MUSHIN_TEST_PRE")
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(x):
+            os.environ["MUSHIN_TEST_PRE"] = "from-pre-task"
+
+        @staticmethod
+        def task(x, d):
+            seen.append(d)
+            return dict(v=1.0)
+
+    def lazy(fn):
+        return zen(fn, resolve_pre_call=False)
+
     W().run(
-        x=multirun([1]), db="${oc.env:MUSHIN_TEST_DB_URL}", working_dir=str(tmp_path)
+        x=multirun([1]),
+        d="${oc.env:MUSHIN_TEST_PRE,default}",
+        working_dir=str(tmp_path),
+        task_fn_wrapper=lazy,
+        pre_task_fn_wrapper=lazy,
     )
-    provenance = json.loads((tmp_path / "0" / "mushin_provenance.json").read_text())
-    assert provenance["config"]["db"] == "${oc.env:MUSHIN_TEST_DB_URL}"
+    assert seen == ["from-pre-task"]
