@@ -634,78 +634,54 @@ _MISSING_SWEPT = object()
 
 
 def _override_texts(overrides) -> list[str]:
-    """A sweep's override strings read back from its YAML, unresolved (#351).
+    """A sweep's override strings, read back from its YAML (#351).
 
-    Reading the elements of the loaded ``ListConfig`` resolves each one, and
-    an override such as ``+out='${hydra:runtime.output_dir}'`` holds an
-    interpolation: after the launch there is no ``HydraConfig`` for the
-    ``hydra`` resolver to read (in a new process, no such resolver), and a
-    resolver that can always run, such as ``now``, gives what it says when
-    mushin reads the file rather than what the jobs had."""
+    Each is read as before, its interpolations resolved, except one whose
+    resolution fails, which is read as the file holds it. An override such
+    as ``+out='${hydra:runtime.output_dir}'`` cannot be resolved once the
+    jobs have run: there is no ``HydraConfig`` for the ``hydra`` resolver to
+    read (in a new process, no such resolver). It stopped ``run()`` after
+    every cell had completed, and stopped a reload. A sweep's values read
+    unresolved cannot key cells that each job resolved for itself, so that
+    case warns."""
     from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
 
-    if OmegaConf.is_config(overrides):
-        return OmegaConf.to_container(overrides, resolve=False)  # type: ignore[return-value]
-    return list(overrides)
+    if not OmegaConf.is_config(overrides):
+        return list(overrides)
+    written = OmegaConf.to_container(overrides, resolve=False)
+    texts = []
+    for i, text in enumerate(written):  # type: ignore[arg-type]
+        try:
+            texts.append(overrides[i])
+        except InterpolationResolutionError as e:
+            texts.append(text)
+            if _is_sweep_override(text):
+                import warnings
+
+                warnings.warn(
+                    f"mushin cannot resolve the sweep {text!r} once its jobs "
+                    f"have run ({e}), so it reads that axis's values as "
+                    "written; a cell's value, which its job resolved, will "
+                    "not match them and the cell comes back NaN. Sweep plain "
+                    "values instead, and resolve them in the task.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+    return texts
 
 
-def _holds_interpolation(value: Any) -> bool:
-    """Whether a value read from override text holds a string with ``${``,
-    which OmegaConf treats as an interpolation (an escaped one too)."""
-    if isinstance(value, str):
-        return "${" in value
-    if isinstance(value, (list, tuple)):
-        return any(_holds_interpolation(v) for v in value)
-    if isinstance(value, Mapping):
-        return any(_holds_interpolation(v) for v in [*value.keys(), *value.values()])
-    return False
-
-
-def _unresolved_interpolation(cfg, name: str):
-    """The interpolation at swept param ``name`` of ``cfg``, unresolved, or
-    ``_MISSING_SWEPT`` when the value there is not an interpolation or cannot
-    be examined (the caller then reads it as before).
-
-    Looked up as `_read_swept_value` looks: a literal key first, else a
-    nested path. Only public OmegaConf calls, none of which resolves the
-    value itself; ``masked_copy`` keeps one key, so a large config is not
-    copied."""
-    from omegaconf import DictConfig, OmegaConf
-
+def _is_sweep_override(text: str) -> bool:
     try:
-        if not isinstance(cfg, DictConfig):
-            return _MISSING_SWEPT
-        if name in cfg.keys():
-            parent, key = cfg, name
-        elif "." in name:
-            head, key = name.rsplit(".", 1)
-            parent = OmegaConf.select(cfg, head)
-        else:
-            return _MISSING_SWEPT
-        if not (
-            isinstance(parent, DictConfig) and OmegaConf.is_interpolation(parent, key)
-        ):
-            return _MISSING_SWEPT
-        copy_ = OmegaConf.masked_copy(parent, [key])
-        return OmegaConf.to_container(copy_, resolve=False)[key]  # type: ignore[index]
-    except Exception:  # noqa: BLE001 - read it as before
-        return _MISSING_SWEPT
+        return _override_parser().parse_override(text).is_sweep_override()
+    except Exception:  # noqa: BLE001 - only decides whether to warn
+        return False
 
 
 def _read_swept_value(cfg, name: str):
     """Read swept param ``name`` from a job config. A literal flat key wins;
     otherwise ``name`` is treated as a nested config *path* (``model.width``),
-    which a plain ``cfg[name]`` subscription would reject.
-
-    An interpolation (``${now:%Y}``) is read unresolved, as
-    `_override_texts` reads the sweep's grid (#351), so a cell keys as its
-    grid coordinate does. Resolved, it would give what its resolver says when
-    mushin reads it: a completed cell whose ``${now:...}`` had changed since
-    came back NaN, and a ``${hydra:...}`` cannot be resolved outside its
-    job."""
-    unresolved = _unresolved_interpolation(cfg, name)
-    if unresolved is not _MISSING_SWEPT:
-        return unresolved
+    which a plain ``cfg[name]`` subscription would reject."""
     try:
         return cfg[name]
     except Exception:  # noqa: BLE001 - fall through to path lookup
@@ -763,8 +739,7 @@ def _swept_combo(
             if choice is not None:
                 val = choice
             else:
-                # Unresolved, as the grid reads a list or dict value (#351).
-                val = OmegaConf.to_container(val, resolve=False)
+                val = OmegaConf.to_container(val, resolve=True)
         combo[n] = sanitize(_unwrap_scalar(val))
     return combo
 
@@ -2173,10 +2148,6 @@ class BaseWorkflow:
         be stored in a `mushin.multirun` list. This
         enables one to distinguish this from an override whose sole
         value was a list of values.
-
-        A value holding an interpolation, such as ``${now:%Y}`` or
-        ``${hydra:runtime.output_dir}``, is returned unresolved, as the
-        sweep's override holds it; each job resolved it for itself.
 
         Returns
         -------
@@ -3707,9 +3678,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # Keyed on the swept params only (all `_combo_of_cfg` returns), as
             # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and manifest
             # keys align.
-            swept_combo = self._combo_of_cfg(
-                cfg, choices=_group_choices_of_job(job), overrides=job.overrides
-            )
+            swept_combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
             key = combo_key(swept_combo)
 
             # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
@@ -3791,69 +3760,20 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if isinstance(v, multirun)
         ]
 
-    def _combo_of_cfg(
-        self,
-        cfg: Any,
-        choices: dict | None = None,
-        overrides: Sequence[str] | None = None,
-    ) -> dict[str, Any]:
+    def _combo_of_cfg(self, cfg: Any, choices: dict | None = None) -> dict[str, Any]:
         """`_swept_combo` of one job config; ``choices`` is the job's
-        ``hydra.runtime.choices`` and ``overrides`` its override strings.
-
-        A swept value the grid holds as an interpolation is read from the
-        job's override when one is given (#351): the task's ``zen`` wrapper
-        resolves the job config in place, so the config a launcher hands back
-        holds what the interpolation gave, while the grid and the cell's own
-        records hold it unresolved."""
+        ``hydra.runtime.choices``."""
 
         def choice_of(name: str) -> str | None:
             choice = (choices or {}).get(name)
             return None if choice is None else str(choice)
 
-        combo = _swept_combo(
+        return _swept_combo(
             cfg,
             self._swept_param_names(),
             choice_of,
             self._sanitize_coordinate_for_xarray,
         )
-        if overrides is not None:
-            for name, value in self._interpolated_job_values(overrides).items():
-                combo[name] = self._sanitize_coordinate_for_xarray(
-                    _unwrap_scalar(value)
-                )
-        return combo
-
-    def _combo_of_job(self, i: int) -> dict[str, Any]:
-        """`_combo_of_cfg` of job ``i``, with its choices and its overrides."""
-        return self._combo_of_cfg(
-            self.cfgs[i], choices=self._job_choices(i), overrides=self._job_overrides(i)
-        )
-
-    def _interpolated_job_values(self, overrides: Sequence[str]) -> dict[str, Any]:
-        """The values one job's ``overrides`` give the swept params whose grid
-        values hold an interpolation, unresolved; empty when there are none,
-        or when the overrides do not parse."""
-        sweep = self.multirun_task_overrides
-        names = [
-            name
-            for name in self._swept_param_names()
-            if any(_holds_interpolation(v) for v in sweep[name])
-        ]
-        if not names:
-            return {}
-        try:
-            parsed = self._parse_overrides(list(overrides))
-        except Exception:  # noqa: BLE001 - key the cell by its config instead
-            return {}
-        return {name: parsed[name] for name in names if name in parsed}
-
-    def _job_overrides(self, i: int) -> list[str] | None:
-        """The override strings of job ``i``, when jobs align with cfgs; None
-        for a sweep loaded from disk, whose configs are read unresolved."""
-        jobs = getattr(self, "jobs", None)
-        if jobs and len(jobs) == len(self.cfgs):
-            return list(jobs[i].overrides or [])
-        return None
 
     def _job_choices(self, i: int) -> dict | None:
         """``runtime.choices`` for job ``i``, when jobs align with cfgs.
@@ -4055,11 +3975,11 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             no_sidecar_counts = True
         else:
             no_sidecar_counts = False
-        for i, (dir_, _cfg, metrics) in enumerate(
+        for i, (dir_, cfg, metrics) in enumerate(
             zip(self.multirun_working_dirs, self.cfgs, job_metrics, strict=True)
         ):
             try:
-                key = combo_key(self._combo_of_job(i))
+                key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
             sidecar = read_cell_status(dir_)
@@ -4339,17 +4259,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             n_jobs = len(self.cfgs)
             aligned = getattr(self, "_job_metrics_by_index", None)
             if aligned is not None and len(aligned) == n_jobs:
-                for i, (_cfg, per_job) in enumerate(
+                for i, (cfg, per_job) in enumerate(
                     zip(self.cfgs, aligned, strict=True)
                 ):
                     if per_job:
-                        combo = self._combo_of_job(i)
+                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
                         self._metrics_by_combo[combo_key(combo)] = per_job
             elif all(len(col) == n_jobs for col in self.metrics.values()):
-                for i in range(n_jobs):
+                for i, cfg in enumerate(self.cfgs):
                     per_job = {k: col[i] for k, col in self.metrics.items()}
                     if per_job:
-                        combo = self._combo_of_job(i)
+                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
                         self._metrics_by_combo[combo_key(combo)] = per_job
 
         grid_names = list(orig_coords)
@@ -4405,8 +4325,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # its working dir (cfgs and working dirs are job-aligned), then look
             # up per grid cell; a missing cell gets an empty string.
             workdir_by_combo = {
-                combo_key(self._combo_of_job(i)): str(wd)
-                for i, (_cfg, wd) in enumerate(
+                combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i))): str(
+                    wd
+                )
+                for i, (cfg, wd) in enumerate(
                     zip(self.cfgs, self.multirun_working_dirs, strict=True)
                 )
             }

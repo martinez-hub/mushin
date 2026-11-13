@@ -1,8 +1,8 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
-# Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
-"""A value holding an interpolation, fixed or swept, is read back unresolved
-(#351): mushin never resolves it after the jobs ran."""
+"""A sweep's override holding an interpolation that cannot be resolved once
+its jobs have run is read as written, instead of stopping `run()` and a
+reload (#351). One that can be resolved reads as before."""
 
 import json
 import subprocess
@@ -11,26 +11,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from omegaconf import OmegaConf
+from hydra_zen import make_config
 
-from mushin import MultiRunMetricsWorkflow, hydra_list, multirun
+from mushin import MultiRunMetricsWorkflow, multirun
 from mushin._sweep_io import MANIFEST_FILE
-from mushin.workflows import _read_swept_value, _swept_combo
 
 HYDRA_DIR = "${hydra:runtime.output_dir}"
-TICK = "${mushin_test_tick:}"
-
-
-@pytest.fixture
-def tick():
-    """A resolver that gives a new value on every call, as ``now`` does over
-    time: a read that resolves it again cannot get what the job had."""
-    count = iter(range(1, 10**6))
-    OmegaConf.register_new_resolver(
-        "mushin_test_tick", lambda: f"tick-{next(count)}", replace=True
-    )
-    yield
-    OmegaConf.clear_resolver("mushin_test_tick")
 
 
 class OwnDir(MultiRunMetricsWorkflow):
@@ -40,7 +26,7 @@ class OwnDir(MultiRunMetricsWorkflow):
         return dict(score=float(x), own_dir=float(Path(out) == Path.cwd()))
 
 
-class Swept(MultiRunMetricsWorkflow):
+class Plain(MultiRunMetricsWorkflow):
     @staticmethod
     def task(x):
         return dict(score=1.0)
@@ -50,7 +36,7 @@ def _scores(wf):
     return wf.to_xarray().score.values.tolist()
 
 
-def test_fixed_hydra_interpolation_does_not_crash_the_sweep(tmp_path):
+def test_a_fixed_hydra_interpolation_does_not_stop_the_sweep(tmp_path):
     wf = OwnDir()
     wf.run(x=multirun([1, 2]), out=HYDRA_DIR, working_dir=tmp_path)
 
@@ -63,14 +49,14 @@ def test_fixed_hydra_interpolation_does_not_crash_the_sweep(tmp_path):
     singleton = wf.to_xarray(non_multirun_params_as_singleton_dims=True)
     assert singleton.coords["out"].values.tolist() == [HYDRA_DIR]
 
-    # Reloaded in this process: HydraConfig is no longer set.
+    # Reloaded in this process, where HydraConfig is no longer set.
     loaded = MultiRunMetricsWorkflow()
     loaded.load_from_dir(tmp_path, "mushin_metrics.json")
     assert _scores(loaded) == [1.0, 2.0]
     assert loaded.multirun_task_overrides["out"] == HYDRA_DIR
 
 
-def test_fixed_hydra_interpolation_reloads_in_a_new_process(tmp_path):
+def test_a_fixed_hydra_interpolation_reloads_in_a_new_process(tmp_path):
     # In a new process the `hydra` resolver is not registered at all.
     OwnDir().run(x=multirun([1, 2]), out=HYDRA_DIR, working_dir=tmp_path)
     code = (
@@ -90,98 +76,58 @@ def test_fixed_hydra_interpolation_reloads_in_a_new_process(tmp_path):
     assert json.loads(out.splitlines()[-1]) == [[1.0, 2.0], HYDRA_DIR]
 
 
-@pytest.mark.usefixtures("tick")
-def test_fixed_interpolation_reads_back_unresolved(tmp_path):
-    wf = OwnDir()
-    wf.run(x=multirun([1, 2]), out=HYDRA_DIR, stamp=TICK, working_dir=tmp_path)
-    assert wf.multirun_task_overrides["stamp"] == TICK
-    for _ in range(2):  # the same on every read
-        loaded = MultiRunMetricsWorkflow()
-        loaded.load_from_dir(tmp_path, "mushin_metrics.json")
-        assert loaded.multirun_task_overrides["stamp"] == TICK
-
-
-@pytest.mark.usefixtures("tick")
-def test_swept_interpolation_keeps_every_cell(tmp_path):
-    # Resolved when read, the grid's coordinate was a new tick that no cell
-    # had, so a completed cell came back NaN.
-    wf = Swept()
-    wf.run(x=multirun([TICK, "b"]), working_dir=tmp_path)
-
-    ds = wf.to_xarray(include_working_subdirs_as_data_var=True)
-    assert ds.coords["x"].values.tolist() == [TICK, "b"]
-    assert ds.score.values.tolist() == [1.0, 1.0]
-    assert all(ds.working_subdir.values.tolist())
-    assert wf.failures == [] and wf.skipped == []
-    manifest = json.loads((tmp_path / MANIFEST_FILE).read_text())
-    assert {c["status"] for c in manifest["cells"].values()} == {"completed"}
-    for status in tmp_path.glob("*/mushin_cell_status.json"):
-        assert json.loads(status.read_text())["combo"]["x"] in (TICK, "b")
-
-    loaded = Swept()
-    loaded.load_from_dir(tmp_path, "mushin_metrics.json")
-    assert _scores(loaded) == [1.0, 1.0]
-    assert loaded.failures == [] and loaded.skipped == []
-
-
-@pytest.mark.usefixtures("tick")
-def test_swept_list_with_an_interpolation_keeps_every_cell(tmp_path):
-    wf = Swept()
-    wf.run(
-        x=multirun([hydra_list([TICK, "z"]), hydra_list(["b"])]), working_dir=tmp_path
-    )
-    assert _scores(wf) == [1.0, 1.0]
-    loaded = Swept()
-    loaded.load_from_dir(tmp_path, "mushin_metrics.json")
-    assert _scores(loaded) == [1.0, 1.0]
-
-
-def test_target_dir_overrides_read_unresolved(tmp_path):
+def test_target_dir_overrides_read_a_fixed_hydra_interpolation(tmp_path):
     first = OwnDir()
     first.run(x=multirun([1, 2]), out=HYDRA_DIR, working_dir=tmp_path / "a")
 
     class Second(MultiRunMetricsWorkflow):
         @staticmethod
-        def task():
+        def task(out):
             return dict(score=1.0)
 
+    # The second sweep's own overrides hold one too.
     second = Second()
-    second.run(target_job_dirs=first.multirun_working_dirs, working_dir=tmp_path / "b")
+    second.run(
+        target_job_dirs=first.multirun_working_dirs,
+        out=HYDRA_DIR,
+        working_dir=tmp_path / "b",
+    )
     assert second.target_dir_multirun_overrides == {
         "x": [1, 2],
         "out": [HYDRA_DIR, HYDRA_DIR],
     }
 
 
-@pytest.mark.parametrize(
-    ("cfg", "name", "expected"),
-    [
-        ({"x": "${now:%Y}"}, "x", "${now:%Y}"),  # a plain dict is read as is
-        (OmegaConf.create({"x": HYDRA_DIR}), "x", HYDRA_DIR),
-        (OmegaConf.create({"m": {"w": HYDRA_DIR}}), "m.w", HYDRA_DIR),
-        (OmegaConf.create({"m": {"w": 3}}), "m.w", 3),
-        # a literal key wins over the nested path, as before
-        (OmegaConf.create({"a.b": HYDRA_DIR, "a": {"b": 5}}), "a.b", HYDRA_DIR),
-        # the parent is itself an interpolation
-        (
-            OmegaConf.create({"m": "${base}", "base": {"w": HYDRA_DIR}}),
-            "m.w",
-            HYDRA_DIR,
-        ),
-    ],
-)
-def test_read_swept_value_leaves_an_interpolation_unresolved(cfg, name, expected):
-    assert _read_swept_value(cfg, name) == expected
+class Rate(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr, base_lr):
+        return dict(score=float(lr))
 
 
-def test_swept_combo_leaves_a_list_element_unresolved():
-    cfg = OmegaConf.create({"x": [HYDRA_DIR, "z"]})
-    combo = _swept_combo(cfg, ["x"], lambda name: None, lambda v: v)
-    assert combo == {"x": [HYDRA_DIR, "z"]}
+@pytest.mark.parametrize("swept", [False, True], ids=["fixed", "swept"])
+def test_an_interpolation_that_resolves_reads_its_value(tmp_path, swept):
+    # A value of the config, unlike `hydra:`, resolves after the launch as it
+    # did in the jobs: it reads as that value, as it always has.
+    lr = multirun(["${base_lr}", 0.1]) if swept else "${base_lr}"
+    expected = ["0.01", 0.1] if swept else "0.01"
+    wf = Rate(eval_task_cfg=make_config(base_lr=0.01))
+    wf.run(lr=lr, working_dir=tmp_path)
+    assert wf.multirun_task_overrides["lr"] == expected
+    loaded = Rate()
+    loaded.load_from_dir(tmp_path, "mushin_metrics.json")
+    assert loaded.multirun_task_overrides["lr"] == expected
+    scores = [0.01, 0.1] if swept else [0.01]
+    assert np.ravel(loaded.to_xarray().score.values).tolist() == scores
 
 
-def test_a_value_without_interpolation_reads_as_before(tmp_path):
-    wf = Swept()
-    wf.run(x=multirun([0.5, 1.5]), working_dir=tmp_path)
-    assert wf.multirun_task_overrides == {"x": [0.5, 1.5]}
-    assert np.array_equal(wf.to_xarray().coords["x"].values, [0.5, 1.5])
+def test_a_swept_hydra_interpolation_warns_instead_of_stopping_the_sweep(tmp_path):
+    # Each job resolves the value to its own directory, so the grid's text
+    # cannot key that cell; the run returns and says so.
+    wf = Plain()
+    with pytest.warns(UserWarning, match="cannot resolve the sweep"):
+        wf.run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)
+    ds = wf.to_xarray()
+    assert ds.coords["x"].values.tolist() == [f"{HYDRA_DIR}/a", "b"]
+    score = ds.score.values
+    assert np.isnan(score[0]) and score[1] == 1.0
+    assert (tmp_path / MANIFEST_FILE).exists()
