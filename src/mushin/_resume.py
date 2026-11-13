@@ -131,6 +131,15 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
     the sidecar, so a sidecar older than the hydra.yaml beside it is a previous
     sweep's record of a reused directory (the new job was killed before its
     first status write), and that hydra.yaml is the record to read."""
+    return sidecar_state(cell_dir, hydra_yaml)[0]
+
+
+def sidecar_state(
+    cell_dir, hydra_yaml=None
+) -> tuple[tuple[int, dict] | None, dict | None]:
+    """``sidecar_job_fields``, and the sidecar itself when it is older than
+    ``hydra_yaml`` (else None): a record a later job's snapshot came after,
+    which `record_of_another_run` judges."""
     if hydra_yaml is not None:
         # The sidecar's age is taken before its content: a sidecar replaced in
         # between is then read in its newer state, and only its age is
@@ -138,21 +147,37 @@ def sidecar_job_fields(cell_dir, hydra_yaml=None) -> tuple[int, dict] | None:
         try:
             written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
         except OSError:
-            return None
+            return None, None
         try:
             newer = Path(hydra_yaml).stat().st_mtime_ns > written
         except FileNotFoundError:  # no hydra.yaml: nothing newer to defer to
             newer = False
         except OSError:  # unreadable: let the hydra.yaml path report it
-            return None
+            return None, None
         if newer:
-            return None
+            return None, read_cell_status(cell_dir)
     status = read_cell_status(cell_dir)
     if status is None:
-        return None
+        return None, None
     num = status.get("job_num")
     choices = status.get("choices")
-    return (num, choices) if _records_job_fields(num, choices) else None
+    return ((num, choices) if _records_job_fields(num, choices) else None), None
+
+
+def record_of_another_run(older: dict | None, stamp: Any) -> bool:
+    """Whether a cell's status record that is older than its hydra.yaml
+    (``older``, from `sidecar_state`) was written by another run than the
+    one whose job wrote that hydra.yaml (``stamp``, its
+    ``hydra.job.mushin_run_id``): the job died after Hydra's snapshot and
+    before its first record, so the record is an earlier run's, of this
+    cell or, in a reused directory, another (#355). A record from before
+    ``run_id`` was recorded is an earlier version's, so another run's. A
+    snapshot without the stamp (a sweep from before it) says nothing, and
+    the record stands, as does one a copy without its files' times left
+    older than its hydra.yaml: both carry the same run."""
+    if older is None or not isinstance(stamp, str):
+        return False
+    return older.get("run_id") != stamp
 
 
 #: What ``resolved_config`` returns for a config that cannot be resolved.

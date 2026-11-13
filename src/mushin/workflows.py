@@ -3862,6 +3862,14 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             self._sanitize_coordinate_for_xarray,
         )
 
+    def _record_is_another_runs(self, i: int) -> bool:
+        """Whether job dir ``i``'s status record is another run's: older than
+        its hydra.yaml, which names another run (`record_of_another_run`).
+        Set by `load_from_dir`; a workflow that ran in-process has none."""
+        stale = getattr(self, "_another_runs_record", None)
+        dirs = self.multirun_working_dirs or ()
+        return bool(stale) and len(stale) == len(dirs) and bool(stale[i])
+
     def _job_choices(self, i: int) -> dict | None:
         """``runtime.choices`` for job ``i``, when jobs align with cfgs.
 
@@ -3961,20 +3969,26 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # job never reached its first status write); otherwise, as for a sweep
         # from before they were recorded, from hydra.yaml, whose parse is most
         # of a reload's time.
-        from ._hydra_yaml import hydra_job_fields, load_hydra_record
-        from ._resume import sidecar_job_fields
+        from ._hydra_yaml import hydra_job_fields, hydra_run_stamp, load_hydra_record
+        from ._resume import record_of_another_run, sidecar_state
 
         hydra_yamls = [d / f"{self.output_subdir}/hydra.yaml" for d in job_dirs]
-        fields = [
-            sidecar_job_fields(d, y) for d, y in zip(job_dirs, hydra_yamls, strict=True)
+        states = [
+            sidecar_state(d, y) for d, y in zip(job_dirs, hydra_yamls, strict=True)
         ]
+        fields = [f for f, _ in states]
         from_yaml = [i for i, f in enumerate(fields) if f is None]
         # Every file is loaded before any field is read, so a sweep with
         # several broken files reports the error it always did.
         _records = [load_hydra_record(hydra_yamls[i]) for i in from_yaml]
+        # A record older than its hydra.yaml is read from there (above); it
+        # is not this job's when that hydra.yaml names another run (#355).
+        stale = [False] * len(job_dirs)
         for i, record in zip(from_yaml, _records, strict=True):
             fields[i] = hydra_job_fields(record)
+            stale[i] = record_of_another_run(states[i][1], hydra_run_stamp(record))
         _job_nums, _choices = zip(*fields, strict=True)
+        stale = _sort_x_by_k(stale, _job_nums)
         job_dirs = _sort_x_by_k(job_dirs, _job_nums)
         cfgs = []
         for dir_ in job_dirs:
@@ -3989,6 +4003,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             cfgs.append(load_from_yaml(cfg_file))
         self.multirun_working_dirs = job_dirs
         self._loaded_job_choices = _sort_x_by_k(list(_choices), _job_nums)
+        self._another_runs_record = stale
         self.cfgs = cfgs
 
         if metrics_filename is not None:
@@ -4069,6 +4084,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
+            if self._record_is_another_runs(i):
+                # Its job died before its first record. The manifest knows
+                # how it ended when this run wrote it, after Hydra's snapshot
+                # (an earlier run's would call the earlier cell completed).
+                entry = manifest_cells.get(key, {})
+                snapshot = dir_ / f"{self.output_subdir}/hydra.yaml"
+                ours = manifest_mtime > _mtime(snapshot)
+                if (
+                    ours
+                    and entry.get("dir") == dir_.name
+                    and (entry.get("status") == "failed")
+                ):
+                    failed.add(key)
+                dirs[key] = dir_
+                continue
             sidecar = read_cell_status(dir_)
             status = (sidecar or {}).get("status")
             if sidecar is None:  # a sweep from before sidecars: ask the manifest
@@ -4170,16 +4200,22 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         from ._resume import read_cell_status
 
         job_metrics: list[Any] = []
-        for dir_ in self.multirun_working_dirs:
+        for i, dir_ in enumerate(self.multirun_working_dirs):
             # A cell recorded 'failed' or 'skipped' (fail-soft, `sample=`, or an
             # exhausted `max_total_seconds` budget) deliberately has no valid
             # metrics: NaN-fill it exactly like the in-process path — never load
             # a stale sidecar a prior attempt left behind, and never raise for
             # its (expected) missing files. A cell still 'running' or 'pending'
             # (a sweep reloaded mid-run, or killed mid-cell) has no result yet
-            # either; `_record_cells_without_result` records it as not run.
+            # either; `_record_cells_without_result` records it as not run. So
+            # has a cell whose record is another run's (`_another_runs_record`).
             status = (read_cell_status(dir_) or {}).get("status")
-            if status in ("failed", "skipped", "running", "pending"):
+            if self._record_is_another_runs(i) or status in (
+                "failed",
+                "skipped",
+                "running",
+                "pending",
+            ):
                 job_metrics.append(None)
                 continue
             _metrics = {}
