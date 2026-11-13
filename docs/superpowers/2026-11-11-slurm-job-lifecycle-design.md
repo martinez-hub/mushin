@@ -123,6 +123,96 @@ until every job ends, and:
   `launch()` (comments and blank lines dropped; `ast.dump` differs between
   Python versions).
 
+## Decisions (PR 2)
+
+Three review rounds narrowed this PR to keeping a dead job's own end; every
+other record is handled as PR 1 handled it (a harness compares 14 record
+states under both `on_error` values with main).
+
+- **E1. A record is the job's own when this run wrote it for this cell:** its
+  `run_id` (a `uuid4` per `run()`, pickled into every job) and its combo. Not
+  the job id: a local job's id is a process id, which can recur, and whether
+  SLURM's array id reads the same in the job and the driver is runbook T9.
+  Not `run_id` alone: two cells can share a dir (`hydra.sweep.subdir=${seed}`
+  over two learning rates). Every record also names its job (`job_id`).
+- **E2. A completed record of the job's own gives the cell's result** when it
+  names the metrics file it wrote (`metrics`: that file's digest, recorded
+  with 'completed' when no value had to be written as its text), the file in
+  the dir is still that one (read once: another job in a shared dir may have
+  written its own since), and the job is
+  `keepable`: submitit counts one task, and the job did not pickle an error
+  in place of its result. Every task of a job of several runs mushin's
+  runner in the cell's dir, so its record is not known to be the first
+  task's (the job's result). A result submitit could not pickle (a lock,
+  say) can leave no result file at all, which the driver cannot tell from a
+  late one; the metrics file holds such a value only as its text, so the
+  record does not claim it. Such cells fail, as in PR 1, and the record
+  stays for a resume (which reuses the file as it always has). HydraDDP's
+  child ranks run their own Hydra app, not mushin's runner; but tasks SLURM
+  starts outside submitit's count (`additional_parameters={"ntasks": ...}`)
+  are not seen (T9). The launcher logs each result it takes this way.
+- **E3. A skipped record of the job's own is skipped.** Any other own
+  terminal record stays and the cell fails, as in PR 1.
+- **E4. Every other record is as PR 1 left it:** a 'running' record or none
+  is recorded over (snapshot written only where missing); a terminal record
+  of an earlier run, of this cell or another, stays. A resumed failed cell
+  whose job dies before its runner keeps the previous attempt's error file;
+  refreshing such a record was tried and cut (a stale read of it could
+  delete a result the job had just written). A dir another cell used keeps
+  that cell's metrics and checkpoints (#355).
+- **E5. One read of the record, no retry.** On a slow filesystem the driver
+  can still see an older 'running' record of a cell that completed, and then
+  records the cell failed over it and removes its metrics file, as in PR 1;
+  waiting for a job SLURM reports COMPLETED and reading its result again is
+  the fix for that case on every job shape (T9 checks how often it happens).
+
+## Decisions (PR 3)
+
+- **F1. One copy of the rules.** The runner's sample skip, resume reuse and
+  cache hit move into `_TaskRunner._settle`, which the job still calls
+  first; the driver calls the same function before submitting. It returns
+  the value and the function that records the cell, which the job calls at
+  once and the driver once every cell is decided.
+- **F2. The driver settles a cell only when its answer is the job's.**
+  `settle_in_driver` composes the job as the dead-job path does (HydraConfig
+  set), resolves its config and takes its project-code record in the driver
+  (checked against the job's own record on `submitit_local`: the config hash
+  and `code_deps` matched for a plain task, a `_target_` in the config, a
+  task defined in the script, and a fixed `${hydra:runtime.output_dir}`),
+  and applies `_settle` strictly: a resume does not reuse a cell whose
+  prior record has a fingerprint the driver cannot take (as a job does for
+  a sweep from before the fingerprint), nor one whose fingerprint changed
+  (the job warns about it); either may still be a cache hit, judged as the
+  job judges it. A cell whose project-code record lacks a file the prior one
+  names (a module only the jobs' path imports) is not judged at all, since
+  its cache key may be another code's; a reused cell whose prior record has
+  no project-code record takes the driver's, as it takes the job's. The
+  driver judges a cell under the job's `hydra.job.env_set`, as `run_job`
+  runs it, so a resolver reading those variables resolves as in the job; a
+  config that reads the environment otherwise (`${oc.env:...}`) is never
+  reused or cache-hit in the driver, whose environment the jobs' may not
+  match. Known limit: a cache entry written where a module only the jobs
+  import was absent (a sequential run on the login node) can be a driver
+  hit the jobs would miss. Every
+  cell is decided before any dir is written (a resume over a renumbered
+  grid reads prior dirs another cell's record would overwrite), and a
+  settled cell whose dir a cell left to its job reads its prior result from
+  is submitted instead, as before. A settled cell then gets the `.hydra/`
+  snapshot `run_job` would write (`hydra.job.id` `driver_<n>`), then its
+  record. Any error settling or writing a cell leaves it to its job, and the
+  driver warns once (never raising: settling is best effort); warnings from
+  judging a cell are the job's to give, and the driver's process keeps its
+  warn-once memory as it was (`judging_quietly`).
+- **F3. Only sweeps that can settle a cell pay for it.** The launcher composes
+  a cell only when it may need no job (`sample=` leaves it out, a resume
+  has completed cells over the same swept names, or a usable `cache_dir`
+  holds an entry), and never when the sweep has Hydra callbacks, which
+  `run_job` calls in each job; a fresh sweep submits as before, and one with
+  nothing left to submit builds no executor (but makes the sweep dir with
+  `hydra.sweep.mode`, as the plugin does). The rest are submitted under
+  their own job numbers (three lines in the copied submission body skip the
+  others; the pin test strips exactly that edit).
+
 ## Needs a cluster
 
 A probe on `submitit_local` (a cell sleeping past `timeout_min=1`) shows a

@@ -100,13 +100,21 @@ that ends without returning (an out-of-memory kill, a failed node,
 `scancel`, a time limit that ends the process before Python can act, or an
 error outside the task, such as the job failing to import it) fails its cell
 the same way, and under `on_error="nan"` the cell's `mushin_error.txt` then
-names the job's log.
+names the job's log. A job of one task that ends so after its cell has
+completed (its result reached the driver too late, say) can keep the cell's
+result: mushin reads it from the cell's directory.
 (mushin runs `launcher="submitit_slurm"` through its own subclass of the
 plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
 names `mushin_submitit_slurm`.)
 Either way, recovery is one command: re-run the same sweep with
 `resume=True` (same `working_dir`): completed cells are reused from their
-sidecars, and only the preempted/missing cells re-run. Inside a long cell, use
+sidecars, and only the preempted/missing cells re-run. On mushin's submitit
+launchers, a resume submits jobs only for those cells (as `sample=` does only
+for the cells it keeps, and a `cache_dir` hit none); the others are settled
+before anything is queued. A cell is still submitted, and its job decides as
+before, when the driver cannot judge it as the job would: its config reads
+the environment (`${oc.env:...}`), or the sweep has Hydra callbacks, which
+run in each job. Inside a long cell, use
 the [`mushin_resume` checkpoint contract](resilience.md) so the re-run
 continues from `last.ckpt` instead of epoch 0.
 

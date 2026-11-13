@@ -94,3 +94,62 @@ OmegaConf.register_new_resolver(
 DIE_BEFORE_START = (
     "hydra.sweep.subdir='${mushin_test_die_before_start:${hydra.job.num}}'"
 )
+
+
+@mushin.sweep
+def second_task_dies(seed):
+    """In a job of two tasks, the second dies on seed 1 after the first has
+    started, and the first returns only once it has, so the cell's last
+    record is the first task's completed one. Both tasks run mushin's runner
+    in the cell's dir: submitit's local tasks set none of the variables
+    mushin reads a rank from."""
+    import time
+
+    import submitit
+
+    started = f"rank1_started_{seed}"
+    if submitit.JobEnvironment().global_rank == 1:
+        open(started, "w").close()
+        if seed == 1:
+            os._exit(9)
+    else:
+        deadline = time.monotonic() + 50
+        while not os.path.exists(started) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def unpicklable_result(seed):
+    """On seed 0, returns a value a JSON sidecar holds only as text and pickle
+    cannot hold at all, so submitit cannot save the job's result."""
+    import threading
+
+    if seed == 0:
+        return dict(v=float(seed), lock=threading.Lock())
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def scaled(seed, scale):
+    return dict(v=float(seed) * scale)
+
+
+@mushin.sweep
+def env_scaled(seed, n):
+    return dict(v=float(n))
+
+
+# A custom resolver reading a variable `hydra.job.env_set` sets for each job:
+# registered in the driver and in every job, which import this module.
+OmegaConf.register_new_resolver(
+    "mushin_test_n", lambda: os.environ.get("MUSHIN_TEST_N", "1"), replace=True
+)
+
+
+def _job_only():
+    """What only a job's environment holds: raises in the driver."""
+    return os.environ["SUBMITIT_LOCAL_JOB_ID"]
+
+
+OmegaConf.register_new_resolver("mushin_test_job_only", _job_only, replace=True)
