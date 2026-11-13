@@ -9,7 +9,8 @@ a time limit before Python could act, or raised outside the task, as when it
 cannot import it) raises from the driver while the later jobs still run,
 unobserved, and the sweep records nothing. Here every job is waited on,
 and a job that ends without a result comes back to mushin as a failed cell,
-which `on_error` then handles as it does a task that raised (#345).
+which `on_error` then handles as it does a task that raised, unless the
+cell's own record holds the result the job could not return (#345).
 
 `run()` sends the plugin's two names here (`mushin_submitit_slurm` and
 `mushin_submitit_local`); their config is the plugin's, field for field, so
@@ -119,9 +120,10 @@ if _plugin_launcher is not None:
         def _wait(self, jobs, job_params):
             """Every job's result, in submission order.
 
-            For mushin's runner, a job that ended without a result is a
-            failed cell (`_dead_return`), and the later jobs are still waited
-            on. An error that cannot become one (a job not known to have
+            For mushin's runner, a job that ended without a result comes
+            back as its cell's record says (`_dead_return`): a failed cell,
+            or the result the cell recorded, and the later jobs are still
+            waited on. An error that cannot become one (a job not known to have
             ended, or a cell that cannot be composed here) is raised once
             every job has been waited on. Any other task function sees the
             first error at once, as the plugin raises it."""
@@ -173,6 +175,7 @@ if _plugin_launcher is not None:
             dead = _DeadJob(
                 _bounded(exc, job.paths.folder),
                 _summary(job, exc, self.params),
+                keepable=_keepable(job, exc),
             )
             outer = HydraConfig.instance().cfg
             try:
@@ -206,9 +209,23 @@ if _plugin_launcher is not None:
                 # Inside the try: the cell's config-group choices come from
                 # the HydraConfig set above.
                 ret.status, ret.return_value = runner.record_dead_cell(ret, dead)
+                if isinstance(ret.return_value, dict):
+                    log.info(
+                        f"submitit job {job.job_id} gave no result; its cell's "
+                        "record holds one, which stands for it (#345)"
+                    )
             finally:
                 HydraConfig.instance().cfg = outer
             return ret
+
+    def _keepable(job, exc) -> bool:
+        """Whether a completed record the job's cell holds can stand for the
+        job's result: a job of one task (every task of a job runs mushin's
+        runner in the cell's dir, and the result is the first task's) that
+        gave no result, not one that pickled an error in its place."""
+        from submitit.core.utils import FailedJobError
+
+        return getattr(job, "num_tasks", 1) == 1 and not isinstance(exc, FailedJobError)
 
     def _ended(job) -> bool:
         """Whether submitit knows the job has ended; False when it cannot

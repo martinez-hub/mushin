@@ -145,7 +145,15 @@ def test_recording_a_dead_cell_never_fails_the_run(tmp_path):
     ret.hydra_cfg = OmegaConf.create({"hydra": {"runtime": {"cwd": str(tmp_path)}}})
     OmegaConf.set_struct(ret.hydra_cfg, True)
     dead = _DeadJob(RuntimeError("x"), "RuntimeError('x')")
-    _record_dead_cell(ret, dead, combo={}, status="failed", on_error="nan")
+    _record_dead_cell(
+        ret,
+        dead,
+        combo={},
+        status="failed",
+        on_error="nan",
+        prior={},
+        run_id="r",
+    )
 
 
 def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
@@ -176,9 +184,73 @@ def test_a_dead_cell_records_this_sweeps_combo(tmp_path):
         write_cell_status(
             tmp_path / "0", status="running", combo={"lr": 0.1}, attempt=1
         )
-        _record_dead_cell(ret, dead, combo=combo, status="failed", on_error="raise")
+        _record_dead_cell(
+            ret,
+            dead,
+            combo=combo,
+            status="failed",
+            on_error="raise",
+            prior=read_cell_status(tmp_path / "0"),
+            run_id="r",
+        )
         status = read_cell_status(tmp_path / "0")
         assert status["status"] == "failed" and status["combo"] == recorded
+
+
+def _dead_ret(root, *, output_subdir=None, job_id="7"):
+    from hydra.core.utils import JobReturn
+    from omegaconf import OmegaConf
+
+    ret = JobReturn()
+    ret.working_dir = "0"
+    ret.cfg = OmegaConf.create({"lr": 0.2})
+    ret.overrides = ["+lr=0.2"]
+    ret.hydra_cfg = OmegaConf.create(
+        {
+            "hydra": {
+                "runtime": {"cwd": str(root)},
+                "output_subdir": output_subdir,
+                "job": {"num": 0, "id": job_id},
+            }
+        }
+    )
+    return ret
+
+
+def test_a_dead_cell_is_recorded_as_350_did_with_its_run_and_job(tmp_path):
+    """Over a 'running' record the attempt, fingerprints and snapshot stay,
+    as #350 recorded them; the record now names this run and the job."""
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _record_dead_cell
+
+    cell = tmp_path / "0"
+    snapshot = cell / ".hydra"
+    snapshot.mkdir(parents=True)
+    (snapshot / "hydra.yaml").write_text("earlier: true\n")
+    (snapshot / "config.yaml").write_text("lr: 0.1\n")
+    write_cell_status(
+        cell,
+        status="running",
+        combo={"lr": 0.2},
+        attempt=3,
+        config_hash="c",
+        code_hash="k",
+        run_id="this",
+    )
+    _record_dead_cell(
+        _dead_ret(tmp_path, output_subdir=".hydra"),
+        _DeadJob(RuntimeError("x"), "RuntimeError('died')"),
+        combo={"lr": 0.2},
+        status="failed",
+        on_error="raise",
+        prior=read_cell_status(cell),
+        run_id="this",
+    )
+    status = read_cell_status(cell)
+    assert status["status"] == "failed" and status["attempt"] == 3
+    assert (status["config_hash"], status["code_hash"]) == ("c", "k")
+    assert status["run_id"] == "this" and status["job_id"] == "7"
+    assert (snapshot / "config.yaml").read_text() == "lr: 0.1\n"
 
 
 @pytest.mark.parametrize(
@@ -356,3 +428,149 @@ def test_the_summary_names_what_ended_the_job_and_its_log():
     # A job of several tasks has a log per task: name their folder.
     several = _summary(_Ended(num_tasks=2), UncompletedJobError("x"), {})
     assert "its log: /logs (one per task)" in several
+
+
+THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
+
+
+@pytest.mark.parametrize(
+    ("prior", "metrics", "keepable", "returns", "recorded"),
+    [
+        # This run's record of this cell.
+        (
+            dict(status="completed", run_id="this", metrics="OURS"),
+            True,
+            True,
+            "metrics",
+            False,
+        ),
+        (
+            dict(status="completed", run_id="this", metrics="OURS"),
+            True,
+            False,
+            "dead",
+            False,
+        ),
+        (dict(status="completed", run_id="this"), False, True, "dead", False),
+        # A file the record does not claim (the result was not whole).
+        (dict(status="completed", run_id="this"), True, True, "dead", False),
+        # A file other than the one it wrote (another job's, in a shared dir).
+        (
+            dict(status="completed", run_id="this", metrics="0" * 16),
+            True,
+            True,
+            "dead",
+            False,
+        ),
+        (
+            dict(status="completed", run_id="this", metrics="OURS"),
+            False,
+            True,
+            "dead",
+            False,
+        ),
+        (dict(status="skipped", run_id="this"), False, True, "skipped", False),
+        (dict(status="failed", run_id="this"), False, True, "dead", False),
+        (dict(status="running", run_id="this"), False, True, "dead", True),
+        # This run's record of another cell in the same dir.
+        (
+            dict(status="completed", run_id="this", combo=OTHER, metrics="OURS"),
+            True,
+            True,
+            "dead",
+            False,
+        ),
+        # An earlier run's records.
+        (
+            dict(status="completed", run_id="earlier", metrics="OURS"),
+            True,
+            True,
+            "dead",
+            False,
+        ),
+        (
+            dict(status="completed", run_id="earlier", combo=OTHER),
+            True,
+            True,
+            "dead",
+            False,
+        ),
+        (dict(status="failed", run_id="earlier"), False, True, "dead", False),
+        (
+            dict(status="failed", run_id="earlier", combo=OTHER),
+            False,
+            True,
+            "dead",
+            False,
+        ),
+        (
+            dict(status="running", run_id="earlier", combo=OTHER),
+            False,
+            True,
+            "dead",
+            True,
+        ),
+        (None, False, True, "dead", True),
+    ],
+)
+def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
+    tmp_path, prior, metrics, keepable, returns, recorded
+):
+    """Which record a dead job keeps as its own end, and which it records its
+    end over or leaves, as #350 did (another cell's records: #355)."""
+    from hydra.core.utils import JobStatus
+
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _SkippedRun, _TaskRunner
+
+    cell = tmp_path / "0"
+    cell.mkdir()
+    from mushin._sweep_io import _digest
+
+    file = '{"v": 1.0}'
+    if prior is not None:
+        fields = {"combo": THIS, "attempt": 1, **prior}
+        if fields.get("metrics") == "OURS":
+            fields["metrics"] = _digest(file)
+        write_cell_status(cell, **fields)
+        (cell / "mushin_error.txt").write_text("boom\n")
+    if metrics:
+        (cell / "mushin_metrics.json").write_text(file)
+    before = read_cell_status(cell)
+
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "nan", "this"
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')", keepable=keepable)
+    status, value = runner.record_dead_cell(_dead_ret(tmp_path), dead)
+
+    assert status is JobStatus.COMPLETED
+    if returns == "metrics":
+        assert value == {"v": 1.0}
+    elif returns == "skipped":
+        assert isinstance(value, _SkippedRun)
+    else:
+        assert value is dead
+    after = read_cell_status(cell)
+    if recorded:
+        assert after["status"] == "failed" and after["combo"] == THIS
+        assert after["run_id"] == "this" and after["job_id"] == "7"
+        assert "died" in (cell / "mushin_error.txt").read_text()
+        assert not (cell / "mushin_metrics.json").exists()
+    else:
+        assert after == before
+        if prior is not None:
+            assert (cell / "mushin_error.txt").read_text() == "boom\n"
+        assert (cell / "mushin_metrics.json").exists() == metrics
+
+
+def test_only_a_one_task_job_that_gave_no_result_may_keep_its_record():
+    from submitit.core.utils import UncompletedJobError
+
+    from hydra_plugins.mushin_submitit import launcher as ours
+
+    gave_none = UncompletedJobError("Job 1 (task: 0) has not produced any output")
+    assert ours._keepable(_Ended(), gave_none)
+    assert ours._keepable(_Ended(), OSError("unreadable result"))
+    assert not ours._keepable(_Ended(num_tasks=2), gave_none)
+    assert not ours._keepable(_Ended(), _failed_job_error("RuntimeError: x"))

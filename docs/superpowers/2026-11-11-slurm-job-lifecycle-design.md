@@ -123,6 +123,49 @@ until every job ends, and:
   `launch()` (comments and blank lines dropped; `ast.dump` differs between
   Python versions).
 
+## Decisions (PR 2)
+
+Three review rounds narrowed this PR to keeping a dead job's own end; every
+other record is handled as PR 1 handled it (a harness compares 14 record
+states under both `on_error` values with main).
+
+- **E1. A record is the job's own when this run wrote it for this cell:** its
+  `run_id` (a `uuid4` per `run()`, pickled into every job) and its combo. Not
+  the job id: a local job's id is a process id, which can recur, and whether
+  SLURM's array id reads the same in the job and the driver is runbook T9.
+  Not `run_id` alone: two cells can share a dir (`hydra.sweep.subdir=${seed}`
+  over two learning rates). Every record also names its job (`job_id`).
+- **E2. A completed record of the job's own gives the cell's result** when it
+  names the metrics file it wrote (`metrics`: that file's digest, recorded
+  with 'completed' when no value had to be written as its text), the file in
+  the dir is still that one (read once: another job in a shared dir may have
+  written its own since), and the job is
+  `keepable`: submitit counts one task, and the job did not pickle an error
+  in place of its result. Every task of a job of several runs mushin's
+  runner in the cell's dir, so its record is not known to be the first
+  task's (the job's result). A result submitit could not pickle (a lock,
+  say) can leave no result file at all, which the driver cannot tell from a
+  late one; the metrics file holds such a value only as its text, so the
+  record does not claim it. Such cells fail, as in PR 1, and the record
+  stays for a resume (which reuses the file as it always has). HydraDDP's
+  child ranks run their own Hydra app, not mushin's runner; but tasks SLURM
+  starts outside submitit's count (`additional_parameters={"ntasks": ...}`)
+  are not seen (T9). The launcher logs each result it takes this way.
+- **E3. A skipped record of the job's own is skipped.** Any other own
+  terminal record stays and the cell fails, as in PR 1.
+- **E4. Every other record is as PR 1 left it:** a 'running' record or none
+  is recorded over (snapshot written only where missing); a terminal record
+  of an earlier run, of this cell or another, stays. A resumed failed cell
+  whose job dies before its runner keeps the previous attempt's error file;
+  refreshing such a record was tried and cut (a stale read of it could
+  delete a result the job had just written). A dir another cell used keeps
+  that cell's metrics and checkpoints (#355).
+- **E5. One read of the record, no retry.** On a slow filesystem the driver
+  can still see an older 'running' record of a cell that completed, and then
+  records the cell failed over it and removes its metrics file, as in PR 1;
+  waiting for a job SLURM reports COMPLETED and reading its result again is
+  the fix for that case on every job shape (T9 checks how often it happens).
+
 ## Needs a cluster
 
 A probe on `submitit_local` (a cell sleeping past `timeout_min=1`) shows a

@@ -152,3 +152,25 @@ def test_user_dict_resembling_nonfinite_tag_is_not_corrupted(tmp_path):
     write_metrics_sidecar(tmp_path, {"weird": {"__mushin_nonfinite__": "hello"}})
     back = read_metrics_sidecar(tmp_path)
     assert back == {"weird": {"__mushin_nonfinite__": "hello"}}
+
+
+@pytest.mark.parametrize(
+    ("metrics", "whole"),
+    [
+        (dict(acc=0.9, loss=[1.0, float("inf")], n=3, name="a", ok=True), True),
+        (dict(nested=dict(acc=0.5)), True),
+        (dict(acc=0.9, lock=__import__("threading").Lock()), False),
+        (dict(when=__import__("datetime").date(2026, 1, 1)), False),
+        ({1: 0.5}, False),  # a key that is not text reads back as text
+    ],
+)
+def test_write_metrics_sidecar_says_whether_the_file_holds_the_result(
+    tmp_path, metrics, whole
+):
+    from mushin._sweep_io import read_metrics_sidecar_written
+
+    written = write_metrics_sidecar(tmp_path, metrics)
+    assert (written is not None) is whole
+    if whole:
+        assert read_metrics_sidecar_written(tmp_path, written) is not None
+        assert read_metrics_sidecar_written(tmp_path, "0" * 16) is None

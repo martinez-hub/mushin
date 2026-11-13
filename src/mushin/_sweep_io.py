@@ -67,7 +67,7 @@ _NONFINITE_TAG = "__mushin_nonfinite__"
 _NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
 
 
-def _json_normalize(v: Any) -> Any:
+def _json_normalize(v: Any, as_text: list | None = None) -> Any:
     """Recursively normalize a metric value to strict-JSON-native types.
 
     Handles the full metric shape (nested dicts and lists), converts
@@ -76,18 +76,21 @@ def _json_normalize(v: Any) -> Any:
     to NaN / signed Inf), and stringifies any other type rather than letting an
     otherwise-successful task's sidecar write crash the sweep. A genuine
     ``None`` metric value also encodes as ``null``, so it reads back as NaN,
-    the one remaining lossy case.
+    the one remaining lossy case. ``as_text``, when given, collects the type
+    of each value (and dict key) written as its text instead of as itself.
     """
     import math
 
     if hasattr(v, "item") and getattr(v, "ndim", None) == 0:  # 0-d np/torch scalar
         v = v.item()
     elif hasattr(v, "tolist"):  # numpy/torch array
-        return _json_normalize(v.tolist())
+        return _json_normalize(v.tolist(), as_text)
     if isinstance(v, dict):
-        return {str(k): _json_normalize(x) for k, x in v.items()}
+        if as_text is not None:
+            as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
+        return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
-        return [_json_normalize(x) for x in v]
+        return [_json_normalize(x, as_text) for x in v]
     if isinstance(v, bool) or v is None:
         return v
     if isinstance(v, float):
@@ -98,6 +101,8 @@ def _json_normalize(v: Any) -> Any:
         return {_NONFINITE_TAG: "inf" if v > 0 else "-inf"}
     if isinstance(v, (int, str)):
         return v
+    if as_text is not None:
+        as_text.append(type(v).__name__)
     return str(v)  # datetime, Path, arbitrary objects -> stringify, never crash
 
 
@@ -117,8 +122,36 @@ def _restore_nonfinite(v: Any) -> Any:
     return float("nan") if v is None else v
 
 
-def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> None:
-    _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics)
+def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> str | None:
+    """Write a cell's metrics file, and return a digest of what it wrote when
+    no value had to be written as its text (an object with no JSON form,
+    say), else None. A launcher that loses a job's result takes the file for
+    it only when it still holds what the cell's record says it wrote (#345)."""
+    as_text: list[str] = []
+    text = _atomic_write_json(Path(job_dir) / METRICS_FILE, metrics, as_text)
+    return None if as_text else _digest(text)
+
+
+def read_metrics_sidecar_written(job_dir, digest: str) -> dict | None:
+    """The metrics file of ``job_dir`` when it is the one whose digest
+    `write_metrics_sidecar` returned, else None; read once, so what is
+    checked is what is parsed."""
+    try:
+        text = (Path(job_dir) / METRICS_FILE).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if _digest(text) != digest:
+        return None
+    try:
+        return _restore_nonfinite(json.loads(text))
+    except (ValueError, RecursionError):
+        return None
+
+
+def _digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def read_metrics_sidecar(job_dir) -> dict | None:
@@ -149,13 +182,14 @@ def _atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
         tmp.unlink(missing_ok=True)  # no residue if the replace raced/failed
 
 
-def _atomic_write_json(path: Path, payload: Any) -> None:
+def _atomic_write_json(path: Path, payload: Any, as_text: list | None = None) -> str:
     # Normalize every sidecar to strict-JSON-native values (nested numpy,
     # non-finite floats -> None, non-native -> str) so a write never emits
     # the invalid `NaN`/`Infinity` literals nor crashes on an exotic value.
-    _atomic_write_text(
-        path, json.dumps(_json_normalize(payload), indent=2, allow_nan=False)
-    )
+    # `as_text` collects what had to be written as its text. Returns the text.
+    text = json.dumps(_json_normalize(payload, as_text), indent=2, allow_nan=False)
+    _atomic_write_text(path, text)
+    return text
 
 
 class Manifest:
