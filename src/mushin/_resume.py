@@ -89,8 +89,7 @@ def write_cell_status(
 
     ``no_metrics`` marks a completed cell whose task returned None, so it
     wrote no metrics file: a reload gives it no metrics instead of looking
-    for the file (#364). A completed record without it, from this version
-    on, comes from an attempt that wrote one."""
+    for the file (#364)."""
 
     payload: dict[str, Any] = {
         "status": status,
