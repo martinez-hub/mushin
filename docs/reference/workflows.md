@@ -22,6 +22,16 @@ Re-exported from hydra-zen.
 
 ::: mushin.workflows.RobustnessCurve
 
+## Running on SLURM
+
+The resources of a sweep whose cells each run as one SLURM job, for
+`run(launcher="submitit_slurm", launcher_config=...)`. For a cell trained with
+DDP, a task per GPU, see [`submitit_slurm_config`](lightning.md).
+
+::: mushin.slurm
+    options:
+      heading_level: 3
+
 ## Resuming
 
 A task that declares a `mushin_resume` parameter receives one of these per
