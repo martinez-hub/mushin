@@ -715,6 +715,16 @@ def _restore_tags(value: Any) -> Any:
     return value
 
 
+def _tag_nan(value: Any) -> Any:
+    """A coordinate as the manifest keeps it: a NaN tagged, as a null would
+    read back as None (`_restore_tags`)."""
+    from ._sweep_io import _NONFINITE_TAG
+
+    if isinstance(value, float) and value != value:
+        return {_NONFINITE_TAG: "nan"}
+    return value
+
+
 def _interpolation_spans(text: str) -> list[str]:
     """The top-level interpolations in an override's text (a nested
     ``${a:${b}}`` is one)."""
@@ -751,7 +761,7 @@ def _read_override(loaded, i: int, text: str, parse, name: str):
         value = parse([task[i]])[name]
     except Exception:  # noqa: BLE001 - read it span by span
         escaped = text
-        for span in _interpolation_spans(text):
+        for span in dict.fromkeys(_interpolation_spans(text)):
             probe = copy.deepcopy(loaded)
             probe.hydra.overrides.task[i] = span
             try:
@@ -773,7 +783,10 @@ def _index_of(elements: list, value: Any) -> int | None:
     """The index of the element of an axis that a job's own override gave
     it, or None."""
     for j, element in enumerate(elements):
-        if type(element) is type(value) and element == value:
+        if type(element) is type(value) and (
+            element == value
+            or (isinstance(value, float) and value != value and element != element)
+        ):
             return j
     return None
 
@@ -2733,6 +2746,8 @@ class BaseWorkflow:
                 continue
             read = _read_override(loaded, i, text, self._parse_overrides, name)
             if isinstance(written, multirun):
+                if read is not None and len(read) != len(written):
+                    read = None  # it split or merged elements: not theirs
                 axes[name] = (list(written), read)
                 output[name] = written
             else:
@@ -2769,11 +2784,13 @@ class BaseWorkflow:
         }
         for i in range(n):
             record = self._this_runs_record(i, run_id)
-            if record is None:
-                continue
-            self._interpolated_records[i] = record
+            if record is not None:
+                self._interpolated_records[i] = record
+            elif not self._is_this_runs_dir(i, run_id):
+                continue  # an earlier sweep's, left in a reused working_dir
             own = self._cell_overrides(i)
-            combo = record.get("combo") if isinstance(record.get("combo"), dict) else {}
+            combo = (record or {}).get("combo")
+            combo = combo if isinstance(combo, dict) else {}
             for name, (written, _) in axes.items():
                 j = _index_of(written, own.get(name, _MISSING_SWEPT))
                 elements_of[name][i] = j
@@ -2790,6 +2807,9 @@ class BaseWorkflow:
                 continue
             values = []
             for j, text in enumerate(written):
+                if not _holds_interpolation(str(text)):
+                    values.append(text)  # written as itself: main's value
+                    continue
                 driver = None if read is None else read[j]
                 voters = completed[name][j] or any_status[name][j]
                 cast = [_value_key(v) for v in voters]
@@ -2808,7 +2828,9 @@ class BaseWorkflow:
             self._interpolated_cells = elements_of
             self._interpolated_decision = {
                 "run_id": run_id,
-                "coords": {name: list(v) for name, v in coordinates.items()},
+                "coords": {
+                    name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
+                },
             }
         return coordinates, known
 
@@ -2832,15 +2854,31 @@ class BaseWorkflow:
             return None
         return {name: [_restore_tags(v) for v in coords[name]] for name in axes}
 
+    def _is_this_runs_dir(self, i: int, run_id) -> bool:
+        """Whether job dir ``i`` is a cell of this run, whatever record it
+        holds (a job may die before its first record over an earlier
+        sweep's): every job of a run in this process; on a reload, a dir
+        whose hydra.yaml names this run, or any dir of a sweep from before
+        runs were named."""
+        jobs = getattr(self, "jobs", None)
+        if jobs and self.cfgs is not None and len(jobs) == len(self.cfgs):
+            return True
+        if run_id is None:
+            return True
+        stamps = self._run_stamps
+        return bool(stamps) and i < len(stamps) and stamps[i] == run_id
+
     def _this_runs_record(self, i: int, run_id) -> dict | None:
         """Job dir ``i``'s status record when this run (``run_id``) wrote
-        it, its combo's tagged values restored; else None."""
+        it, or any record of a sweep from before runs were named (as
+        `record_of_another_run` takes it), its combo's tagged values
+        restored; else None."""
         from ._resume import read_cell_status
 
-        if run_id is None:
-            return None
         record = read_cell_status(self.multirun_working_dirs[i])
-        if not isinstance(record, dict) or record.get("run_id") != run_id:
+        if not isinstance(record, dict):
+            return None
+        if run_id is not None and record.get("run_id") != run_id:
             return None
         combo = record.get("combo")
         if isinstance(combo, dict):
@@ -4638,8 +4676,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self._interpolated_cells = None
         self._interpolated_records = {}
         self._interpolated_decision = None
-        # A previous run's jobs are not this sweep's cells.
+        # A previous run's jobs and manifest are not this sweep's.
         self.jobs = []
+        self._manifest = None
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None

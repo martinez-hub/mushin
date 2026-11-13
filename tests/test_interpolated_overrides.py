@@ -413,3 +413,86 @@ def test_a_non_finite_element_beside_an_interpolation(tmp_path):
     assert wf.multirun_task_overrides["x"][1] == float("inf")
     back = Inf().load_from_dir(tmp_path, "mushin_metrics.json")
     assert back.multirun_task_overrides["x"][1] == float("inf")
+
+
+class Rated(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr, base_lr=None):
+        return dict(v=1.0)
+
+
+def test_a_nan_element_beside_an_interpolation(tmp_path):
+    wf = Rated()
+    wf.run(
+        base_lr=0.01,
+        lr=multirun([float("nan"), "${base_lr}", 0.5]),
+        working_dir=tmp_path,
+    )
+    assert _values(wf) == [1.0, 1.0, 1.0]
+    back = Rated().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert math.isnan(back.multirun_task_overrides["lr"][0])
+    assert _values(back) == [1.0, 1.0, 1.0]
+
+
+def test_a_sweep_from_before_run_stamps_reads_its_records(tmp_path):
+    """A sweep written before runs were named has no run stamp: its records
+    count as its own, as a reload takes them elsewhere."""
+    import re
+
+    Named().run(
+        model_name=multirun(["m1", "m2"]),
+        name=multirun(["${model_name}_x", "b"]),
+        working_dir=tmp_path,
+    )
+    stamp = re.compile(r"^.*mushin_run_id.*\n", re.M)
+    for path in [tmp_path / "multirun.yaml", *tmp_path.glob("*/.hydra/*.yaml")]:
+        path.write_text(stamp.sub("", path.read_text()))
+    for path in tmp_path.glob("*/mushin_cell_status.json"):
+        record = json.loads(path.read_text())
+        record.pop("run_id", None)
+        path.write_text(json.dumps(record))
+    (tmp_path / MANIFEST_FILE).unlink()
+    back = Named().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert _values(back) == [4.0, 1.0, 4.0, 1.0]
+
+
+class AnyRate(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr, seed, base_lr=None):
+        return dict(v=1.0)
+
+
+def test_a_repeated_interpolation_that_cannot_be_read(tmp_path):
+    wf = AnyRate()
+    wf.run(
+        base_lr=0.01,
+        lr=multirun(["${base_lr}", "${hydra:job.num}", "${hydra:job.num}_b"]),
+        seed=multirun([0]),
+        working_dir=tmp_path,
+    )
+    assert wf.multirun_task_overrides["lr"][0] == "0.01"
+
+
+class Tagged(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(name, tag=None):
+        return dict(v=float(len(name)))
+
+
+def test_an_interpolation_that_reads_as_several_elements(tmp_path):
+    """`${tag}` resolves to "foo,bar", which the driver's reading splits in
+    two: that reading is not the axis's, and the cells key by their own."""
+    wf = Tagged()
+    wf.run(tag="foo,bar", name=multirun(["${tag}", "b"]), working_dir=tmp_path)
+    assert _values(wf) == [7.0, 1.0]
+    back = Tagged().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert _values(back) == [7.0, 1.0]
+
+
+def test_a_load_replaces_a_runs_manifest(tmp_path):
+    first = Plain()
+    first.run(x=multirun(["a"]), working_dir=tmp_path / "a", notes="A")
+    Plain().run(x=multirun(["b"]), working_dir=tmp_path / "b")
+    first.load_from_dir(tmp_path / "b", "mushin_metrics.json")
+    fresh = Plain().load_from_dir(tmp_path / "b", "mushin_metrics.json")
+    assert first.notes == fresh.notes
