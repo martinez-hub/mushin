@@ -1506,11 +1506,13 @@ class _TaskRunner:
     @staticmethod
     def _multi_rank_world() -> bool:
         """True when this process is one rank of an EXTERNAL multi-rank launch
-        (SLURM/submitit set SLURM_NTASKS; torchrun sets WORLD_SIZE + RANK,
-        both before the process starts). Requires a per-rank marker alongside
-        WORLD_SIZE so mushin's own single-node launcher (which exports
-        WORLD_SIZE in rank 0 but never RANK/SLURM_PROCID) is not mistaken for
-        an external rank."""
+        (SLURM/submitit set SLURM_NTASKS; submitit's local executor sets
+        SUBMITIT_LOCAL_NTASKS; torchrun sets WORLD_SIZE + RANK, all before the
+        process starts). Requires a per-rank marker alongside each count
+        (SLURM_PROCID, SUBMITIT_LOCAL_GLOBALID, RANK), so mushin's own
+        single-node launcher (which exports WORLD_SIZE in rank 0 but never a
+        rank) and a single-task local job (one task) are not mistaken for an
+        external rank."""
         import os
 
         def _gt1(name: str) -> bool:
@@ -1524,6 +1526,9 @@ class _TaskRunner:
             # SLURM_NTASKS is allocation-wide; SLURM_PROCID is set per task by
             # srun — a sequential driver inside an salloc shell has no PROCID
             # and is NOT a rank.
+            return True
+        if _gt1("SUBMITIT_LOCAL_NTASKS") and "SUBMITIT_LOCAL_GLOBALID" in os.environ:
+            # submitit's local tasks set no SLURM variable (#365).
             return True
         return _gt1("WORLD_SIZE") and (
             "RANK" in os.environ or "SLURM_PROCID" in os.environ

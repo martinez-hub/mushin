@@ -150,7 +150,14 @@ def test_multi_rank_detection_branches(monkeypatch):
     exports WORLD_SIZE but never a per-rank var)."""
     from mushin.workflows import _TaskRunner
 
-    for var in ("WORLD_SIZE", "RANK", "SLURM_NTASKS", "SLURM_PROCID"):
+    for var in (
+        "WORLD_SIZE",
+        "RANK",
+        "SLURM_NTASKS",
+        "SLURM_PROCID",
+        "SUBMITIT_LOCAL_NTASKS",
+        "SUBMITIT_LOCAL_GLOBALID",
+    ):
         monkeypatch.delenv(var, raising=False)
     assert not _TaskRunner._multi_rank_world()
 
@@ -171,4 +178,17 @@ def test_multi_rank_detection_branches(monkeypatch):
 
     # negative: WORLD_SIZE leaked without a per-rank marker
     monkeypatch.delenv("RANK")
+    assert not _TaskRunner._multi_rank_world()
+    monkeypatch.delenv("WORLD_SIZE")
+
+    # submitit_local positive: a task of a job of several (#365)
+    monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "2")
+    monkeypatch.setenv("SUBMITIT_LOCAL_GLOBALID", "1")
+    assert _TaskRunner._multi_rank_world()
+
+    # submitit_local negatives: a job of one task, and no per-task marker
+    monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "1")
+    assert not _TaskRunner._multi_rank_world()
+    monkeypatch.setenv("SUBMITIT_LOCAL_NTASKS", "2")
+    monkeypatch.delenv("SUBMITIT_LOCAL_GLOBALID")
     assert not _TaskRunner._multi_rank_world()
