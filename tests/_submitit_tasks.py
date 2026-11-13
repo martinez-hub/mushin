@@ -128,3 +128,8 @@ def unpicklable_result(seed):
     if seed == 0:
         return dict(v=float(seed), lock=threading.Lock())
     return dict(v=float(seed))
+
+
+@mushin.sweep
+def scaled(seed, scale):
+    return dict(v=float(seed) * scale)

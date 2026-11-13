@@ -107,7 +107,9 @@ plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
 names `mushin_submitit_slurm`.)
 Either way, recovery is one command: re-run the same sweep with
 `resume=True` (same `working_dir`): completed cells are reused from their
-sidecars, and only the preempted/missing cells re-run. Inside a long cell, use
+sidecars, and only the preempted/missing cells re-run. On `submitit_slurm`, a
+resume submits jobs only for those cells, and `sample=` only for the cells it
+keeps; the others are settled before anything is queued. Inside a long cell, use
 the [`mushin_resume` checkpoint contract](resilience.md) so the re-run
 continues from `last.ckpt` instead of epoch 0.
 

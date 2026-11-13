@@ -166,6 +166,28 @@ states under both `on_error` values with main).
   waiting for a job SLURM reports COMPLETED and reading its result again is
   the fix for that case on every job shape (T9 checks how often it happens).
 
+## Decisions (PR 3)
+
+- **F1. One copy of the rules.** The runner's sample skip, resume reuse and
+  cache hit move, verbatim, into `_TaskRunner._settle`, which the job still
+  calls first; the driver calls the same function before submitting.
+- **F2. The driver settles a cell only when its answer is the job's.**
+  `settle_in_driver` composes the job as the dead-job path does (HydraConfig
+  set), resolves its config and takes its project-code record in the driver
+  (checked against the job's own record on `submitit_local`: the config hash
+  and `code_deps` matched for a plain task, a `_target_` in the config, a
+  task defined in the script, and a fixed `${hydra:runtime.output_dir}`),
+  and applies `_settle` strictly: a fingerprint the prior record has but the
+  driver cannot take does not count as unchanged, as it does in a job for a
+  sweep from before the fingerprint; that cell is left to its job. A settled
+  cell gets the `.hydra/` snapshot `run_job` would write, then its record.
+  Any error settling a cell leaves it to its job.
+- **F3. Only sweeps that can settle a cell pay for it.** The launcher composes
+  per cell only when `sample=`, a resume or a `cache_dir` is set; a fresh
+  sweep submits as before. The rest are submitted under their own job numbers
+  (one line in the copied submission body filters them; the pin test strips
+  exactly that edit).
+
 ## Needs a cluster
 
 A probe on `submitit_local` (a cell sleeping past `timeout_min=1`) shows a

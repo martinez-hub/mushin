@@ -896,19 +896,8 @@ def _record_dead_cell(
         cell_dir = _job_dir(ret)
         hydra = ret.hydra_cfg.hydra
         # Written before the status, which must be the newer of the two
-        # (`sidecar_job_fields`). As `run_job` saves them, unresolved.
-        if hydra.output_subdir is not None:
-            snapshot = cell_dir / str(hydra.output_subdir)
-            if not (snapshot / "hydra.yaml").exists():
-                snapshot.mkdir(parents=True, exist_ok=True)
-                for name, node in (
-                    ("config.yaml", ret.cfg),
-                    ("hydra.yaml", ret.hydra_cfg),
-                    ("overrides.yaml", OmegaConf.create(list(ret.overrides))),
-                ):
-                    (snapshot / name).write_text(
-                        OmegaConf.to_yaml(node), encoding="utf-8"
-                    )
+        # (`sidecar_job_fields`).
+        _write_hydra_snapshot(ret, cell_dir, replace=False)
         (cell_dir / METRICS_FILE).unlink(missing_ok=True)
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
@@ -934,6 +923,28 @@ def _record_dead_cell(
             )
     except Exception:  # noqa: BLE001 - see the docstring: never fails the run
         pass
+
+
+def _write_hydra_snapshot(ret: JobReturn, cell_dir: Path, *, replace: bool) -> None:
+    """The ``.hydra/`` snapshot Hydra's ``run_job`` writes for a job (its
+    config, its Hydra config and its overrides, unresolved), for a job mushin
+    composed in the driver; none when the run keeps none. An existing one is
+    kept unless ``replace``."""
+    from omegaconf import OmegaConf
+
+    subdir = ret.hydra_cfg.hydra.output_subdir
+    if subdir is None:
+        return
+    snapshot = cell_dir / str(subdir)
+    if not replace and (snapshot / "hydra.yaml").exists():
+        return
+    snapshot.mkdir(parents=True, exist_ok=True)
+    for name, node in (
+        ("config.yaml", ret.cfg),
+        ("hydra.yaml", ret.hydra_cfg),
+        ("overrides.yaml", OmegaConf.create(list(ret.overrides))),
+    ):
+        (snapshot / name).write_text(OmegaConf.to_yaml(node), encoding="utf-8")
 
 
 def _job_id_or_none(value: Any) -> str | None:
@@ -1461,14 +1472,32 @@ class _TaskRunner:
             MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray,
         )
 
-    def _settle(self, cfg, cwd, resolved, chash, job_num, write_status):
+    def _settle(
+        self,
+        cfg,
+        cwd,
+        resolved,
+        chash,
+        job_num,
+        write_status,
+        *,
+        strict=False,
+        prepare=None,
+    ):
         """The steps that can settle a cell without computing it: a cell
         ``sample=`` left out, a completed cell a resume reuses, and a
         ``cache_dir`` hit. Each records the cell in ``cwd``, its dir, and
         returns ``(value, deps)``: the value the cell's job returns, or
         `_COMPUTE` for a cell that must compute, and the cell's project-code
         record (None for an unsampled cell, which never takes one). One copy
-        of these rules for the job that runs the cell (#345)."""
+        of these rules for the job that runs the cell and for the driver that
+        decides, before submitting it, whether it needs a job (#345).
+
+        ``strict`` is the driver's: a fingerprint the prior record has but
+        this process cannot take (a config it cannot resolve, a project-code
+        record it cannot compare) does not count as unchanged, as it does in
+        the job for a sweep from before the fingerprint; the cell is then
+        left to its job. ``prepare`` runs before the first write to ``cwd``."""
         import warnings
         from pathlib import Path
 
@@ -1494,6 +1523,8 @@ class _TaskRunner:
         if self.sampled_indices is not None:
             if job_num is not None and job_num not in self.sampled_indices:
                 combo = self._combo(cfg, self.swept_names)
+                if prepare is not None:
+                    prepare()
                 write_status(cwd, status="skipped", combo=combo, attempt=1)
                 # A skipped cell has no valid metrics; drop any sidecar a prior
                 # sweep left in this reused dir so show/export don't list old
@@ -1551,6 +1582,12 @@ class _TaskRunner:
                 # field, an unknown record).
                 changed_deps = changed_project_code(prior_deps, deps)
                 deps_changed = bool(changed_deps)
+                if strict and (
+                    (prior_config is not None and chash is None)
+                    or (prior_code is not None and self.code_hash is None)
+                    or (prior_deps is not None and changed_deps is None)
+                ):
+                    return _COMPUTE, deps
                 if config_changed or code_changed or deps_changed:
                     parts = []
                     if config_changed:
@@ -1580,6 +1617,8 @@ class _TaskRunner:
                         # DIFFERENT cell, the dir keeps stale metrics -> the
                         # manifest and an offline load_from_dir mis-key the cell.
                         # A no-op when the cached cell is already this dir.
+                        if prepare is not None:
+                            prepare()
                         written = write_metrics_sidecar(cwd, cached)
                         # Keep the reused cell's prior record (see
                         # merge_project_records): writing this run's keys would
@@ -1607,6 +1646,8 @@ class _TaskRunner:
             cached = read_metrics_sidecar(cache_cell)
             if cached is not None:
                 combo = self._combo(cfg, self.swept_names)
+                if prepare is not None:
+                    prepare()
                 written = write_metrics_sidecar(cwd, cached)
                 write_status(
                     cwd,
@@ -1619,6 +1660,55 @@ class _TaskRunner:
                 return cached, deps
 
         return _COMPUTE, deps
+
+    def settles_in_driver(self) -> bool:
+        """Whether a cell of this run may need no job: ``sample=`` leaves
+        cells out, a resume reuses completed ones, a ``cache_dir`` holds
+        others. Otherwise mushin's submitit launcher composes nothing in the
+        driver before it submits (#345)."""
+        return (
+            self.sampled_indices is not None
+            or self.prior_manifest is not None
+            or self.cache_dir is not None
+        )
+
+    def settle_in_driver(self, ret: JobReturn) -> tuple[Any, Any] | None:
+        """For mushin's submitit launcher, before it submits the cell's job
+        (#345): the status and value of a cell that needs no compute, recorded
+        in its dir as its job would record it (with the ``.hydra/`` snapshot
+        ``run_job`` writes), or None for a cell to submit. Called in the
+        driver, with HydraConfig set to the job's config.
+
+        The rules are the job's own (`_settle`), applied strictly: whatever
+        the driver cannot judge as the job would, a config it cannot resolve
+        or a project-code record it cannot compare, is left to the job."""
+        from ._resume import resolved_config, resolved_config_hash, write_cell_status
+
+        resolved = resolved_config(ret.cfg)
+        chash = resolved_config_hash(resolved)
+        job_num, choices = _current_job_fields()
+        cell_dir = _job_dir(ret)
+        write_status = functools.partial(
+            write_cell_status,
+            config_hash=chash,
+            code_hash=self.code_hash,
+            job_num=job_num,
+            choices=choices,
+            run_id=self.run_id,
+        )
+        value, _ = self._settle(
+            ret.cfg,
+            cell_dir,
+            resolved,
+            chash,
+            job_num,
+            write_status,
+            strict=True,
+            prepare=lambda: _write_hydra_snapshot(ret, cell_dir, replace=True),
+        )
+        if value is _COMPUTE:
+            return None
+        return JobStatus.COMPLETED, value
 
     def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
         """Record a cell whose job ended without a result (#345), and return

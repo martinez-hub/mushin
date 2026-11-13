@@ -339,11 +339,6 @@ def test_a_resume_reuses_a_sweep_the_plugins_launcher_ran(tmp_path, monkeypatch)
 # Known gap (#345), pinned so a fix turns it into a failure to update.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="#345: a resume submits every cell; each job decides reuse itself",
-)
 def test_resume_submits_only_the_cells_it_must_compute(tmp_path):
     wd = tmp_path / "s"
     tasks.record_pid.run(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
@@ -499,3 +494,128 @@ def test_a_dead_job_leaves_this_cells_earlier_result_for_a_resume(
     again = tasks.die_when_told.run(resume=True, **sweep)
     # The first run's result, reused; the second run recomputed the others.
     assert again["pid"].values[1] == first["pid"].values[1]
+
+
+# Cells that need no job are settled in the driver (#345): only the rest are
+# submitted, under their own job numbers.
+
+
+def _records(wd: Path) -> dict[str, dict]:
+    """Each cell's record, without what names the run, the job or the
+    attempt's own process."""
+    out = {}
+    for path in sorted(wd.glob("[0-9]*/mushin_cell_status.json")):
+        record = json.loads(path.read_text())
+        for key in ("run_id", "job_id"):
+            record.pop(key, None)
+        out[path.parent.name] = record
+    return out
+
+
+def _cells(wd: Path) -> dict[str, str]:
+    manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
+    return {key: cell["status"] for key, cell in manifest["cells"].items()}
+
+
+def _without_the_driver_pass(monkeypatch):
+    from mushin.workflows import _TaskRunner
+
+    monkeypatch.setattr(_TaskRunner, "settles_in_driver", lambda self: False)
+
+
+@pytest.mark.parametrize("driver", [True, False], ids=["driver", "jobs"])
+def test_sample_submits_only_the_sampled_cells(tmp_path, monkeypatch, driver):
+    if not driver:
+        _without_the_driver_pass(monkeypatch)
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match="skip"):
+        ds = tasks.record_pid.run(
+            seed=multirun([0, 1, 2, 3]), working_dir=str(wd), sample=1, **LOCAL
+        )
+    assert int((~np.isnan(ds["v"].values)).sum()) == 1
+    assert len(_job_dirs(wd)) == (1 if driver else 4)
+    records = _records(wd)
+    assert sorted(r["status"] for r in records.values()) == ["completed"] + 3 * [
+        "skipped"
+    ]
+    for cell in records:
+        assert (wd / cell / ".hydra" / "hydra.yaml").is_file()
+    reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+    assert len(reloaded.skipped) == 3
+
+
+def _sweep_then_resume(tmp_path, monkeypatch, driver):
+    """A sweep whose cell 1 dies, then a resume; returns the runs' datasets,
+    the dir, and the jobs each run submitted."""
+    if not driver:
+        _without_the_driver_pass(monkeypatch)
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match="failed"):
+        first = tasks.die_when_told.run(on_error="nan", **sweep)
+    submitted = len(_job_dirs(wd))
+    monkeypatch.delenv("MUSHIN_TEST_DIE")
+    again = tasks.die_when_told.run(resume=True, **sweep)
+    return first, again, wd, (submitted, len(_job_dirs(wd)) - submitted)
+
+
+def test_a_resume_submits_only_the_cell_it_must_compute(tmp_path, monkeypatch):
+    first, again, wd, (_, resubmitted) = _sweep_then_resume(
+        tmp_path, monkeypatch, driver=True
+    )
+    assert resubmitted == 1
+    assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
+    before, after = first["pid"].values, again["pid"].values
+    assert after[0] == before[0] and after[2] == before[2]  # reused
+
+
+def test_settling_in_the_driver_leaves_what_the_jobs_would(tmp_path, monkeypatch):
+    """The same sweep and resume with the driver's pass and without it: the
+    same dataset, manifest and cell records (but for the ids of the run and
+    the job); only the jobs submitted differ."""
+    outcomes = []
+    for driver in (True, False):
+        with monkeypatch.context() as m:
+            _, again, wd, counts = _sweep_then_resume(tmp_path / str(driver), m, driver)
+        outcomes.append((again["v"].values.tolist(), _cells(wd), _records(wd), counts))
+    (v1, cells1, records1, counts1), (v2, cells2, records2, counts2) = outcomes
+    assert (v1, cells1, records1) == (v2, cells2, records2)
+    assert counts1 == (3, 1) and counts2 == (3, 3)
+
+
+def test_a_cache_hit_submits_no_job(tmp_path):
+    cache = tmp_path / "cache"
+    sweep = dict(seed=multirun([0, 1]), cache_dir=str(cache), **LOCAL)
+    first = tasks.record_pid.run(working_dir=str(tmp_path / "a"), **sweep)
+    again = tasks.record_pid.run(working_dir=str(tmp_path / "b"), **sweep)
+    assert again["pid"].values.tolist() == first["pid"].values.tolist()
+    assert len(_job_dirs(tmp_path / "b")) == 0
+
+
+def test_a_changed_config_on_resume_submits_every_cell(tmp_path):
+    wd = tmp_path / "s"
+    tasks.scaled.run(seed=multirun([0, 1]), scale=1.0, working_dir=str(wd), **LOCAL)
+    with pytest.warns(UserWarning, match="fingerprint mismatch"):
+        again = tasks.scaled.run(
+            seed=multirun([0, 1]), scale=2.0, working_dir=str(wd), resume=True, **LOCAL
+        )
+    assert again["v"].values.tolist() == [0.0, 2.0]
+    assert len(_job_dirs(wd)) == 4
+
+
+def test_a_cell_the_driver_cannot_settle_is_left_to_its_job(tmp_path, monkeypatch):
+    from mushin.workflows import _TaskRunner
+
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    first = tasks.record_pid.run(**sweep)
+
+    def broken(self, ret):
+        raise RuntimeError("cannot settle here")
+
+    monkeypatch.setattr(_TaskRunner, "settle_in_driver", broken)
+    again = tasks.record_pid.run(resume=True, **sweep)
+    # Submitted, and reused by the jobs themselves, as before.
+    assert len(_job_dirs(wd)) == 4
+    assert again["pid"].values.tolist() == first["pid"].values.tolist()

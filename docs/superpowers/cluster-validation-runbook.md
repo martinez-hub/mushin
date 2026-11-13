@@ -402,6 +402,19 @@ the first line of each `mushin_error.txt`, and whether the job id in that
 message matches the `job_id` in the cell's `mushin_cell_status.json` and
 `hydra.job.id` in its `hydra.yaml` (an array task's is `<array>_<task>`).
 
+
+### T11: A resume submits only the cells it must compute (#345 item 3)
+
+1. Run a 6-cell sweep with `launcher="submitit_slurm"` and `on_error="nan"`
+   where one cell fails (e.g. raise on one seed), then `resume=True` with the
+   failure fixed. `sacct -X --starttime <resume start> --format=JobID,JobName`
+   must list one array task for the resume, and the dataset all six values.
+2. `sample=2` on a fresh 6-cell sweep must submit an array of 2 tasks.
+3. The same sweep with `cache_dir=` into a new `working_dir` must submit
+   nothing (the driver's log says "6 of 6 cells need no job").
+
+**Report:** the `sacct` lines for each step.
+
 ---
 
 ## Graduation

@@ -101,6 +101,17 @@ def test_the_submission_is_the_plugins_own():
         "jobs = executor.map_array",
     )
     original = body(theirs, "import submitit", "jobs = executor.map_array")
+    # mushin's edits, exactly: the cells settled in the driver need no job.
+    lines = copied.splitlines()
+    for ours_only in (
+        "# mushin's: the cells settled in the driver need no job.",
+        "job_params = [p for p in job_params if p[2] not in skip]",
+    ):
+        lines.remove(ours_only)
+    guarded = "jobs = executor.map_array(self, *zip(*job_params)) if job_params else []"
+    assert lines[-1] == guarded
+    lines[-1] = "jobs = executor.map_array(self, *zip(*job_params))"
+    copied = "\n".join(lines)
     # The copy's only edits: names it reaches through the plugin's modules,
     # and the builtin generic.
     original = original.replace(
@@ -574,3 +585,47 @@ def test_only_a_one_task_job_that_gave_no_result_may_keep_its_record():
     assert ours._keepable(_Ended(), OSError("unreadable result"))
     assert not ours._keepable(_Ended(num_tasks=2), gave_none)
     assert not ours._keepable(_Ended(), _failed_job_error("RuntimeError: x"))
+
+
+@pytest.mark.parametrize(
+    ("prior", "chash", "settles"),
+    [
+        (dict(config_hash="c"), "c", True),
+        (dict(config_hash="c"), None, False),  # the driver cannot resolve it
+        (dict(), None, True),  # a sweep from before the fingerprint
+        (dict(config_hash="c"), "d", False),  # changed
+    ],
+)
+def test_the_driver_reuses_only_what_it_can_judge_as_the_job_would(
+    tmp_path, prior, chash, settles
+):
+    """`_settle(strict=True)`: a fingerprint the prior record has and the
+    driver cannot take is not 'unchanged' there, as it is in the job."""
+    import warnings
+
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _COMPUTE, _PriorCells, _TaskRunner
+
+    cell = tmp_path / "0"
+    write_cell_status(cell, status="completed", combo={"lr": 0.2}, attempt=1, **prior)
+    write_metrics_sidecar(cell, {"v": 1.0})
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.code_hash, runner.cache_dir = None, None
+    runner._code_token, runner.code_roots, runner.code_body_roots = "t", (), ()
+    runner.script_entries = {}
+    runner.prior_manifest = _PriorCells(str(tmp_path), ("lr",), {"lr=0.2": "0"})
+    written = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        value, _ = runner._settle(
+            {"lr": 0.2},
+            tmp_path / "1",
+            {"lr": 0.2},
+            chash,
+            0,
+            lambda *a, **k: written.append(k),
+            strict=True,
+        )
+    assert (value is not _COMPUTE) is settles
