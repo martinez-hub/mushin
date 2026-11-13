@@ -181,6 +181,61 @@ def record_of_another_run(record: dict | None, stamp: Any) -> bool:
     return record.get("run_id") != stamp
 
 
+def record_predates(cell_dir, hydra_yaml) -> bool:
+    """Whether the cell's status record is older than ``hydra_yaml``, the
+    test `sidecar_state` makes, by the files' ages alone; False when either
+    cannot be stat'ed. Take it before reading the record, as `sidecar_state`
+    does: a record replaced in between is then read in its newer state."""
+    try:
+        written = (Path(cell_dir) / STATUS_FILE).stat().st_mtime_ns
+        return Path(hydra_yaml).stat().st_mtime_ns > written
+    except OSError:
+        return False
+
+
+#: The line `OmegaConf.to_yaml` writes for ``hydra.job.mushin_run_id``, inside
+#: the ``  job:`` section of ``hydra:``: a key indented by four spaces.
+_STAMP_KEY = "    mushin_run_id: "
+#: An unquoted YAML scalar that would load as a number, a boolean or null.
+_NOT_A_STRING = re.compile(
+    r"[-+]?(\d[\d_]*(\.\d*)?([eE][-+]?\d+)?|\.\d+([eE][-+]?\d+)?|\.inf|\.nan)"
+    r"|null|~|true|false|yes|no|on|off",
+    re.IGNORECASE,
+)
+
+
+def snapshot_run_stamp(hydra_yaml) -> str | None:
+    """The run a job's hydra.yaml names (``hydra.job.mushin_run_id``),
+    read from its own line in the ``job:`` section, with no YAML parser:
+    ``run()`` writes a plain id, which the emitter quotes when it would read
+    as anything but a string. On every hydra.yaml Hydra or mushin writes it
+    gives what `_hydra_yaml.hydra_run_stamp` gives for the parsed file
+    (a value written by hand, such as an escaped string, may read
+    differently): None for a file that cannot be read or names no run, or a
+    value that is not a plain id (empty, ``???``, an interpolation, or a
+    number)."""
+    try:
+        text = Path(hydra_yaml).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    in_job, value = False, None
+    for line in text.splitlines():
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= 2:
+            in_job = line.rstrip() == "  job:"  # a section of ``hydra:``
+        elif in_job and line.startswith(_STAMP_KEY):
+            value = line[len(_STAMP_KEY) :].strip()
+            break
+    if value is None:
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    elif _NOT_A_STRING.fullmatch(value):
+        return None
+    if not value or value == "???" or "${" in value:
+        return None
+    return value
+
+
 #: What ``resolved_config`` returns for a config that cannot be resolved.
 _UNRESOLVED = object()
 
