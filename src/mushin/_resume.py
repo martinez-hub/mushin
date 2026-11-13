@@ -5425,10 +5425,12 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     """Compute the ResumeContext for a cell about to (re-)execute in ``cell_dir``.
 
     Combo-match guard: a prior status sidecar is honored ONLY if its recorded
-    combo equals ``combo``. This makes numeric-dir reuse safe; if a grid change
-    reused this dir for a different cell, we neither resume nor surface that
-    cell's checkpoint. (Resume is only meaningful for a workflow that records a
-    non-degenerate per-cell combo; an empty combo cannot distinguish cells.)"""
+    combo equals ``combo``, so a cell that takes over a dir another cell used
+    is not resumed from that cell's record. Its checkpoints stay in the dir,
+    though, and once this cell's own record has replaced the other's, a later
+    attempt of this cell can be handed them (#355). (Resume is only meaningful
+    for a workflow that records a non-degenerate per-cell combo; an empty
+    combo cannot distinguish cells.)"""
     cell_dir = Path(cell_dir)
     prior = read_cell_status(cell_dir)
     matches = prior is not None and prior.get("combo") == combo
