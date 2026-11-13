@@ -2854,6 +2854,57 @@ def test_a_run_stamp_reads_alike_on_both_read_paths(stamp, read):
     assert hydra_run_stamp(OmegaConf.create(tree)) == read
 
 
+class _SometimesNone(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):
+        return None if x == 2 else dict(v=float(x))
+
+
+def test_a_reload_reads_a_cell_that_returned_no_metrics_as_the_run_does(tmp_path):
+    """#364: a completed cell whose task returned None has no metrics file;
+    the reload gives it NaN, as the run does, instead of raising."""
+    wf = _SometimesNone()
+    wf.run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    ran = wf.to_xarray()["v"].values.tolist()
+    loaded = _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+    values = loaded.to_xarray()["v"].values.tolist()
+    assert values[0] == ran[0] == 1.0
+    assert values[1] != values[1] and ran[1] != ran[1]
+    assert loaded.is_complete == wf.is_complete
+    assert [f["combo"] for f in loaded.failures] == [f["combo"] for f in wf.failures]
+    assert [s["combo"] for s in loaded.skipped] == [s["combo"] for s in wf.skipped]
+
+
+def test_a_metrics_file_a_cell_wrote_and_lost_still_raises(tmp_path):
+    """The record names the file its attempt wrote (its digest): a missing
+    one was lost, not never written."""
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    (tmp_path / "0" / "mushin_metrics.json").unlink()
+    with pytest.raises(FileNotFoundError, match="No files"):
+        _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
+def test_a_record_from_before_run_id_still_raises_for_a_missing_file(tmp_path):
+    """A released version's record cannot tell 'returned None' from a lost
+    file: as before, a reload raises."""
+    import json
+
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    path = tmp_path / "1" / "mushin_cell_status.json"
+    record = json.loads(path.read_text())
+    del record["run_id"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(FileNotFoundError, match="No files"):
+        _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
+@pytest.mark.parametrize("name", ["fit_metrics.pt", "nothing_*.json"])
+def test_a_missing_file_of_the_users_own_still_raises(tmp_path, name):
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    with pytest.raises(FileNotFoundError, match="No files"):
+        _SometimesNone().load_from_dir(tmp_path, ["mushin_metrics.json", name])
+
+
 def test_offline_reload_restores_inf_metrics(tmp_path):
     """The tagged ±Inf sidecar marker must be decoded by the default
     metric_load_fn too — an offline reload must yield real Inf values, not

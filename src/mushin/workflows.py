@@ -4508,6 +4508,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if isinstance(metrics_filename, str):
             metrics_filename = [metrics_filename]
 
+        from ._sweep_io import METRICS_FILE
+
         job_metrics: list[Any] = []
         for i, dir_ in enumerate(self.multirun_working_dirs):
             # A cell recorded 'failed' or 'skipped' (fail-soft, `sample=`, or an
@@ -4528,9 +4530,23 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ):
                 job_metrics.append(None)
                 continue
-            _metrics = {}
+            # A completed cell whose task returned no metrics has no
+            # mushin_metrics.json: its record, from a version that records its
+            # run, names no file it wrote (#364). One that names a file whose
+            # file is gone lost it, and a record from before `run_id` cannot
+            # tell the two apart: both still raise, as does a missing file of
+            # the user's own.
+            wrote_none = (
+                status == "completed"
+                and "run_id" in (record or {})
+                and "metrics" not in (record or {})
+            )
+            _metrics, absent = {}, 0
             for name in metrics_filename:
                 files = sorted(dir_.glob(name))
+                if not files and name == METRICS_FILE and wrote_none:
+                    absent += 1
+                    continue
                 if not files:
                     raise FileNotFoundError(
                         f"No files with the path/pattern {dir_ / name} were found"
@@ -4538,7 +4554,8 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
 
                 for f_ in files:
                     _metrics.update(self.metric_load_fn(f_))
-            job_metrics.append(_metrics)
+            # Only the sidecar asked for, and none written: no result (NaN).
+            job_metrics.append(None if absent == len(metrics_filename) else _metrics)
 
         # Keep the job-aligned view (None = failed/skipped cell) so `to_xarray`
         # can rebuild `_metrics_by_combo` per cell even when some cells are
