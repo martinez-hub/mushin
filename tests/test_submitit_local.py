@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -589,6 +590,9 @@ def test_a_job_whose_task_raises_fails_its_cell_and_its_record(
         with pytest.warns(UserWarning, match=r"failed: \['seed=0'\]"):
             ds = getattr(tasks, task).run(**sweep)
         assert "v" not in ds or np.isnan(ds["v"].values).all()
+        # The task's own error, not a wait that timed out: the order ran.
+        error = (wd / "0" / "mushin_error.txt").read_text()
+        assert re.search(r"RuntimeError: task . of seed 0", error)
     record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
     assert record["status"] == "failed"
     assert not (wd / "0" / "mushin_metrics.json").exists()
