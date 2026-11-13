@@ -2710,6 +2710,35 @@ def test_show_keeps_an_older_record_of_the_same_run(tmp_path, case):
     assert mushin.best(wd, "v", mode="min").value == 2.0
 
 
+def test_a_run_that_raises_after_a_load_keeps_the_loads_judgment(tmp_path):
+    """A run that raises before its jobs are collected leaves the loaded
+    dirs in place; their record of another run must stay judged."""
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    with pytest.raises(Exception):
+        wf.run(x=multirun([13]), lr=1.0, working_dir=str(tmp_path / "fresh"))
+    v = wf.to_xarray(metrics_filename="mushin_metrics.json")["v"].values.tolist()
+    assert v[0] != v[0] and v[1] == 4.0
+
+
+def test_a_cell_a_later_run_fills_counts_on_the_next_read(tmp_path):
+    """After a load, a resume from elsewhere computes the dead cell: its new
+    record is no longer older than its snapshot, and the same workflow reads
+    it, as a fresh load would."""
+    first = dict(x=multirun([1, 2]), lr=1.0)
+    second = dict(x=multirun([3, 4]), lr=1.0)
+    wd = _a_job_died_before_its_first_record(tmp_path, first, second)
+    wf = _ReusedDir()
+    wf.load_from_dir(wd, "mushin_metrics.json")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ReusedDir().run(working_dir=str(wd), resume=True, **second)
+    assert wf.load_metrics("mushin_metrics.json") == {"v": [3.0, 4.0]}
+
+
 def test_each_jobs_snapshot_names_the_run_its_record_does(tmp_path):
     import json
 
