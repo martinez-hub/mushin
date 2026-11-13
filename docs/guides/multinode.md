@@ -107,7 +107,13 @@ plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
 names `mushin_submitit_slurm`.)
 Either way, recovery is one command: re-run the same sweep with
 `resume=True` (same `working_dir`): completed cells are reused from their
-sidecars, and only the preempted/missing cells re-run. Inside a long cell, use
+sidecars, and only the preempted/missing cells re-run. On mushin's submitit
+launchers, a resume submits jobs only for those cells (as `sample=` does only
+for the cells it keeps, and a `cache_dir` hit none); the others are settled
+before anything is queued. A cell is still submitted, and its job decides as
+before, when the driver cannot judge it as the job would: its config reads
+the environment (`${oc.env:...}`), or the sweep has Hydra callbacks, which
+run in each job. Inside a long cell, use
 the [`mushin_resume` checkpoint contract](resilience.md) so the re-run
 continues from `last.ckpt` instead of epoch 0.
 

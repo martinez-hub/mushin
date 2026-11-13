@@ -600,6 +600,10 @@ class _DeadJob(_FailedRun):
         self.keepable = keepable
 
 
+#: What `_TaskRunner._settle` returns for a cell that must compute.
+_COMPUTE = object()
+
+
 class _SkippedRun:
     """Sentinel returned in place of a cell that was intentionally not run: the
     wall-clock budget (``max_total_seconds``) was exhausted, or the cell was not
@@ -892,19 +896,8 @@ def _record_dead_cell(
         cell_dir = _job_dir(ret)
         hydra = ret.hydra_cfg.hydra
         # Written before the status, which must be the newer of the two
-        # (`sidecar_job_fields`). As `run_job` saves them, unresolved.
-        if hydra.output_subdir is not None:
-            snapshot = cell_dir / str(hydra.output_subdir)
-            if not (snapshot / "hydra.yaml").exists():
-                snapshot.mkdir(parents=True, exist_ok=True)
-                for name, node in (
-                    ("config.yaml", ret.cfg),
-                    ("hydra.yaml", ret.hydra_cfg),
-                    ("overrides.yaml", OmegaConf.create(list(ret.overrides))),
-                ):
-                    (snapshot / name).write_text(
-                        OmegaConf.to_yaml(node), encoding="utf-8"
-                    )
+        # (`sidecar_job_fields`).
+        _write_hydra_snapshot(ret, cell_dir, replace=False)
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
             cell_dir,
@@ -932,6 +925,90 @@ def _record_dead_cell(
             )
     except Exception:  # noqa: BLE001 - see the docstring: never fails the run
         pass
+
+
+def _covers(deps: Any, prior: Any) -> bool:
+    """Whether a project-code record ``deps`` names every file ``prior``
+    does: the driver's can lack one only the jobs can import (#345). A
+    record of another shape names none (`changed_project_code` then finds
+    the two incomparable)."""
+
+    def files(record: Any) -> set:
+        code = record.get("code") if isinstance(record, dict) else None
+        return set(code) if isinstance(code, dict) else set()
+
+    return files(prior) <= files(deps)
+
+
+def _resolved(path: Path) -> Path:
+    """``path`` resolved, or made absolute when it cannot be (a symlink
+    loop, an unreadable parent): the same path always gives the same answer."""
+    import os
+
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(path))
+
+
+def _reads_environment(ret: JobReturn) -> bool:
+    """Whether a job's config may resolve differently in its own process:
+    it, or a variable ``hydra.job.env_set`` sets for the job, reads the
+    environment (``${oc.env:...}``, OmegaConf's older ``${env:...}``,
+    spaced as OmegaConf allows), which the job's may hold differently (a
+    scheduler's variables). Setting variables to fixed values changes
+    nothing the driver cannot apply itself (`settle_in_driver`). A custom
+    resolver that reads ``os.environ`` is not seen."""
+    import re
+
+    from omegaconf import OmegaConf
+
+    env = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
+
+    def reads(node: Any) -> bool:
+        if isinstance(node, str):
+            return env.search(node) is not None
+        if isinstance(node, Mapping):
+            return any(reads(v) for v in node.values())
+        if isinstance(node, (list, tuple)):
+            return any(reads(v) for v in node)
+        return False
+
+    try:
+        hydra_cfg = getattr(ret, "hydra_cfg", None)
+        env_set = (
+            OmegaConf.select(hydra_cfg, "hydra.job.env_set")
+            if hydra_cfg is not None
+            else None
+        )
+        return reads(OmegaConf.to_container(ret.cfg, resolve=False)) or (
+            env_set is not None
+            and reads(OmegaConf.to_container(env_set, resolve=False))
+        )
+    except Exception:  # noqa: BLE001 - not examinable: as if it did
+        return True
+
+
+def _write_hydra_snapshot(ret: JobReturn, cell_dir: Path, *, replace: bool) -> None:
+    """The ``.hydra/`` snapshot Hydra's ``run_job`` writes for a job (its
+    config, its Hydra config and its overrides, unresolved), for a job mushin
+    composed in the driver; none when the run keeps none. An existing one is
+    kept unless ``replace``."""
+    from omegaconf import OmegaConf
+
+    subdir = ret.hydra_cfg.hydra.output_subdir
+    if subdir is None:
+        return
+    snapshot = cell_dir / str(subdir)
+    if not replace and (snapshot / "hydra.yaml").exists():
+        return
+    snapshot.mkdir(parents=True, exist_ok=True)
+    for name, node in (
+        ("config.yaml", ret.cfg),
+        ("hydra.yaml", ret.hydra_cfg),
+        ("overrides.yaml", OmegaConf.create(list(ret.overrides))),
+    ):
+        (snapshot / name).write_text(OmegaConf.to_yaml(node), encoding="utf-8")
 
 
 def _job_id_or_none(value: Any) -> str | None:
@@ -1461,6 +1538,345 @@ class _TaskRunner:
             MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray,
         )
 
+    def _settle(
+        self,
+        cfg,
+        cwd,
+        resolved,
+        chash,
+        job_num,
+        write_status,
+        *,
+        strict=False,
+    ):
+        """The steps that can settle a cell without computing it: a cell
+        ``sample=`` left out, a completed cell a resume reuses, and a
+        ``cache_dir`` hit. Returns ``(value, deps, record)``: the value the
+        cell's job returns, or `_COMPUTE` for a cell that must compute; the
+        cell's project-code record (None for an unsampled cell, which never
+        takes one); and, for a settled cell, the function that records it in
+        ``cwd``, its dir, which the job calls at once and the driver once it
+        has decided every cell. One copy of these rules for the job that runs
+        the cell and for the driver that decides, before submitting it,
+        whether it needs a job (#345).
+
+        ``strict`` is the driver's. A resume does not reuse a cell whose
+        prior record has a fingerprint this process cannot take (a config it
+        cannot resolve, a project-code record it cannot compare), as the job
+        does for a sweep from before the fingerprint, nor one whose
+        fingerprint changed, which the job warns about; such a cell may still
+        be a cache hit, judged as the job judges it. A cell whose
+        project-code record lacks a file the prior one names (a module only
+        the jobs' path imports) is not judged at all: its cache key may be
+        another code's. A reused cell whose prior record has no project-code
+        record takes the driver's, as it takes the job's: it guards every file
+        the driver sees, though not one only the jobs import."""
+        import warnings
+        from pathlib import Path
+
+        from ._resume import (
+            cell_project_record,
+            changed_project_code,
+            merge_project_records,
+            read_cell_status,
+        )
+        from ._sweep_io import (
+            METRICS_FILE,
+            combo_key,
+            read_metrics_sidecar,
+            remove_sidecar,
+            write_metrics_sidecar,
+        )
+
+        # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
+        # job number is not in the selected sample never runs (NaN); keying on
+        # the job index (not the combo) makes the selection launcher- and
+        # axis-type-agnostic and identical across a resume. An un-sampled cell is
+        # recorded 'skipped', so a later resume WITHOUT `sample` fills it in.
+        # No job number -> don't skip.
+        if self.sampled_indices is not None:
+            if job_num is not None and job_num not in self.sampled_indices:
+                combo = self._combo(cfg, self.swept_names)
+
+                def skipped():
+                    write_status(cwd, status="skipped", combo=combo, attempt=1)
+                    # A skipped cell has no valid metrics; drop any sidecar a
+                    # prior sweep left in this reused dir so show/export don't
+                    # list old metrics on a 'skipped' row while to_xarray
+                    # NaN-fills it.
+                    remove_sidecar(cwd / METRICS_FILE)
+
+                return _SkippedRun("not sampled"), None, skipped
+
+        # This cell's project-code record, taken here, in the process that will
+        # run (or reuse) it (see cell_project_record), and only by a cell that
+        # can compare or store it: an unsampled cell above never does.
+        deps = cell_project_record(
+            self._code_token,
+            self.code_roots,
+            self.code_body_roots,
+            resolved,
+            scripts=self.script_entries,
+        )
+
+        # (1) resume short-circuit — before pre_task/instrument, only when resuming
+        if self.prior_manifest is not None:
+            # Key the lookup on the CURRENT swept names, not the prior sweep's:
+            # if the grid shape changed (an axis added/removed), the current
+            # cell's key won't match any completed cell, so it re-runs instead
+            # of projecting onto the old params and reusing the wrong cell.
+            sc = self._combo(cfg, self.swept_names)
+            key = combo_key(sc)
+            dir_ = self.prior_manifest.completed.get(key)
+            if dir_ is not None:
+                cell_dir = Path(self.prior_manifest.root) / dir_
+                prior = read_cell_status(cell_dir) or {}
+                prior_config = prior.get("config_hash")
+                prior_code = prior.get("code_hash")
+                prior_deps = prior.get("code_deps")
+                # A completed cell is reused only if the resolved config, the
+                # task source AND the project code the task reaches all still
+                # match. A missing prior hash (a pre-fingerprint sweep) can't be
+                # checked, so it isn't a reason to re-run — legacy sweeps still
+                # resume.
+                config_changed = (
+                    prior_config is not None
+                    and chash is not None
+                    and prior_config != chash
+                )
+                code_changed = (
+                    prior_code is not None
+                    and self.code_hash is not None
+                    and prior_code != self.code_hash
+                )
+                # Judged on the files both records have, on any Python version
+                # (for one exception, see its docstring);
+                # None when they cannot be compared (a sidecar from before the
+                # field, an unknown record).
+                changed_deps = changed_project_code(prior_deps, deps)
+                deps_changed = bool(changed_deps)
+                if strict and prior_deps is not None and not _covers(deps, prior_deps):
+                    return _COMPUTE, deps, None
+                if strict and (
+                    (prior_config is not None and chash is None)
+                    or (prior_code is not None and self.code_hash is None)
+                    or (prior_deps is not None and changed_deps is None)
+                    or config_changed
+                    or code_changed
+                    or deps_changed
+                ):
+                    pass  # not reused here; the cache below may still hold it
+                elif config_changed or code_changed or deps_changed:
+                    parts = []
+                    if config_changed:
+                        parts.append("config")
+                    if code_changed:
+                        parts.append("task code")
+                    if deps_changed:
+                        # Name where the change is, so the user sees which
+                        # helper or constant the edit was in.
+                        parts.append(
+                            f"code the task reaches ({', '.join(changed_deps)})"
+                        )
+                    what = " and ".join(parts)
+                    warnings.warn(
+                        f"resume: cell {key!r} was completed under a different "
+                        f"{what} (fingerprint mismatch); re-running it instead "
+                        "of reusing the cached result.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                else:
+                    cached = read_metrics_sidecar(cell_dir)
+                    if cached is not None:
+                        # Refresh THIS job dir so its metrics/status match the
+                        # config Hydra just wrote here. Otherwise, when a resume
+                        # reuses a numeric dir that a prior sweep filled with a
+                        # DIFFERENT cell, the dir keeps stale metrics -> the
+                        # manifest and an offline load_from_dir mis-key the cell.
+                        # A no-op when the cached cell is already this dir.
+                        merged = merge_project_records(prior_deps, deps)
+
+                        def reused(cached=cached, merged=merged):
+                            written = write_metrics_sidecar(cwd, cached)
+                            # Keep the reused cell's prior record (see
+                            # merge_project_records): writing this run's keys
+                            # would declare it checked against code it was not
+                            # compared with, and dropping the record would let
+                            # a later resume reuse the cell unchecked.
+                            write_status(
+                                cwd,
+                                status="completed",
+                                combo=sc,
+                                attempt=1,
+                                code_deps=merged,
+                                metrics=written,
+                            )
+
+                        return cached, deps, reused
+
+        # (1.4) content-addressed cache: reuse a cell computed under the same
+        # resolved config, task source AND project code in ANY working_dir. Keyed on the
+        # fingerprints (not the combo/dir), so it survives a fresh working_dir.
+        # The cache hit refreshes this job dir (metrics + completed status) so
+        # the manifest and an offline load see a normal completed cell.
+        cache_key = self._cache_key(chash, deps)
+        if cache_key is not None:
+            cache_cell = Path(self.cache_dir) / cache_key
+            cached = read_metrics_sidecar(cache_cell)
+            if cached is not None:
+                combo = self._combo(cfg, self.swept_names)
+
+                def cache_hit(cached=cached, combo=combo):
+                    written = write_metrics_sidecar(cwd, cached)
+                    write_status(
+                        cwd,
+                        status="completed",
+                        combo=combo,
+                        attempt=1,
+                        code_deps=deps,
+                        metrics=written,
+                    )
+
+                return cached, deps, cache_hit
+
+        return _COMPUTE, deps, None
+
+    def _left_out(self, job_num: int | None) -> bool:
+        """Whether ``sample=`` leaves job ``job_num``'s cell out."""
+        return (
+            self.sampled_indices is not None
+            and job_num is not None
+            and job_num not in self.sampled_indices
+        )
+
+    def _reuses(self) -> bool:
+        """Whether a cell may be reused: a resume whose prior sweep has
+        completed cells over the same swept names (a cell's key holds them
+        all, so another grid shape matches none), or a ``cache_dir`` this
+        task can use that holds an entry."""
+        import os
+
+        prior = self.prior_manifest
+        resumed = (
+            prior is not None
+            and bool(prior.completed)
+            and set(prior.params) == set(self.swept_names)
+        )
+        if resumed:
+            return True
+        if self.cache_dir is None or not getattr(self, "cache_ok", True):
+            return False
+        try:
+            with os.scandir(self.cache_dir) as entries:
+                return any(True for _ in entries)
+        except OSError:  # none yet, or unreadable: the jobs judge it
+            return False
+
+    def settles_in_driver(self) -> bool:
+        """Whether a cell of this run may need no job: ``sample=`` leaves
+        cells out, a resume reuses completed ones, a ``cache_dir`` holds
+        others. Otherwise mushin's submitit launcher composes nothing in the
+        driver before it submits (#345)."""
+        return self.sampled_indices is not None or self._reuses()
+
+    def may_settle(self, job_num: int, reuses: bool | None = None) -> bool:
+        """Whether job ``job_num``'s cell may need no job, so is worth
+        composing in the driver. ``reuses`` is `_reuses`, taken once per
+        launch (it lists the cache dir)."""
+        reuses = self._reuses() if reuses is None else reuses
+        return self._left_out(job_num) or reuses
+
+    @staticmethod
+    def reads_environment(ret: JobReturn) -> bool:
+        """`_reads_environment`, for mushin's submitit launcher."""
+        return _reads_environment(ret)
+
+    def dirs_of(self, ret: JobReturn) -> tuple[Path, Path | None]:
+        """The dir of the cell of ``ret``, and the dir a resume reads it
+        from (its completed prior cell's, or None), both resolved. Called in
+        the driver, with HydraConfig set to the job's config; raises when
+        the cell's combo cannot be taken."""
+        from ._sweep_io import combo_key
+
+        own = _resolved(_job_dir(ret))
+        prior = self.prior_manifest
+        if prior is None:
+            return own, None
+        name = prior.completed.get(combo_key(self._combo(ret.cfg, self.swept_names)))
+        return own, None if name is None else _resolved(Path(prior.root) / name)
+
+    def prior_dirs(self) -> set[Path]:
+        """Every dir a resume may read a completed prior cell from."""
+        prior = self.prior_manifest
+        if prior is None:
+            return set()
+        return {_resolved(Path(prior.root) / name) for name in prior.completed.values()}
+
+    def _status_writer(self, chash, job_num, choices, job_id):
+        """`write_cell_status` with what every record of this cell carries."""
+        from ._resume import write_cell_status
+
+        return functools.partial(
+            write_cell_status,
+            config_hash=chash,
+            code_hash=self.code_hash,
+            job_num=job_num,
+            choices=choices,
+            run_id=self.run_id,
+            job_id=job_id,
+        )
+
+    def settle_in_driver(self, ret: JobReturn) -> tuple[Any, Any, list] | None:
+        """For mushin's submitit launcher, before it submits the cell's job
+        (#345): the status and value of a cell that needs no compute, and the
+        writes that record it in its dir as its job would (the ``.hydra/``
+        snapshot ``run_job`` writes, then its record), for the launcher to do
+        once every cell is decided; or None for a cell to submit. Called in
+        the driver, with HydraConfig set to the job's config.
+
+        The rules are the job's own (`_settle`), applied strictly: whatever
+        the driver cannot judge as the job would is left to the job. That
+        includes reusing a cell whose config reads the environment
+        (`_reads_environment`), which the job's may hold differently: only
+        ``sample=`` may settle such a cell here."""
+        from hydra.core.utils import env_override
+
+        from ._resume import resolved_config, resolved_config_hash
+
+        job_num, choices = _current_job_fields()
+        left_out = self._left_out(job_num)
+        if _reads_environment(ret) and not left_out:
+            return None
+        cell_dir = _job_dir(ret)
+        # Under the variables Hydra sets for the job (`hydra.job.env_set`),
+        # as `run_job` runs it: a resolver that reads them (a custom one,
+        # which `_reads_environment` does not see) resolves as in the job. A
+        # cell ``sample=`` leaves out resolves nothing it needs, and one whose
+        # variables cannot be resolved here is left to its job.
+        env: dict = {}
+        if not left_out:
+            try:
+                env = dict(ret.hydra_cfg.hydra.job.env_set or {})
+            except Exception:  # noqa: BLE001 - its job resolves them
+                return None
+        with env_override(env):
+            resolved = resolved_config(ret.cfg)
+            chash = resolved_config_hash(resolved)
+            value, _, record = self._settle(
+                ret.cfg,
+                cell_dir,
+                resolved,
+                chash,
+                job_num,
+                self._status_writer(chash, job_num, choices, None),
+                strict=True,
+            )
+        if value is _COMPUTE:
+            return None
+        writes = [lambda: _write_hydra_snapshot(ret, cell_dir, replace=True), record]
+        return JobStatus.COMPLETED, value, writes
+
     def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
         """Record a cell whose job ended without a result (#345), and return
         the status and value of the JobReturn mushin's submitit launcher
@@ -1542,19 +1958,13 @@ class _TaskRunner:
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
-            cell_project_record,
-            changed_project_code,
             discover_last_ckpt,
-            merge_project_records,
             read_cell_status,
             resolved_config,
             resolved_config_hash,
-            write_cell_status,
         )
         from ._sweep_io import (
             METRICS_FILE,
-            combo_key,
-            read_metrics_sidecar,
             remove_sidecar,
             write_metrics_sidecar,
         )
@@ -1570,148 +1980,14 @@ class _TaskRunner:
         # passes it): a resume reads it from completed cells alone, and at a
         # project's file cap it is most of a sidecar's size.
         job_num, choices = _current_job_fields()
-        write_status = functools.partial(
-            write_cell_status,
-            config_hash=chash,
-            code_hash=self.code_hash,
-            job_num=job_num,
-            choices=choices,
-            run_id=self.run_id,
-            job_id=_current_job_id(),
+        write_status = self._status_writer(chash, job_num, choices, _current_job_id())
+
+        settled, deps, record = self._settle(
+            cfg, Path.cwd(), resolved, chash, job_num, write_status
         )
-
-        # (0) sampling skip — BEFORE resume/budget/compute. A cell whose Hydra
-        # job number is not in the selected sample never runs (NaN); keying on
-        # the job index (not the combo) makes the selection launcher- and
-        # axis-type-agnostic and identical across a resume. An un-sampled cell is
-        # recorded 'skipped', so a later resume WITHOUT `sample` fills it in.
-        # No job number -> don't skip.
-        if self.sampled_indices is not None:
-            if job_num is not None and job_num not in self.sampled_indices:
-                cwd = Path.cwd()
-                combo = self._combo(cfg, self.swept_names)
-                write_status(cwd, status="skipped", combo=combo, attempt=1)
-                # A skipped cell has no valid metrics; drop any sidecar a prior
-                # sweep left in this reused dir so show/export don't list old
-                # metrics on a 'skipped' row while to_xarray NaN-fills it.
-                remove_sidecar(cwd / METRICS_FILE)
-                return _SkippedRun("not sampled")
-
-        # This cell's project-code record, taken here, in the process that will
-        # run (or reuse) it (see cell_project_record), and only by a cell that
-        # can compare or store it: an unsampled cell above never does.
-        deps = cell_project_record(
-            self._code_token,
-            self.code_roots,
-            self.code_body_roots,
-            resolved,
-            scripts=self.script_entries,
-        )
-
-        # (1) resume short-circuit — before pre_task/instrument, only when resuming
-        if self.prior_manifest is not None:
-            # Key the lookup on the CURRENT swept names, not the prior sweep's:
-            # if the grid shape changed (an axis added/removed), the current
-            # cell's key won't match any completed cell, so it re-runs instead
-            # of projecting onto the old params and reusing the wrong cell.
-            sc = self._combo(cfg, self.swept_names)
-            key = combo_key(sc)
-            dir_ = self.prior_manifest.completed.get(key)
-            if dir_ is not None:
-                cell_dir = Path(self.prior_manifest.root) / dir_
-                prior = read_cell_status(cell_dir) or {}
-                prior_config = prior.get("config_hash")
-                prior_code = prior.get("code_hash")
-                prior_deps = prior.get("code_deps")
-                # A completed cell is reused only if the resolved config, the
-                # task source AND the project code the task reaches all still
-                # match. A missing prior hash (a pre-fingerprint sweep) can't be
-                # checked, so it isn't a reason to re-run — legacy sweeps still
-                # resume.
-                config_changed = (
-                    prior_config is not None
-                    and chash is not None
-                    and prior_config != chash
-                )
-                code_changed = (
-                    prior_code is not None
-                    and self.code_hash is not None
-                    and prior_code != self.code_hash
-                )
-                # Judged on the files both records have, on any Python version
-                # (for one exception, see its docstring);
-                # None when they cannot be compared (a sidecar from before the
-                # field, an unknown record).
-                changed_deps = changed_project_code(prior_deps, deps)
-                deps_changed = bool(changed_deps)
-                if config_changed or code_changed or deps_changed:
-                    parts = []
-                    if config_changed:
-                        parts.append("config")
-                    if code_changed:
-                        parts.append("task code")
-                    if deps_changed:
-                        # Name where the change is, so the user sees which
-                        # helper or constant the edit was in.
-                        parts.append(
-                            f"code the task reaches ({', '.join(changed_deps)})"
-                        )
-                    what = " and ".join(parts)
-                    warnings.warn(
-                        f"resume: cell {key!r} was completed under a different "
-                        f"{what} (fingerprint mismatch); re-running it instead "
-                        "of reusing the cached result.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                else:
-                    cached = read_metrics_sidecar(cell_dir)
-                    if cached is not None:
-                        # Refresh THIS job dir so its metrics/status match the
-                        # config Hydra just wrote here. Otherwise, when a resume
-                        # reuses a numeric dir that a prior sweep filled with a
-                        # DIFFERENT cell, the dir keeps stale metrics -> the
-                        # manifest and an offline load_from_dir mis-key the cell.
-                        # A no-op when the cached cell is already this dir.
-                        cwd = Path.cwd()
-                        written = write_metrics_sidecar(cwd, cached)
-                        # Keep the reused cell's prior record (see
-                        # merge_project_records): writing this run's keys would
-                        # declare it checked against code it was not compared
-                        # with, and dropping the record would let a later resume
-                        # reuse the cell unchecked.
-                        write_status(
-                            cwd,
-                            status="completed",
-                            combo=sc,
-                            attempt=1,
-                            code_deps=merge_project_records(prior_deps, deps),
-                            metrics=written,
-                        )
-                        return cached
-
-        # (1.4) content-addressed cache: reuse a cell computed under the same
-        # resolved config, task source AND project code in ANY working_dir. Keyed on the
-        # fingerprints (not the combo/dir), so it survives a fresh working_dir.
-        # The cache hit refreshes this job dir (metrics + completed status) so
-        # the manifest and an offline load see a normal completed cell.
-        cache_key = self._cache_key(chash, deps)
-        if cache_key is not None:
-            cache_cell = Path(self.cache_dir) / cache_key
-            cached = read_metrics_sidecar(cache_cell)
-            if cached is not None:
-                cwd = Path.cwd()
-                combo = self._combo(cfg, self.swept_names)
-                written = write_metrics_sidecar(cwd, cached)
-                write_status(
-                    cwd,
-                    status="completed",
-                    combo=combo,
-                    attempt=1,
-                    code_deps=deps,
-                    metrics=written,
-                )
-                return cached
+        if settled is not _COMPUTE:
+            record()
+            return settled
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
         # cells (no compute) so a long sweep ends gracefully instead of running
@@ -2836,9 +3112,10 @@ class BaseWorkflow:
 
         # `sample=` bounds what actually COMPUTES; the dry-run preview reports
         # that. The gate below still fires on the full grid: Hydra enumerates
-        # and launches every cell regardless of sampling (a job dir, composed
-        # config, and — under submitit — a scheduler submission per cell), so
-        # the typo'd-grid rail must cap launch cost, not just compute.
+        # and composes every cell regardless of sampling, and launches each
+        # (a job dir and, but under mushin's submitit launchers, which usually
+        # submit only the sampled cells, a launch per cell), so the typo'd-grid
+        # rail must cap that cost, not just compute.
         effective_cells = num_cells if sample is None else min(sample, num_cells)
 
         if dry_run:
@@ -2879,9 +3156,9 @@ class BaseWorkflow:
             sample_note = (
                 ""
                 if sample is None
-                else f" `sample={sample}` limits compute but does not reduce the "
-                f"number of launched Hydra jobs: all {num_cells} cells would "
-                "still be launched."
+                else f" `sample={sample}` limits compute but not the grid: all "
+                f"{num_cells} cells are still composed (and, except usually on "
+                "mushin's submitit launchers, launched)."
             )
             raise ValueError(
                 f"this sweep has {num_cells} cells, above the {limit_src} limit "
@@ -3493,8 +3770,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             huge grid. The ``MUSHIN_MAX_CELLS`` environment variable supplies a
             default ceiling when this is not set (an explicit value wins). Use
             ``dry_run=True`` to preview an over-limit sweep. ``sample=`` does
-            not lower this gate: Hydra still launches every grid cell (sampling
-            saves compute, not launch overhead).
+            not lower this gate: every grid cell is still composed, and
+            launched, but on mushin's submitit launchers, which usually submit
+            jobs only for the sampled cells (not when the sweep has Hydra
+            callbacks).
         max_total_seconds : float | None (default: None)
             A graceful wall-clock budget. Once it is exhausted the remaining
             cells are skipped (recorded ``'skipped'``, NaN in the dataset,
@@ -3536,8 +3815,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ``self.skipped``). The subset is chosen deterministically (see
             ``sample_seed``) so it is reproducible and identical across a resume;
             resuming WITHOUT ``sample`` fills in the remaining cells. The full
-            grid is still composed by Hydra (only the sampled cells run), so this
-            saves compute, not launch overhead. ``sample >= n_cells`` runs
+            grid is still composed by Hydra, and launched too (only the sampled
+            cells run), but on mushin's submitit launchers, which usually submit
+            jobs only for the sampled cells (not when the sweep has Hydra
+            callbacks). ``sample >= n_cells`` runs
             everything. A sampled sweep is intentionally incomplete
             (``is_complete`` is False).
         sample_seed : int (default: 0)
