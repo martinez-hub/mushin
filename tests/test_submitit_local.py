@@ -214,6 +214,7 @@ def test_a_job_that_fails_before_its_cell_starts_is_a_failed_cell(
         assert _status(wd / cell) == "failed"
         error = (wd / cell / "mushin_error.txt").read_text()
         assert "FailedJobError" in error and "_submitit_tasks" in error
+        assert "ModuleNotFoundError" in error  # the job's own error, kept
     # The one line says the job raised, not that it gave no result.
     manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
     for c in manifest["cells"].values():
