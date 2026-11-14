@@ -2516,16 +2516,20 @@ def _a_job_died_before_its_first_record(
         hydra.write_text(
             "\n".join(line for line in text.splitlines() if "mushin_run_id" not in line)
         )
-    # Hydra writes the snapshot after the earlier record, whatever the copy did,
-    # and the later sweep's manifest after that.
-    record = path.stat().st_mtime_ns
+    # Hydra writes the snapshot after the earlier run ended (its record, then
+    # its manifest), whatever the copy did, and the later sweep's manifest after
+    # that. Dated from the earlier manifest too: a slow runner can take more
+    # than the second below between the earlier record and that manifest.
+    earlier = max(
+        path.stat().st_mtime_ns, (wd / "mushin_sweep_manifest.json").stat().st_mtime_ns
+    )
     for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
-        os.utime(wd / dead / ".hydra" / name, ns=(record + 10**9, record + 10**9))
+        os.utime(wd / dead / ".hydra" / name, ns=(earlier + 10**9, earlier + 10**9))
     if manifest:
         # Written after the snapshot, or in the same tick of a coarse clock.
         shutil.copy(later / "mushin_sweep_manifest.json", wd)
         tick = 10**9 if manifest == "same tick" else 2 * 10**9
-        os.utime(wd / "mushin_sweep_manifest.json", ns=(record + tick,) * 2)
+        os.utime(wd / "mushin_sweep_manifest.json", ns=(earlier + tick,) * 2)
     return wd
 
 
