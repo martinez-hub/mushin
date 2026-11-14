@@ -1919,6 +1919,48 @@ class _TaskRunner:
         writes = [lambda: _write_hydra_snapshot(ret, cell_dir, replace=True), record]
         return JobStatus.COMPLETED, value, writes
 
+    def record_a_failed_task(self, ret: JobReturn, job_id: str) -> None:
+        """Record failed the cell of a job of several tasks one of which
+        failed, when the cell's record is a completed one of this run's job
+        (``job_id``, the scheduler's): another task finished after the failing
+        one recorded its failure (#365). ``ret`` is a task's return. The
+        cell's metrics file goes with the record, and the entry its completing
+        task wrote to ``cache_dir``, which a later run would otherwise reuse;
+        the failing task's own error file stays. Best-effort: the run fails
+        the cell whatever happens here."""
+        from ._resume import read_cell_status, write_cell_status
+        from ._sweep_io import METRICS_FILE, remove_sidecar
+
+        try:
+            cell_dir = _job_dir(ret)
+            prior = read_cell_status(cell_dir) or {}
+            own = (
+                prior.get("status") == "completed"
+                and self.run_id is not None
+                and prior.get("run_id") == self.run_id
+                and prior.get("job_id") == job_id
+            )
+            if not own:
+                return
+            write_cell_status(
+                cell_dir,
+                status="failed",
+                combo=prior.get("combo", {}),
+                attempt=prior.get("attempt", 1),
+                config_hash=prior.get("config_hash"),
+                code_hash=prior.get("code_hash"),
+                job_num=prior.get("job_num"),
+                choices=prior.get("choices"),
+                run_id=self.run_id,
+                job_id=job_id,
+            )
+            remove_sidecar(cell_dir / METRICS_FILE)
+            key = self._cache_key(prior.get("config_hash"), prior.get("code_deps"))
+            if key is not None:
+                remove_sidecar(Path(self.cache_dir) / key / METRICS_FILE)
+        except Exception:  # noqa: BLE001 - best-effort, see above
+            return
+
     def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
         """Record a cell whose job ended without a result (#345), and return
         the status and value of the JobReturn mushin's submitit launcher
@@ -1949,7 +1991,7 @@ class _TaskRunner:
         sweeper raises it after the batch); under ``"nan"`` a COMPLETED
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
-        from ._resume import read_cell_status, wrote_no_metrics
+        from ._resume import read_cell_status, same_cell, wrote_no_metrics
         from ._sweep_io import read_metrics_sidecar_written
 
         num = ret.hydra_cfg.hydra.job.num
@@ -1965,7 +2007,7 @@ class _TaskRunner:
         except Exception:  # noqa: BLE001 - no record to read
             cell_dir, prior = None, {}
         status = prior.get("status")
-        this_cell = combo is not None and prior.get("combo") == combo
+        this_cell = combo is not None and same_cell(prior.get("combo"), combo)
         own = (
             this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
         )

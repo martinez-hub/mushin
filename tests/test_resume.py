@@ -9,6 +9,7 @@ import pytest
 from mushin._resume import (
     STATUS_FILE,
     ResumeContext,
+    build_resume_context,
     discover_last_ckpt,
     read_cell_status,
     sidecar_job_fields,
@@ -233,6 +234,143 @@ def test_build_resume_context_tolerates_sidecar_missing_attempt(tmp_path):
     rc = build_resume_context(tmp_path, {"seed": 0})
     assert rc.is_resume is True
     assert rc.attempt == 1  # missing attempt -> 0 + 1
+
+
+# A swept NaN or inf is stored tagged in a cell's record; every reader reads
+# it as the value it was swept (#355).
+
+
+def test_a_combo_reads_back_as_swept(tmp_path):
+    import math
+
+    combo = {
+        "a": float("inf"),
+        "b": -float("inf"),
+        "c": float("nan"),
+        "d": None,
+        "e": [1, float("nan")],
+    }
+    write_cell_status(tmp_path, status="completed", combo=combo, attempt=1)
+    back = read_cell_status(tmp_path)["combo"]
+    assert back["a"] == float("inf") and back["b"] == -float("inf")
+    assert math.isnan(back["c"]) and back["d"] is None
+    assert back["e"][0] == 1 and math.isnan(back["e"][1])
+    assert math.isnan(combo["c"])  # the caller's combo is not changed
+    # A swept param named like the tag stays a param.
+    write_cell_status(
+        tmp_path, status="completed", combo={"__mushin_nonfinite__": "inf"}, attempt=1
+    )
+    assert read_cell_status(tmp_path)["combo"] == {"__mushin_nonfinite__": "inf"}
+
+
+@pytest.mark.parametrize("value", [[], {}, ["inf"]])
+def test_a_tag_shaped_value_that_is_not_a_tag_reads_as_stored(tmp_path, value):
+    stored = {"x": {"__mushin_nonfinite__": value}}
+    (tmp_path / STATUS_FILE).write_text(
+        json.dumps({"status": "completed", "combo": stored})
+    )
+    assert read_cell_status(tmp_path)["combo"] == stored
+
+
+def test_a_record_too_deep_to_restore_keeps_its_stored_combo(tmp_path, monkeypatch):
+    """A combo nested deeper than the restore can recurse reads in its stored
+    form, as it did before combos were restored. (How deep that is depends on
+    the Python version, so the restore is made to raise.)"""
+    from mushin import _sweep_io
+
+    def too_deep(value):
+        raise RecursionError
+
+    monkeypatch.setattr(_sweep_io, "restore_combo_value", too_deep)
+    stored = {"x": {"__mushin_nonfinite__": "nan"}}
+    (tmp_path / STATUS_FILE).write_text(
+        json.dumps({"status": "completed", "combo": stored})
+    )
+    record = read_cell_status(tmp_path)
+    assert record is not None and record["combo"] == stored
+
+
+class _NoText:
+    def __str__(self):
+        raise RuntimeError("no text")
+
+
+@pytest.mark.parametrize(
+    "stored, live, same",
+    [
+        ({"x": float("nan")}, {"x": float("nan")}, True),
+        ({"x": None}, {"x": float("nan")}, False),
+        ({"x": float("nan")}, {"x": None}, False),
+        ({"x": float("inf")}, {"x": float("inf")}, True),
+        ({"x": 1}, {"x": True}, False),
+        ({"x": 1}, {"x": 1.0}, False),
+        ({"x": [1, 2]}, {"x": (1, 2)}, True),
+        ({"x": 1}, {"x": _NoText()}, False),
+        (None, {}, False),
+    ],
+)
+def test_same_cell_compares_combos_as_stored(stored, live, same):
+    from mushin._resume import same_cell
+
+    assert same_cell(stored, live) is same
+
+
+def test_a_nan_cell_does_not_resume_a_none_cells_checkpoint(tmp_path):
+    """A record from a swept None in a reused dir is another cell's: both
+    were stored null before NaN was tagged."""
+    write_cell_status(tmp_path, status="failed", combo={"x": None}, attempt=1)
+    (tmp_path / "last.ckpt").write_text("weights of x=None")
+    rc = build_resume_context(tmp_path, {"x": float("nan")})
+    assert rc.is_resume is False and rc.last_ckpt is None
+
+
+@pytest.mark.parametrize("x", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_a_swept_non_finite_cell_resumes_its_own_checkpoint(tmp_path, x):
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen[mushin_resume.attempt] = None if last is None else last.read_text()
+            if mushin_resume.attempt == 1:
+                (Path.cwd() / "last.ckpt").write_text(f"x={x}")
+                raise RuntimeError("first attempt fails")
+            return dict(v=1.0)
+
+    sweep = dict(x=multirun([x]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(on_error="nan", **sweep)
+    W().run(resume=True, **sweep)
+    assert seen == {1: None, 2: f"x={x}"}
+
+
+@pytest.mark.parametrize("x", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_a_resume_without_its_manifest_reuses_a_non_finite_cell(tmp_path, x):
+    """The manifest is rebuilt from the cells' records when it is gone (a
+    driver killed before its last save): a NaN cell keys as the live one."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    calls = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            calls.append(x)
+            return dict(v=1.0)
+
+    W().run(x=multirun([1.0, x]), working_dir=str(tmp_path))
+    (tmp_path / "mushin_sweep_manifest.json").unlink()
+    calls.clear()
+    W().run(x=multirun([1.0, x]), working_dir=str(tmp_path), resume=True)
+    assert calls == []
 
 
 RECIPE = "ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)"
