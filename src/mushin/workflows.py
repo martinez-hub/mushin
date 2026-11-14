@@ -8,6 +8,7 @@ import functools
 import json
 import math
 import os
+import re
 import sys
 import uuid
 from collections import UserList, defaultdict
@@ -662,7 +663,8 @@ def _override_texts(overrides) -> list[str]:
     It stopped ``run()`` after every cell had completed, and stopped a
     reload. A sweep's own values (a ``choice`` in its ``multirun.yaml``) key
     the grid's cells, which each job resolved for itself, so one that cannot
-    be resolved still raises (#353)."""
+    be resolved still raises here; a MultiRunMetricsWorkflow reads such a
+    value from its cells instead (`_overrides_from_cells`, #353)."""
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
@@ -680,6 +682,172 @@ def _override_texts(overrides) -> list[str]:
                 raise
             texts.append(text)
     return texts
+
+
+def _raw_override_texts(overrides) -> list[str]:
+    """A sweep's override strings as its YAML holds them, unresolved."""
+    from omegaconf import OmegaConf
+
+    return [str(t) for t in OmegaConf.to_container(overrides, resolve=False)]  # type: ignore[union-attr]
+
+
+def _holds_interpolation(text: str) -> bool:
+    """Whether an override's text holds an interpolation, which each job
+    resolves for itself (#353)."""
+    return "${" in text
+
+
+def _value_key(value: Any) -> str:
+    """How a coordinate keys a cell (`combo_key`), for one value."""
+    from ._sweep_io import combo_key
+
+    return combo_key({"_": value})
+
+
+# The value of an interpolated swept param that cannot be keyed (`_unkeyed_value`):
+# no grid coordinate equals it, so its dir falls outside the grid.
+_UNKEYED = "\x00mushin-unkeyed"
+
+
+def _restore_tags(value: Any) -> Any:
+    """A value as a record or manifest stores it, its tagged NaN or
+    infinity restored (a null stays None: a swept None)."""
+    from ._sweep_io import _NONFINITE_TAG
+
+    tags = {"inf": float("inf"), "-inf": -float("inf"), "nan": float("nan")}
+    if isinstance(value, dict):
+        tag = value.get(_NONFINITE_TAG)
+        # Only a tag mushin writes (a string): any other value there is a
+        # value of the user's, and may not be hashable (#382).
+        if set(value) == {_NONFINITE_TAG} and isinstance(tag, str) and tag in tags:
+            return tags[tag]
+        return {k: _restore_tags(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_restore_tags(v) for v in value]
+    return value
+
+
+def _tag_nan(value: Any) -> Any:
+    """A coordinate or fixed value as the manifest keeps it: each NaN in it
+    tagged, inside a list or dict too, as a null would read back as None
+    (`_restore_tags`)."""
+    from ._sweep_io import _NONFINITE_TAG
+
+    if isinstance(value, float) and value != value:
+        return {_NONFINITE_TAG: "nan"}
+    if isinstance(value, dict):
+        return {k: _tag_nan(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_tag_nan(v) for v in value]
+    return value
+
+
+def _interpolation_spans(text: str) -> list[str]:
+    """The top-level interpolations in an override's text (a nested
+    ``${a:${b}}`` is one)."""
+    try:
+        from omegaconf import grammar_parser
+
+        tree = grammar_parser.parse(text)
+    except Exception:  # noqa: BLE001 - none found
+        return []
+    spans: list[str] = []
+
+    def walk(node) -> None:
+        if type(node).__name__ == "InterpolationContext":
+            spans.append(node.getText())
+            return
+        for child in getattr(node, "children", None) or []:
+            walk(child)
+
+    walk(tree)
+    return spans
+
+
+def _read_override(loaded, i: int, text: str, parse, name: str):
+    """The driver's reading of override ``i`` of a sweep's YAML (as main
+    reads it: resolved there, then parsed). Where it cannot be read whole,
+    each interpolation that cannot be resolved there is read as written, so
+    its siblings read as main would read them; an element that still holds
+    an interpolation reads as None (a swept override: a list, an element
+    None where unread; a fixed one: its value or None)."""
+    import copy
+
+    task = loaded.hydra.overrides.task
+    try:
+        value = parse([task[i]])[name]
+    except Exception:  # noqa: BLE001 - read it span by span
+        escaped = text
+        for span in dict.fromkeys(_interpolation_spans(text)):
+            probe = copy.deepcopy(loaded)
+            probe.hydra.overrides.task[i] = span
+            try:
+                probe.hydra.overrides.task[i]  # noqa: B018 - resolves it
+            except Exception:  # noqa: BLE001 - read as written
+                escaped = escaped.replace(span, "\\" + span)
+        probe = copy.deepcopy(loaded)
+        probe.hydra.overrides.task[i] = escaped
+        try:
+            value = parse([probe.hydra.overrides.task[i]])[name]
+        except Exception:  # noqa: BLE001 - not readable here at all
+            return None
+    if isinstance(value, multirun):
+        return [None if _holds_interpolation(str(v)) else v for v in value]
+    return None if _holds_interpolation(str(value)) else value
+
+
+def _same_element(a: Any, b: Any) -> bool:
+    """Whether two parsed override values are the same element: equal and
+    of one type throughout (``1`` is not ``True``), a NaN equal to a NaN,
+    inside a list or dict too."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, float) and a != a:
+        return b != b
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(map(_same_element, a, b))
+    if isinstance(a, dict):
+        # Each key matched by this rule too: ``True`` and ``1`` are one key
+        # to a dict, and two NaN keys are two.
+        if len(a) != len(b):
+            return False
+        rest = list(b.items())
+        for key, value in a.items():
+            for j, (other, its) in enumerate(rest):
+                if _same_element(key, other):
+                    if not _same_element(value, its):
+                        return False
+                    del rest[j]
+                    break
+            else:
+                return False
+        return True
+    return a == b
+
+
+def _round_trips(value: Any) -> bool:
+    """Whether ``value`` reads back from the manifest as itself. JSON keeps
+    a dict's keys only as text, so ``{1: "a"}`` would read back as
+    ``{"1": "a"}``: such a value is not saved, and is read again instead
+    (a NaN is tagged, `_tag_nan`)."""
+    import json
+
+    from ._sweep_io import _json_normalize
+
+    try:
+        text = json.dumps(_json_normalize(_tag_nan(value)))
+        return _same_element(_restore_tags(json.loads(text)), value)
+    except Exception:  # noqa: BLE001 - not saved: read again instead
+        return False
+
+
+def _index_of(elements: list, value: Any) -> int | None:
+    """The index of the element of an axis that a job's own override gave
+    it, or None."""
+    for j, element in enumerate(elements):
+        if _same_element(element, value):
+            return j
+    return None
 
 
 def _as_metrics(result: Mapping) -> dict:
@@ -882,6 +1050,23 @@ def _with_launcher_hint(error: Exception, launcher: str | None) -> Exception | N
     )
 
 
+def _kept_fingerprint(cell_dir, combo) -> dict:
+    """For the record of a cell that runs no attempt (one ``sample=`` leaves
+    out, or past the wall-clock budget): the prior record's fingerprint, when
+    that record is this cell's, so a later run under the config that left its
+    checkpoints is still handed them (#391); else nothing, and the record
+    takes this run's."""
+    from ._resume import read_cell_status, same_cell
+
+    prior = read_cell_status(cell_dir) or {}
+    if not same_cell(prior.get("combo"), combo):
+        return {}
+    return {
+        "config_hash": prior.get("config_hash"),
+        "code_hash": prior.get("code_hash"),
+    }
+
+
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
     from ._hydra_yaml import hydra_choices
@@ -1036,6 +1221,11 @@ def _resolved(path: Path) -> Path:
         return Path(os.path.abspath(path))
 
 
+# An interpolation that reads the environment: ``${oc.env:...}``, OmegaConf's
+# older ``${env:...}``, spaced as OmegaConf allows.
+_ENV_READ = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
+
+
 def _reads_environment(ret: JobReturn) -> bool:
     """Whether a job's config may resolve differently in its own process:
     it, or a variable ``hydra.job.env_set`` sets for the job, reads the
@@ -1044,15 +1234,11 @@ def _reads_environment(ret: JobReturn) -> bool:
     scheduler's variables). Setting variables to fixed values changes
     nothing the driver cannot apply itself (`settle_in_driver`). A custom
     resolver that reads ``os.environ`` is not seen."""
-    import re
-
     from omegaconf import OmegaConf
-
-    env = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
 
     def reads(node: Any) -> bool:
         if isinstance(node, str):
-            return env.search(node) is not None
+            return _ENV_READ.search(node) is not None
         if isinstance(node, Mapping):
             return any(reads(v) for v in node.values())
         if isinstance(node, (list, tuple)):
@@ -1696,7 +1882,16 @@ class _TaskRunner:
                 combo = self._combo(cfg, self.swept_names)
 
                 def skipped():
-                    write_status(cwd, status="skipped", combo=combo, attempt=1)
+                    # No attempt ran (`_kept_fingerprint`). In the driver, a
+                    # config that reads the environment may also hash
+                    # differently from the job's.
+                    write_status(
+                        cwd,
+                        status="skipped",
+                        combo=combo,
+                        attempt=1,
+                        **_kept_fingerprint(cwd, combo),
+                    )
                     # A skipped cell has no valid metrics; drop any sidecar a
                     # prior sweep left in this reused dir so show/export don't
                     # list old metrics on a 'skipped' row while to_xarray
@@ -1784,6 +1979,17 @@ class _TaskRunner:
                         stacklevel=3,
                     )
                 else:
+                    # A reused cell's result was computed under the prior
+                    # record's fingerprint: keep it where this run has none (a
+                    # config that cannot be resolved), or a later resume under
+                    # another config would have nothing to compare and would
+                    # reuse it (#396).
+                    kept = {
+                        "config_hash": chash if chash is not None else prior_config,
+                        "code_hash": (
+                            self.code_hash if self.code_hash is not None else prior_code
+                        ),
+                    }
                     cached = read_metrics_sidecar(cell_dir)
                     if cached is not None:
                         # Refresh THIS job dir so its metrics/status match the
@@ -1794,7 +2000,7 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         merged = merge_project_records(prior_deps, deps)
 
-                        def reused(cached=cached, merged=merged):
+                        def reused(cached=cached, merged=merged, kept=kept):
                             written = write_metrics_sidecar(cwd, cached)
                             # Keep the reused cell's prior record (see
                             # merge_project_records): writing this run's keys
@@ -1808,6 +2014,7 @@ class _TaskRunner:
                                 attempt=1,
                                 code_deps=merged,
                                 metrics=written,
+                                **kept,
                                 # The job that computed it, whose log holds
                                 # that computation (#345).
                                 submitit=prior.get("submitit"),
@@ -1821,7 +2028,7 @@ class _TaskRunner:
                         # metrics file in this dir is not its result.
                         merged = merge_project_records(prior_deps, deps)
 
-                        def reused_none(merged=merged):
+                        def reused_none(merged=merged, kept=kept):
                             remove_sidecar(cwd / METRICS_FILE)
                             write_status(
                                 cwd,
@@ -1830,6 +2037,7 @@ class _TaskRunner:
                                 attempt=1,
                                 code_deps=merged,
                                 no_metrics=True,
+                                **kept,
                                 submitit=prior.get("submitit"),
                             )
 
@@ -2170,7 +2378,12 @@ class _TaskRunner:
         import warnings
         from pathlib import Path
 
-        from ._provenance import NOT_WRITTEN, record_accelerator, write_provenance
+        from ._provenance import (
+            NOT_WRITTEN,
+            authored_config,
+            record_accelerator,
+            write_provenance,
+        )
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
@@ -2266,7 +2479,13 @@ class _TaskRunner:
             if skip:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
-                write_status(cwd, status="skipped", combo=combo, attempt=1)
+                write_status(
+                    cwd,
+                    status="skipped",
+                    combo=combo,
+                    attempt=1,
+                    **_kept_fingerprint(cwd, combo),
+                )
                 # Same reused-dir hygiene as the sampling skip above.
                 remove_sidecar(cwd / METRICS_FILE)
                 return _SkippedRun()
@@ -2309,6 +2528,11 @@ class _TaskRunner:
                 attempt=rc.attempt,
                 budget_id=self.budget_id,
             )
+            # The record's config as written, taken before pre_task: hydra-zen's
+            # `zen` (the default wrapper of both hooks) resolves the job's config
+            # in place, and a config read after that holds every resolved
+            # `${oc.env:...}` value (#383).
+            authored = authored_config(cfg)
             self.pre_task(cfg)
             if rc.is_resume:
                 # pre_task may stage a checkpoint into the cell dir (the
@@ -2317,7 +2541,7 @@ class _TaskRunner:
                 rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
             written = NOT_WRITTEN
             try:
-                written = write_provenance(cwd, cfg, base=self.base_provenance)
+                written = write_provenance(cwd, authored, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             # Set the contextvar AFTER the (fallible) status write, so a failed
@@ -2679,6 +2903,9 @@ class BaseWorkflow:
         self.metrics = {}
         self.workflow_overrides = {}
         self._multirun_task_overrides = {}
+        self._interpolated_cells = None
+        self._interpolated_records = {}
+        self._interpolated_decision = None
         self.jobs = []
         self._working_dir = None
         # combo_key(sanitized swept-param combo) -> that cell's metrics dict.
@@ -2770,14 +2997,341 @@ class BaseWorkflow:
         {'foo': ['val'], 'bar': multirun(['a', 'b']), 'apple': 1}
         """
         if not self._multirun_task_overrides:
-            overrides = _override_texts(
-                load_from_yaml(self.working_dir / "multirun.yaml").hydra.overrides.task
-            )
-
-            output = self._parse_overrides(overrides)
+            loaded = load_from_yaml(self.working_dir / "multirun.yaml")
+            task = loaded.hydra.overrides.task
+            raw = _raw_override_texts(task)
+            # Only a sweep with an interpolated override, and only a workflow
+            # that keeps its cells, reads its coordinates from them (#353).
+            if not any(_holds_interpolation(t) for t in raw) or not hasattr(
+                self, "_cell_record"
+            ):
+                output = self._parse_overrides(_override_texts(task))
+            else:
+                output, cells_known = self._overrides_from_cells(loaded, raw)
+                if not cells_known:
+                    # Read again once the sweep's cells are known.
+                    return output
             self._multirun_task_overrides = output
 
         return self._multirun_task_overrides
+
+    def _overrides_from_cells(self, loaded, raw: list[str]) -> tuple[dict, bool]:
+        """`multirun_task_overrides` for a sweep with an interpolated
+        override (#353), and whether its cells were known. Each override is
+        read on its own: a fixed one as before (resolved, else as written,
+        #351); a swept one whose text holds an interpolation gets each
+        element's coordinate from `_axis_coordinates`, since each job
+        resolved it for itself."""
+        from ._hydra_yaml import hydra_run_stamp
+
+        output: dict = {}
+        axes: dict[str, tuple[list, list | None]] = {}
+        fixed: dict[str, Any] = {}
+        for i, text in enumerate(raw):
+            ((name, written),) = self._parse_overrides([text]).items()
+            if not _holds_interpolation(text):
+                output[name] = written
+                continue
+            read = _read_override(loaded, i, text, self._parse_overrides, name)
+            if isinstance(written, multirun):
+                if read is not None and len(read) != len(written):
+                    read = None  # it split or merged elements: not theirs
+                axes[name] = (list(written), read)
+                output[name] = written
+            else:
+                fixed[name] = (written, read)
+        run_id = hydra_run_stamp(loaded)
+        coordinates, known = self._axis_coordinates(axes, run_id)
+        for name, values in coordinates.items():
+            output[name] = multirun(values)
+        values = self._fixed_values(fixed, run_id, known)
+        output.update(values)
+        if known and (axes or fixed):
+            decision: dict = {"run_id": run_id}
+            # Coordinates are saved only when every one reads back as itself;
+            # else a reload decides again from the records (`_round_trips`).
+            if all(_round_trips(c) for v in coordinates.values() for c in v):
+                decision["coords"] = {
+                    name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
+                }
+            # A fixed value is saved when it reads back as itself, and none
+            # is when the run's config reads the environment anywhere: an
+            # `${oc.env:API_TOKEN}`, read directly or through another key
+            # (`token="${api_key}"`), would put a credential in the manifest.
+            # Such a value is read again as before, by the reader (#392).
+            reads_env = self._run_reads_environment(raw)
+            decision["fixed"] = {
+                name: _tag_nan(v)
+                for name, v in values.items()
+                if not reads_env and _round_trips(v)
+            }
+            self._interpolated_decision = decision
+        return output, known
+
+    def _run_reads_environment(self, raw: list[str]) -> bool:
+        """Whether this run's config may read the environment anywhere: an
+        override's text, the sweep's multirun.yaml, or the config snapshot
+        (``config.yaml`` in ``hydra.output_subdir``, as composed, unresolved)
+        of a job of each set of config-group choices. A job's config itself is no guide: its
+        task's wrapper resolved it in place. What cannot be read counts as
+        reading it (#392)."""
+        if any(_ENV_READ.search(text) for text in raw):
+            return True
+        try:
+            texts = [(self.working_dir / "multirun.yaml").read_text(encoding="utf-8")]
+            seen: set = set()
+            for i, cell in enumerate(self.multirun_working_dirs or []):
+                choices = self._job_choices(i) or {}
+                key = tuple(sorted((str(k), str(v)) for k, v in choices.items()))
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Where the sweep keeps it (`hydra.output_subdir`); none
+                # kept reads as unreadable, so as reading the environment.
+                subdir = getattr(self, "output_subdir", None)
+                snapshot = Path(cell) / str(subdir) / "config.yaml"
+                texts.append(snapshot.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - not readable: as if it did
+            return True
+        return any(_ENV_READ.search(text) for text in texts)
+
+    def _fixed_values(self, fixed: dict, run_id, known: bool) -> dict:
+        """The value of each fixed override that holds an interpolation:
+        the run's, saved in its manifest; else, in the run, the value its
+        jobs resolved, when they agree (``${now:%Y}``: the run's year, on any
+        later read), and its text when they differ (``${hydra:...}``, each
+        job's own); else as before, the reader's reading or its text
+        (#353, #351)."""
+        saved = self._saved_decision(run_id)
+        saved_fixed = saved.get("fixed") if saved is not None else None
+        values = {}
+        for name, (written, read) in fixed.items():
+            if isinstance(saved_fixed, dict) and name in saved_fixed:
+                values[name] = _restore_tags(saved_fixed[name])
+                continue
+            resolved = self._resolved_by_jobs(name) if known else []
+            keys = {_value_key(v) for v in resolved}
+            if len(keys) == 1:
+                # The reader's reading where it keys the same, as main has it
+                # ("0.01" for a quoted ${base_lr}).
+                same = read is not None and _value_key(read) in keys
+                values[name] = read if same else resolved[0]
+            elif len(keys) > 1:
+                values[name] = written
+            else:
+                values[name] = written if read is None else read
+        return values
+
+    def _resolved_by_jobs(self, name: str) -> list:
+        """``name``'s value in each job of this run that resolved it itself:
+        a config group's option name from the job's choices (main reads the
+        name, not the composed node); any other value from the job's config,
+        when the task's wrapper resolved that config in place before the
+        task ran (hydra-zen's ``zen``) and it holds no interpolation there
+        any more. A raw task gets the config itself and may change it, so
+        its jobs' configs say nothing (#392)."""
+        from omegaconf import OmegaConf
+
+        jobs = getattr(self, "jobs", None)
+        if not jobs or self.cfgs is None or len(jobs) != len(self.cfgs):
+            return []
+        resolves = getattr(self, "_task_resolves", False)
+        parent_path, _, key = name.rpartition(".")
+        values = []
+        for i, cfg in enumerate(self.cfgs):
+            choices = self._job_choices(i) or {}
+            if name in choices:
+                values.append(choices[name])
+                continue
+            if not resolves:
+                continue
+            try:
+                parent = OmegaConf.select(cfg, parent_path) if parent_path else cfg
+                if parent is None or OmegaConf.is_interpolation(parent, key):
+                    continue
+                value = parent[key]
+                if OmegaConf.is_config(value):
+                    # A job that resolved its config holds no interpolation
+                    # inside a list or dict either; one that did not (a cell
+                    # `sample=` left out) would be resolved now, here.
+                    if _holds_interpolation(
+                        str(OmegaConf.to_container(value, resolve=False))
+                    ):
+                        continue
+                    value = OmegaConf.to_container(value, resolve=True)
+            except Exception:  # noqa: BLE001 - not this job's to say
+                continue
+            values.append(value)
+        return values
+
+    def _axis_coordinates(self, axes, run_id) -> tuple[dict[str, list], bool]:
+        """Each interpolated axis's coordinates, and whether the sweep's
+        cells were known. The run decides them once and saves them in its
+        manifest (`Manifest.interpolated`); a reload of this run reads them
+        there. Otherwise, for each element: the value this run's records of
+        its cells hold (its completed cells', else any of its cells', as a
+        sampled-out or failed cell is recorded too), as the driver reads it
+        where that keys the same; the element's text where they differ; and,
+        with no record, the driver's reading, else the text. Records which
+        element each of this run's cells got, for `_combo_of_cfg`."""
+        dirs, cfgs = self.multirun_working_dirs, self.cfgs
+        known = bool(dirs) and cfgs is not None and len(dirs) == len(cfgs)
+        self._interpolated_cells, self._interpolated_records = None, {}
+        if not axes:
+            if known:
+                self._interpolated_cells = {}
+            return {}, known
+        n = len(dirs) if known else 0
+        elements_of: dict[str, list] = {name: [None] * n for name in axes}
+        completed: dict[str, list[list]] = {
+            name: [[] for _ in written] for name, (written, _) in axes.items()
+        }
+        any_status: dict[str, list[list]] = {
+            name: [[] for _ in written] for name, (written, _) in axes.items()
+        }
+        for i in range(n):
+            record = self._this_runs_record(i, run_id)
+            if record is not None:
+                self._interpolated_records[i] = record
+            elif not self._is_this_runs_dir(i, run_id):
+                continue  # an earlier sweep's, left in a reused working_dir
+            own = self._cell_overrides(i)
+            combo = (record or {}).get("combo")
+            combo = combo if isinstance(combo, dict) else {}
+            for name, (written, _) in axes.items():
+                j = _index_of(written, own.get(name, _MISSING_SWEPT))
+                elements_of[name][i] = j
+                if j is None or name not in combo:
+                    continue
+                any_status[name][j].append(combo[name])
+                if record.get("status") == "completed":
+                    completed[name][j].append(combo[name])
+        saved = self._saved_coordinates(run_id, axes)
+        coordinates = {}
+        for name, (written, read) in axes.items():
+            if saved is not None:
+                coordinates[name] = saved[name]
+                continue
+            values = []
+            for j, text in enumerate(written):
+                if not _holds_interpolation(str(text)):
+                    values.append(text)  # written as itself: main's value
+                    continue
+                driver = None if read is None else read[j]
+                voters = completed[name][j] or any_status[name][j]
+                cast = [_value_key(v) for v in voters]
+                if not cast:
+                    values.append(text if driver is None else driver)
+                elif len(set(cast)) == 1:
+                    same = (
+                        driver is not None
+                        and _value_key(self._element_coord(driver)) == cast[0]
+                    )
+                    values.append(driver if same else voters[0])
+                else:
+                    values.append(text)
+            # An element whose value keys as another element's coordinate
+            # (job 0's `${hydra:job.num}` beside a written 0) would put two
+            # elements' cells under one key, one result overwriting the
+            # other: such an element keeps its text (#386).
+            keys = [_value_key(self._element_coord(v)) for v in values]
+            values = [
+                text
+                if keys.count(key) > 1 and _holds_interpolation(str(text))
+                else value
+                for value, key, text in zip(values, keys, written, strict=True)
+            ]
+            coordinates[name] = values
+        if known:
+            self._interpolated_cells = elements_of
+        return coordinates, known
+
+    def _saved_coordinates(self, run_id, axes) -> dict | None:
+        """The coordinates this run saved in its manifest, when the manifest
+        is this run's (its ``run_id``) and they fit the sweep's axes."""
+        saved = self._saved_decision(run_id)
+        if saved is None:
+            return None
+        coords = saved.get("coords")
+        if not isinstance(coords, dict) or set(coords) != set(axes):
+            return None
+        if any(
+            not isinstance(coords[name], list) or len(coords[name]) != len(written)
+            for name, (written, _) in axes.items()
+        ):
+            return None
+        return {name: [_restore_tags(v) for v in coords[name]] for name in axes}
+
+    def _is_this_runs_dir(self, i: int, run_id) -> bool:
+        """Whether job dir ``i`` is a cell of this run, whatever record it
+        holds (a job may die before its first record over an earlier
+        sweep's): every job of a run in this process; on a reload, a dir
+        whose hydra.yaml names this run, or any dir of a sweep from before
+        runs were named."""
+        jobs = getattr(self, "jobs", None)
+        if jobs and self.cfgs is not None and len(jobs) == len(self.cfgs):
+            return True
+        if run_id is None:
+            return True
+        stamps = self._run_stamps
+        return bool(stamps) and i < len(stamps) and stamps[i] == run_id
+
+    def _saved_decision(self, run_id) -> dict | None:
+        """What this run (``run_id``) saved in its manifest about its
+        interpolated overrides (`Manifest.interpolated`), else None."""
+        from ._sweep_io import MANIFEST_FILE, Manifest
+
+        if run_id is None or not (self.working_dir / MANIFEST_FILE).exists():
+            return None
+        saved = Manifest.load_or_new(self.working_dir, []).interpolated
+        if not isinstance(saved, dict) or saved.get("run_id") != run_id:
+            return None
+        return saved
+
+    def _this_runs_record(self, i: int, run_id) -> dict | None:
+        """Job dir ``i``'s status record when this run (``run_id``) wrote
+        it, or any record of a sweep from before runs were named (as
+        `record_of_another_run` takes it), its combo's tagged values
+        restored; else None."""
+        from ._resume import read_cell_status
+
+        record = read_cell_status(self.multirun_working_dirs[i])
+        if not isinstance(record, dict):
+            return None
+        if run_id is not None and record.get("run_id") != run_id:
+            return None
+        combo = record.get("combo")
+        if isinstance(combo, dict):
+            record = dict(record, combo={k: _restore_tags(v) for k, v in combo.items()})
+        return record
+
+    def _cell_overrides(self, i: int) -> dict:
+        """Job ``i``'s own overrides, parsed as the sweep's are, its
+        interpolations unresolved; empty when they cannot be read."""
+        from omegaconf import OmegaConf
+
+        try:
+            jobs = getattr(self, "jobs", None)
+            if jobs and len(jobs) == len(self.cfgs) and jobs[i].overrides is not None:
+                texts = list(jobs[i].overrides)
+            else:
+                dir_ = self.multirun_working_dirs[i]
+                path = dir_ / str(self.output_subdir) / "overrides.yaml"
+                texts = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
+            return self._parse_overrides(texts)
+        except Exception:  # noqa: BLE001 - its cell keys by its record
+            return {}
+
+    def _interpolated_names(self) -> dict[str, list]:
+        """{swept name: the element of each of this run's cells} for the
+        swept overrides that hold an interpolation, once the cells are
+        known; else {}."""
+        self.multirun_task_overrides  # noqa: B018 - computes it
+        return self._interpolated_cells or {}
+
+    def _element_coord(self, value: Any) -> Any:
+        """One element of a swept axis as the grid's coordinates hold it."""
+        return self._sanitize_coordinate_for_xarray(multirun([value]))[0]
 
     @staticmethod
     def pre_task(*args: Any, **kwargs: Any) -> None:
@@ -3494,8 +4048,13 @@ class BaseWorkflow:
 
         _task_fn, _wants_resume = _prepare_task(self.task)
         _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
+        _wrapped_task = task_fn_wrapper(_task_fn)
+        # Whether each job's config holds the values its task ran with: a
+        # wrapper that resolves it in place first (hydra-zen's `zen`) leaves
+        # them there; a raw task may change it (`_resolved_by_jobs`, #392).
+        self._task_resolves = getattr(_wrapped_task, "_resolve", False) is True
         task_call = _TaskRunner(
-            task=task_fn_wrapper(_task_fn),
+            task=_wrapped_task,
             pre_task=pre_task_fn_wrapper(_signed(self.pre_task)),
             swept_names=_runner_swept,
             base_provenance=_base_provenance,
@@ -3527,6 +4086,9 @@ class BaseWorkflow:
         # the dry_run early-return — so a preview or a rejected call on a
         # loaded workflow does not wipe state its next to_xarray() needs.
         self._multirun_task_overrides = {}
+        self._interpolated_cells = None
+        self._interpolated_records = {}
+        self._interpolated_decision = None
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -4318,13 +4880,16 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         self.failures = []
         self.skipped = []
         job_metrics: list[Any] = []
-        for job, cfg, wdir in zip(
-            self.jobs, self.cfgs, self.multirun_working_dirs, strict=True
+        for i, (job, cfg, wdir) in enumerate(
+            zip(self.jobs, self.cfgs, self.multirun_working_dirs, strict=True)
         ):
             # Keyed on the swept params only (all `_combo_of_cfg` returns), as
-            # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and manifest
-            # keys align.
-            swept_combo = self._combo_of_cfg(cfg, choices=_group_choices_of_job(job))
+            # `to_xarray`'s `_lookup_key` is, so `_metrics_by_combo` and the
+            # grid align. The manifest keys a cell as its job resolved it,
+            # which differs only for an interpolated swept value (#353).
+            choices = _group_choices_of_job(job)
+            swept_combo = self._combo_of_cfg(cfg, choices=choices, i=i)
+            job_combo = self._job_combo(swept_combo, i)
             key = combo_key(swept_combo)
 
             # A budget-skipped cell completed the Hydra job with a `_SkippedRun`
@@ -4335,7 +4900,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 job.return_value, _SkippedRun
             ):
                 self.skipped.append({"combo": key, "working_dir": str(wdir)})
-                manifest.mark(swept_combo, dir=wdir.name, status="skipped")
+                manifest.mark(job_combo, dir=wdir.name, status="skipped")
                 job_metrics.append(None)
                 continue
 
@@ -4363,16 +4928,19 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                         "working_dir": str(wdir),
                     }
                 )
-                manifest.mark(swept_combo, dir=wdir.name, status="failed", error=error)
+                manifest.mark(job_combo, dir=wdir.name, status="failed", error=error)
                 job_metrics.append(None)
             else:
                 job_metrics.append(rv)
                 if rv is not None:
                     self._metrics_by_combo[key] = rv
-                manifest.mark(swept_combo, dir=wdir.name, status="completed")
+                manifest.mark(job_combo, dir=wdir.name, status="completed")
 
         self.metrics = self._process_metrics(job_metrics)
 
+        # The coordinates this run gave an interpolated axis, which a reload
+        # of this run reads rather than deciding them again (#353).
+        manifest.interpolated = getattr(self, "_interpolated_decision", None)
         manifest.save()
         self._manifest = manifest
 
@@ -4406,20 +4974,69 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             if isinstance(v, multirun)
         ]
 
-    def _combo_of_cfg(self, cfg: Any, choices: dict | None = None) -> dict[str, Any]:
+    def _combo_of_cfg(
+        self, cfg: Any, choices: dict | None = None, i: int | None = None
+    ) -> dict[str, Any]:
         """`_swept_combo` of one job config; ``choices`` is the job's
-        ``hydra.runtime.choices``."""
+        ``hydra.runtime.choices``. For job ``i``, an interpolated swept value
+        is never resolved again (after the run it resolves differently, or
+        not at all): this run's cell keys by its element's coordinate, and
+        another run's dir by its record's value (#353)."""
 
         def choice_of(name: str) -> str | None:
             choice = (choices or {}).get(name)
             return None if choice is None else str(choice)
 
-        return _swept_combo(
+        names = self._swept_param_names()
+        cells = self._interpolated_names() if i is not None else {}
+        combo = _swept_combo(
             cfg,
-            self._swept_param_names(),
+            [n for n in names if n not in cells],
             choice_of,
             self._sanitize_coordinate_for_xarray,
         )
+        overrides = self.multirun_task_overrides
+        for n, elements in cells.items():
+            j = elements[i] if i is not None and i < len(elements) else None
+            if j is not None:
+                combo[n] = self._element_coord(overrides[n][j])
+            else:
+                combo[n] = self._unkeyed_value(cfg, n, i, choice_of)
+        return {n: combo[n] for n in names if n in combo}
+
+    def _unkeyed_value(self, cfg: Any, name: str, i: int | None, choice_of) -> Any:
+        """An interpolated swept value of a dir that is not this run's cell
+        (an earlier sweep's, left in a reused working_dir): its record's
+        value, else its config read as before, else a value no coordinate
+        has, so it falls outside the grid instead of raising."""
+        from ._resume import read_cell_status
+
+        if i is not None:
+            record = read_cell_status(self.multirun_working_dirs[i]) or {}
+            combo = record.get("combo")
+            if isinstance(combo, dict) and name in combo:
+                return _restore_tags(combo[name])
+        try:
+            return _swept_combo(
+                cfg, [name], choice_of, self._sanitize_coordinate_for_xarray
+            )[name]
+        except Exception:  # noqa: BLE001 - e.g. ${hydra:...} offline
+            return _UNKEYED
+
+    def _job_combo(self, grid_combo: dict[str, Any], i: int) -> dict[str, Any]:
+        """Job ``i``'s combo as its job resolved it, as the manifest keys it
+        (a resume looks a cell up by its job's own combo): an interpolated
+        value from this run's record of the cell, else its grid key's."""
+        combo = dict(grid_combo)
+        cells = self._interpolated_names()
+        if cells:
+            record = (self._interpolated_records or {}).get(i) or {}
+            recorded = record.get("combo")
+            if isinstance(recorded, dict):
+                for n in cells:
+                    if n in recorded:
+                        combo[n] = recorded[n]
+        return combo
 
     def _cell_record(self, i: int) -> tuple[dict | None, bool]:
         """Job dir ``i``'s status record, read now, and whether it is another
@@ -4498,6 +5115,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # Reset memoized caches so a reused workflow object does not return
         # stale overrides/coordinates from a previously loaded directory.
         self._multirun_task_overrides = {}
+        self._interpolated_cells = None
+        self._interpolated_records = {}
+        self._interpolated_decision = None
+        # A previous run's jobs and manifest are not this sweep's.
+        self.jobs = []
+        self._manifest = None
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -4644,6 +5267,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             manifest_cells, manifest_mtime = {}, 0.0
 
         with_result: set[str] = set()
+        job_keys: dict[str, str] = {}
         dirs: dict[str, Path] = {}
         failed: set[str] = set()
         if job_metrics is None:
@@ -4655,16 +5279,21 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             zip(self.multirun_working_dirs, self.cfgs, job_metrics, strict=True)
         ):
             try:
-                key = combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i)))
+                choices = self._job_choices(i)
+                grid_combo = self._combo_of_cfg(cfg, choices=choices, i=i)
+                key = combo_key(grid_combo)
+                job_key = combo_key(self._job_combo(grid_combo, i))
             except Exception:  # noqa: BLE001 - e.g. an earlier sweep's dir, over
                 continue  # other axes; its grid cell then counts as without result
+            # The manifest keys a cell as its job resolved it (#353).
+            job_keys[key] = job_key
             sidecar, another_runs = self._cell_record(i)
             if another_runs:
                 # Its job died before its first record. The manifest knows
                 # how it ended when this run wrote it, after Hydra's snapshot
                 # (an earlier run's would call the earlier cell completed);
                 # in the same tick of a coarse clock counts as after.
-                entry = manifest_cells.get(key, {})
+                entry = manifest_cells.get(job_key, {})
                 snapshot = dir_ / f"{self.output_subdir}/hydra.yaml"
                 ours = manifest_mtime >= _mtime(snapshot)
                 if (
@@ -4677,7 +5306,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 continue
             status = (sidecar or {}).get("status")
             if sidecar is None:  # a sweep from before sidecars: ask the manifest
-                entry = manifest_cells.get(key, {})
+                entry = manifest_cells.get(job_key, {})
                 if entry.get("dir") == dir_.name:
                     status = entry.get("status")
                 elif no_sidecar_counts:
@@ -4704,7 +5333,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 # The manifest's error text, if it describes this attempt: it
                 # lists this dir, and was written after the cell's status (a
                 # resume killed before its own manifest leaves the old one).
-                entry = manifest_cells.get(key, {})
+                entry = manifest_cells.get(job_keys.get(key, key), {})
                 current = (
                     entry.get("dir") == dir_.name
                     and _mtime(dir_ / STATUS_FILE) <= manifest_mtime
@@ -4985,13 +5614,17 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                     zip(self.cfgs, aligned, strict=True)
                 ):
                     if per_job:
-                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        combo = self._combo_of_cfg(
+                            cfg, choices=self._job_choices(i), i=i
+                        )
                         self._metrics_by_combo[combo_key(combo)] = per_job
             elif all(len(col) == n_jobs for col in self.metrics.values()):
                 for i, cfg in enumerate(self.cfgs):
                     per_job = {k: col[i] for k, col in self.metrics.items()}
                     if per_job:
-                        combo = self._combo_of_cfg(cfg, choices=self._job_choices(i))
+                        combo = self._combo_of_cfg(
+                            cfg, choices=self._job_choices(i), i=i
+                        )
                         self._metrics_by_combo[combo_key(combo)] = per_job
 
         grid_names = list(orig_coords)
@@ -5047,9 +5680,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             # its working dir (cfgs and working dirs are job-aligned), then look
             # up per grid cell; a missing cell gets an empty string.
             workdir_by_combo = {
-                combo_key(self._combo_of_cfg(cfg, choices=self._job_choices(i))): str(
-                    wd
-                )
+                combo_key(
+                    self._combo_of_cfg(cfg, choices=self._job_choices(i), i=i)
+                ): str(wd)
                 for i, (cfg, wd) in enumerate(
                     zip(self.cfgs, self.multirun_working_dirs, strict=True)
                 )
