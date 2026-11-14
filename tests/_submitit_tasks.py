@@ -152,6 +152,78 @@ def none_on_one(seed):
     return None if seed == 1 else dict(v=float(seed))
 
 
+def _wait_for(name, text=""):
+    """Wait until file ``name`` exists (and holds ``text``), then a moment
+    more; raise if it never does, so a test runs the order it means to."""
+    import time
+    from pathlib import Path
+
+    deadline = time.monotonic() + 20  # well under the job's time limit
+    while time.monotonic() < deadline:
+        path = Path(name)
+        if path.exists() and text in path.read_text():
+            time.sleep(0.5)  # past the other task's record too
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"{name} never held {text!r}")
+
+
+def _raising(task: str) -> None:
+    """Mark, in the cell's dir, that ``task`` is about to raise: a file of
+    its own, which no record write replaces (a 'failed' record can be, by
+    the other task's 'running' write if it starts late)."""
+    from pathlib import Path
+
+    Path(f"{task}.raises").touch()
+
+
+def _after_the_other_failed(task: str) -> None:
+    """Wait until ``task`` raised and its runner recorded the failure."""
+    import time
+
+    _wait_for(f"{task}.raises")
+    time.sleep(1.0)  # its runner's 'failed' write, after the raise
+
+
+@mushin.sweep
+def second_task_raises_late(seed):
+    """In a job of two tasks, the first returns metrics and the second
+    raises once the first has written them (#365)."""
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 0:
+        return dict(v=float(seed))
+    _wait_for("mushin_metrics.json")
+    raise RuntimeError(f"task 1 of seed {seed}")
+
+
+@mushin.sweep
+def first_task_raises_early(seed):
+    """In a job of two tasks, the first raises at once and the second
+    returns metrics once the first has recorded its failure (#365)."""
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 0:
+        _raising("task0")
+        raise RuntimeError(f"task 0 of seed {seed}")
+    _after_the_other_failed("task0")
+    return dict(v=float(seed) + 100)
+
+
+@mushin.sweep
+def second_task_raises_early(seed):
+    """In a job of two tasks, the second raises at once and the first
+    returns metrics once the second has recorded its failure, so the
+    cell's last record is the first task's completed one (#365)."""
+    import submitit
+
+    if submitit.JobEnvironment().global_rank == 1:
+        _raising("task1")
+        raise RuntimeError(f"task 1 of seed {seed}")
+    _after_the_other_failed("task1")
+    return dict(v=float(seed))
+
+
 @mushin.sweep
 def scaled(seed, scale):
     return dict(v=float(seed) * scale)

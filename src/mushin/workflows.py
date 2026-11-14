@@ -674,6 +674,17 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
+def _as_metrics(result: Mapping) -> dict:
+    """A task's Mapping result as the dict its metrics file holds: a
+    DictConfig with its interpolations resolved, any other Mapping by its
+    items (a nested one is written as a dict too, `_json_normalize`)."""
+    from omegaconf import OmegaConf
+
+    if OmegaConf.is_config(result):
+        return OmegaConf.to_container(result, resolve=True)  # type: ignore[return-value]
+    return dict(result)
+
+
 def _tasks_per_cell(launcher_config) -> int:
     """How many tasks a submitit launcher config gives each cell's job:
     ``tasks_per_node`` times ``nodes``, each 1 when absent or unreadable."""
@@ -1908,6 +1919,48 @@ class _TaskRunner:
         writes = [lambda: _write_hydra_snapshot(ret, cell_dir, replace=True), record]
         return JobStatus.COMPLETED, value, writes
 
+    def record_a_failed_task(self, ret: JobReturn, job_id: str) -> None:
+        """Record failed the cell of a job of several tasks one of which
+        failed, when the cell's record is a completed one of this run's job
+        (``job_id``, the scheduler's): another task finished after the failing
+        one recorded its failure (#365). ``ret`` is a task's return. The
+        cell's metrics file goes with the record, and the entry its completing
+        task wrote to ``cache_dir``, which a later run would otherwise reuse;
+        the failing task's own error file stays. Best-effort: the run fails
+        the cell whatever happens here."""
+        from ._resume import read_cell_status, write_cell_status
+        from ._sweep_io import METRICS_FILE, remove_sidecar
+
+        try:
+            cell_dir = _job_dir(ret)
+            prior = read_cell_status(cell_dir) or {}
+            own = (
+                prior.get("status") == "completed"
+                and self.run_id is not None
+                and prior.get("run_id") == self.run_id
+                and prior.get("job_id") == job_id
+            )
+            if not own:
+                return
+            write_cell_status(
+                cell_dir,
+                status="failed",
+                combo=prior.get("combo", {}),
+                attempt=prior.get("attempt", 1),
+                config_hash=prior.get("config_hash"),
+                code_hash=prior.get("code_hash"),
+                job_num=prior.get("job_num"),
+                choices=prior.get("choices"),
+                run_id=self.run_id,
+                job_id=job_id,
+            )
+            remove_sidecar(cell_dir / METRICS_FILE)
+            key = self._cache_key(prior.get("config_hash"), prior.get("code_deps"))
+            if key is not None:
+                remove_sidecar(Path(self.cache_dir) / key / METRICS_FILE)
+        except Exception:  # noqa: BLE001 - best-effort, see above
+            return
+
     def record_dead_cell(self, ret: JobReturn, dead: _DeadJob) -> tuple[Any, Any]:
         """Record a cell whose job ended without a result (#345), and return
         the status and value of the JobReturn mushin's submitit launcher
@@ -1938,7 +1991,9 @@ class _TaskRunner:
         sweeper raises it after the batch); under ``"nan"`` a COMPLETED
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
-        from ._resume import read_cell_status, wrote_no_metrics
+        from omegaconf import OmegaConf
+
+        from ._resume import read_cell_status, same_cell, wrote_no_metrics
         from ._sweep_io import read_metrics_sidecar_written
 
         num = ret.hydra_cfg.hydra.job.num
@@ -1954,9 +2009,18 @@ class _TaskRunner:
         except Exception:  # noqa: BLE001 - no record to read
             cell_dir, prior = None, {}
         status = prior.get("status")
-        this_cell = combo is not None and prior.get("combo") == combo
+        this_cell = combo is not None and same_cell(prior.get("combo"), combo)
+        # This run's record of this job: by its combo, or by the job's id,
+        # which the job recorded, since a swept value that resolves anew (a
+        # clock) does not give, here, the value the job recorded (#384).
+        try:
+            job_id = _job_id_or_none(OmegaConf.select(ret.hydra_cfg.hydra, "job.id"))
+        except Exception:  # noqa: BLE001 - judged by its combo alone
+            job_id = None
         own = (
-            this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
+            self.run_id is not None
+            and prior.get("run_id") == self.run_id
+            and (this_cell or (job_id is not None and prior.get("job_id") == job_id))
         )
         written = prior.get("metrics")
         if own and status == "completed" and dead.keepable and wrote_no_metrics(prior):
@@ -1975,7 +2039,8 @@ class _TaskRunner:
             _record_dead_cell(
                 ret,
                 dead,
-                combo=combo,
+                # The job's own record keeps the combo the job resolved.
+                combo=None if own else combo,
                 status="skipped" if skipped else "failed",
                 on_error=self.on_error,
                 prior=prior,
@@ -1986,27 +2051,6 @@ class _TaskRunner:
         if self.on_error == "raise":
             return JobStatus.FAILED, dead.exception
         return JobStatus.COMPLETED, dead
-
-    @staticmethod
-    def _resolves(wrapper) -> bool:
-        """Whether ``wrapper`` resolved the config in place before it called
-        its function, as zen does by default (``resolve_pre_call``, kept as
-        its ``_resolve``). Read only: mushin adds no resolution of its own."""
-        return getattr(wrapper, "_resolve", False) is True
-
-    def _combo_after(self, wrapper, cfg, combo):
-        """The cell's combo read again after ``wrapper`` ran, when it
-        resolved the config in place (#353): the values its function got. A
-        wrapper that does not resolve leaves the combo read before it, as a
-        raw function may change its config (that is not the cell's
-        identity); one that cannot be read again (an escaped value now
-        literal) leaves it too (Codex, #385)."""
-        if not self._resolves(wrapper):
-            return combo
-        try:
-            return self._combo(cfg, self.swept_names)
-        except Exception:  # noqa: BLE001 - keep the one already read
-            return combo
 
     def __call__(self, cfg):
         import warnings
@@ -2028,8 +2072,7 @@ class _TaskRunner:
         )
 
         # The config is resolved once, for its fingerprint and for the
-        # `_target_`s the project-code record follows, before anything else
-        # resolves it: as the driver's pass resolves it (`settle_in_driver`).
+        # `_target_`s the project-code record follows.
         resolved = resolved_config(cfg)
         chash = resolved_config_hash(resolved)
         # Hydra's job number and config-group choices go into every status
@@ -2150,14 +2193,6 @@ class _TaskRunner:
                 budget_id=self.budget_id,
             )
             self.pre_task(cfg)
-            # A zen wrapper resolves the config in place before it calls
-            # (`resolve_pre_call`), and a resolver that gives a new value on
-            # each call (a counter) gave the combo read before it another
-            # value than the task's (#353). The combo is read again after
-            # each wrapper has run, so the record holds what the task ran
-            # with; mushin resolves nothing itself, since a second pass
-            # changes an escaped interpolation (Codex, #385).
-            combo = self._combo_after(self.pre_task, cfg, combo)
             if rc.is_resume:
                 # pre_task may stage a checkpoint into the cell dir (the
                 # resilience guide's pattern), so the checkpoint is looked for
@@ -2175,7 +2210,6 @@ class _TaskRunner:
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
-                combo = self._combo_after(self.task, cfg, combo)
                 try:
                     write_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
                 except OSError:
@@ -2194,11 +2228,13 @@ class _TaskRunner:
                 # raised; the record written above carries this process's view
                 # from before the task.
                 record_accelerator(cwd, written)
-            # The task's own wrapper may have resolved the config just now.
-            combo = self._combo_after(self.task, cfg, combo)
             written = None
-            if isinstance(result, dict):
-                written = write_metrics_sidecar(cwd, result)
+            if isinstance(result, Mapping):
+                # Any Mapping the run takes as metrics, written as a dict
+                # (#369): a UserDict or DictConfig wrote no file, and a reload
+                # raised for it.
+                metrics = _as_metrics(result)
+                written = write_metrics_sidecar(cwd, metrics)
                 # Store the freshly-computed cell in the content-addressed cache
                 # so a future sweep with the same config+code reuses it. Keyed on
                 # the fingerprints; best-effort (a cache-write failure must never
@@ -2208,7 +2244,7 @@ class _TaskRunner:
                     try:
                         cache_cell = Path(self.cache_dir) / cache_key
                         cache_cell.mkdir(parents=True, exist_ok=True)
-                        write_metrics_sidecar(cache_cell, result)
+                        write_metrics_sidecar(cache_cell, metrics)
                     except OSError:
                         pass
             write_status(
