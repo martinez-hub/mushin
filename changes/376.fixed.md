@@ -1,0 +1,1 @@
+`seed_everything_per_rank` now gives each task of a `submitit_local` job of several (`tasks_per_node > 1`) its own rank, read from `SUBMITIT_LOCAL_GLOBALID`, where every task got rank 0, and so the same seed, unless it exported `RANK` itself.

@@ -390,6 +390,27 @@ def test_a_job_whose_cell_completed_keeps_its_result(tmp_path, monkeypatch, on_e
     assert record["job_id"] == raised[0]  # the job's own id, as submitit names it
 
 
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+def test_a_job_whose_cell_returned_none_keeps_that_result(
+    tmp_path, monkeypatch, on_error
+):
+    """A cell whose task returned None records that it wrote no metrics
+    (#364): when its job's result is lost, the record stands for it, and the
+    run and a reload agree that it completed."""
+    wd = tmp_path / "s"
+    raised = _result_too_late_for(monkeypatch, seed=1)
+    ds = tasks.none_on_one.run(
+        seed=multirun([0, 1, 2]), working_dir=str(wd), on_error=on_error, **LOCAL
+    )
+    assert len(raised) == 1  # the dead-job path ran
+    v = ds["v"].values
+    assert v[0] == 0.0 and np.isnan(v[1]) and v[2] == 2.0
+    manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
+    assert {c["status"] for c in manifest["cells"].values()} == {"completed"}
+    reloaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+    assert reloaded.failures == [] and reloaded.is_complete
+
+
 def _results_that_raised(monkeypatch):
     """The ids of the jobs whose `results()` raised in this process, the
     driver: a job submitit reports as failed. A job of several tasks reads

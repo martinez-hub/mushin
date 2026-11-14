@@ -61,6 +61,7 @@ def write_cell_status(
     run_id: str | None = None,
     job_id: str | None = None,
     metrics: str | None = None,
+    no_metrics: bool = False,
 ) -> None:
     """Atomically write this cell's status sidecar into its own dir.
 
@@ -84,7 +85,11 @@ def write_cell_status(
     (no value written as its text). A launcher that finds a job ended without a result
     tells by ``run_id`` and the combo whether the cell's record is that
     job's own, and can then take a completed record's metrics file, if it is
-    still the one the record names, as the job's result (#345)."""
+    still the one the record names, as the job's result (#345).
+
+    ``no_metrics`` marks a completed cell whose task returned None, so it
+    wrote no metrics file: a reload gives it no metrics instead of looking
+    for the file (#364)."""
 
     payload: dict[str, Any] = {
         "status": status,
@@ -108,7 +113,19 @@ def write_cell_status(
         payload["job_id"] = job_id
     if metrics is not None:
         payload["metrics"] = metrics
+    if no_metrics:
+        payload["no_metrics"] = True
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
+
+
+def wrote_no_metrics(record: Any) -> bool:
+    """Whether a cell's record says its attempt completed with no metrics:
+    its task returned None, so it wrote no metrics file (#364)."""
+    return (
+        isinstance(record, dict)
+        and record.get("status") == "completed"
+        and record.get("no_metrics") is True
+    )
 
 
 def _records_job_fields(num: Any, choices: Any) -> bool:
@@ -5425,10 +5442,12 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     """Compute the ResumeContext for a cell about to (re-)execute in ``cell_dir``.
 
     Combo-match guard: a prior status sidecar is honored ONLY if its recorded
-    combo equals ``combo``. This makes numeric-dir reuse safe; if a grid change
-    reused this dir for a different cell, we neither resume nor surface that
-    cell's checkpoint. (Resume is only meaningful for a workflow that records a
-    non-degenerate per-cell combo; an empty combo cannot distinguish cells.)"""
+    combo equals ``combo``, so a cell that takes over a dir another cell used
+    is not resumed from that cell's record. Its checkpoints stay in the dir,
+    though, and once this cell's own record has replaced the other's, a later
+    attempt of this cell can be handed them (#355). (Resume is only meaningful
+    for a workflow that records a non-degenerate per-cell combo; an empty
+    combo cannot distinguish cells.)"""
     cell_dir = Path(cell_dir)
     prior = read_cell_status(cell_dir)
     matches = prior is not None and prior.get("combo") == combo

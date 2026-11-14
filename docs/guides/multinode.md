@@ -130,7 +130,8 @@ Two multi-rank cautions:
   `submitit_local` included). Each rank or task would check the deadline at
   its own moment: a rank that stops while its siblings train would hang DDP
   at rendezvous, and a late task could record the cell skipped. A warning is
-  emitted in the job's log. Bound multi-rank jobs with the scheduler's own `timeout_min`
+  emitted in the job's log, and by `run()` before it submits anything when
+  `launcher_config` gives each cell several tasks. Bound multi-rank jobs with the scheduler's own `timeout_min`
   instead. Single-rank jobs, one per cell, share the sweep's deadline; one
   that SLURM preempts and requeues after the deadline still runs, since it
   started before it.
