@@ -603,3 +603,63 @@ def test_a_reuse_keeps_the_fingerprint_its_metrics_were_computed_under(
         wf.run(lr=0.2, resume=True, **sweep)
     assert calls == [0.1, 0.2]
     assert float(wf.to_xarray()["v"].squeeze()) == 0.2
+
+
+def test_a_resume_reuses_a_completed_cell_that_returned_none(tmp_path):
+    """#373: a cell whose task returned None wrote no metrics file, and its
+    record says so (#364): a resume reuses it rather than running it again.
+    A record that does not say so (an earlier version's) still runs."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    calls = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            calls.append(x)
+            return None if x == 2 else dict(v=float(x))
+
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    calls.clear()
+    wf = W()
+    wf.run(x=multirun([1, 2]), working_dir=str(tmp_path), resume=True)
+    assert calls == []
+    values = wf.to_xarray()["v"].values.tolist()
+    assert values[0] == 1.0 and values[1] != values[1] and wf.is_complete
+    back = W().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.is_complete
+
+    record = tmp_path / "1" / STATUS_FILE
+    data = json.loads(record.read_text())
+    del data["no_metrics"]
+    record.write_text(json.dumps(data))
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path), resume=True)
+    assert calls == [2]
+
+
+def test_a_reuse_of_a_none_cell_keeps_its_fingerprint(tmp_path, monkeypatch):
+    """The same for a cell whose task returned None (#373): its reuse keeps the
+    fingerprint it was completed under (#396)."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    monkeypatch.delenv("MUSHIN_TEST_UNSET_VAR", raising=False)
+    calls = []
+
+    class T(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, lr):
+            calls.append(lr)
+
+    sweep = dict(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        T().run(lr=0.1, **sweep)
+        T().run(lr="${oc.env:MUSHIN_TEST_UNSET_VAR}", resume=True, **sweep)
+        record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+        assert "config_hash" in record
+        T().run(lr=0.2, resume=True, **sweep)
+    assert calls == [0.1, 0.2]

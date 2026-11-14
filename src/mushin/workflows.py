@@ -1621,6 +1621,7 @@ class _TaskRunner:
             changed_project_code,
             merge_project_records,
             read_cell_status,
+            wrote_no_metrics,
         )
         from ._sweep_io import (
             METRICS_FILE,
@@ -1729,6 +1730,17 @@ class _TaskRunner:
                         stacklevel=3,
                     )
                 else:
+                    # A reused cell's result was computed under the prior
+                    # record's fingerprint: keep it where this run has none (a
+                    # config that cannot be resolved), or a later resume under
+                    # another config would have nothing to compare and would
+                    # reuse it (#396).
+                    kept = {
+                        "config_hash": chash if chash is not None else prior_config,
+                        "code_hash": (
+                            self.code_hash if self.code_hash is not None else prior_code
+                        ),
+                    }
                     cached = read_metrics_sidecar(cell_dir)
                     if cached is not None:
                         # Refresh THIS job dir so its metrics/status match the
@@ -1738,20 +1750,6 @@ class _TaskRunner:
                         # manifest and an offline load_from_dir mis-key the cell.
                         # A no-op when the cached cell is already this dir.
                         merged = merge_project_records(prior_deps, deps)
-
-                        # Its metrics were computed under the prior record's
-                        # fingerprint: keep it where this run has none (a
-                        # config that cannot be resolved), or a later resume
-                        # under another config would have nothing to compare
-                        # and would reuse them (#396).
-                        kept = {
-                            "config_hash": chash if chash is not None else prior_config,
-                            "code_hash": (
-                                self.code_hash
-                                if self.code_hash is not None
-                                else prior_code
-                            ),
-                        }
 
                         def reused(cached=cached, merged=merged, kept=kept):
                             written = write_metrics_sidecar(cwd, cached)
@@ -1771,6 +1769,26 @@ class _TaskRunner:
                             )
 
                         return cached, deps, reused
+                    if wrote_no_metrics(prior):
+                        # Its task returned None, so it wrote no metrics file,
+                        # and its record says so (#364): reused as completed
+                        # with no metrics, rather than run again (#373). A
+                        # metrics file in this dir is not its result.
+                        merged = merge_project_records(prior_deps, deps)
+
+                        def reused_none(merged=merged, kept=kept):
+                            remove_sidecar(cwd / METRICS_FILE)
+                            write_status(
+                                cwd,
+                                status="completed",
+                                combo=sc,
+                                attempt=1,
+                                code_deps=merged,
+                                no_metrics=True,
+                                **kept,
+                            )
+
+                        return None, deps, reused_none
 
         # (1.4) content-addressed cache: reuse a cell computed under the same
         # resolved config, task source AND project code in ANY working_dir. Keyed on the
