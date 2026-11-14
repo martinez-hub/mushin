@@ -975,3 +975,81 @@ def test_get_provenance_missing_path_raises(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         _get_provenance(tmp_path / "no_such_sweep")
+
+
+@pytest.mark.parametrize(
+    ("record", "hydra_run", "served"),
+    [
+        (None, None, True),
+        (("completed", "R2"), "R2", True),
+        (("failed", "R2"), "R2", False),
+        (("running", "R2"), "R2", False),
+        (("completed", "R1"), "R2", False),
+    ],
+    ids=["no-record", "own-completed", "failed", "running", "earlier-runs"],
+)
+def test_a_dir_serves_metrics_only_its_own_run_completed(
+    tmp_path, record, hydra_run, served
+):
+    """A dir's mushin_metrics.json is served as its run's only when its
+    record is completed and is the run its .hydra/ snapshot names: a job
+    that died before its first record leaves an earlier run's record and
+    metrics beside its own snapshot (#407). A dir without a record (a plain
+    Hydra run) keeps serving its file."""
+    import json
+    import os
+
+    from mushin._resume import STATUS_FILE, write_cell_status
+    from mushin.mcp.server import _get_metrics
+
+    run = tmp_path / "exp" / "0"
+    (run / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), run / ".hydra" / "config.yaml")
+    (run / "mushin_metrics.json").write_text(json.dumps({"acc": 0.5}))
+    if record is not None:
+        status, run_id = record
+        write_cell_status(
+            run, status=status, combo={"lr": 0.1}, attempt=1, run_id=run_id
+        )
+    if hydra_run is not None:
+        hydra_yaml = run / ".hydra" / "hydra.yaml"
+        hydra_yaml.write_text(f"hydra:\n  job:\n    mushin_run_id: {hydra_run}\n")
+        # The snapshot is this run's, written after an earlier run's record.
+        status_mtime = (run / STATUS_FILE).stat().st_mtime_ns
+        os.utime(hydra_yaml, ns=(status_mtime + 10**9, status_mtime + 10**9))
+    out = _get_metrics(tmp_path / "exp")
+    got = out["per_run"][0].get("mushin_metrics")
+    assert (got is not None) == served
+
+
+@pytest.mark.parametrize("escaping", ["record", "hydra-yaml"])
+def test_a_dir_whose_metadata_escapes_the_root_serves_no_metrics(tmp_path, escaping):
+    """The record and hydra.yaml that decide whose a dir's metrics are must
+    lie within --root, as `_job_sort_key` requires: one symlinked outside is
+    not read, and the metrics it would vouch for are not served (#409)."""
+    import json
+    import os
+
+    from mushin._resume import STATUS_FILE, write_cell_status
+    from mushin.mcp.server import _get_metrics
+
+    root = tmp_path / "allowed"
+    run = root / "exp" / "0"
+    (run / ".hydra").mkdir(parents=True)
+    OmegaConf.save(OmegaConf.create({"lr": 0.1}), run / ".hydra" / "config.yaml")
+    (run / "mushin_metrics.json").write_text(json.dumps({"acc": 0.5}))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if escaping == "record":
+        write_cell_status(
+            outside, status="completed", combo={"lr": 0.1}, attempt=1, run_id="R"
+        )
+        (run / STATUS_FILE).symlink_to(outside / STATUS_FILE)
+    else:
+        write_cell_status(run, status="completed", combo={"lr": 0.1}, attempt=1)
+        (outside / "hydra.yaml").write_text("hydra:\n  job:\n    mushin_run_id: R\n")
+        # Older than the record, so read, it would vouch for the metrics.
+        os.utime(outside / "hydra.yaml", ns=(10**9, 10**9))
+        (run / ".hydra" / "hydra.yaml").symlink_to(outside / "hydra.yaml")
+    out = _get_metrics(root / "exp", root=root)
+    assert out["per_run"][0].get("mushin_metrics") is None
