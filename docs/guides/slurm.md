@@ -149,8 +149,10 @@ The driver names the jobs of each submission in a file under
 it has waited on those jobs. Some cases follow from that:
 
 - A driver killed before its jobs end (Ctrl-C, a lost login session) leaves
-  its file. A cell whose job never started then stays `queued` until a later
-  run of the sweep, such as a `resume=True`, records the cell.
+  its file, and so does a driver whose wait raised before the scheduler could
+  say every job had ended. A cell whose job never started then stays
+  `queued` until a later run of the sweep, such as a `resume=True`, records
+  the cell.
 - A job that dies before its code starts can show `queued` until the driver
   has waited on every job of its submission.
 - A sweep whose `hydra.sweep.subdir` puts each cell more than one directory

@@ -126,8 +126,12 @@ def forget_launch(path) -> None:
     """Remove a launch file, if it is still there. Its driver does once it
     has waited on the launch's jobs; a failure is logged, since a sweep
     must not fail over a view of its queue."""
+    from ._sweep_io import _while_held
+
     try:
-        Path(path).unlink(missing_ok=True)
+        # On Windows, a `show` with the file open makes the unlink raise
+        # PermissionError for a moment; retried as for a sidecar (#357).
+        _while_held(lambda: Path(path).unlink(missing_ok=True))
     except OSError as exc:
         log.warning(
             f"mushin could not remove the launch file {path} ({exc!r}); "
