@@ -189,7 +189,9 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
        launch's under `_loose_key`. Only other runs': the combo could match
        another cell of R. If one is newer than t, the cell was rerun, reused
        or cached after L, which is a killed driver's leftover launch: that
-       record's row stands.
+       record's row stands. Not a record of a run whose own launch file is
+       older than L's: that run launched before L, and its record is its
+       late job's, not a rerun's.
     3. Otherwise the cell is queued, and its row replaces those records'
        rows, all older than L. A record and a launch of one mtime count so:
        a resume within a coarse mtime tick (1 s on some filesystems) of the
@@ -204,6 +206,14 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
     from ._resume import STATUS_FILE
 
     launches, _ = read_launches(root)
+    # Each run's first launch, for rule 2: a run whose launch file is older
+    # than L's ran before L.
+    first_launched: dict = {}
+    for launch in launches:
+        at = first_launched.get(launch.run_id)
+        first_launched[launch.run_id] = (
+            launch.mtime_ns if at is None else min(at, launch.mtime_ns)
+        )
     newest = {}
     for launch in sorted(launches, key=lambda x: (x.mtime_ns, x.path.name)):
         if launch.depth == 1 and not ended_locally(launch):
@@ -242,7 +252,14 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
         key = _loose_key_or_none(cell.combo)
         mine = in_own_dir[num] + (by_key[key] if key is not None else [])
         matched = {id(r): r for r in mine if r["run_id"] != launch.run_id}
-        if any(written_after(r, launch.mtime_ns) for r in matched.values()):
+        # A record of a run that launched before L is that run's late job,
+        # not a rerun after L: it retires nothing (#403).
+        later = [
+            r
+            for r in matched.values()
+            if not first_launched.get(r["run_id"], launch.mtime_ns) < launch.mtime_ns
+        ]
+        if any(written_after(r, launch.mtime_ns) for r in later):
             continue  # rule 2
         rows.append(
             {
