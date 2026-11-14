@@ -799,3 +799,15 @@ def test_a_launch_file_reads_back_as_written(tmp_path):
         ((num, job_id, combo),) = [(c.num, c.job_id, c.combo) for c in launch.cells]
         assert (num, job_id, combo["m"]) == (3, "7_0", None)
         assert math.isnan(combo["lr"])
+
+
+def test_an_earlier_runs_late_record_leaves_a_resumes_cell_queued(tmp_path):
+    """A resume R2 launched while R1's jobs still ran. R1's job then wrote
+    its record, after R2's launch: R1 launched first, so its record is not a
+    later rerun, and R2's resubmitted cell stays queued (#403)."""
+    _put_launch(tmp_path, run=R1, cells=[(1, "100_0", {"lr": 0.2})], at=T)
+    _put_launch(tmp_path, run=R2, cells=[(1, "200_0", {"lr": 0.2})], at=T + 5 * S)
+    _put_record(
+        tmp_path, "1", run=R1, combo={"lr": 0.2}, num=1, job_id="100_0", at=T + 10 * S
+    )
+    assert _statuses(tmp_path) == [(0.2, "queued")]
