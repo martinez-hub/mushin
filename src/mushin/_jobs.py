@@ -580,6 +580,7 @@ _ENDED = frozenset(
         "COMPLETED",
         "DEADLINE",
         "FAILED",
+        "LAUNCH_FAILED",
         "NODE_FAIL",
         "OUT_OF_MEMORY",
         "REVOKED",
@@ -812,10 +813,23 @@ def refuse_live_launches(working_dir) -> list[Path]:
             )
         else:
             answers: dict[str, tuple[str, Any]] = {}
+            stalled = None
             for _, arrays in asked:
                 for array in arrays:
-                    if array not in answers:
-                        answers[array] = _ask(scontrol, array)
+                    if array in answers:
+                        continue
+                    if stalled is not None:
+                        # One answer that could not be read already refuses
+                        # the run: the rest are not asked, each with its own
+                        # wait for a scheduler that is not answering (#410).
+                        answers[array] = (
+                            "unknown",
+                            f"not asked, as scontrol did not answer for job {stalled}",
+                        )
+                        continue
+                    answers[array] = _ask(scontrol, array)
+                    if answers[array][0] == "unknown":
+                        stalled = array
             for launch, arrays in asked:
                 # The arrays of each verdict: "live", "gone", "not ours" or,
                 # when scontrol's answer could not be read, "unknown".

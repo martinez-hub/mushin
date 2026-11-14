@@ -448,3 +448,27 @@ def test_show_and_cancel_count_a_zombie_as_ended(tmp_path, monkeypatch):
     assert mushin.show(wd).rows == []
     mushin.cancel(wd)
     assert not path.exists()
+
+
+def test_a_scheduler_that_times_out_is_not_asked_again(tmp_path, slurm):
+    """One scontrol timeout already refuses the run: the other launches'
+    arrays are not asked about too, each with its own wait (#410)."""
+    wd = tmp_path / "s"
+    first = launch(wd, R1, [(0, "100")])
+    second = launch(wd, R2, [(1, "200")])
+    slurm.jobs["100"] = subprocess.TimeoutExpired([SCONTROL], 10)
+    slurm.jobs["200"] = shown(job("RUNNING", _ours(wd), job="200"))
+    with pytest.raises(RuntimeError, match="could not tell") as caught:
+        _run(wd)
+    assert slurm.asked == ["100"]
+    assert str(first) in str(caught.value) and str(second) in str(caught.value)
+
+
+def test_a_job_slurm_could_not_launch_has_ended(tmp_path, slurm):
+    """LAUNCH_FAILED is an end state (SLURM 20.11 and later): the run goes
+    ahead, as for any ended job (#410)."""
+    wd = tmp_path / "s"
+    path = launch(wd, R1, [(0, "100")])
+    slurm.jobs["100"] = shown(job("LAUNCH_FAILED", _ours(wd)))
+    _run(wd)
+    assert not path.exists()
