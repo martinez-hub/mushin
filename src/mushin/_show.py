@@ -83,14 +83,24 @@ def _read_cells(root) -> list[dict]:
     return _scan(root)[0]
 
 
-def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
+def _scan(
+    root, *, mtimes: bool = False, records: list | None = None
+) -> tuple[list[dict], float]:
     """``_read_cells`` plus the mtime of the manifest that scoped the scan
     (0.0 when none did), read once so the two never disagree. Each cell's
     record and ``.hydra/hydra.yaml`` are stat'ed (their ages), and the
     hydra.yaml is read only when it is the newer. ``mtimes`` records every
     cell's ``status_mtime``; otherwise only the cells the manifest does not
     list get one, as the stale-dir rule needs, and the field is 0.0 (``show``
-    and ``export`` never read it)."""
+    and ``export`` never read it). Each cell also carries its record's
+    ``run_id``, ``job_num``, ``job_id`` and ``job`` (the ``submitit`` entry
+    naming its job, or None).
+
+    ``records``, when given, collects ``{"run_id", "job_num", "job_id",
+    "combo", "dir"}`` of every record read, the ones the scan then leaves
+    out included: whether a launch's job ran is told by its record, which
+    may be one that the manifest of a later run on a narrower grid scopes
+    out (`_queued`)."""
     from ._resume import (
         STATUS_FILE,
         read_cell_status,
@@ -116,6 +126,9 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
         s = read_cell_status(d)
         if s is None or not isinstance(s.get("combo"), dict):
             continue
+        fields = {k: s.get(k) for k in ("run_id", "job_num", "job_id")}
+        if records is not None:
+            records.append({**fields, "combo": s["combo"], "dir": d})
         if older and record_of_another_run(s, snapshot_run_stamp(snapshot)):
             continue  # its job died before its first record: an earlier run's
         status_mtime = 0.0
@@ -139,9 +152,123 @@ def _scan(root, *, mtimes: bool = False) -> tuple[list[dict], float]:
                 "metrics": m,
                 "dir": d,
                 "status_mtime": status_mtime,
+                **fields,
+                "job": s["submitit"] if isinstance(s.get("submitit"), dict) else None,
             }
         )
     return cells, manifest_mtime
+
+
+def _loose_key(combo: dict) -> str:
+    """``combo_key`` with each integral float as an int: a launch holds a
+    swept ``lr=1`` as typed, while a float field's record holds 1.0."""
+    from ._sweep_io import combo_key
+
+    return combo_key(
+        {
+            k: int(v) if isinstance(v, float) and v.is_integer() else v
+            for k, v in combo.items()
+        }
+    )
+
+
+def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], set]:
+    """The rows of the cells whose jobs a launch submitted and that have not
+    started (#345), and the indices of the rows in ``cells`` they replace.
+    ``cells`` and ``records`` are `_scan`'s.
+
+    A job number named by two launches (two live drivers, or a leftover
+    launch and a resume) is decided by the newer launch file, or, on one
+    mtime, by the later file name, so the result is deterministic. For that
+    launch L (of run R, written at t) and its cell (job number n, job id j):
+
+    1. A record of run R naming job j or number n (any of ``records``)
+       means L's job ran: no queued row, and that record's row stands.
+    2. The cell's records of other runs: those in dir ``n`` that name number
+       n, and, for a custom ``hydra.sweep.subdir``, those whose combo is the
+       launch's under `_loose_key`. Only other runs': the combo could match
+       another cell of R. If one is newer than t, the cell was rerun, reused
+       or cached after L, which is a killed driver's leftover launch: that
+       record's row stands.
+    3. Otherwise the cell is queued, and its row replaces those records'
+       rows, all older than L. A record and a launch of one mtime count so:
+       a resume within a coarse mtime tick (1 s on some filesystems) of the
+       run before it has launched after it.
+
+    A launch is not read when its cells' dirs nest below the root (`_scan`
+    reads direct children only), nor when it is local, from this host, and
+    none of its jobs' processes lives (a killed driver's)."""
+    from collections import defaultdict
+
+    from ._jobs import ended_locally, read_launches
+    from ._resume import STATUS_FILE
+
+    launches, _ = read_launches(root)
+    newest = {}
+    for launch in sorted(launches, key=lambda x: (x.mtime_ns, x.path.name)):
+        if launch.depth == 1 and not ended_locally(launch):
+            for cell in launch.cells:
+                newest[cell.num] = (launch, cell)
+    if not newest:
+        return [], set()
+
+    # Indexed, as a launch and the records can each name thousands of cells.
+    ran, in_own_dir, by_key = set(), defaultdict(list), defaultdict(list)
+    for r in records:
+        # Only as written (a str): a hand-edited value may not even hash.
+        run, num = (r["run_id"] if isinstance(r["run_id"], str) else None), _job_num(r)
+        if run is not None and isinstance(r["job_id"], str):
+            ran.add((run, r["job_id"]))
+        if run is not None and num is not None:
+            ran.add((run, num))
+        if num is not None and r["dir"].name == str(num):
+            in_own_dir[num].append(r)
+        key = _loose_key_or_none(r["combo"])
+        if key is not None:
+            by_key[key].append(r)
+
+    def written_after(record: dict, t: int) -> bool:
+        # `show` scans without each record's mtime; rule 2 needs a few.
+        try:
+            return (record["dir"] / STATUS_FILE).stat().st_mtime_ns > t
+        except OSError:  # removed since: it retires nothing
+            return False
+
+    rows, replaced = [], set()
+    for num in sorted(newest):
+        launch, cell = newest[num]
+        if (launch.run_id, cell.job_id) in ran or (launch.run_id, num) in ran:
+            continue  # rule 1
+        key = _loose_key_or_none(cell.combo)
+        mine = in_own_dir[num] + (by_key[key] if key is not None else [])
+        matched = {id(r): r for r in mine if r["run_id"] != launch.run_id}
+        if any(written_after(r, launch.mtime_ns) for r in matched.values()):
+            continue  # rule 2
+        rows.append(
+            {
+                "combo": dict(cell.combo),
+                "status": "queued",
+                "metrics": {},
+                "dir": None,
+                "status_mtime": 0.0,
+                "job": {"job_id": cell.job_id},
+            }
+        )
+        replaced |= {r["dir"] for r in matched.values()}
+    return rows, {i for i, c in enumerate(cells) if c["dir"] in replaced}
+
+
+def _loose_key_or_none(combo: dict) -> str | None:
+    try:
+        return _loose_key(combo)
+    except Exception:  # noqa: BLE001 - a value whose str() raises keys nothing
+        return None
+
+
+def _job_num(record: dict) -> int | None:
+    # Not a bool: a record holds a job number only as Hydra writes it.
+    num = record["job_num"]
+    return num if type(num) is int else None
 
 
 def _free_name(name: str, taken: set, suffix: str) -> str:
@@ -153,13 +280,20 @@ def _free_name(name: str, taken: set, suffix: str) -> str:
     return name
 
 
-def _metric_column_names(param_cols: list[str], metric_cols: list[str]) -> dict:
+#: The columns ``show`` adds after ``status`` with ``jobs=True`` (#345).
+_JOB_COLUMNS = ("job", "host", "logs")
+
+
+def _metric_column_names(
+    param_cols: list[str], metric_cols: list[str], reserved=("status",)
+) -> dict:
     """Column name per metric. A metric named like a swept-param column or
-    ``status`` becomes ``"<name> (metric)"`` (e.g. a task reporting the
-    effective ``lr`` alongside a swept ``lr``), and that name is kept clear of
-    every other column, so even a metric already named ``"lr (metric)"``
-    keeps its value."""
-    reserved = set(param_cols) | {"status"}
+    one of ``reserved`` (the columns ``show`` adds: ``status``, and the job
+    columns with ``jobs=True``) becomes ``"<name> (metric)"`` (e.g. a task
+    reporting the effective ``lr`` alongside a swept ``lr``), and that name
+    is kept clear of every other column, so even a metric already named
+    ``"lr (metric)"`` keeps its value."""
+    reserved = set(param_cols) | set(reserved)
     taken = reserved | set(metric_cols)
     names = {}
     for m in metric_cols:
@@ -190,10 +324,12 @@ def _apply_metric_filter(
 
 class ShowResult:
     """The result of ``show``: ``rows`` (one dict per cell, keyed by the
-    table's column names: the swept params, ``status`` and the metrics) plus a
-    rendered ``table``. ``str()`` returns the table. ``status`` is the cell
-    status: a swept param of that name is ``"status (param)"``, and a metric
-    named like a param or ``status`` is ``"<name> (metric)"``."""
+    table's column names: the swept params, ``status``, with ``jobs=True``
+    ``job``, ``host`` and ``logs``, and the metrics) plus a rendered
+    ``table``. ``str()`` returns the table. ``status`` is the cell status: a
+    swept param of that name is ``"status (param)"``, and a metric named like
+    a param or ``status`` is ``"<name> (metric)"``; with ``jobs=True`` the
+    same holds for ``job``, ``host`` and ``logs``."""
 
     def __init__(self, rows: list[dict], table: str):
         self.rows = rows
@@ -213,35 +349,63 @@ class ShowResult:
 
 
 def _cell_rows(
-    cells: list[dict], metrics: list[str] | None
+    cells: list[dict], metrics: list[str] | None, *, jobs: bool = False
 ) -> tuple[list[str], list[str], list[dict]]:
     """``(param_cols, columns, rows)`` of the cells ``_read_cells`` returns:
-    one row per cell, in ``cells`` order, with its swept params, ``status``
-    and the metric columns ``metrics`` selects (``show`` and
-    ``export.table``). ``param_cols`` are the params' column names."""
+    one row per cell, in ``cells`` order, with its swept params, ``status``,
+    with ``jobs`` the job columns (from a cell's ``job``, the ``submitit``
+    entry of its record), and the metric columns ``metrics`` selects
+    (``show`` and ``export.table``). ``param_cols`` are the params' column
+    names. The job columns are reserved only with ``jobs``, so a param or
+    metric named ``host`` keeps its name otherwise, as in an export."""
+    added = ["status", *(_JOB_COLUMNS if jobs else ())]
     params = _ordered_union([c["combo"] for c in cells])
     # Hydra keys hold no space or parentheses, so params cannot clash with
-    # each other or with a renamed column; only ``status`` is taken.
-    param_col = {p: _free_name(p, {"status"}, "(param)") for p in params}
+    # each other or with a renamed column; only the added columns are taken.
+    param_col = {p: _free_name(p, set(added), "(param)") for p in params}
     param_cols = list(param_col.values())
     metric_cols = _ordered_union([c["metrics"] for c in cells])
     metric_cols = _apply_metric_filter(metrics, metric_cols)
-    colname = _metric_column_names(param_cols, metric_cols)
+    colname = _metric_column_names(param_cols, metric_cols, added)
     rows: list[dict] = []
     for c in cells:
         row: dict[str, Any] = {param_col[p]: c["combo"].get(p) for p in params}
         row["status"] = c["status"]
+        if jobs:
+            job = c.get("job") or {}
+            row.update(
+                job=job.get("job_id"), host=job.get("host"), logs=job.get("logs")
+            )
         for m in metric_cols:
             row[colname[m]] = c["metrics"].get(m)
         rows.append(row)
-    columns = [*param_cols, "status", *(colname[m] for m in metric_cols)]
+    columns = [*param_cols, *added, *(colname[m] for m in metric_cols)]
     return param_cols, columns, rows
 
 
 def show(
-    root, *, metrics: list[str] | None = None, sort: str | None = None
+    root,
+    *,
+    metrics: list[str] | None = None,
+    sort: str | None = None,
+    jobs: bool = False,
 ) -> ShowResult:
     """Read the sweep under ``root`` and return a status/metrics table.
+
+    A cell's ``status`` is ``completed``, ``failed``, ``skipped`` (left out
+    by ``sample=``, or by a ``max_total_seconds`` budget that ran out),
+    ``running`` (started; also a cell whose process was killed), or, on
+    mushin's submitit launchers, ``queued``: its job was submitted and has
+    not started. A cell sent to a job again (by a resume) is ``queued`` in
+    place of its earlier record until the job starts. Without a submitit
+    launcher, a cell that has not started has no row.
+
+    ``queued`` comes from the launch files under ``root/mushin_jobs/``,
+    which a driver removes once it has waited on the jobs. A driver killed
+    before then leaves its file, and the cells of a SLURM job that never
+    started stay ``queued`` until a later run records them (a local one's,
+    until its processes have exited). A launch of cells whose dirs nest
+    below ``root`` (a ``hydra.sweep.subdir`` of several levels) lists none.
 
     Parameters
     ----------
@@ -252,11 +416,18 @@ def show(
         every metric found, discovery order). An unknown name raises
         ``ValueError`` (like ``sort=``); repeats are deduplicated.
     sort : str | None
-        Column to sort rows by (a swept param, ``"status"``, or a metric).
-        Defaults to the swept params in grid order. ``"status"`` is always the
-        cell status: a swept param named ``status`` is shown (and sorted) as
-        ``"status (param)"``, and a metric that shares a swept param's name,
-        or ``status``, as ``"<name> (metric)"``.
+        Column to sort rows by (a swept param, ``"status"``, a job column, or
+        a metric). Defaults to the swept params in grid order. ``"status"`` is
+        always the cell status: a swept param named ``status`` is shown (and
+        sorted) as ``"status (param)"``, and a metric that shares a swept
+        param's name, or ``status``, as ``"<name> (metric)"``.
+    jobs : bool
+        Add the columns ``job`` (the submitit job id), ``host`` (the node
+        the job ran on) and ``logs`` (the folder of its logs) after
+        ``status``, from the job a cell's record names; a ``queued`` row
+        has only its ``job``, and a cell not run by a submitit launcher has
+        none. A swept param or a metric of one of these names is then
+        ``"<name> (param)"`` or ``"<name> (metric)"``.
 
     Returns
     -------
@@ -264,7 +435,11 @@ def show(
         ``.rows`` (one dict per cell) and ``.table`` (the rendered string); the
         table is also printed.
     """
-    param_cols, columns, rows = _cell_rows(_read_cells(root), metrics)
+    records: list[dict] = []
+    cells, _ = _scan(root, records=records)
+    queued, replaced = _queued(root, cells, records)
+    cells = [c for i, c in enumerate(cells) if i not in replaced] + queued
+    param_cols, columns, rows = _cell_rows(cells, metrics, jobs=jobs)
     if sort is not None:
         if sort not in columns:
             raise ValueError(
@@ -421,6 +596,7 @@ def _best_group(
     metric: str,
     mode: str,
     over: list[str],
+    queued: int = 0,
 ) -> BestResult:
     """``best(over=...)``: group cells by their combo minus ``over``, average
     ``metric`` within each group and pick the best mean.
@@ -434,9 +610,9 @@ def _best_group(
     a kill, and could win on one lucky seed. And rather than "every value any
     cell has", so that a seed that failed for every configuration drops out
     instead of making the sweep unanswerable. While the sweep is unfinished
-    (a cell running, a sidecar newer than the manifest that ``run()`` writes
-    last, a cell recorded as skipped, or no usable manifest) the bar is
-    provisional and the result says so. A single value of ``over`` means
+    (a cell running, ``queued`` cells, a sidecar newer than the manifest that
+    ``run()`` writes last, a cell recorded as skipped, or no usable manifest)
+    the bar is provisional and the result says so. A single value of ``over`` means
     there is nothing to average, and raises. Skipped groups, and cells whose combo lacks an
     ``over`` param (another grid in flight in a reused ``working_dir``), are
     reported with a warning; no complete group raises."""
@@ -483,10 +659,17 @@ def _best_group(
     in_flight = sum(c["status"] in ("running", "pending") for c in grouped)
     not_run = sum(c["status"] == "skipped" for c in grouped)
 
-    if in_flight:
+    if in_flight or queued:
+        counts = []
+        if in_flight:
+            counts.append(
+                f"{in_flight} cell(s) recorded as running or without a status"
+            )
+        if queued:
+            counts.append(f"{queued} cell(s) queued")
         why = (
-            f"{in_flight} cell(s) recorded as running or without a status; a "
-            "killed sweep leaves them so, and resume=True reruns them"
+            f"{' and '.join(counts)}; a killed sweep leaves them so, and "
+            "resume=True reruns them"
         )
     elif not_run:
         why = (
@@ -622,7 +805,8 @@ def best(
         raise ValueError(f"`mode` must be 'max' or 'min', got {mode!r}")
     names = None if over is None else _over_names(over)
 
-    cells, manifest_mtime = _scan(root, mtimes=names is not None)
+    records: list[dict] | None = None if names is None else []
+    cells, manifest_mtime = _scan(root, mtimes=names is not None, records=records)
     if names is not None:
         _check_swept(names, cells)
     candidates = [c for c in cells if _is_candidate(c, metric)]
@@ -642,7 +826,12 @@ def best(
         )
 
     if names is not None:
-        return _best_group(cells, manifest_mtime, metric, mode, names)
+        # Queued cells say the sweep has not finished; their combos are the
+        # overrides' text, for display, so they are counted, not grouped.
+        queued, _ = _queued(root, cells, records)
+        return _best_group(
+            cells, manifest_mtime, metric, mode, names, queued=len(queued)
+        )
 
     pick = (max if mode == "max" else min)(
         candidates, key=lambda c: c["metrics"][metric]
