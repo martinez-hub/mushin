@@ -1976,14 +1976,12 @@ class _TaskRunner:
             return JobStatus.FAILED, dead.exception
         return JobStatus.COMPLETED, dead
 
-    def _wrappers_resolve(self) -> bool:
-        """Whether the task's or pre_task's wrapper resolves the config in
-        place before it calls, as zen does by default (``resolve_pre_call``,
-        kept as its ``_resolve``)."""
-        return any(
-            getattr(wrapper, "_resolve", False) is True
-            for wrapper in (self.task, self.pre_task)
-        )
+    @staticmethod
+    def _resolves(wrapper) -> bool:
+        """Whether ``wrapper`` resolves the config in place before it calls,
+        as zen does by default (``resolve_pre_call``, kept as its
+        ``_resolve``)."""
+        return getattr(wrapper, "_resolve", False) is True
 
     def __call__(self, cfg):
         import warnings
@@ -2030,9 +2028,14 @@ class _TaskRunner:
         # calls (`resolve_pre_call`), so the cell's record, read before
         # `pre_task`, and the task each resolved it: a resolver that gives a
         # new value each call (a counter) gave them different values. Done
-        # here, as zen would, only when a wrapper resolves; a task that
-        # opted out gets the config as Hydra composed it.
-        if self._wrappers_resolve():
+        # where the first resolving wrapper would do it: here when
+        # `pre_task`'s does; just before the task when only the task's does
+        # (so `pre_task` still runs first, as it did); not at all when
+        # neither does.
+        resolve_before_task = not self._resolves(self.pre_task) and self._resolves(
+            self.task
+        )
+        if self._resolves(self.pre_task):
             _resolve_in_place(cfg)
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
@@ -2152,6 +2155,10 @@ class _TaskRunner:
             # ResumeContext leaking into later in-process cells.
             token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
             try:
+                if resolve_before_task:
+                    # As the task's wrapper would, and the record follows it.
+                    _resolve_in_place(cfg)
+                    combo = self._combo(cfg, self.swept_names)
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
                 try:
