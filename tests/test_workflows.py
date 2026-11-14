@@ -3143,3 +3143,40 @@ def test_a_wrapper_that_does_not_resolve_reads_after_pre_task(tmp_path, monkeypa
         pre_task_fn_wrapper=lazy,
     )
     assert seen == ["from-pre-task"]
+
+
+def test_a_non_resolving_pre_task_runs_before_the_tasks_resolution(
+    tmp_path, monkeypatch
+):
+    """When only the task's wrapper resolves, the config is resolved just
+    before the task, after `pre_task`, as that wrapper would (Codex, #385):
+    an environment variable `pre_task` sets reaches the task, and the cell's
+    record holds what the task got."""
+    import json
+    import os
+
+    from hydra_zen import zen
+
+    monkeypatch.setenv("MUSHIN_TEST_PRE", "unset")
+    monkeypatch.delenv("MUSHIN_TEST_PRE")
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(x):
+            os.environ["MUSHIN_TEST_PRE"] = "from-pre-task"
+
+        @staticmethod
+        def task(x, d):
+            seen.append(d)
+            return dict(v=1.0)
+
+    W().run(
+        x=multirun([1]),
+        d=multirun(["${oc.env:MUSHIN_TEST_PRE,default}"]),
+        working_dir=str(tmp_path),
+        pre_task_fn_wrapper=lambda fn: zen(fn, resolve_pre_call=False),
+    )
+    assert seen == ["from-pre-task"]
+    record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+    assert record["combo"]["d"] == "from-pre-task"
