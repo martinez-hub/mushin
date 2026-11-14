@@ -501,3 +501,30 @@ def test_a_load_replaces_a_runs_manifest(tmp_path):
     first.load_from_dir(tmp_path / "b", "mushin_metrics.json")
     fresh = Plain().load_from_dir(tmp_path / "b", "mushin_metrics.json")
     assert first.notes == fresh.notes
+
+
+class Stamped(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, stamp):
+        return dict(v=float(x))
+
+
+@pytest.mark.parametrize("spec", ["%Y", "%H-%M-%S-%f"])
+def test_a_fixed_interpolation_is_the_runs_value_on_every_read(tmp_path, spec):
+    """The issue's second case: a fixed value is the one its jobs resolved
+    when they agree (the run's year), else its text, not the reader's
+    reading at reload time."""
+    stamp = "${now:" + spec + "}"
+    wf = Stamped()
+    wf.run(x=multirun([1, 2]), stamp=stamp, working_dir=tmp_path)
+    provenance = [
+        json.loads((tmp_path / d / "mushin_provenance.json").read_text())["config"][
+            "stamp"
+        ]
+        for d in ("0", "1")
+    ]
+    expected = provenance[0] if provenance[0] == provenance[1] else stamp
+    assert wf.multirun_task_overrides["stamp"] == expected
+    for _ in range(2):
+        back = Stamped().load_from_dir(tmp_path, "mushin_metrics.json")
+        assert back.multirun_task_overrides["stamp"] == expected

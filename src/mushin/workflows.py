@@ -2739,6 +2739,7 @@ class BaseWorkflow:
 
         output: dict = {}
         axes: dict[str, tuple[list, list | None]] = {}
+        fixed: dict[str, Any] = {}
         for i, text in enumerate(raw):
             ((name, written),) = self._parse_overrides([text]).items()
             if not _holds_interpolation(text):
@@ -2751,11 +2752,72 @@ class BaseWorkflow:
                 axes[name] = (list(written), read)
                 output[name] = written
             else:
-                output[name] = written if read is None else read
-        coordinates, known = self._axis_coordinates(axes, hydra_run_stamp(loaded))
+                fixed[name] = (written, read)
+        run_id = hydra_run_stamp(loaded)
+        coordinates, known = self._axis_coordinates(axes, run_id)
         for name, values in coordinates.items():
             output[name] = multirun(values)
+        values = self._fixed_values(fixed, run_id, known)
+        output.update(values)
+        if known and (axes or fixed):
+            self._interpolated_decision = {
+                "run_id": run_id,
+                "coords": {
+                    name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
+                },
+                "fixed": {name: _tag_nan(v) for name, v in values.items()},
+            }
         return output, known
+
+    def _fixed_values(self, fixed: dict, run_id, known: bool) -> dict:
+        """The value of each fixed override that holds an interpolation:
+        the run's, saved in its manifest; else, in the run, the value its
+        jobs resolved, when they agree (``${now:%Y}``: the run's year, on any
+        later read), and its text when they differ (``${hydra:...}``, each
+        job's own); else as before, the reader's reading or its text
+        (#353, #351)."""
+        saved = self._saved_decision(run_id)
+        saved_fixed = saved.get("fixed") if saved is not None else None
+        values = {}
+        for name, (written, read) in fixed.items():
+            if isinstance(saved_fixed, dict) and name in saved_fixed:
+                values[name] = _restore_tags(saved_fixed[name])
+                continue
+            resolved = self._resolved_by_jobs(name) if known else []
+            keys = {_value_key(v) for v in resolved}
+            if len(keys) == 1:
+                # The reader's reading where it keys the same, as main has it
+                # ("0.01" for a quoted ${base_lr}).
+                same = read is not None and _value_key(read) in keys
+                values[name] = read if same else resolved[0]
+            elif len(keys) > 1:
+                values[name] = written
+            else:
+                values[name] = written if read is None else read
+        return values
+
+    def _resolved_by_jobs(self, name: str) -> list:
+        """``name``'s value in each job of this run that resolved it itself
+        (its config holds no interpolation there any more)."""
+        from omegaconf import OmegaConf
+
+        jobs = getattr(self, "jobs", None)
+        if not jobs or self.cfgs is None or len(jobs) != len(self.cfgs):
+            return []
+        parent_path, _, key = name.rpartition(".")
+        values = []
+        for cfg in self.cfgs:
+            try:
+                parent = OmegaConf.select(cfg, parent_path) if parent_path else cfg
+                if parent is None or OmegaConf.is_interpolation(parent, key):
+                    continue
+                value = parent[key]
+            except Exception:  # noqa: BLE001 - not this job's to say
+                continue
+            if OmegaConf.is_config(value):
+                value = OmegaConf.to_container(value, resolve=True)
+            values.append(value)
+        return values
 
     def _axis_coordinates(self, axes, run_id) -> tuple[dict[str, list], bool]:
         """Each interpolated axis's coordinates, and whether the sweep's
@@ -2826,23 +2888,13 @@ class BaseWorkflow:
             coordinates[name] = values
         if known:
             self._interpolated_cells = elements_of
-            self._interpolated_decision = {
-                "run_id": run_id,
-                "coords": {
-                    name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
-                },
-            }
         return coordinates, known
 
     def _saved_coordinates(self, run_id, axes) -> dict | None:
         """The coordinates this run saved in its manifest, when the manifest
         is this run's (its ``run_id``) and they fit the sweep's axes."""
-        from ._sweep_io import MANIFEST_FILE, Manifest
-
-        if run_id is None or not (self.working_dir / MANIFEST_FILE).exists():
-            return None
-        saved = Manifest.load_or_new(self.working_dir, []).interpolated
-        if not isinstance(saved, dict) or saved.get("run_id") != run_id:
+        saved = self._saved_decision(run_id)
+        if saved is None:
             return None
         coords = saved.get("coords")
         if not isinstance(coords, dict) or set(coords) != set(axes):
@@ -2867,6 +2919,18 @@ class BaseWorkflow:
             return True
         stamps = self._run_stamps
         return bool(stamps) and i < len(stamps) and stamps[i] == run_id
+
+    def _saved_decision(self, run_id) -> dict | None:
+        """What this run (``run_id``) saved in its manifest about its
+        interpolated overrides (`Manifest.interpolated`), else None."""
+        from ._sweep_io import MANIFEST_FILE, Manifest
+
+        if run_id is None or not (self.working_dir / MANIFEST_FILE).exists():
+            return None
+        saved = Manifest.load_or_new(self.working_dir, []).interpolated
+        if not isinstance(saved, dict) or saved.get("run_id") != run_id:
+            return None
+        return saved
 
     def _this_runs_record(self, i: int, run_id) -> dict | None:
         """Job dir ``i``'s status record when this run (``run_id``) wrote

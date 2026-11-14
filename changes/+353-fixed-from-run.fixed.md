@@ -1,0 +1,1 @@
+A fixed value written as an interpolation (`stamp="${now:%Y}"`) now reads, in the run and on every reload of it, as the value the sweep's jobs resolved when they agree (the run's year), and as its text when they differ (`${now:...}` to the microsecond, a job's own `${hydra:...}`), instead of as the reader resolves it at the time.
