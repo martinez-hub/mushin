@@ -3295,3 +3295,57 @@ def test_an_escaped_interpolation_is_resolved_only_by_the_wrapper(tmp_path):
         x=multirun([1]), working_dir=str(tmp_path), task_fn_wrapper=None
     )
     assert seen == [1]
+
+
+def test_a_raw_task_that_changes_its_config_keeps_the_cells_combo(tmp_path):
+    """A task run without a wrapper gets the config itself and may change
+    it; the cell's record keeps the values it was launched with, so its
+    next attempt finds it (Codex, #385)."""
+    import json
+    import warnings
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):  # raw: called with the whole config
+            seed.seed = 99
+            raise RuntimeError("fails after changing its config")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(
+            seed=multirun([0]),
+            working_dir=str(tmp_path),
+            task_fn_wrapper=None,
+            on_error="nan",
+        )
+    record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "failed" and record["combo"] == {"seed": 0}
+
+
+def test_a_combo_that_cannot_be_read_again_keeps_the_first(tmp_path, monkeypatch):
+    """Reading the combo again after zen's wrapper resolved the config can
+    raise (an escaped value is literal text by then): the cell keeps the
+    combo read before, and its task runs (Codex, #385)."""
+    import json
+
+    from mushin.workflows import _TaskRunner
+
+    real = _TaskRunner._combo
+    calls = []
+
+    def flaky(cfg, names):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("cannot be read again")
+        return real(cfg, names)
+
+    monkeypatch.setattr(_TaskRunner, "_combo", staticmethod(flaky))
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):
+            return dict(v=float(seed))
+
+    W().run(seed=multirun([3]), working_dir=str(tmp_path))
+    record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "completed" and record["combo"] == {"seed": 3}
