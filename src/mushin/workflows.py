@@ -7,6 +7,7 @@ import dataclasses
 import functools
 import json
 import math
+import re
 import uuid
 from collections import UserList, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -719,8 +720,8 @@ def _restore_tags(value: Any) -> Any:
 
 
 def _tag_nan(value: Any) -> Any:
-    """A coordinate as the manifest keeps it: each NaN in it tagged, inside
-    a list or dict too, as a null would read back as None
+    """A coordinate or fixed value as the manifest keeps it: each NaN in it
+    tagged, inside a list or dict too, as a null would read back as None
     (`_restore_tags`)."""
     from ._sweep_io import _NONFINITE_TAG
 
@@ -1149,6 +1150,11 @@ def _resolved(path: Path) -> Path:
         return Path(os.path.abspath(path))
 
 
+# An interpolation that reads the environment: ``${oc.env:...}``, OmegaConf's
+# older ``${env:...}``, spaced as OmegaConf allows.
+_ENV_READ = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
+
+
 def _reads_environment(ret: JobReturn) -> bool:
     """Whether a job's config may resolve differently in its own process:
     it, or a variable ``hydra.job.env_set`` sets for the job, reads the
@@ -1157,15 +1163,11 @@ def _reads_environment(ret: JobReturn) -> bool:
     scheduler's variables). Setting variables to fixed values changes
     nothing the driver cannot apply itself (`settle_in_driver`). A custom
     resolver that reads ``os.environ`` is not seen."""
-    import re
-
     from omegaconf import OmegaConf
-
-    env = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
 
     def reads(node: Any) -> bool:
         if isinstance(node, str):
-            return env.search(node) is not None
+            return _ENV_READ.search(node) is not None
         if isinstance(node, Mapping):
             return any(reads(v) for v in node.values())
         if isinstance(node, (list, tuple)):
@@ -2872,6 +2874,7 @@ class BaseWorkflow:
 
         output: dict = {}
         axes: dict[str, tuple[list, list | None]] = {}
+        fixed: dict[str, Any] = {}
         for i, text in enumerate(raw):
             ((name, written),) = self._parse_overrides([text]).items()
             if not _holds_interpolation(text):
@@ -2884,11 +2887,130 @@ class BaseWorkflow:
                 axes[name] = (list(written), read)
                 output[name] = written
             else:
-                output[name] = written if read is None else read
-        coordinates, known = self._axis_coordinates(axes, hydra_run_stamp(loaded))
+                fixed[name] = (written, read)
+        run_id = hydra_run_stamp(loaded)
+        coordinates, known = self._axis_coordinates(axes, run_id)
         for name, values in coordinates.items():
             output[name] = multirun(values)
+        values = self._fixed_values(fixed, run_id, known)
+        output.update(values)
+        if known and (axes or fixed):
+            decision: dict = {"run_id": run_id}
+            # Coordinates are saved only when every one reads back as itself;
+            # else a reload decides again from the records (`_round_trips`).
+            if all(_round_trips(c) for v in coordinates.values() for c in v):
+                decision["coords"] = {
+                    name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
+                }
+            # A fixed value is saved when it reads back as itself, and none
+            # is when the run's config reads the environment anywhere: an
+            # `${oc.env:API_TOKEN}`, read directly or through another key
+            # (`token="${api_key}"`), would put a credential in the manifest.
+            # Such a value is read again as before, by the reader (#392).
+            reads_env = self._run_reads_environment(raw)
+            decision["fixed"] = {
+                name: _tag_nan(v)
+                for name, v in values.items()
+                if not reads_env and _round_trips(v)
+            }
+            self._interpolated_decision = decision
         return output, known
+
+    def _run_reads_environment(self, raw: list[str]) -> bool:
+        """Whether this run's config may read the environment anywhere: an
+        override's text, the sweep's multirun.yaml, or the config snapshot
+        (``config.yaml`` in ``hydra.output_subdir``, as composed, unresolved)
+        of a job of each set of config-group choices. A job's config itself is no guide: its
+        task's wrapper resolved it in place. What cannot be read counts as
+        reading it (#392)."""
+        if any(_ENV_READ.search(text) for text in raw):
+            return True
+        try:
+            texts = [(self.working_dir / "multirun.yaml").read_text(encoding="utf-8")]
+            seen: set = set()
+            for i, cell in enumerate(self.multirun_working_dirs or []):
+                choices = self._job_choices(i) or {}
+                key = tuple(sorted((str(k), str(v)) for k, v in choices.items()))
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Where the sweep keeps it (`hydra.output_subdir`); none
+                # kept reads as unreadable, so as reading the environment.
+                subdir = getattr(self, "output_subdir", None)
+                snapshot = Path(cell) / str(subdir) / "config.yaml"
+                texts.append(snapshot.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - not readable: as if it did
+            return True
+        return any(_ENV_READ.search(text) for text in texts)
+
+    def _fixed_values(self, fixed: dict, run_id, known: bool) -> dict:
+        """The value of each fixed override that holds an interpolation:
+        the run's, saved in its manifest; else, in the run, the value its
+        jobs resolved, when they agree (``${now:%Y}``: the run's year, on any
+        later read), and its text when they differ (``${hydra:...}``, each
+        job's own); else as before, the reader's reading or its text
+        (#353, #351)."""
+        saved = self._saved_decision(run_id)
+        saved_fixed = saved.get("fixed") if saved is not None else None
+        values = {}
+        for name, (written, read) in fixed.items():
+            if isinstance(saved_fixed, dict) and name in saved_fixed:
+                values[name] = _restore_tags(saved_fixed[name])
+                continue
+            resolved = self._resolved_by_jobs(name) if known else []
+            keys = {_value_key(v) for v in resolved}
+            if len(keys) == 1:
+                # The reader's reading where it keys the same, as main has it
+                # ("0.01" for a quoted ${base_lr}).
+                same = read is not None and _value_key(read) in keys
+                values[name] = read if same else resolved[0]
+            elif len(keys) > 1:
+                values[name] = written
+            else:
+                values[name] = written if read is None else read
+        return values
+
+    def _resolved_by_jobs(self, name: str) -> list:
+        """``name``'s value in each job of this run that resolved it itself:
+        a config group's option name from the job's choices (main reads the
+        name, not the composed node); any other value from the job's config,
+        when the task's wrapper resolved that config in place before the
+        task ran (hydra-zen's ``zen``) and it holds no interpolation there
+        any more. A raw task gets the config itself and may change it, so
+        its jobs' configs say nothing (#392)."""
+        from omegaconf import OmegaConf
+
+        jobs = getattr(self, "jobs", None)
+        if not jobs or self.cfgs is None or len(jobs) != len(self.cfgs):
+            return []
+        resolves = getattr(self, "_task_resolves", False)
+        parent_path, _, key = name.rpartition(".")
+        values = []
+        for i, cfg in enumerate(self.cfgs):
+            choices = self._job_choices(i) or {}
+            if name in choices:
+                values.append(choices[name])
+                continue
+            if not resolves:
+                continue
+            try:
+                parent = OmegaConf.select(cfg, parent_path) if parent_path else cfg
+                if parent is None or OmegaConf.is_interpolation(parent, key):
+                    continue
+                value = parent[key]
+                if OmegaConf.is_config(value):
+                    # A job that resolved its config holds no interpolation
+                    # inside a list or dict either; one that did not (a cell
+                    # `sample=` left out) would be resolved now, here.
+                    if _holds_interpolation(
+                        str(OmegaConf.to_container(value, resolve=False))
+                    ):
+                        continue
+                    value = OmegaConf.to_container(value, resolve=True)
+            except Exception:  # noqa: BLE001 - not this job's to say
+                continue
+            values.append(value)
+        return values
 
     def _axis_coordinates(self, axes, run_id) -> tuple[dict[str, list], bool]:
         """Each interpolated axis's coordinates, and whether the sweep's
@@ -2970,27 +3092,13 @@ class BaseWorkflow:
             coordinates[name] = values
         if known:
             self._interpolated_cells = elements_of
-            # Saved only when every coordinate reads back as itself; else a
-            # reload decides again from the records (`_round_trips`).
-            if all(_round_trips(c) for v in coordinates.values() for c in v):
-                self._interpolated_decision = {
-                    "run_id": run_id,
-                    "coords": {
-                        name: [_tag_nan(c) for c in v]
-                        for name, v in coordinates.items()
-                    },
-                }
         return coordinates, known
 
     def _saved_coordinates(self, run_id, axes) -> dict | None:
         """The coordinates this run saved in its manifest, when the manifest
         is this run's (its ``run_id``) and they fit the sweep's axes."""
-        from ._sweep_io import MANIFEST_FILE, Manifest
-
-        if run_id is None or not (self.working_dir / MANIFEST_FILE).exists():
-            return None
-        saved = Manifest.load_or_new(self.working_dir, []).interpolated
-        if not isinstance(saved, dict) or saved.get("run_id") != run_id:
+        saved = self._saved_decision(run_id)
+        if saved is None:
             return None
         coords = saved.get("coords")
         if not isinstance(coords, dict) or set(coords) != set(axes):
@@ -3015,6 +3123,18 @@ class BaseWorkflow:
             return True
         stamps = self._run_stamps
         return bool(stamps) and i < len(stamps) and stamps[i] == run_id
+
+    def _saved_decision(self, run_id) -> dict | None:
+        """What this run (``run_id``) saved in its manifest about its
+        interpolated overrides (`Manifest.interpolated`), else None."""
+        from ._sweep_io import MANIFEST_FILE, Manifest
+
+        if run_id is None or not (self.working_dir / MANIFEST_FILE).exists():
+            return None
+        saved = Manifest.load_or_new(self.working_dir, []).interpolated
+        if not isinstance(saved, dict) or saved.get("run_id") != run_id:
+            return None
+        return saved
 
     def _this_runs_record(self, i: int, run_id) -> dict | None:
         """Job dir ``i``'s status record when this run (``run_id``) wrote
@@ -3776,8 +3896,13 @@ class BaseWorkflow:
 
         _task_fn, _wants_resume = _prepare_task(self.task)
         _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
+        _wrapped_task = task_fn_wrapper(_task_fn)
+        # Whether each job's config holds the values its task ran with: a
+        # wrapper that resolves it in place first (hydra-zen's `zen`) leaves
+        # them there; a raw task may change it (`_resolved_by_jobs`, #392).
+        self._task_resolves = getattr(_wrapped_task, "_resolve", False) is True
         task_call = _TaskRunner(
-            task=task_fn_wrapper(_task_fn),
+            task=_wrapped_task,
             pre_task=pre_task_fn_wrapper(_signed(self.pre_task)),
             swept_names=_runner_swept,
             base_provenance=_base_provenance,
