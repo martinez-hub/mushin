@@ -117,8 +117,12 @@ same cell.
   uses, as the driver does.
 
 Each cell runs in its own directory, `<working_dir>/<number>/`, and its
-`mushin_cell_status.json` names the job that ran it (`job_id`). That job's
-logs are under `<working_dir>/.submitit/<job id>/`: `<job id>_0_log.out` and
+`mushin_cell_status.json` names the job that ran it (`job_id`). Its `submitit`
+entry also names that job's log folder (`logs`), the node it ran on (`host`)
+and, on SLURM, its `partition`, once the job's code has started; a job that
+died before that names only its id and logs. A cell a resume reused keeps the entry of the
+job that computed it. That job's logs are under
+`<working_dir>/.submitit/<job id>/`: `<job id>_0_log.out` and
 `<job id>_0_log.err`. A submission of several cells is one job array, whose
 tasks' ids are `<array id>_<index>`, the index counting the cells that
 submission sent (a resume sends only some, so it is not the cell's number); a

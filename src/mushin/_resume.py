@@ -64,6 +64,7 @@ def write_cell_status(
     job_id: str | None = None,
     metrics: str | None = None,
     no_metrics: bool = False,
+    submitit: dict | None = None,
 ) -> None:
     """Atomically write this cell's status sidecar into its own dir.
 
@@ -91,7 +92,13 @@ def write_cell_status(
 
     ``no_metrics`` marks a completed cell whose task returned None, so it
     wrote no metrics file: a reload gives it no metrics instead of looking
-    for the file (#364)."""
+    for the file (#364).
+
+    ``submitit`` names the submitit job the cell ran in (#345): its
+    ``job_id``, its ``logs`` folder (each task's ``<id>_<task>_log.out``
+    and ``.err``), and its ``host`` and SLURM ``partition`` when known. It
+    is written only in that shape, each value a non-empty string, so a
+    malformed one carried from an older record is dropped."""
 
     payload: dict[str, Any] = {
         "status": status,
@@ -118,6 +125,8 @@ def write_cell_status(
         payload["metrics"] = metrics
     if no_metrics:
         payload["no_metrics"] = True
+    if _is_job_entry(submitit):
+        payload["submitit"] = dict(submitit)
     # A record that replaces another cell's marks the checkpoints that cell
     # left in the dir; this cell is never handed one of them, and its later
     # records carry the mark (#355).
@@ -125,6 +134,20 @@ def write_cell_status(
     if mark is not None:
         payload["foreign_ckpts"] = mark
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
+
+
+# The fields a record's ``submitit`` entry may hold; ``job_id`` and ``logs``
+# are always there (#345).
+_JOB_ENTRY_KEYS = frozenset({"job_id", "logs", "host", "partition"})
+
+
+def _is_job_entry(entry: Any) -> bool:
+    """Whether ``entry`` is a record's ``submitit`` entry as written."""
+    return (
+        isinstance(entry, dict)
+        and {"job_id", "logs"} <= set(entry) <= _JOB_ENTRY_KEYS
+        and all(isinstance(v, str) and v for v in entry.values())
+    )
 
 
 def wrote_no_metrics(record: Any) -> bool:
