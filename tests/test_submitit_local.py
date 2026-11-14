@@ -678,6 +678,10 @@ def test_a_resume_runs_again_a_cell_whose_dead_job_the_run_could_not_keep(tmp_pa
     # Seed 0's entry alone: seed 1's went with its completed record.
     assert len(list(cache.glob("*/mushin_metrics.json"))) == 1
     submitted = len(_job_dirs(wd))
+    # Rank 0 waits for this file, which rank 1 makes before it dies. Left from
+    # the first run, rank 0 would not wait: it could complete the cell before
+    # rank 1 starts, and rank 1 would then keep that record, not die.
+    (wd / "1" / "rank1_started_1").unlink()
     # Seed 1's rank 1 dies again, which shows the cell ran again.
     with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
         tasks.second_task_dies.run(resume=True, **sweep)
