@@ -271,7 +271,7 @@ before that (or a detached sweep) leaves the job's last record; under
 than failed; `show` leaves a G3 cell out rather than listing it failed; the
 MCP server's `_load_runs` pairs `.hydra/config.yaml` with metrics without
 reading the record, so it can pair this run's snapshot with an earlier
-run's metrics (a follow-up issue).
+run's metrics (#407).
 
 ## Needs a cluster
 
