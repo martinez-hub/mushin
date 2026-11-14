@@ -7,7 +7,9 @@ import dataclasses
 import functools
 import json
 import math
+import os
 import re
+import sys
 import uuid
 from collections import UserList, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -593,14 +595,20 @@ class _DeadJob(_FailedRun):
     cannot stand for it is recorded failed, as the run reports the cell
     (#406)."""
 
-    __slots__ = ("keepable", "summary")
+    __slots__ = ("job", "keepable", "summary")
 
     def __init__(
-        self, exception: BaseException, summary: str, keepable: bool = False
+        self,
+        exception: BaseException,
+        summary: str,
+        keepable: bool = False,
+        job: dict | None = None,
     ) -> None:
         super().__init__(exception)
         self.summary = summary
         self.keepable = keepable
+        # The job's id and log folder, as the launcher saw it (#345).
+        self.job = job
 
 
 #: What `_TaskRunner._settle` returns for a cell that must compute.
@@ -986,6 +994,36 @@ def _current_job_id() -> str | None:
         return None
 
 
+def _submitit_job_record(job_id: str | None) -> dict | None:
+    """The submitit job this process runs, for its cell's records (#345):
+    its id, its log folder (each task's ``<id>_<task>_log.out`` and
+    ``.err``), its host and, on SLURM, its partition. None outside a
+    submitit job, and in one whose id is not ``job_id``, Hydra's
+    ``job.id``: a driver started inside an sbatch job sees that job's
+    environment, which is not a cell's. submitit is read from
+    ``sys.modules``, never imported: a submitit job has it loaded."""
+    if job_id is None or not os.environ.get("SUBMITIT_EXECUTOR"):
+        return None
+    submitit = sys.modules.get("submitit")
+    if submitit is None:
+        return None
+    try:
+        env = submitit.JobEnvironment()
+        if str(env.job_id) != job_id:
+            return None
+        entry = {
+            "job_id": job_id,
+            "logs": str(env.paths.folder),
+            "host": str(env.hostname),
+        }
+    except Exception:  # noqa: BLE001 - the record names no job
+        return None
+    partition = os.environ.get("SLURM_JOB_PARTITION")
+    if partition:
+        entry["partition"] = partition
+    return entry
+
+
 # What to `pip install` per Hydra launcher name, for the missing-plugin install
 # hint. The submitit launchers come with mushin's `slurm` extra, which also
 # holds the plugin's floor (#344); quoted, as a shell needs `[...]` to be.
@@ -1130,6 +1168,21 @@ def _record_dead_cell(
         # Written before the status, which must be the newer of the two
         # (`sidecar_job_fields`).
         _write_run_snapshot(ret, cell_dir, run_id)
+        job_id = _job_id_or_none(OmegaConf.select(hydra, "job.id"))
+        # The job's id and log folder, from the launcher; its host and
+        # partition only from the cell's own record of this job, written
+        # once its runner started, whose entry is this job's: a cell the job
+        # reused names the job that computed it (#345).
+        entry = dict(dead.job) if isinstance(dead.job, dict) else {}
+        carried = prior.get("submitit")
+        if (
+            isinstance(carried, dict)
+            and run_id is not None
+            and prior.get("run_id") == run_id
+            and prior.get("job_id") == job_id
+            and carried.get("job_id") == job_id
+        ):
+            entry.update({k: carried[k] for k in ("host", "partition") if k in carried})
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
             cell_dir,
@@ -1143,7 +1196,8 @@ def _record_dead_cell(
             job_num=hydra.job.num,
             choices=_group_choices_of_job(ret),
             run_id=run_id,
-            job_id=_job_id_or_none(OmegaConf.select(hydra, "job.id")),
+            job_id=job_id,
+            submitit=entry or None,
         )
         # After the record: a metrics file that cannot be removed must not keep
         # the cell's end from being recorded.
@@ -1993,6 +2047,9 @@ class _TaskRunner:
                                 code_deps=merged,
                                 metrics=written,
                                 **kept,
+                                # The job that computed it, whose log holds
+                                # that computation (#345).
+                                submitit=prior.get("submitit"),
                             )
 
                         return cached, deps, reused
@@ -2013,6 +2070,7 @@ class _TaskRunner:
                                 code_deps=merged,
                                 no_metrics=True,
                                 **kept,
+                                submitit=prior.get("submitit"),
                             )
 
                         return None, deps, reused_none
@@ -2038,6 +2096,8 @@ class _TaskRunner:
                         attempt=1,
                         code_deps=deps,
                         metrics=written,
+                        # Computed by another cell's job, not this one's.
+                        submitit=None,
                     )
 
                 return cached, deps, cache_hit
@@ -2094,6 +2154,38 @@ class _TaskRunner:
         """`_reads_environment`, for mushin's submitit launcher."""
         return _reads_environment(ret)
 
+    def submitted_combos(self, job_overrides) -> list[dict]:
+        """Each submitted cell's swept params as its overrides give them, for
+        the launch file `mushin.show` lists queued cells from (#345). Read
+        from the override texts, not a composed config: composing every cell
+        in the driver would cost what the jobs are sent off to spend.
+
+        Named as `_parse_overrides` names them (``+``/``++`` dropped), so
+        they match ``swept_names``, and sanitized as a record's combo is, so
+        a value matches a record's but where the job's config converts it: a
+        typed float field given ``1`` holds 1.0, and an interpolation holds
+        what it resolves to. A ``~key`` deletion names no value. Each
+        distinct text is parsed once (an axis's values repeat across cells).
+        """
+        parser = _override_parser()
+        swept = set(self.swept_names)
+        sanitize = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray
+        parsed: dict[str, tuple[str, Any] | None] = {}
+        combos = []
+        for overrides in job_overrides:
+            combo = {}
+            for text in overrides:
+                if text not in parsed:
+                    (override,) = parser.parse_overrides([text])
+                    name = override.get_key_element().split("+")[-1]
+                    keep = name in swept and not override.is_delete()
+                    parsed[text] = (name, sanitize(override.value())) if keep else None
+                if parsed[text] is not None:
+                    name, value = parsed[text]
+                    combo[name] = value  # the last override of a name wins
+            combos.append(combo)
+        return combos
+
     def dirs_of(self, ret: JobReturn) -> tuple[Path, Path | None]:
         """The dir of the cell of ``ret``, and the dir a resume reads it
         from (its completed prior cell's, or None), both resolved. Called in
@@ -2115,7 +2207,7 @@ class _TaskRunner:
             return set()
         return {_resolved(Path(prior.root) / name) for name in prior.completed.values()}
 
-    def _status_writer(self, chash, job_num, choices, job_id):
+    def _status_writer(self, chash, job_num, choices, job_id, submitit=None):
         """`write_cell_status` with what every record of this cell carries."""
         from ._resume import write_cell_status
 
@@ -2127,6 +2219,7 @@ class _TaskRunner:
             choices=choices,
             run_id=self.run_id,
             job_id=job_id,
+            submitit=submitit,
         )
 
     def settle_in_driver(self, ret: JobReturn) -> tuple[Any, Any, list] | None:
@@ -2213,6 +2306,7 @@ class _TaskRunner:
                 choices=prior.get("choices"),
                 run_id=self.run_id,
                 job_id=job_id,
+                submitit=prior.get("submitit"),
             )
             remove_sidecar(cell_dir / METRICS_FILE)
             key = self._cache_key(prior.get("config_hash"), prior.get("code_deps"))
@@ -2400,7 +2494,10 @@ class _TaskRunner:
         # passes it): a resume reads it from completed cells alone, and at a
         # project's file cap it is most of a sidecar's size.
         job_num, choices = _current_job_fields()
-        write_status = self._status_writer(chash, job_num, choices, _current_job_id())
+        job_id = _current_job_id()
+        write_status = self._status_writer(
+            chash, job_num, choices, job_id, _submitit_job_record(job_id)
+        )
 
         settled, deps, record = self._settle(
             cfg, Path.cwd(), resolved, chash, job_num, write_status

@@ -117,8 +117,12 @@ same cell.
   uses, as the driver does.
 
 Each cell runs in its own directory, `<working_dir>/<number>/`, and its
-`mushin_cell_status.json` names the job that ran it (`job_id`). That job's
-logs are under `<working_dir>/.submitit/<job id>/`: `<job id>_0_log.out` and
+`mushin_cell_status.json` names the job that ran it (`job_id`). Its `submitit`
+entry also names that job's log folder (`logs`), the node it ran on (`host`)
+and, on SLURM, its `partition`, once the job's code has started; a job that
+died before that names only its id and logs. A cell a resume reused keeps the entry of the
+job that computed it. That job's logs are under
+`<working_dir>/.submitit/<job id>/`: `<job id>_0_log.out` and
 `<job id>_0_log.err`. A submission of several cells is one job array, whose
 tasks' ids are `<array id>_<index>`, the index counting the cells that
 submission sent (a resume sends only some, so it is not the cell's number); a
@@ -131,10 +135,30 @@ squeue --me
 ```
 
 lists the sweep's queued and running jobs. `mushin.show("/scratch/me/lr-sweep")`
-prints each cell that has started with its status (`running`, `completed`,
-`failed`, `skipped`), from any machine that sees the filesystem. During a
-resume, a cell sent to a job again shows the earlier run's status (`failed`,
-say) until that job starts.
+prints a row for each cell the sweep has recorded or submitted, with its
+status, from any machine that sees the filesystem: `queued` (its job has not
+started), `running`, `completed`, `failed` or `skipped`. During a resume, a
+cell sent to a job again is `queued` in place of the earlier run's status
+until that job starts.
+`mushin.show("/scratch/me/lr-sweep", jobs=True)` also lists each cell's job id
+(`job`), the node it ran on (`host`) and the folder of its logs (`logs`); a
+queued cell has only its job id.
+
+The driver names the jobs of each submission in a file under
+`<working_dir>/mushin_jobs/`, which `show` reads, and removes the file once
+it has waited on those jobs. Some cases follow from that:
+
+- A driver killed before its jobs end (Ctrl-C, a lost login session) leaves
+  its file, and so does a driver whose wait raised before the scheduler could
+  say every job had ended. A cell whose job never started then stays
+  `queued` until a later run of the sweep, such as a `resume=True`, records
+  the cell, or until `mushin.cancel` (below) removes the file.
+- A job that dies before its code starts can show `queued` until the driver
+  has waited on every job of its submission.
+- A sweep whose `hydra.sweep.subdir` puts each cell more than one directory
+  below `working_dir` lists no cell as `queued`.
+- A login node may see a shared filesystem's files late, so a cell that has
+  just started can show `queued` for a few seconds.
 
 `array_parallelism` (256 by default) caps how many of the sweep's jobs run at
 once; the rest wait in the queue.
@@ -166,11 +190,44 @@ driver cannot (a `PYTHONPATH` set in `setup`, say), and every cell of a sweep
 with Hydra callbacks, since the job's environment, imports and callbacks are
 not the driver's.
 
-To cancel a sweep, cancel its jobs: `scancel <job id>` for each submission
-`squeue --me` lists (a job array has one id for all its tasks). Each
-submission's folders under `<working_dir>/.submitit/` begin with its id, and a
-resume adds a submission of its own. A driver still running records the
-cancelled cells as failed, and a later `resume=True` runs them again.
+To cancel a sweep, pass its `working_dir` to `mushin.cancel`, on a machine
+where `scontrol` and `scancel` work (a login node), with the driver running or
+not:
+
+```python
+import mushin
+
+mushin.cancel("/scratch/me/lr-sweep", dry_run=True)  # the job ids it would cancel
+mushin.cancel("/scratch/me/lr-sweep")  # cancels them, and returns their ids
+```
+
+It reads the submissions listed under `<working_dir>/mushin_jobs/`, asks
+`scontrol` about each one's job array, and runs `scancel` once, for the arrays
+still queued or running. A driver still running records the cancelled cells as
+failed, and a later `resume=True` runs them again. Once a submission's jobs are
+cancelled or over, `cancel` removes its file, so `show` no longer lists its
+cells as `queued`. Some cases follow:
+
+- SLURM reuses job ids. A job is cancelled only when its script or logs lie
+  under the sweep's submitit folder (`<working_dir>/.submitit/` by default);
+  a job id SLURM has given another job is left alone, with a warning. The
+  check is only as strict as that folder: a `submitit_folder` several sweeps
+  share cannot tell their jobs apart, and one at or just below the
+  filesystem's root (`/%j`, `/scratch/%j`) is not trusted at all, so its
+  jobs are not cancelled.
+- When `scontrol` takes too long, fails, or answers in a form `cancel` cannot
+  read, it cancels nothing and raises, naming the `scancel` command to run by
+  hand.
+- Jobs sent to another cluster (`additional_parameters={"clusters": ...}`, or
+  `SBATCH_CLUSTERS`) are not checked: `cancel` warns with the
+  `scancel --clusters=...` command to run, and removes their file.
+- Jobs of `launcher="submitit_local"` are processes, not SLURM jobs: `cancel`
+  skips them with a warning.
+
+By hand, `scancel <job id>` for each submission `squeue --me` lists cancels the
+same jobs (a job array has one id for all its tasks). Each submission's folders
+under `<working_dir>/.submitit/` begin with its id, and a resume adds a
+submission of its own.
 
 ## Many small cells
 
