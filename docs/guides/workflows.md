@@ -156,6 +156,14 @@ list of values, and every combination is one cell.
   (`flag="true"`). Under a sweeper other than Hydra's basic one, chosen with
   `sweeper=` or in the config's defaults list, nothing is refused: that
   sweeper writes its jobs its own way.
+- **A string holding `${...}` is an interpolation**, resolved in each job,
+  whether it is fixed or swept: `lr="${base_lr}"` reads `base_lr`. A backslash
+  right before the `${` reaches the task as a backslash, so a Windows path such
+  as `outputs\${now:%Y}` resolves as written, and an escaped `\${...}` cannot
+  be passed this way. The default wrapper (hydra-zen's `zen`) also resolves the
+  config before the task runs, so a task may not receive the text `${...}`
+  even from the config. To hand a task such text, pass it without the `$` and
+  add the `$` in the task.
 - **Not supported:** continuous `interval(...)` syntax and adaptive sweeper
   plugins (Optuna/Nevergrad/Ax). Those sample points instead of forming a
   grid, which `to_xarray` cannot assemble; mushin raises a clear error rather

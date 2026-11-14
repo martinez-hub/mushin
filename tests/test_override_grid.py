@@ -804,3 +804,24 @@ def test_batching_sweeper_jobs_are_flattened(tmp_path):
     )
     ds = wf.to_xarray()
     assert sorted(ds["v"].values.tolist()) == [1.0, 2.0, 3.0]
+
+
+@pytest.mark.parametrize(
+    ("text", "received"),
+    [("out\\${base_lr}", "out\\0.1"), ("\\${base_lr}", "\\0.1")],
+    ids=["path", "escaped"],
+)
+def test_a_backslash_before_an_interpolation_reaches_the_task(tmp_path, text, received):
+    """As the workflows guide says (#397): a backslash right before ``${`` in a
+    value passed to ``run()`` reaches the task as a backslash (a Windows path),
+    so an escaped interpolation cannot be passed this way."""
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, path, base_lr=None):
+            seen.append(path)
+            return dict(v=1.0)
+
+    W().run(x=multirun([1]), base_lr=0.1, path=text, working_dir=tmp_path)
+    assert seen == [received]
