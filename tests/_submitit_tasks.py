@@ -101,8 +101,8 @@ def second_task_dies(seed):
     """In a job of two tasks, the second dies on seed 1 after the first has
     started, and the first returns only once it has, so the cell's last
     record is the first task's completed one. Both tasks run mushin's runner
-    in the cell's dir: submitit's local tasks set none of the variables
-    `_multi_rank_world` reads a rank from."""
+    in the cell's dir; submitit's local tasks set no SLURM variable, only
+    their own (SUBMITIT_LOCAL_NTASKS, SUBMITIT_LOCAL_GLOBALID)."""
     import time
 
     import submitit
@@ -145,6 +145,11 @@ def first_task_reports(seed):
         time.sleep(0.05)
     time.sleep(0.5)  # past the first task's completed record too
     return None
+
+
+@mushin.sweep
+def none_on_one(seed):
+    return None if seed == 1 else dict(v=float(seed))
 
 
 @mushin.sweep

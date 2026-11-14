@@ -1,0 +1,1 @@
+`run()` now warns, before submitting anything, when `max_total_seconds` will be disabled because `launcher_config` gives each cell several tasks (`tasks_per_node` or `nodes` above 1). Each task already warned, but only in its job's log.
