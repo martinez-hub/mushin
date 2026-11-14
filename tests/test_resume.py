@@ -263,6 +263,15 @@ def test_a_combo_reads_back_as_swept(tmp_path):
     assert read_cell_status(tmp_path)["combo"] == {"__mushin_nonfinite__": "inf"}
 
 
+@pytest.mark.parametrize("value", [[], {}, ["inf"]])
+def test_a_tag_shaped_value_that_is_not_a_tag_reads_as_stored(tmp_path, value):
+    stored = {"x": {"__mushin_nonfinite__": value}}
+    (tmp_path / STATUS_FILE).write_text(
+        json.dumps({"status": "completed", "combo": stored})
+    )
+    assert read_cell_status(tmp_path)["combo"] == stored
+
+
 def test_a_record_too_deep_to_restore_keeps_its_stored_combo(tmp_path, monkeypatch):
     """A combo nested deeper than the restore can recurse reads in its stored
     form, as it did before combos were restored. (How deep that is depends on
