@@ -454,7 +454,9 @@ def cancel(working_dir, *, dry_run: bool = False) -> list[str]:
 
 
 # The states of a job that has ended (SLURM's JOB STATE CODES). Any other,
-# a state this list does not know included, counts as not ended.
+# a state this list does not know included, counts as not ended. PREEMPTED is
+# not here: SLURM may requeue such a job, and cancelling one that did end is
+# harmless (scancel's "already completed" is tolerated).
 _ENDED = frozenset(
     {
         "BOOT_FAIL",
@@ -464,7 +466,6 @@ _ENDED = frozenset(
         "FAILED",
         "NODE_FAIL",
         "OUT_OF_MEMORY",
-        "PREEMPTED",
         "REVOKED",
         "TIMEOUT",
     }

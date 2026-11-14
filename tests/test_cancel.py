@@ -489,3 +489,13 @@ def test_a_launch_under_the_root_folder_is_not_cancelled(tmp_path, slurm):
     with pytest.warns(UserWarning):
         assert mushin.cancel(tmp_path) == []
     assert slurm.scancels == [] and path.exists()
+
+
+def test_a_preempted_job_is_cancelled(tmp_path, slurm):
+    """SLURM may requeue a preempted job, so it has not ended: it is
+    cancelled, and its launch goes with it (#405)."""
+    folder = str(tmp_path / ".submitit")
+    path = _launch(tmp_path, R1, [(0, "100_0")])
+    slurm.jobs["100"] = _shown(_job("PREEMPTED", folder, task=0))
+    assert mushin.cancel(tmp_path) == ["100"]
+    assert slurm.scancels and not path.exists()
