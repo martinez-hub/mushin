@@ -202,12 +202,21 @@ def _within_root(target: Path, root: Path | None) -> bool:
     return resolved == root or root in resolved.parents
 
 
-def _metrics_are_its_own(run_dir: Path, hydra_yaml: Path) -> bool:
+def _metrics_are_its_own(
+    run_dir: Path, hydra_yaml: Path, root: Path | None = None
+) -> bool:
     """Whether a run dir's ``mushin_metrics.json`` is the result of the job
     whose ``.hydra/`` snapshot is beside it, as a reload judges it: its
     record is completed, and is that job's run's, not an earlier run's left
     when the job died before its first record (#407). A dir with no record
-    (a plain Hydra run, or a sweep from before records) keeps its file."""
+    (a plain Hydra run, or a sweep from before records) keeps its file.
+    The record and hydra.yaml are read only within ``root`` (resolving
+    symlinks), as `_job_sort_key` reads them: one outside is not read, and
+    the metrics it would vouch for are not served (#409)."""
+    if not (
+        _within_root(run_dir / STATUS_FILE, root) and _within_root(hydra_yaml, root)
+    ):
+        return False
     record = read_cell_status(run_dir)
     if record is None:
         return True
@@ -258,7 +267,7 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
         # read_metrics_sidecar is corrupt-guarded (returns None) and pure JSON,
         # so no unpickling is involved.
         if _within_root(run_dir / METRICS_FILE, rootp) and _metrics_are_its_own(
-            run_dir, hydra_dir / "hydra.yaml"
+            run_dir, hydra_dir / "hydra.yaml", rootp
         ):
             sidecar = read_metrics_sidecar(run_dir)
             if sidecar is not None:
