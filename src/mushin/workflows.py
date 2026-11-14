@@ -1739,7 +1739,21 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         merged = merge_project_records(prior_deps, deps)
 
-                        def reused(cached=cached, merged=merged):
+                        # Its metrics were computed under the prior record's
+                        # fingerprint: keep it where this run has none (a
+                        # config that cannot be resolved), or a later resume
+                        # under another config would have nothing to compare
+                        # and would reuse them (#396).
+                        kept = {
+                            "config_hash": chash if chash is not None else prior_config,
+                            "code_hash": (
+                                self.code_hash
+                                if self.code_hash is not None
+                                else prior_code
+                            ),
+                        }
+
+                        def reused(cached=cached, merged=merged, kept=kept):
                             written = write_metrics_sidecar(cwd, cached)
                             # Keep the reused cell's prior record (see
                             # merge_project_records): writing this run's keys
@@ -1753,6 +1767,7 @@ class _TaskRunner:
                                 attempt=1,
                                 code_deps=merged,
                                 metrics=written,
+                                **kept,
                             )
 
                         return cached, deps, reused
