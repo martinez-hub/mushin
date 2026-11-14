@@ -1,0 +1,1 @@
+The workflows guide says how a string holding `${...}` passed to `run()` reaches the task: a backslash right before the `${` arrives as a backslash (a Windows path), so an escaped `\${...}` cannot be passed that way, and the default `zen` wrapper resolves the config before the task, so a task may not receive the text `${...}` even from the config (#397).

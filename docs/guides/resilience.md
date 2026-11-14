@@ -230,9 +230,10 @@ class Train(MultiRunMetricsWorkflow):
     @staticmethod
     def task(lr, seed, mushin_resume=None):
         # mushin_resume.dir       -> this cell's directory (write your checkpoint here)
-        # mushin_resume.is_resume -> True when a prior attempt of THIS cell left artifacts
-        # mushin_resume.last_ckpt -> newest checkpoint in dir, or None
-        ckpt = mushin_resume.last_ckpt  # None on a cell's first attempt
+        # mushin_resume.is_resume -> True when a prior attempt of THIS cell ran here
+        # mushin_resume.last_ckpt -> newest checkpoint in dir written under this
+        #                            config and task code, or None
+        ckpt = mushin_resume.last_ckpt  # None on a first attempt, or a changed config
         # Lightning: save last.ckpt at the top of the cell's directory
         trainer = Trainer(
             callbacks=[ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)]
@@ -252,13 +253,21 @@ directories earlier cells used, and a cell there can be handed an earlier
 cell's checkpoint: run another grid in a new `working_dir`. Tasks that don't
 declare `mushin_resume` are unaffected.
 
+A checkpoint goes only to an attempt under the config and task code that wrote
+it. When either has changed since, `last_ckpt` is None and the cell trains from
+scratch, though `is_resume` is still True. To continue from the old checkpoint
+on purpose (a raised `max_epochs`, say), load it from `mushin_resume.dir`
+yourself before the task writes its own there.
+
 ## Provenance
 
 Every run (fail-soft or not) writes a per-job provenance record,
 `mushin_provenance.json`, into each job directory *before* the task executes, so
 even a failing cell leaves its lineage behind. It captures the git SHA, key
-package versions, the resolved config and, once the task has returned, the
-accelerator as the cell's process saw it (CUDA and cuDNN build, and the device
+package versions, the config as written (an interpolation such as
+`${oc.env:DB_URL}` is kept as its text, so the value it reads never reaches the
+file, and a secret-looking value is redacted) and, once the task has returned,
+the accelerator as the cell's process saw it (CUDA and cuDNN build, and the device
 once the task initialized CUDA or when MPS is available). It is `null` when
 that process never imported torch. With torch loaded, `cuda` and `cudnn` are
 the wheel's build (`null` on a CPU-only build) and `device` is `null` until the
