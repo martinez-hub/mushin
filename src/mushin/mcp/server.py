@@ -21,7 +21,14 @@ from omegaconf import OmegaConf
 
 from mushin.__main__ import guide_text
 from mushin._hydra_yaml import read_hydra_job
-from mushin._resume import STATUS_FILE, sidecar_job_fields
+from mushin._resume import (
+    STATUS_FILE,
+    read_cell_status,
+    record_of_another_run,
+    record_predates,
+    sidecar_job_fields,
+    snapshot_run_stamp,
+)
 from mushin._sweep_io import (
     MANIFEST_FILE,
     METRICS_FILE,
@@ -195,6 +202,23 @@ def _within_root(target: Path, root: Path | None) -> bool:
     return resolved == root or root in resolved.parents
 
 
+def _metrics_are_its_own(run_dir: Path, hydra_yaml: Path) -> bool:
+    """Whether a run dir's ``mushin_metrics.json`` is the result of the job
+    whose ``.hydra/`` snapshot is beside it, as a reload judges it: its
+    record is completed, and is that job's run's, not an earlier run's left
+    when the job died before its first record (#407). A dir with no record
+    (a plain Hydra run, or a sweep from before records) keeps its file."""
+    record = read_cell_status(run_dir)
+    if record is None:
+        return True
+    if record.get("status") != "completed":
+        return False
+    return not (
+        record_predates(run_dir, hydra_yaml)
+        and record_of_another_run(record, snapshot_run_stamp(hydra_yaml))
+    )
+
+
 def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
     """Load experiment runs at ``p`` without executing pickled code.
 
@@ -233,7 +257,9 @@ def _load_runs(p: Path, root: str | Path | None = None) -> list[Experiment]:
         # Workflow sweeps store their metrics in a JSON sidecar, not .pt files;
         # read_metrics_sidecar is corrupt-guarded (returns None) and pure JSON,
         # so no unpickling is involved.
-        if _within_root(run_dir / METRICS_FILE, rootp):
+        if _within_root(run_dir / METRICS_FILE, rootp) and _metrics_are_its_own(
+            run_dir, hydra_dir / "hydra.yaml"
+        ):
             sidecar = read_metrics_sidecar(run_dir)
             if sidecar is not None:
                 metrics[Path(METRICS_FILE).stem] = sidecar
