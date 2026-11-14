@@ -1621,6 +1621,7 @@ class _TaskRunner:
             changed_project_code,
             merge_project_records,
             read_cell_status,
+            same_cell,
         )
         from ._sweep_io import (
             METRICS_FILE,
@@ -1641,7 +1642,19 @@ class _TaskRunner:
                 combo = self._combo(cfg, self.swept_names)
 
                 def skipped():
-                    write_status(cwd, status="skipped", combo=combo, attempt=1)
+                    # No attempt ran: the record keeps the fingerprint of the
+                    # one that left this cell's checkpoints, so a later run
+                    # under its config is still handed them (#391). (In the
+                    # driver, a config that reads the environment may also
+                    # hash differently from the job's.)
+                    prior = read_cell_status(cwd) or {}
+                    kept = {}
+                    if same_cell(prior.get("combo"), combo):
+                        kept = {
+                            "config_hash": prior.get("config_hash"),
+                            "code_hash": prior.get("code_hash"),
+                        }
+                    write_status(cwd, status="skipped", combo=combo, attempt=1, **kept)
                     # A skipped cell has no valid metrics; drop any sidecar a
                     # prior sweep left in this reused dir so show/export don't
                     # list old metrics on a 'skipped' row while to_xarray
