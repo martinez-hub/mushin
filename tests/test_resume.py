@@ -663,3 +663,196 @@ def test_a_reuse_of_a_none_cell_keeps_its_fingerprint(tmp_path, monkeypatch):
         assert "config_hash" in record
         T().run(lr=0.2, resume=True, **sweep)
     assert calls == [0.1, 0.2]
+
+
+# A checkpoint written under one config or task code is not handed to an
+# attempt under another (#391).
+
+
+def _ckpt_sweep(seen, fail=False):
+    """A workflow class whose task notes the checkpoint it was handed, writes
+    its own naming its lr, and fails when ``fail``."""
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, lr, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen.append(None if last is None else last.read_text())
+            (Path.cwd() / "last.ckpt").write_text(f"lr={lr}")
+            if fail:
+                raise RuntimeError("fails after its checkpoint")
+            return dict(v=1.0)
+
+    return W
+
+
+def test_a_rerun_under_a_changed_config_is_not_handed_the_old_checkpoint(tmp_path):
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    W = _ckpt_sweep(seen)
+    W().run(x=multirun([1]), lr=0.1, working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(x=multirun([1]), lr=0.2, working_dir=str(tmp_path), resume=True)
+    assert seen == [None, None]
+
+
+def test_an_interrupted_attempt_under_a_changed_config_starts_fresh(tmp_path):
+    """Attempt 2 runs under a new lr and is not handed attempt 1's
+    checkpoint; attempt 3, under attempt 2's lr, is handed attempt 2's."""
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    sweep = dict(x=multirun([1]), working_dir=str(tmp_path), on_error="nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ckpt_sweep(seen, fail=True)().run(lr=0.1, **sweep)
+        _ckpt_sweep(seen, fail=True)().run(lr=0.2, resume=True, **sweep)
+        _ckpt_sweep(seen)().run(lr=0.2, resume=True, **sweep)
+    assert seen == [None, None, "lr=0.2"]
+
+
+def test_a_rerun_with_changed_task_code_is_not_handed_the_old_checkpoint(tmp_path):
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = []
+
+    class First(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            (Path.cwd() / "last.ckpt").write_text("first")
+            raise RuntimeError("fails after its checkpoint")
+
+    class Second(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen.append(None if last is None else last.read_text())
+            return dict(v=2.0)
+
+    sweep = dict(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        First().run(on_error="nan", **sweep)
+        Second().run(resume=True, **sweep)
+    assert seen == [None]
+
+
+def test_a_rerun_under_the_same_config_is_handed_its_checkpoint(tmp_path):
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    sweep = dict(x=multirun([1]), lr=0.1, working_dir=str(tmp_path), on_error="nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ckpt_sweep(seen, fail=True)().run(**sweep)
+        _ckpt_sweep(seen)().run(resume=True, **sweep)
+    assert seen == [None, "lr=0.1"]
+
+
+def test_a_record_without_a_fingerprint_hands_its_checkpoint(tmp_path):
+    """A record from before fingerprints (no config_hash or code_hash)
+    cannot be compared, so its checkpoint is handed, as resume reuse treats
+    a missing hash."""
+    import json
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    sweep = dict(x=multirun([1]), working_dir=str(tmp_path), on_error="nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ckpt_sweep(seen, fail=True)().run(lr=0.1, **sweep)
+        status = tmp_path / "0" / "mushin_cell_status.json"
+        record = json.loads(status.read_text())
+        record.pop("config_hash"), record.pop("code_hash")
+        status.write_text(json.dumps(record))
+        _ckpt_sweep(seen)().run(lr=0.2, resume=True, **sweep)
+    assert seen == [None, "lr=0.1"]
+
+
+def _write(d, status, *, run_id, config_hash, code_hash="c"):
+    write_cell_status(
+        d,
+        status=status,
+        combo={"x": 1},
+        attempt=1,
+        config_hash=config_hash,
+        code_hash=code_hash,
+        run_id=run_id,
+    )
+
+
+def test_a_record_of_the_same_run_keeps_its_checkpoints_whatever_its_hash(tmp_path):
+    """A requeued attempt, or another task of the job, rebuilds its config
+    and can resolve a clock or a rank differently; within one run the
+    checkpoint is still this cell's own (#391)."""
+    _write(tmp_path, "running", run_id="r1", config_hash="a")
+    (tmp_path / "last.ckpt").write_text("own")
+    _write(tmp_path, "running", run_id="r1", config_hash="b")
+    assert discover_last_ckpt(tmp_path).read_text() == "own"
+
+
+def test_a_record_without_a_fingerprint_does_not_hand_on_the_old_checkpoint(tmp_path):
+    """An attempt whose config cannot be fingerprinted cannot be told from a
+    changed one: it marks the checkpoints there, and a later attempt is not
+    handed them either (#391)."""
+    _write(tmp_path, "running", run_id="r1", config_hash="a")
+    (tmp_path / "last.ckpt").write_text("lr=0.1")
+    _write(tmp_path, "running", run_id="r2", config_hash=None)
+    _write(tmp_path, "failed", run_id="r2", config_hash=None)
+    _write(tmp_path, "running", run_id="r3", config_hash="b")
+    assert discover_last_ckpt(tmp_path) is None
+
+
+def test_a_cell_sample_left_out_keeps_its_checkpoint_for_its_config(tmp_path):
+    """A cell `sample=` leaves out records no attempt: its record keeps the
+    fingerprint of the attempt that left the checkpoint, so a later run under
+    that config is handed it, and one under another config is not (#391)."""
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    sweep = dict(x=multirun([1, 2]), working_dir=str(tmp_path), on_error="nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ckpt_sweep(seen, fail=True)().run(lr=0.1, **sweep)
+        _ckpt_sweep(seen, fail=True)().run(lr=0.2, sample=1, **sweep)
+        seen.clear()
+        _ckpt_sweep(seen)().run(lr=0.1, resume=True, **sweep)
+    assert sorted(map(str, seen)) == ["None", "lr=0.1"]
+
+
+def test_a_cell_the_budget_skips_keeps_its_checkpoint_for_its_config(tmp_path):
+    """A cell the wall-clock budget skips records no attempt either: a later
+    run under the config that left its checkpoint is handed it (#391)."""
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    sweep = dict(x=multirun([1, 2]), working_dir=str(tmp_path), on_error="nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ckpt_sweep(seen, fail=True)().run(lr=0.1, **sweep)
+        # The first cell starts the clock and runs; the second is past it.
+        _ckpt_sweep(seen, fail=True)().run(
+            lr=0.2, resume=True, max_total_seconds=1e-6, **sweep
+        )
+        assert len(seen) == 3
+        seen.clear()
+        _ckpt_sweep(seen)().run(lr=0.1, resume=True, **sweep)
+    assert seen == [None, "lr=0.1"]
