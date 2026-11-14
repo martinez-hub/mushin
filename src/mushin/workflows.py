@@ -707,8 +707,11 @@ def _restore_tags(value: Any) -> Any:
 
     tags = {"inf": float("inf"), "-inf": -float("inf"), "nan": float("nan")}
     if isinstance(value, dict):
-        if set(value) == {_NONFINITE_TAG} and value[_NONFINITE_TAG] in tags:
-            return tags[value[_NONFINITE_TAG]]
+        tag = value.get(_NONFINITE_TAG)
+        # Only a tag mushin writes (a string): any other value there is a
+        # value of the user's, and may not be hashable (#382).
+        if set(value) == {_NONFINITE_TAG} and isinstance(tag, str) and tag in tags:
+            return tags[tag]
         return {k: _restore_tags(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_restore_tags(v) for v in value]
@@ -716,12 +719,17 @@ def _restore_tags(value: Any) -> Any:
 
 
 def _tag_nan(value: Any) -> Any:
-    """A coordinate as the manifest keeps it: a NaN tagged, as a null would
-    read back as None (`_restore_tags`)."""
+    """A coordinate as the manifest keeps it: each NaN in it tagged, inside
+    a list or dict too, as a null would read back as None
+    (`_restore_tags`)."""
     from ._sweep_io import _NONFINITE_TAG
 
     if isinstance(value, float) and value != value:
         return {_NONFINITE_TAG: "nan"}
+    if isinstance(value, dict):
+        return {k: _tag_nan(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_tag_nan(v) for v in value]
     return value
 
 
@@ -790,7 +798,11 @@ def _same_element(a: Any, b: Any) -> bool:
     if isinstance(a, (list, tuple)):
         return len(a) == len(b) and all(map(_same_element, a, b))
     if isinstance(a, dict):
-        return a.keys() == b.keys() and all(_same_element(a[k], b[k]) for k in a)
+        # Keys by type too: ``True`` and ``1`` are one key to a dict.
+        typed = {(type(k), k) for k in a}
+        if typed != {(type(k), k) for k in b}:
+            return False
+        return all(_same_element(a[k], b[k]) for k in a)
     return a == b
 
 
