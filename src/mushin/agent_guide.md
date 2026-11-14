@@ -47,7 +47,7 @@ Python 3.11 to 3.15 is supported. Intel macOS is not.
 | Inspect finished runs | `mushin.show`, `mushin.best`, `mushin.diff`, or the MCP server |
 | Run cells in parallel on one machine | `launcher="joblib"` |
 | Run several jobs on each GPU | Ray; see the GPU packing guide (Going further). `pin_gpu_round_robin` needs a fresh process per job, which joblib stops giving once cells outnumber `n_jobs` |
-| Run each cell as a SLURM job | `launcher="submitit_slurm"` with `launcher_config=mushin.slurm(...)`; see the SLURM guide (Going further) |
+| Run each cell as a SLURM job | `launcher="submitit_slurm"` with `launcher_config=mushin.slurm(...)`; add `wait=False` to submit and return at once, then `mushin.collect(working_dir)` once the jobs have ended; see the SLURM guide (Going further) |
 | Train one cell across several GPUs or nodes | the multi-node guide (see Going further) |
 
 ## A template experiment
@@ -298,6 +298,13 @@ computing cells. On SLURM the jobs keep running too, and a `run()` on that
 `mushin.cancel(working_dir)` cancels them and returns their ids (with
 `dry_run=True` it only lists them).
 
+To leave a SLURM sweep running without a live process, pass `wait=False`:
+`run()` submits the jobs and returns a dict (`working_dir`, `run_id`,
+`submitted`, `job_ids`) instead of the result. Once the jobs have ended,
+`mushin.collect(working_dir)` returns the dataset, from any session; it
+raises, writing nothing, while any job is queued or running. A `run()` on that
+`working_dir` is refused until the run is collected or its jobs have ended.
+
 ## Where results go, and how to reload them
 
 A sweep writes to its `working_dir`, or by default to `multirun/<date>/<time>/`
@@ -307,7 +314,7 @@ under the directory it was launched from:
 runs/compare-v1/
   multirun.yaml                the sweep's overrides
   mushin_sweep_manifest.json   every cell's status, written when the run ends
-  mushin_jobs/                 submitit launchers: the jobs a run still waits on
+  mushin_jobs/                 submitit launchers: the jobs a run has not waited on or collected
   0/, 1/, ...                  one directory per cell, holding:
     mushin_cell_status.json    completed, failed, skipped or running
     mushin_metrics.json        the dict the task returned (none if it returned None)

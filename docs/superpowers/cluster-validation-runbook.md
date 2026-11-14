@@ -429,6 +429,38 @@ message matches the `job_id` in the cell's `mushin_cell_status.json` and
 
 **Report:** the `sacct` lines for each step.
 
+### T12: Submit and return, then collect (#345 item 1)
+
+`collect` reads each job's end from `sacct` through submitit's reader; its
+tests fake `sacct` and use `submitit_local` jobs. On the cluster:
+
+1. From a login node, run a 6-cell sweep with `launcher="submitit_slurm"`,
+   `on_error="nan"` and `wait=False`, and log out. From a new session on
+   another login node, `mushin.collect(working_dir)` raises "have not ended"
+   while the jobs queue or run, then returns the dataset a waited run of the
+   same sweep returns (same values, failures and manifest cells).
+2. Time `run(wait=False)` on a 1,000-cell grid: Hydra composes every cell
+   before submitting, which must stay within the login node's limits.
+3. Right after the jobs end, `sacct -o JobID,State,NodeList --parsable2 -j
+   <array>` lists every task with its end state. On a cluster without
+   accounting, `collect` must raise with `UNKNOWN`, never record a live job's
+   cell. A sweep with `additional_parameters={"clusters": ...}`: does `sacct`
+   on the login node see its jobs?
+4. Dead jobs while detached, each collected as a failed cell with the state
+   SLURM gives in its summary: an out-of-memory kill, `scancel` of a running
+   task, `scancel` of a pending task (it never started), and a time limit hit
+   in C code.
+5. A job preempted and requeued while detached: `collect` raises until the
+   requeued job ends, then takes its result.
+6. DDP (`submitit_slurm_config`, several tasks per job), detached and
+   collected, gives what a waited run gives.
+7. While a detached run's jobs are queued, a `resume=True` from another login
+   node is refused, naming `mushin.collect`.
+8. Collect after upgrading mushin, or from another Python, against the
+   submission files the earlier version wrote.
+
+**Report:** the `sacct` lines, the error messages, and the timings.
+
 ---
 
 ## Graduation

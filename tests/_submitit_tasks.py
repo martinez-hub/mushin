@@ -43,6 +43,22 @@ def die_on_two(seed):
 
 
 @mushin.sweep
+def fates(seed):
+    """A cell of each fate: the seed `MUSHIN_TEST_DIE` names dies without a
+    result, seed 1 raises, and any other completes."""
+    if os.environ.get("MUSHIN_TEST_DIE") == str(seed):
+        os._exit(9)
+    if seed == 1:
+        raise RuntimeError("boom")
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def always_dies(seed):
+    os._exit(9)
+
+
+@mushin.sweep
 def die_loudly(seed):
     """Writes a long error stream, its cause at the end, then dies."""
     if seed == 1:

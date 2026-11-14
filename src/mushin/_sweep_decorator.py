@@ -63,7 +63,10 @@ class Sweep:
         plus `working_dir` / `on_error` / `resume` / `launcher` / … ).
 
         With `dry_run=True` no jobs launch: the grid-preview summary is returned
-        (there is no dataset to build)."""
+        (there is no dataset to build). With `wait=False` the jobs are left
+        running: the submission's summary is returned, and
+        `mushin.collect(working_dir)` builds the dataset once they have
+        ended."""
         wf = self.workflow_cls()  # fresh per run — no state carryover
         # Expose the instance BEFORE running, so a failing run's workflow is
         # inspectable for debugging instead of `.workflow` silently keeping the
@@ -72,6 +75,8 @@ class Sweep:
         result = wf.run(**kwargs)
         if kwargs.get("dry_run"):
             return result  # the dry-run summary; nothing ran, no dataset
+        if kwargs.get("wait", True) is False:
+            return result  # the submission's summary; collect builds the dataset
         return wf.to_xarray()
 
 

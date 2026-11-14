@@ -1657,3 +1657,470 @@ def test_launch_combos_match_records(
         assert recorded["xs"] == "[1, 2]" and recorded["m345"] == "small"
         # The typed float keys apart: `show` matches such a cell by its job.
         assert combo_key({**submitted, "lr": 1}) != combo_key({**recorded, "lr": 1.0})
+
+
+# Submit and return (`wait=False`), then collect once the jobs have ended
+# (#345). The jobs of a detached run are left running by design; the `left`
+# fixture ends any a test leaves.
+
+
+@pytest.fixture
+def left():
+    """``(working_dir, job id)`` of the jobs a test's detached runs left:
+    those still running at teardown are ended. A child of this process (the
+    test drove the run) is killed and reaped; another (a driver subprocess
+    submitted it) only while its command line is submitit's controller on
+    the sweep's folder, as the system may have given its pid to another
+    process."""
+    import contextlib
+    import signal
+
+    from mushin import _jobs
+
+    jobs: list[tuple[Path, str]] = []
+    yield jobs
+    for wd, job_id in jobs:
+        pid = int(job_id)
+        try:
+            if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            continue
+        except ChildProcessError:
+            pass
+        state, command = (_jobs._processes([pid]) or {}).get(pid, ("Z", ""))
+        if not state.startswith("Z") and _jobs._runs_controller(
+            command, str(wd / ".submitit")
+        ):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def _detach(sweep, wd: Path, left: list, **run):
+    """``sweep.run(wait=False, ...)`` into ``wd``: its summary, its jobs
+    noted for the teardown."""
+    summary = sweep.run(working_dir=str(wd), wait=False, **run)
+    assert isinstance(summary, dict)  # not a dataset: nothing was waited on
+    left.extend((wd, job_id) for job_id in summary["job_ids"])
+    return summary
+
+
+def _collect(collect, seconds=60):
+    """``collect()`` once the jobs have ended: until then it raises, having
+    written nothing."""
+    import time
+
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return collect()
+        except RuntimeError as exc:
+            if "not ended" not in str(exc) or time.monotonic() > deadline:
+                raise
+        time.sleep(0.1)
+
+
+def test_wait_false_returns_while_the_jobs_wait(tmp_path, monkeypatch, left):
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [0, 1, 2])
+    summary = _detach(
+        tasks.record_pid,
+        wd,
+        left,
+        seed=multirun([0, 1, 2]),
+        overrides=[tasks.GATE],
+        **LOCAL,
+    )
+    (launch,) = _launches(wd)
+    cells = json.loads((wd / "mushin_jobs" / launch).read_text())["cells"]
+    assert summary == {
+        "working_dir": str(wd.resolve()),
+        "run_id": launch.split(".")[0],
+        "submitted": 3,
+        "job_ids": [cell["job_id"] for cell in cells],
+    }
+    assert _show(wd) == {0: "queued", 1: "queued", 2: "queued"}
+    # The launcher holds the jobs' processes; a collect, whose Hydra state
+    # swap runs the plugin scan again (re-executing the module), keeps them.
+    launcher = sys.modules["hydra_plugins.mushin_submitit.launcher"]
+    held = list(launcher._HELD)
+    assert len(held) >= 3
+    wf = tasks.record_pid.workflow
+    assert not wf.is_complete
+    with pytest.raises(RuntimeError, match=r"mushin\.collect"):
+        wf.to_xarray()
+    with pytest.raises(RuntimeError, match="3 of 3 jobs"):
+        mushin.collect(wd)
+    assert _launches(wd) == [launch]
+    assert not (wd / "mushin_sweep_manifest.json").exists()
+    gate.touch()
+    ds = _collect(wf.collect).to_xarray()
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
+    assert os.getpid() not in ds["pid"].values.tolist()  # each ran as a job
+    assert all(any(p is q for q in launcher._HELD) for p in held)
+    assert wf.is_complete and _launches(wd) == []
+    assert (wd / "mushin_sweep_manifest.json").is_file()
+    # Collected: a second collect reloads, to the same dataset.
+    again = mushin.collect(wd)
+    for name in ("v", "pid"):
+        np.testing.assert_array_equal(again[name].values, ds[name].values)
+
+
+def _comparable(wd: Path, wf, ds, case: str) -> dict:
+    """What a run leaves on disk and reports, without what differs between
+    two runs of one sweep: run and job ids, paths, times (the provenance
+    attr is each run's own), and a dead local job's state, which is
+    `FINISHED` to the driver that held its process and `NO PROCESS AND NO
+    RESULT` to a collect. Values by their repr, as a NaN equals no NaN."""
+
+    def text(value):
+        value = str(value).replace(str(wd.resolve()), "<wd>").replace(str(wd), "<wd>")
+        value = re.sub(r"\(state: [^)]*\)", "(state: ...)", value)
+        return re.sub(r"\d{4,}", "<id>", value)
+
+    records, errors = {}, []
+    for cell in sorted(p for p in wd.iterdir() if p.is_dir()):
+        status = cell / "mushin_cell_status.json"
+        if status.is_file():
+            record = json.loads(status.read_text())
+            for key in ("run_id", "job_id", "submitit", "budget_id"):
+                record.pop(key, None)
+            if case == "several-tasks":
+                # Each task of the job counts an attempt over the record the
+                # other may have written first: a race in the job, whose
+                # count a dead cell's record keeps, waited or collected.
+                record.pop("attempt", None)
+            records[cell.name] = record
+        if (cell / "mushin_error.txt").is_file():
+            errors.append(cell.name)
+    manifest = json.loads((wd / "mushin_sweep_manifest.json").read_text())
+    return {
+        "records": records,
+        "error files": errors,
+        "manifest": {
+            key: {k: text(v) if k == "error" else v for k, v in cell.items()}
+            for key, cell in manifest["cells"].items()
+        },
+        "failures": sorted(
+            (f["combo"], text(f["exception"]), Path(f["working_dir"]).name)
+            for f in wf.failures
+        ),
+        "skipped": sorted(
+            (s["combo"], Path(s["working_dir"]).name) for s in wf.skipped
+        ),
+        "complete": wf.is_complete,
+        "lineage": (manifest.get("notes"), manifest.get("tags"), wf.notes, wf.tags),
+        "coords": {name: repr(ds[name].values.tolist()) for name in ds.coords},
+        "values": {name: repr(ds[name].values.tolist()) for name in ds.data_vars},
+        "attrs": {k: text(v) for k, v in ds.attrs.items() if k != "provenance"},
+    }
+
+
+def _steps(case: str) -> list:
+    """``case``'s runs, ``(sweep, run() keywords, environment)``; each but
+    the last is waited on."""
+    if case == "fates":
+        return [
+            # An earlier sweep over another grid, whose cells the next
+            # sweep's dirs hold: one of them a dir its job dies before
+            # starting in.
+            (tasks.fates, dict(seed=multirun([5, 6, 7, 8, 9])), {}),
+            (
+                tasks.fates,
+                dict(seed=multirun([0, 1, 2, 3]), overrides=[tasks.DIE_BEFORE_START]),
+                {"MUSHIN_TEST_DIE": "2", "MUSHIN_TEST_DIE_BEFORE_START": "3"},
+            ),
+        ]
+    if case == "sample":
+        return [(tasks.fates, dict(seed=multirun([0, 2, 4, 6]), sample=2), {})]
+    if case == "resume":
+        return [
+            # The resume, passing none, keeps the first run's notes and tags.
+            (
+                tasks.fates,
+                dict(seed=multirun([0, 1, 2, 3]), notes="first", tags=["a"]),
+                {"MUSHIN_TEST_DIE": "2"},
+            ),
+            (tasks.fates, dict(seed=multirun([0, 1, 2, 3]), resume=True), {}),
+        ]
+    if case == "interpolated":
+        # `x` resolves in each job to its job number (#386); seed 1 dies.
+        return [
+            (
+                tasks.die_when_told_over_x,
+                dict(x=multirun(["${hydra:job.num}"]), seed=multirun([0, 1])),
+                {"MUSHIN_TEST_DIE": "1"},
+            )
+        ]
+    if case == "several-tasks":
+        config = {"timeout_min": 1, "tasks_per_node": 2}
+        return [
+            (
+                tasks.second_task_dies,
+                dict(seed=multirun([0, 1]), launcher_config=config),
+                {},
+            )
+        ]
+    assert case == "unsaved-result"
+    return [(tasks.unpicklable_result, dict(seed=multirun([0, 1])), {})]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["fates", "sample", "resume", "interpolated", "several-tasks", "unsaved-result"],
+)
+def test_wait_false_then_collect_matches_a_waited_run(
+    tmp_path, monkeypatch, left, case
+):
+    """Collect replays the waited run's own wait, so a sweep submitted with
+    `wait=False` and collected leaves the records, files, manifest and
+    dataset a waited run of it leaves: cells completed, raised, dead while
+    running, dead before starting in an earlier sweep's dir, left out by
+    `sample=`, reused by a resume, and a job of two tasks one of which
+    dies. Each run is driven from this process, as in a notebook, so a
+    dead job's process is this process's unreaped child."""
+    import warnings
+
+    from submitit.core import core
+
+    # Both wait for a dead job's result file; shortened, for both alike.
+    monkeypatch.setattr(core.Job, "_results_timeout_s", 2)
+    seen = {}
+    for name in ("waited", "detached"):
+        wd = tmp_path / name
+        steps = _steps(case)
+        for i, (sweep, kwargs, env) in enumerate(steps):
+            run = {**LOCAL, "on_error": "nan", **kwargs}
+            with monkeypatch.context() as m, warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # failed and skipped cells warn
+                for key, value in env.items():
+                    m.setenv(key, value)
+                if name == "detached" and i == len(steps) - 1:
+                    _detach(sweep, wd, left, **run)
+                    wf = _collect(lambda wd=wd: MultiRunMetricsWorkflow().collect(wd))
+                else:
+                    sweep.run(working_dir=str(wd), **run)
+                    wf = sweep.workflow
+                ds = wf.to_xarray()
+        seen[name] = _comparable(wd, wf, ds, case)
+    for key, waited in seen["waited"].items():
+        assert seen["detached"][key] == waited, key
+    assert _launches(tmp_path / "detached") == []
+
+
+_DRIVER = """\
+import json, sys
+import _submitit_tasks as tasks
+from mushin import multirun
+summary = tasks.die_on_two.run(
+    seed=multirun([0, 1, 2]), working_dir=sys.argv[1], on_error="nan", wait=False,
+    launcher="submitit_local", launcher_config={"timeout_min": 1},
+)
+print(json.dumps(summary))
+"""
+
+
+def test_a_driver_that_exits_leaves_its_jobs_to_collect(tmp_path, left):
+    """The case `wait=False` is for: the driver submits, returns and exits,
+    its jobs run on, and a later process collects them."""
+    import subprocess
+
+    wd = tmp_path / "s"
+    out = subprocess.run(
+        [sys.executable, "-c", _DRIVER, str(wd)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+        timeout=120,
+    )
+    summary = json.loads(out.stdout.strip().splitlines()[-1])
+    left.extend((wd, job_id) for job_id in summary["job_ids"])
+    assert summary["submitted"] == 3
+    with pytest.warns(UserWarning, match=r"failed: \['seed=2'\]"):
+        ds = _collect(lambda: mushin.collect(wd))
+    v = ds["v"].values
+    assert v[0] == 0.0 and v[1] == 1.0 and np.isnan(v[2])
+    assert _status(wd / "2") == "failed" and _launches(wd) == []
+
+
+def test_collect_under_raise_raises_the_cells_own_error(tmp_path, left):
+    """As a waited run raises it: once every cell is recorded, with no
+    manifest. The launch is done with, so a second collect reloads. The
+    workflow collected on keeps nothing of the run it held before."""
+    first, wd = tmp_path / "first", tmp_path / "s"
+    wf = tasks.fail_on_one.workflow_cls()
+    wf.run(seed=multirun([0, 2]), working_dir=str(first), **LOCAL)
+    _detach(tasks.fail_on_one, wd, left, seed=multirun([0, 1, 2]), **LOCAL)
+    with pytest.raises(RuntimeError, match="boom"):
+        _collect(lambda: wf.collect(wd))
+    assert [_status(wd / n) for n in "012"] == ["completed", "failed", "completed"]
+    assert not (wd / "mushin_sweep_manifest.json").exists()
+    assert _launches(wd) == []
+    assert wf.jobs == [] and wf.multirun_working_dirs is None
+    ds = mushin.collect(wd)
+    v = ds["v"].values
+    assert v[0] == 0.0 and np.isnan(v[1]) and v[2] == 2.0
+
+
+def test_a_detached_run_drops_what_the_workflow_held_before(tmp_path, left):
+    """A workflow that ran a sweep and then submits another with
+    `wait=False` keeps nothing of the first: not its jobs, failures or
+    manifest (whose notes it read)."""
+    first, wd = tmp_path / "first", tmp_path / "s"
+    wf = tasks.fail_on_one.workflow_cls()
+    with pytest.warns(UserWarning, match="failed"):
+        wf.run(
+            seed=multirun([0, 1]),
+            working_dir=str(first),
+            on_error="nan",
+            notes="first",
+            **LOCAL,
+        )
+    summary = wf.run(seed=multirun([0, 2]), working_dir=str(wd), wait=False, **LOCAL)
+    left.extend((wd, job_id) for job_id in summary["job_ids"])
+    assert wf.jobs == [] and wf.failures == [] and wf.notes is None
+    assert not wf.is_complete
+    ds = _collect(wf.collect).to_xarray()
+    assert ds["v"].values.tolist() == [0.0, 2.0] and wf.is_complete
+
+
+def test_collect_on_a_reused_workflow_reads_only_its_run(tmp_path, left):
+    first, wd = tmp_path / "first", tmp_path / "s"
+    wf = tasks.record_pid.workflow_cls()
+    wf.run(seed=multirun([0, 1, 2]), working_dir=str(first), **LOCAL)
+    _detach(tasks.record_pid, wd, left, seed=multirun([5, 6]), **LOCAL)
+    ds = _collect(lambda: wf.collect(wd)).to_xarray()
+    assert ds["seed"].values.tolist() == [5, 6]
+    assert ds["v"].values.tolist() == [5.0, 6.0]
+    assert wf.working_dir == wd.resolve()
+
+
+def test_wait_false_keeps_the_budget_start_until_collect(tmp_path, left):
+    """The jobs read the run's budget start from its file: it stays until
+    collect, as it stays while a driver waits."""
+    wd = tmp_path / "s"
+    _detach(
+        tasks.record_pid,
+        wd,
+        left,
+        seed=multirun([0, 1]),
+        max_total_seconds=600,
+        **LOCAL,
+    )
+    assert _until(lambda: _completed(wd / "0") and _completed(wd / "1"))
+    (start,) = wd.glob(".mushin_budget_start.*")
+    _collect(lambda: mushin.collect(wd))
+    assert not start.exists()
+
+
+def test_wait_false_with_nothing_to_submit_finishes_at_once(tmp_path):
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    first = tasks.record_pid.run(**sweep)
+    (wd / "mushin_sweep_manifest.json").unlink()
+    summary = tasks.record_pid.run(resume=True, wait=False, **sweep)
+    assert summary["submitted"] == 0 and summary["job_ids"] == []
+    wf = tasks.record_pid.workflow
+    assert wf.is_complete and (wd / "mushin_sweep_manifest.json").is_file()
+    assert wf.to_xarray()["pid"].values.tolist() == first["pid"].values.tolist()
+    assert _launches(wd) == []
+
+
+def test_a_batch_that_needed_no_job_is_collected(tmp_path, left):
+    """With `max_batch_size`, every batch is submitted at once. A batch whose
+    cells all need no job (here, left out by `sample=`) is recorded for
+    collect too, since a later batch's jobs are left running."""
+    import random
+
+    wd = tmp_path / "s"
+    # The cell `sample=1` keeps of four: its batch of two is submitted, the
+    # other batch needs no job.
+    (kept,) = random.Random("4:1:0").sample(range(4), 1)
+    _detach(
+        tasks.record_pid,
+        wd,
+        left,
+        seed=multirun([0, 1, 2, 3]),
+        sample=1,
+        overrides=["hydra.sweeper.max_batch_size=2"],
+        **LOCAL,
+    )
+    assert len(_launches(wd)) == 2
+    with pytest.warns(UserWarning, match="not run"):
+        wf = _collect(lambda: MultiRunMetricsWorkflow().collect(wd))
+    v = wf.to_xarray()["v"].values
+    assert [i for i in range(4) if not np.isnan(v[i])] == [kept]
+    assert len(wf.skipped) == 3 and _launches(wd) == []
+
+
+def test_a_slurm_launch_is_collected_through_sacct(tmp_path, monkeypatch, left):
+    """A SLURM job's end is read from sacct, through submitit's own reader:
+    local jobs stand in, their launch file relabeled, and sacct is faked to
+    say the dead one ran out of memory."""
+    from submitit.slurm import slurm
+
+    from mushin import _jobs
+
+    monkeypatch.setattr(slurm.SlurmJob, "watcher", slurm.SlurmInfoWatcher(delay_s=600))
+    wd = tmp_path / "s"
+    summary = _detach(
+        tasks.die_on_two, wd, left, seed=multirun([0, 1, 2]), on_error="nan", **LOCAL
+    )
+    (launch,), _ = _jobs.read_launches(wd)
+    assert _until(lambda: _jobs.ended_locally(launch))
+    data = json.loads(launch.path.read_text())
+    data["executor"] = "slurm"
+    launch.path.write_text(json.dumps(data))
+    ids = summary["job_ids"]
+    states = dict(zip(ids, ["COMPLETED", "COMPLETED", "OUT_OF_MEMORY"], strict=True))
+    out = "JobID|State|NodeList\n" + "".join(f"{j}|{s}|n1\n" for j, s in states.items())
+    monkeypatch.setattr(
+        slurm.SlurmInfoWatcher,
+        "_make_command",
+        lambda self: [sys.executable, "-c", f"import sys; sys.stdout.write({out!r})"],
+    )
+    with pytest.warns(UserWarning, match=r"failed: \['seed=2'\]"):
+        wf = MultiRunMetricsWorkflow().collect(wd)
+    (failure,) = wf.failures
+    assert "(state: OUT_OF_MEMORY)" in failure["exception"]
+    assert wf.to_xarray()["v"].values.tolist()[:2] == [0.0, 1.0]
+
+
+def test_dead_jobs_cost_collect_one_shared_wait(tmp_path, left):
+    """submitit waits for each dead job's result file in turn (15 s each);
+    collect waits once for them all, then reads each at once."""
+    import inspect
+    import time
+
+    from submitit.core import core
+
+    from mushin import _jobs
+
+    # The seam collect sets on each job it rebuilds.
+    assert core.Job._results_timeout_s == 15
+    assert "_results_timeout_s" in inspect.getsource(core.Job._get_outcome_and_result)
+    wd = tmp_path / "s"
+    _detach(
+        tasks.always_dies, wd, left, seed=multirun([0, 1, 2]), on_error="nan", **LOCAL
+    )
+    (launch,), _ = _jobs.read_launches(wd)
+    assert _until(lambda: _jobs.ended_locally(launch))
+    start = time.monotonic()
+    with pytest.warns(UserWarning, match="3 run"):
+        mushin.collect(wd)
+    assert time.monotonic() - start < 30  # one wait of 15 s, not three
+
+
+def test_a_detached_runs_jobs_refuse_the_next_run(tmp_path, monkeypatch, left):
+    """A run into the dir while the detached run's jobs wait is refused
+    (two drivers would write the same cells), and says to collect."""
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [0, 1])
+    sweep = dict(seed=multirun([0, 1]), overrides=[tasks.GATE], **LOCAL)
+    _detach(tasks.record_pid, wd, left, **sweep)
+    with pytest.raises(ValueError, match=r"mushin\.collect"):
+        tasks.record_pid.run(working_dir=str(wd), resume=True, **sweep)
+    gate.touch()
+    ds = _collect(lambda: mushin.collect(wd))
+    assert ds["v"].values.tolist() == [0.0, 1.0]
