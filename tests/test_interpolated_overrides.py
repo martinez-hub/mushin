@@ -835,3 +835,18 @@ def test_a_fixed_value_resolved_through_an_environment_read_is_not_saved(
         wf.run(token="${api_key}", x=multirun([1, 2]), working_dir=tmp_path)
     assert wf.multirun_task_overrides["token"] == "tok-indirect-secret"
     assert "tok-indirect-secret" not in (tmp_path / MANIFEST_FILE).read_text()
+
+
+def test_a_fixed_value_is_saved_under_another_output_subdir(tmp_path):
+    """The environment check reads each job's config snapshot where the
+    sweep keeps it (``hydra.output_subdir``), so a sweep that keeps it
+    elsewhere still saves its fixed values (#392)."""
+    wf = Stamped()
+    wf.run(
+        x=multirun([1, 2]),
+        stamp="${now:%Y}",
+        overrides=["hydra.output_subdir=.snap"],
+        working_dir=tmp_path,
+    )
+    manifest = json.loads((tmp_path / MANIFEST_FILE).read_text())
+    assert manifest["interpolated"]["fixed"].get("stamp") is not None

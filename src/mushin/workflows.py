@@ -2919,8 +2919,8 @@ class BaseWorkflow:
     def _run_reads_environment(self, raw: list[str]) -> bool:
         """Whether this run's config may read the environment anywhere: an
         override's text, the sweep's multirun.yaml, or the config snapshot
-        (``.hydra/config.yaml``, as composed, unresolved) of a job of each
-        set of config-group choices. A job's config itself is no guide: its
+        (``config.yaml`` in ``hydra.output_subdir``, as composed, unresolved)
+        of a job of each set of config-group choices. A job's config itself is no guide: its
         task's wrapper resolved it in place. What cannot be read counts as
         reading it (#392)."""
         if any(_ENV_READ.search(text) for text in raw):
@@ -2934,7 +2934,10 @@ class BaseWorkflow:
                 if key in seen:
                     continue
                 seen.add(key)
-                snapshot = Path(cell) / ".hydra" / "config.yaml"
+                # Where the sweep keeps it (`hydra.output_subdir`); none
+                # kept reads as unreadable, so as reading the environment.
+                subdir = getattr(self, "output_subdir", None)
+                snapshot = Path(cell) / str(subdir) / "config.yaml"
                 texts.append(snapshot.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001 - not readable: as if it did
             return True
