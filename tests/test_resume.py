@@ -569,3 +569,36 @@ def test_the_guides_lightning_recipe_resumes_from_its_checkpoint(tmp_path):
     assert seen[0] is None
     assert seen[1] is not None and Path(seen[1]).name == "last.ckpt"
     assert resumed.to_xarray()["epochs"].values.tolist() == [2.0]
+
+
+def test_a_resume_reuses_a_completed_cell_that_returned_none(tmp_path):
+    """#373: a cell whose task returned None wrote no metrics file, and its
+    record says so (#364): a resume reuses it rather than running it again.
+    A record that does not say so (an earlier version's) still runs."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    calls = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            calls.append(x)
+            return None if x == 2 else dict(v=float(x))
+
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    calls.clear()
+    wf = W()
+    wf.run(x=multirun([1, 2]), working_dir=str(tmp_path), resume=True)
+    assert calls == []
+    values = wf.to_xarray()["v"].values.tolist()
+    assert values[0] == 1.0 and values[1] != values[1] and wf.is_complete
+    back = W().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.is_complete
+
+    record = tmp_path / "1" / STATUS_FILE
+    data = json.loads(record.read_text())
+    del data["no_metrics"]
+    record.write_text(json.dumps(data))
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path), resume=True)
+    assert calls == [2]
