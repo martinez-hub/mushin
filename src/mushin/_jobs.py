@@ -83,7 +83,8 @@ class Launch:
     submitit's id-independent log ``folder``, the SLURM ``clusters`` the
     jobs were sent to (None for the default one), the driver's ``host``, the
     ``depth`` of the cells' dirs below the sweep root (`hydra.sweep.subdir`'s
-    parts), the file's ``mtime_ns`` and its ``cells``."""
+    parts), the file's ``mtime_ns``, its ``cells``, and the ``tasks`` of each
+    job (1 for a file from before the field)."""
 
     path: Path
     run_id: str
@@ -94,6 +95,7 @@ class Launch:
     depth: int
     mtime_ns: int
     cells: tuple[LaunchCell, ...]
+    tasks: int = 1
 
 
 def record_launch(
@@ -106,6 +108,7 @@ def record_launch(
     host: str,
     depth: int,
     cells: Iterable[LaunchCell],
+    tasks: int = 1,
 ) -> Path:
     """Write the launch file for ``cells``, the jobs one submission sent, in
     submission order, and return its path. Named by the first job's number:
@@ -122,6 +125,7 @@ def record_launch(
         "clusters": clusters,
         "host": host,
         "depth": depth,
+        "tasks": tasks,
         "cells": [
             {
                 "num": cell.num,
@@ -192,8 +196,11 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
     run_id, cells = data.get("run_id"), data.get("cells")
     folder, clusters = data.get("folder"), data.get("clusters")
     host, depth = data.get("host"), data.get("depth")
+    tasks = data.get("tasks", 1)
     if not (
-        run_id == _NAME.fullmatch(path.name)["run_id"]
+        type(tasks) is int
+        and tasks >= 1
+        and run_id == _NAME.fullmatch(path.name)["run_id"]
         and data.get("executor") in _EXECUTORS
         and isinstance(folder, str)
         and _absolute(folder)
@@ -236,6 +243,7 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
         depth=depth,
         mtime_ns=mtime_ns,
         cells=tuple(read),
+        tasks=tasks,
     )
 
 
@@ -337,7 +345,9 @@ def _processes(pids: list[int]) -> dict[int, tuple[str, str]] | None:
         found = {}
         for pid in pids:
             try:
-                stat = Path(f"/proc/{pid}/stat").read_text(errors="replace")
+                stat = Path(f"/proc/{pid}/stat").read_text(
+                    encoding="utf-8", errors="replace"
+                )
                 argv = Path(f"/proc/{pid}/cmdline").read_bytes()
             except (FileNotFoundError, ProcessLookupError):
                 continue  # it has exited
@@ -773,11 +783,17 @@ def refuse_live_launches(working_dir) -> list[Path]:
     others: list[str] = []
     asked: list[tuple[Launch, list[str]]] = []
     for launch in launches:
+        # A cell's recorded end is its job's only for a job of one task:
+        # each task of a job of several writes the cell's record, so one
+        # task's end leaves the others to the scheduler (#410).
         cells = [
             cell
             for cell in launch.cells
-            if (launch.run_id, cell.job_id) not in recorded
-            and (launch.run_id, cell.num) not in recorded
+            if launch.tasks > 1
+            or (
+                (launch.run_id, cell.job_id) not in recorded
+                and (launch.run_id, cell.num) not in recorded
+            )
         ]
         if not cells:
             ended.append(launch.path)

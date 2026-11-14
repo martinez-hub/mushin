@@ -472,3 +472,39 @@ def test_a_job_slurm_could_not_launch_has_ended(tmp_path, slurm):
     slurm.jobs["100"] = shown(job("LAUNCH_FAILED", _ours(wd)))
     _run(wd)
     assert not path.exists()
+
+
+def test_a_record_does_not_end_a_job_of_several_tasks(tmp_path, slurm):
+    """Each task of a job of several tasks writes the cell's record: one
+    task's end is not the job's, so the job is asked about (#410)."""
+    wd = tmp_path / "s"
+    launch(wd, R1, [(0, "100")], tasks=2)
+    _record(wd, "0", run=R1, status="completed", num=0, job_id="100")
+    slurm.jobs["100"] = shown(job("RUNNING", _ours(wd)))
+    with pytest.raises(ValueError, match="queued or running"):
+        _run(wd)
+    assert slurm.asked == ["100"]
+
+
+def test_a_launch_file_keeps_its_jobs_task_count(tmp_path):
+    """Written and read back; a file from before the field reads as one task."""
+    import json
+
+    path = _jobs.record_launch(
+        tmp_path,
+        run_id=R1,
+        executor="slurm",
+        folder=str(tmp_path / ".submitit"),
+        clusters=None,
+        host="login1",
+        depth=1,
+        cells=[_jobs.LaunchCell(0, "100", {"lr": 0.1})],
+        tasks=4,
+    )
+    (read,), _ = _jobs.read_launches(tmp_path)
+    assert read.tasks == 4
+    data = json.loads(path.read_text())
+    del data["tasks"]
+    path.write_text(json.dumps(data))
+    (read,), _ = _jobs.read_launches(tmp_path)
+    assert read.tasks == 1

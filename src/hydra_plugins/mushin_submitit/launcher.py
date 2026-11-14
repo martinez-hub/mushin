@@ -301,6 +301,10 @@ if _plugin_launcher is not None:
                     host=socket.gethostname(),
                     depth=_cell_depth(self.config),
                     cells=cells,
+                    # Each task of a job of several writes its cell's record,
+                    # so the guard asks about such a job whatever its cells
+                    # record (#410).
+                    tasks=max((getattr(j, "num_tasks", 1) for j in jobs), default=1),
                 )
             except Exception as exc:  # noqa: BLE001 - the sweep goes on
                 log.warning(
