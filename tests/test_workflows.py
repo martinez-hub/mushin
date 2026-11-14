@@ -3149,6 +3149,143 @@ def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_p
     assert "metrics" not in records[2]
 
 
+def test_a_jobs_fingerprint_is_its_config_as_composed(tmp_path):
+    """A job fingerprints its config as Hydra composed it, as the submitit
+    driver's settle pass does, so the two agree even for an escaped
+    interpolation (resolved once, it reads as a live one) (#353)."""
+    import json
+
+    from omegaconf import OmegaConf
+
+    from mushin._resume import resolved_config, resolved_config_hash
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, tmpl):
+            return dict(v=float(x))
+
+    from hydra_zen import make_config
+
+    W(make_config(tmpl="\\${x}")).run(x=multirun([1]), working_dir=str(tmp_path))
+    cell = tmp_path / "0"
+    composed = OmegaConf.load(cell / ".hydra" / "config.yaml")
+    record = json.loads((cell / "mushin_cell_status.json").read_text())
+    assert record["config_hash"] == resolved_config_hash(resolved_config(composed))
+
+
+def test_a_wrapper_that_does_not_resolve_reads_after_pre_task(tmp_path, monkeypatch):
+    """With wrappers that do not resolve the config before they call, the
+    task resolves its interpolations when it reads them, after `pre_task`
+    (#353)."""
+    import os
+
+    from hydra_zen import zen
+
+    monkeypatch.setenv("MUSHIN_TEST_PRE", "unset")
+    monkeypatch.delenv("MUSHIN_TEST_PRE")
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(x):
+            os.environ["MUSHIN_TEST_PRE"] = "from-pre-task"
+
+        @staticmethod
+        def task(x, d):
+            seen.append(d)
+            return dict(v=1.0)
+
+    def lazy(fn):
+        return zen(fn, resolve_pre_call=False)
+
+    W().run(
+        x=multirun([1]),
+        d="${oc.env:MUSHIN_TEST_PRE,default}",
+        working_dir=str(tmp_path),
+        task_fn_wrapper=lazy,
+        pre_task_fn_wrapper=lazy,
+    )
+    assert seen == ["from-pre-task"]
+
+
+def test_a_non_resolving_pre_task_runs_before_the_tasks_resolution(
+    tmp_path, monkeypatch
+):
+    """When only the task's wrapper resolves the config, it does so just
+    before the task, after `pre_task`: an environment variable `pre_task`
+    sets reaches the task (#353)."""
+    import os
+
+    from hydra_zen import zen
+
+    monkeypatch.setenv("MUSHIN_TEST_PRE", "unset")
+    monkeypatch.delenv("MUSHIN_TEST_PRE")
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def pre_task(x):
+            os.environ["MUSHIN_TEST_PRE"] = "from-pre-task"
+
+        @staticmethod
+        def task(x, d):
+            seen.append(d)
+            return dict(v=1.0)
+
+    W().run(
+        x=multirun([1]),
+        d=multirun(["${oc.env:MUSHIN_TEST_PRE,default}"]),
+        working_dir=str(tmp_path),
+        pre_task_fn_wrapper=lambda fn: zen(fn, resolve_pre_call=False),
+    )
+    assert seen == ["from-pre-task"]
+
+
+def test_an_escaped_interpolation_is_resolved_only_by_the_wrapper(tmp_path):
+    """An escaped interpolation is resolved once, by zen's wrapper: a
+    second pass would turn the literal text the first made into a live
+    interpolation that may not resolve (#353)."""
+    from hydra_zen import make_config
+
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):  # raw: called with the whole config
+            seen.append(x.x)
+            return dict(v=1.0)
+
+    W(make_config(tmpl="\\${missing}")).run(
+        x=multirun([1]), working_dir=str(tmp_path), task_fn_wrapper=None
+    )
+    assert seen == [1]
+
+
+def test_a_raw_task_that_changes_its_config_keeps_the_cells_combo(tmp_path):
+    """A task run without a wrapper gets the config itself and may change
+    it; the cell's record keeps the values it was launched with, so its
+    next attempt finds it (#353)."""
+    import json
+    import warnings
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed):  # raw: called with the whole config
+            seed.seed = 99
+            raise RuntimeError("fails after changing its config")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(
+            seed=multirun([0]),
+            working_dir=str(tmp_path),
+            task_fn_wrapper=None,
+            on_error="nan",
+        )
+    record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "failed" and record["combo"] == {"seed": 0}
+
+
 @pytest.mark.parametrize("kind", ["UserDict", "MappingProxyType", "DictConfig"])
 def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
     """#369: a task that returns a Mapping that is not a dict gives the run
@@ -3189,7 +3326,7 @@ def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
 
 def test_a_user_string_in_metrics_is_written_as_text(tmp_path):
     """A UserString is a Sequence whose items are UserStrings again: it is
-    written as its text, not walked (Codex, #387)."""
+    written as its text, not walked (#369)."""
     import json
     from collections import UserString
 

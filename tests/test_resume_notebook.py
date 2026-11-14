@@ -3186,8 +3186,8 @@ LOADED = f"def _warm():\n    import {SUBPKG}.sub\n\n\n_warm()\ndel _warm\n"
     ids=["nonlocal import into a placeholder", "comprehension rebinding"],
 )
 def test_main_s_reading_is_the_floor(kernel, sub_project, setup, task):
-    """Shapes the scope model reads one way and main another (both found by
-    Codex): what main named still counts, so the record never holds less
+    """Shapes the scope model reads one way and main another (both found in
+    review): what main named still counts, so the record never holds less
     than main's."""
     kernel.run(setup)
     kernel.run(task)
@@ -3471,7 +3471,7 @@ def test_a_free_variable_the_unit_also_reads_as_a_global_is_read_both_ways(
 def test_a_free_variable_reads_the_namespaces_module_too(kernel, sub_project):
     """The task's `m` is its closure's, but a chain on it reads the
     namespace's module of that name too, as main did: a recompute when that
-    module changes (Codex on #291), kept for the case below."""
+    module changes (#291), kept for the case below."""
     kernel.run(f"import {SUBPKG} as m\nimport types\n")
     kernel.run(
         "def make(m):\n    def task(a):\n        return m.sub.f(a)\n\n    return task\n\n\n"

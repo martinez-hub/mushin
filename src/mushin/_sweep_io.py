@@ -153,7 +153,7 @@ def restore_combo_value(v: Any) -> Any:
     if isinstance(v, dict):
         tag = v.get(_NONFINITE_TAG)
         # Only a tag mushin writes (a string): a list or dict there is a
-        # value of the user's, and not hashable (Codex, #382).
+        # value of the user's, and not hashable (#382).
         if (
             set(v) == {_NONFINITE_TAG}
             and isinstance(tag, str)
