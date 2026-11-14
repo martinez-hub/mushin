@@ -235,6 +235,18 @@ def test_a_folder_with_a_space(tmp_path, slurm):
     assert mushin.cancel(wd) == ["100"]
 
 
+def test_cells_of_one_job_are_cancelled_once(tmp_path, slurm):
+    """A job that runs several cells in turn names one job id for all of
+    them: its array is asked about and cancelled once. A guard: arrays were
+    already de-duplicated."""
+    folder = str(tmp_path / ".submitit")
+    _launch(tmp_path, R1, [(0, "100_0"), (1, "100_0"), (2, "100_0")])
+    slurm.jobs["100"] = _shown(_job("RUNNING", folder, task=0))
+    assert mushin.cancel(tmp_path) == ["100"]
+    assert slurm.asked == ["100"]
+    assert slurm.scancels == [["100"]]
+
+
 def test_a_collapsed_pending_array(tmp_path, slurm):
     """scontrol shows the pending tasks of an array as one line."""
     folder = str(tmp_path / ".submitit")
