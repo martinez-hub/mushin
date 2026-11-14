@@ -1,6 +1,10 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
+import enum
+
 import pytest
+
+from mushin.workflows import MultiRunMetricsWorkflow
 
 
 def test_capture_provenance_no_git(tmp_path):
@@ -628,3 +632,109 @@ def test_accelerator_device_none_without_cuda_or_mps(monkeypatch):
         torch.backends.mps, "is_available", lambda: False, raising=False
     )
     assert _provenance._accelerator()["device"] is None
+
+
+class _Db(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, db):
+        return dict(v=float(x))
+
+
+@pytest.mark.parametrize("raw", [False, True], ids=["zen", "raw"])
+def test_a_sweep_records_an_env_interpolation_as_written(tmp_path, monkeypatch, raw):
+    """#383: zen resolves the job's config in place before the task, and the
+    record was written after that, so an `${oc.env:...}` value reached the
+    disk under any key name. The record keeps the config as written."""
+    import json
+
+    from mushin import multirun
+
+    monkeypatch.setenv("MUSHIN_TEST_DB", "postgres://user:pw@host")
+    wrappers = dict(task_fn_wrapper=None, pre_task_fn_wrapper=None) if raw else {}
+    wf = _Db()
+    if raw:
+
+        class Raw(MultiRunMetricsWorkflow):
+            @staticmethod
+            def task(x):  # raw: called with the whole config
+                return dict(v=1.0)
+
+        wf = Raw()
+    wf.run(
+        x=multirun([1]),
+        db="${oc.env:MUSHIN_TEST_DB}",
+        working_dir=tmp_path,
+        **wrappers,
+    )
+    text = (tmp_path / "0" / "mushin_provenance.json").read_text()
+    assert "postgres://" not in text
+    assert json.loads(text)["config"]["db"] == "${oc.env:MUSHIN_TEST_DB}"
+
+
+class _Rated(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(lr, base_lr):
+        return dict(v=float(lr))
+
+
+def test_a_swept_interpolation_is_recorded_as_written(tmp_path):
+    """#383: a swept element that is an interpolation is recorded as its
+    text, as the rest of the config is."""
+    import json
+
+    from mushin import multirun
+
+    _Rated().run(
+        base_lr=0.01,
+        lr=multirun(["${base_lr}", 0.5]),
+        working_dir=tmp_path,
+    )
+    records = [
+        json.loads((tmp_path / d / "mushin_provenance.json").read_text())["config"]
+        for d in ("0", "1")
+    ]
+    assert records[0]["lr"] == "${base_lr}"
+    assert records[1]["lr"] == 0.5
+    assert records[0]["base_lr"] == 0.01
+
+
+def test_an_escaped_interpolation_is_recorded_with_its_escape(tmp_path):
+    """#383: an escaped interpolation keeps its escape in the record, which
+    then does not read as a live interpolation."""
+    import json
+
+    from hydra_zen import make_config
+
+    from mushin import multirun
+
+    class Tmpl(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, tmpl):
+            return dict(v=float(x))
+
+    Tmpl(make_config(tmpl="\\${x}")).run(x=multirun([1]), working_dir=tmp_path)
+    config = json.loads((tmp_path / "0" / "mushin_provenance.json").read_text())
+    assert config["config"]["tmpl"] == "\\${x}"
+
+
+class _Color(enum.Enum):
+    RED = 1
+
+
+def test_a_config_holding_an_enum_is_recorded(tmp_path):
+    """#383: an Enum value is recorded by its name; the record was not
+    written at all (json could not encode it, and the error was swallowed)."""
+    import json
+
+    from hydra_zen import make_config
+
+    from mushin import multirun
+
+    class Painted(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, color):
+            return dict(v=float(x))
+
+    Painted(make_config(color=_Color.RED)).run(x=multirun([1]), working_dir=tmp_path)
+    record = json.loads((tmp_path / "0" / "mushin_provenance.json").read_text())
+    assert record["config"]["color"] == "RED"

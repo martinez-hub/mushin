@@ -323,14 +323,25 @@ def _redact_config(obj: Any) -> Any:
     return obj
 
 
-def _to_plain(cfg):
+def authored_config(cfg):
+    """``cfg`` as written, as plain containers, or None when it cannot be
+    read. Its interpolations are never evaluated (e.g. `${oc.env:SECRET}`,
+    which would bake a resolved secret into the on-disk record), and an Enum
+    is its name (json cannot write the Enum, and the record would be lost).
+    The runner takes it before the task's wrapper runs: hydra-zen's ``zen``
+    resolves the job's config in place, so a config read after it holds
+    every resolved value (#383)."""
     try:
         from omegaconf import OmegaConf
 
-        # resolve=False: never evaluate interpolations (e.g. `${oc.env:SECRET}`),
-        # which would bake a resolved secret into the on-disk record; the config
-        # is recorded as authored. Literal secret values are then redacted.
-        plain = OmegaConf.to_container(cfg, resolve=False)
+        return OmegaConf.to_container(cfg, resolve=False, enum_to_str=True)
     except Exception:
         return None
-    return _redact_config(plain)
+
+
+def _to_plain(cfg):
+    """The config a record holds: ``cfg`` as written (`authored_config`; a
+    plain dict or list is taken as already that), its literal secret values
+    redacted."""
+    plain = cfg if isinstance(cfg, (dict, list)) else authored_config(cfg)
+    return None if plain is None else _redact_config(plain)

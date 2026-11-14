@@ -2056,7 +2056,12 @@ class _TaskRunner:
         import warnings
         from pathlib import Path
 
-        from ._provenance import NOT_WRITTEN, record_accelerator, write_provenance
+        from ._provenance import (
+            NOT_WRITTEN,
+            authored_config,
+            record_accelerator,
+            write_provenance,
+        )
         from ._resume import (
             _CURRENT_RESUME,
             build_resume_context,
@@ -2192,6 +2197,11 @@ class _TaskRunner:
                 attempt=rc.attempt,
                 budget_id=self.budget_id,
             )
+            # The record's config as written, taken before pre_task: hydra-zen's
+            # `zen` (the default wrapper of both hooks) resolves the job's config
+            # in place, and a config read after that holds every resolved
+            # `${oc.env:...}` value (#383).
+            authored = authored_config(cfg)
             self.pre_task(cfg)
             if rc.is_resume:
                 # pre_task may stage a checkpoint into the cell dir (the
@@ -2200,7 +2210,7 @@ class _TaskRunner:
                 rc = dataclasses.replace(rc, last_ckpt=discover_last_ckpt(cwd))
             written = NOT_WRITTEN
             try:
-                written = write_provenance(cwd, cfg, base=self.base_provenance)
+                written = write_provenance(cwd, authored, base=self.base_provenance)
             except Exception:  # noqa: BLE001 - provenance is best-effort
                 pass
             # Set the contextvar AFTER the (fallible) status write, so a failed

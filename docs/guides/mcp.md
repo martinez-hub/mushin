@@ -46,7 +46,7 @@ Add an entry to your `claude_desktop_config.json`:
 | `list_experiments` | Run directories (those containing `.hydra/`) under the root. |
 | `describe_experiment` | Swept parameters, metric keys, run and checkpoint counts. |
 | `get_metrics` | Per-run metrics; optional `mean`/`std` reduction across runs. |
-| `get_config` | The resolved Hydra config for a run (or all runs). |
+| `get_config` | The Hydra config for a run (or all runs), as written: interpolations are not resolved. |
 | `read_dataset` | Dimensions, coordinates, data variables, and basic statistics of a saved netCDF file. |
 | `get_failures` | Failed sweep cells from the manifest: combo, directory, error, and the recorded traceback. |
 | `get_provenance` | Per-run provenance records: git SHA, package versions, accelerator (CUDA/cuDNN/device, when the cell's process imported torch). |
