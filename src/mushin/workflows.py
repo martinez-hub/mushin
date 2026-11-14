@@ -1914,6 +1914,38 @@ class _TaskRunner:
         """`_reads_environment`, for mushin's submitit launcher."""
         return _reads_environment(ret)
 
+    def submitted_combos(self, job_overrides) -> list[dict]:
+        """Each submitted cell's swept params as its overrides give them, for
+        the launch file `mushin.show` lists queued cells from (#345). Read
+        from the override texts, not a composed config: composing every cell
+        in the driver would cost what the jobs are sent off to spend.
+
+        Named as `_parse_overrides` names them (``+``/``++`` dropped), so
+        they match ``swept_names``, and sanitized as a record's combo is, so
+        a value matches a record's but where the job's config converts it: a
+        typed float field given ``1`` holds 1.0, and an interpolation holds
+        what it resolves to. A ``~key`` deletion names no value. Each
+        distinct text is parsed once (an axis's values repeat across cells).
+        """
+        parser = _override_parser()
+        swept = set(self.swept_names)
+        sanitize = MultiRunMetricsWorkflow._sanitize_coordinate_for_xarray
+        parsed: dict[str, tuple[str, Any] | None] = {}
+        combos = []
+        for overrides in job_overrides:
+            combo = {}
+            for text in overrides:
+                if text not in parsed:
+                    (override,) = parser.parse_overrides([text])
+                    name = override.get_key_element().split("+")[-1]
+                    keep = name in swept and not override.is_delete()
+                    parsed[text] = (name, sanitize(override.value())) if keep else None
+                if parsed[text] is not None:
+                    name, value = parsed[text]
+                    combo[name] = value  # the last override of a name wins
+            combos.append(combo)
+        return combos
+
     def dirs_of(self, ret: JobReturn) -> tuple[Path, Path | None]:
         """The dir of the cell of ``ret``, and the dir a resume reads it
         from (its completed prior cell's, or None), both resolved. Called in

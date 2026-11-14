@@ -56,14 +56,14 @@ local pass therefore does not cover them, and you should not claim it does.
 | `src/mushin/agent_guide.md`, `__main__.py` | The usage guide for agents that *use* mushin, printed by `python -m mushin guide` and shown at `docs/for-agents.md`. |
 | `src/mushin/workflows.py`, `_sweep_decorator.py` | `MultiRunMetricsWorkflow` and `@mushin.sweep`: the core. |
 | `src/mushin/_resume.py`, `_sweep_io.py`, `_provenance.py` | Resumable sweeps, per-cell sidecars and manifest, provenance capture. |
-| `src/mushin/_show.py`, `export.py` | Offline views of a sweep directory (`show`, `best`, `diff`, CSV export). |
+| `src/mushin/_show.py`, `export.py`, `_jobs.py` | Offline views of a sweep directory (`show`, `best`, `diff`, CSV export), and the launch files from which `show` lists queued cells. |
 | `src/mushin/_tuning.py`, `_packing.py` | Auto-tuning and GPU packing. |
 | `src/mushin/benchmark/` | `compare`, the task registry, the batteries, the statistics (`eval` extra). |
 | `src/mushin/llm/` | `compare_llms`, `compare_scores`, `llm_judge` (`eval` extra). |
 | `src/mushin/study/` | `Study`: a training sweep routed into `compare`. Its features need the `eval` extra, but `import mushin` loads it. |
 | `src/mushin/lightning/` | `HydraDDP`, `HydraFSDP`, `MetricsCallback`, cluster helpers. |
 | `src/mushin/mcp/` | The read-only `mushin-mcp` server (`mcp` extra). It also serves the agent guide as the `guide` prompt and the `mushin://guide` resource. |
-| `src/hydra_plugins/mushin_submitit/` | The launchers `run()` uses in place of `submitit_slurm`/`submitit_local`: the plugin's own, but a cell that needs no job (left out by `sample=`, reused by a resume, a `cache_dir` hit) is settled in the driver instead of submitted, every job is waited on, and a job that ends without a result is a failed cell, unless its cell recorded the result the job could not return. Hydra imports this module in every Hydra app, so it imports nothing heavy and, without the `slurm` extra, defines nothing. |
+| `src/hydra_plugins/mushin_submitit/` | The launchers `run()` uses in place of `submitit_slurm`/`submitit_local`: the plugin's own, but a cell that needs no job (left out by `sample=`, reused by a resume, a `cache_dir` hit) is settled in the driver instead of submitted, every job is waited on, and a job that ends without a result is a failed cell, unless its cell recorded the result the job could not return. Each launch records its job ids for `show` until its jobs have been waited on. Hydra imports this module in every Hydra app, so it imports nothing heavy and, without the `slurm` extra, defines nothing. |
 | `src/mushin/testing/` | Small Lightning modules and datasets the tests and a `HydraDDP` docstring example use. It ships in the wheel but is not public API. |
 | `.claude-plugin/`, `plugins/mushin/` | The Claude Code plugin marketplace and its one plugin, whose `guide` skill prints the installed agent guide. `tests/test_plugin.py` pins the manifests and the skill; after changing them, run `claude plugin validate plugins/mushin` and `claude plugin validate .` by hand (nothing in CI runs Claude Code). |
 | `tests/` | pytest + hypothesis. `tests/plugins/hydra_plugins/` holds a test sweeper plugin. |

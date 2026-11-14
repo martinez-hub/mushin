@@ -135,10 +135,28 @@ squeue --me
 ```
 
 lists the sweep's queued and running jobs. `mushin.show("/scratch/me/lr-sweep")`
-prints each cell that has started with its status (`running`, `completed`,
-`failed`, `skipped`), from any machine that sees the filesystem. During a
-resume, a cell sent to a job again shows the earlier run's status (`failed`,
-say) until that job starts.
+prints a row for each cell the sweep has recorded or submitted, with its
+status, from any machine that sees the filesystem: `queued` (its job has not
+started), `running`, `completed`, `failed` or `skipped`. During a resume, a
+cell sent to a job again is `queued` in place of the earlier run's status
+until that job starts.
+`mushin.show("/scratch/me/lr-sweep", jobs=True)` also lists each cell's job id
+(`job`), the node it ran on (`host`) and the folder of its logs (`logs`); a
+queued cell has only its job id.
+
+The driver names the jobs of each submission in a file under
+`<working_dir>/mushin_jobs/`, which `show` reads, and removes the file once
+it has waited on those jobs. Some cases follow from that:
+
+- A driver killed before its jobs end (Ctrl-C, a lost login session) leaves
+  its file. A cell whose job never started then stays `queued` until a later
+  run of the sweep, such as a `resume=True`, records the cell.
+- A job that dies before its code starts can show `queued` until the driver
+  has waited on every job of its submission.
+- A sweep whose `hydra.sweep.subdir` puts each cell more than one directory
+  below `working_dir` lists no cell as `queued`.
+- A login node may see a shared filesystem's files late, so a cell that has
+  just started can show `queued` for a few seconds.
 
 `array_parallelism` (256 by default) caps how many of the sweep's jobs run at
 once; the rest wait in the queue.

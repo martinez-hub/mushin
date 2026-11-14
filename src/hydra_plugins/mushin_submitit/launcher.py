@@ -19,11 +19,15 @@ unless the cell's own record holds the result the job could not return
 `mushin_submitit_local`); their config is the plugin's, field for field, so
 `launcher_config` and `submitit_slurm_config` work unchanged.
 
+For mushin's runner, each launch also names its jobs in a launch file
+under `<working_dir>/mushin_jobs/` until it has waited on them, so
+`mushin.show` can list the cells whose jobs have not started (`queued`).
+
 Hydra imports every module under `hydra_plugins` whenever any Hydra
 application starts, and reports an ImportError there as a warning (an error
 under `-W error`). So this module imports nothing heavy, and without the
-plugin it defines nothing. mushin itself is imported only when a job died
-or a job of several tasks returned.
+plugin it defines nothing. mushin itself is imported only on a launch of
+mushin's runner.
 """
 
 import contextlib
@@ -72,7 +76,20 @@ if _plugin_launcher is not None:
             jobs, job_params = self._submit(
                 job_overrides, initial_job_idx, skip=settled
             )
-            waited = self._wait(jobs, job_params)
+            launch = self._record_launch(jobs, job_params)
+            try:
+                waited = self._wait(jobs, job_params)
+            except Exception:
+                # `_wait` raises only once it has visited every job, but a
+                # job it could not tell had ended may still be queued: then
+                # the launch stays. Without one (a plain Hydra task, or a
+                # write that failed) the scheduler is not asked again.
+                if launch is not None and all(_ended(job) for job in jobs):
+                    _forget(launch)
+                raise
+            # A BaseException (Ctrl-C, SystemExit) leaves the launch: its
+            # jobs may still be queued, and `show` keeps listing them so.
+            _forget(launch)
             returns = dict(zip([p[2] for p in job_params], waited, strict=True))
             returns.update(settled)
             return [returns[n] for n in numbers]
@@ -246,6 +263,52 @@ if _plugin_launcher is not None:
             jobs = executor.map_array(self, *zip(*job_params))  # noqa: B905
             return jobs, job_params
 
+        def _record_launch(self, jobs, job_params) -> Path | None:
+            """Write the launch file that names ``jobs`` (#345), and return
+            its path; None for a task function other than mushin's runner,
+            which `show` does not read, and when the file cannot be written:
+            it is a view of the queue, and never fails a sweep. Stores
+            nothing on the launcher, which every job unpickles."""
+            runner = self.task_function
+            run_id = getattr(runner, "run_id", None)
+            if not getattr(runner, "_mushin_collects_dead_jobs", False) or not run_id:
+                return None
+            try:
+                import socket
+
+                from submitit.core.utils import JobPaths
+
+                from mushin._jobs import LaunchCell, record_launch
+
+                combos = runner.submitted_combos([p[0] for p in job_params])
+                cells = [
+                    LaunchCell(params[2], str(job.job_id), combo)
+                    for job, params, combo in zip(jobs, job_params, combos, strict=True)
+                ]
+                # The folder every job's paths start with (its id comes
+                # after), as submitit wrote them into the scripts it
+                # submitted: the scheduler's record of a job names it, which
+                # tells this sweep's jobs from others under a reused id.
+                folder = JobPaths.get_first_id_independent_folder(
+                    self.params["submitit_folder"]
+                )
+                return record_launch(
+                    Path(str(self.config.hydra.sweep.dir)),
+                    run_id=run_id,
+                    executor=self._EXECUTOR,
+                    folder=str(folder),
+                    clusters=_clusters(self.params),
+                    host=socket.gethostname(),
+                    depth=_cell_depth(self.config),
+                    cells=cells,
+                )
+            except Exception as exc:  # noqa: BLE001 - the sweep goes on
+                log.warning(
+                    "mushin could not record this launch's jobs, so "
+                    f"`mushin.show` will not list them as queued: {exc!r}"
+                )
+                return None
+
         def _wait(self, jobs, job_params):
             """Every job's result, in submission order.
 
@@ -392,6 +455,39 @@ if _plugin_launcher is not None:
             return {"job_id": str(job.job_id), "logs": str(job.paths.folder)}
         except Exception:  # noqa: BLE001 - the record names no job
             return None
+
+    def _forget(launch) -> None:
+        """Remove a launch's file, once its jobs are known to have ended;
+        nothing for a launch that wrote none."""
+        if launch is not None:
+            from mushin._jobs import forget_launch
+
+            forget_launch(launch)
+
+    def _clusters(params) -> str | None:
+        """The SLURM clusters a launch's jobs were sent to, as sbatch reads
+        them (`--clusters`, or `SBATCH_CLUSTERS`), or None for the default
+        one: `squeue` and `scontrol` see another cluster's jobs only when
+        told it."""
+        extra = params.get("additional_parameters") or {}
+        for key in ("clusters", "cluster"):
+            value = extra.get(key)
+            if isinstance(value, list | tuple):
+                value = ",".join(map(str, value))
+            if value:
+                return str(value)
+        return os.environ.get("SBATCH_CLUSTERS") or None
+
+    def _cell_depth(config) -> int:
+        """How many levels below the sweep root `hydra.sweep.subdir` puts a
+        cell's dir (1 for Hydra's ``${hydra.job.num}``, 2 for
+        ``a_${a}/b_${b}``), counted on the subdir's text: the driver cannot
+        resolve it for a job (it may read the job's own keys), and resolving
+        it would run its resolvers outside a job. `show` reads only the
+        root's direct children, so it lists no queued cell of a deeper
+        launch."""
+        raw = OmegaConf.to_container(config.hydra.sweep, resolve=False)["subdir"]
+        return max(len(Path(str(raw)).parts), 1)
 
     def _task_failed(ret) -> bool:
         """Whether one task's return is a failure, as `jobs_post_process`
