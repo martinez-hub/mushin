@@ -933,7 +933,7 @@ def test_parametric_tests_have_no_floor_for_the_family_to_raise(test):
     """A t-test's p-value falls without bound as the separation grows, so the
     probe's value is not a floor: three methods two seeds apart by 10000 are
     all significant under Holm at alpha=1e-6, and must not be told they
-    cannot be (Codex, #269). Every parametric test takes the same branch."""
+    cannot be (#269). Every parametric test takes the same branch."""
     scores = np.array([[0.0, 1.0], [10000.0, 10001.0], [20000.0, 20001.0]])
     ds = xr.Dataset(
         {"score": (("method", "seed"), scores)},
@@ -952,8 +952,8 @@ def test_rank_probe_takes_the_exact_path_scipy_takes_for_real_data():
     """Identical paired differences are ties, which switch scipy's Wilcoxon to
     its asymptotic p-value at larger n (0.00018 at 14 seeds against the exact
     2 ** (1 - 14)); a probe built that way told 25 methods at 14 seeds, whose
-    300 Holm-corrected pairs are all significant, that none could be (Codex,
-    #269). The probe's differences are distinct, so it reaches the exact floor."""
+    300 Holm-corrected pairs are all significant, that none could be
+    (#269). The probe's differences are distinct, so it reaches the exact floor."""
     assert _best_case_p("wilcoxon", 14) == 2 ** (1 - 14)
     n_methods, n_seeds = 25, 14
     scores = np.array([(np.arange(n_seeds) + 1.0) * (i + 1) for i in range(n_methods)])
