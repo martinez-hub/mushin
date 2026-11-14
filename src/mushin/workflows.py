@@ -1730,6 +1730,17 @@ class _TaskRunner:
                         stacklevel=3,
                     )
                 else:
+                    # A reused cell's result was computed under the prior
+                    # record's fingerprint: keep it where this run has none (a
+                    # config that cannot be resolved), or a later resume under
+                    # another config would have nothing to compare and would
+                    # reuse it (#396).
+                    kept = {
+                        "config_hash": chash if chash is not None else prior_config,
+                        "code_hash": (
+                            self.code_hash if self.code_hash is not None else prior_code
+                        ),
+                    }
                     cached = read_metrics_sidecar(cell_dir)
                     if cached is not None:
                         # Refresh THIS job dir so its metrics/status match the
@@ -1740,7 +1751,7 @@ class _TaskRunner:
                         # A no-op when the cached cell is already this dir.
                         merged = merge_project_records(prior_deps, deps)
 
-                        def reused(cached=cached, merged=merged):
+                        def reused(cached=cached, merged=merged, kept=kept):
                             written = write_metrics_sidecar(cwd, cached)
                             # Keep the reused cell's prior record (see
                             # merge_project_records): writing this run's keys
@@ -1754,6 +1765,7 @@ class _TaskRunner:
                                 attempt=1,
                                 code_deps=merged,
                                 metrics=written,
+                                **kept,
                             )
 
                         return cached, deps, reused
@@ -1764,7 +1776,7 @@ class _TaskRunner:
                         # metrics file in this dir is not its result.
                         merged = merge_project_records(prior_deps, deps)
 
-                        def reused_none(merged=merged):
+                        def reused_none(merged=merged, kept=kept):
                             remove_sidecar(cwd / METRICS_FILE)
                             write_status(
                                 cwd,
@@ -1773,6 +1785,7 @@ class _TaskRunner:
                                 attempt=1,
                                 code_deps=merged,
                                 no_metrics=True,
+                                **kept,
                             )
 
                         return None, deps, reused_none

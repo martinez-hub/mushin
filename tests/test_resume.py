@@ -571,6 +571,40 @@ def test_the_guides_lightning_recipe_resumes_from_its_checkpoint(tmp_path):
     assert resumed.to_xarray()["epochs"].values.tolist() == [2.0]
 
 
+def test_a_reuse_keeps_the_fingerprint_its_metrics_were_computed_under(
+    tmp_path, monkeypatch
+):
+    """A resume whose config cannot be resolved has no fingerprint, reuses
+    the completed cell, and kept writing its record without one; a later
+    resume under another config then had nothing to compare, and reused the
+    old result for it (#396)."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    monkeypatch.delenv("MUSHIN_TEST_UNSET_VAR", raising=False)
+    calls = []
+
+    class T(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, lr):
+            calls.append(lr)
+            return dict(v=float(lr))
+
+    sweep = dict(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        T().run(lr=0.1, **sweep)
+        T().run(lr="${oc.env:MUSHIN_TEST_UNSET_VAR}", resume=True, **sweep)
+        record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+        assert "config_hash" in record
+        wf = T()
+        wf.run(lr=0.2, resume=True, **sweep)
+    assert calls == [0.1, 0.2]
+    assert float(wf.to_xarray()["v"].squeeze()) == 0.2
+
+
 def test_a_resume_reuses_a_completed_cell_that_returned_none(tmp_path):
     """#373: a cell whose task returned None wrote no metrics file, and its
     record says so (#364): a resume reuses it rather than running it again.
@@ -602,3 +636,30 @@ def test_a_resume_reuses_a_completed_cell_that_returned_none(tmp_path):
     record.write_text(json.dumps(data))
     W().run(x=multirun([1, 2]), working_dir=str(tmp_path), resume=True)
     assert calls == [2]
+
+
+def test_a_reuse_of_a_none_cell_keeps_its_fingerprint(tmp_path, monkeypatch):
+    """The same for a cell whose task returned None (#373): its reuse keeps the
+    fingerprint it was completed under (#396)."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    monkeypatch.delenv("MUSHIN_TEST_UNSET_VAR", raising=False)
+    calls = []
+
+    class T(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, lr):
+            calls.append(lr)
+
+    sweep = dict(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        T().run(lr=0.1, **sweep)
+        T().run(lr="${oc.env:MUSHIN_TEST_UNSET_VAR}", resume=True, **sweep)
+        record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
+        assert "config_hash" in record
+        T().run(lr=0.2, resume=True, **sweep)
+    assert calls == [0.1, 0.2]
