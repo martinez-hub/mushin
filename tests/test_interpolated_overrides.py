@@ -434,6 +434,24 @@ def test_a_nan_element_beside_an_interpolation(tmp_path):
     assert _values(back) == [1.0, 1.0, 1.0]
 
 
+class Based(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, base=None):
+        return dict(v=1.0 if x == x else 0.0)
+
+
+def test_an_interpolation_that_resolves_to_nan_keys_as_nan(tmp_path):
+    """A record stores a combo's NaN tagged (#382), so the cell whose element
+    resolves to NaN keys as ``nan`` (not as a swept None) in the run and in a
+    reload (#386). The coordinate is the driver's reading, as on main."""
+    wf = Based()
+    wf.run(base=float("nan"), x=multirun(["${base}", 0.5]), working_dir=tmp_path)
+    back = Based().load_from_dir(tmp_path, "mushin_metrics.json")
+    for read in (wf, back):
+        assert [str(x) for x in read.multirun_task_overrides["x"]] == ["nan", "0.5"]
+        assert _values(read) == [0.0, 1.0]
+
+
 def test_a_sweep_from_before_run_stamps_reads_its_records(tmp_path):
     """A sweep written before runs were named has no run stamp: its records
     count as its own, as a reload takes them elsewhere."""
