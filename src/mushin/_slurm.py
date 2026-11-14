@@ -1,6 +1,6 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""`mushin.slurm`: the resources of a sweep's SLURM jobs, one cell per job (#346).
+"""`mushin.slurm`: the resources of a sweep's SLURM jobs (#346).
 
 Standard library only: `import mushin` loads this module, and the check below
 runs only when the helper is called.
@@ -49,10 +49,12 @@ def slurm(
     account: str | None = None,
     qos: str | None = None,
     setup: list[str] | None = None,
+    cells_per_job: int = 1,
     check: bool = True,
     **extra: Any,
 ) -> dict[str, Any]:
-    """The ``launcher_config`` of a sweep that runs each cell as one SLURM job.
+    """The ``launcher_config`` of a sweep that runs its cells as SLURM jobs of
+    one task.
 
     Pass it with ``launcher="submitit_slurm"`` (the ``slurm`` extra)::
 
@@ -65,7 +67,8 @@ def slurm(
     Each job runs one task, with ``gpus`` GPUs and ``cpus`` CPUs, so a cell
     runs once (a job of several tasks runs the cell once per task). A cell
     that trains with DDP, on one node or several, runs a task per GPU: build
-    its config with ``mushin.submitit_slurm_config`` instead.
+    its config with ``mushin.submitit_slurm_config`` instead. Each job runs
+    one cell, or ``cells_per_job`` of them, for a sweep of many short cells.
 
     Parameters
     ----------
@@ -92,6 +95,13 @@ def slurm(
         path. A shell variable is written ``$HOME``, not ``${HOME}``: Hydra
         reads every ``${...}`` as its own interpolation, so no line may hold
         one.
+    cells_per_job : int
+        The cells each job runs, one after another, in one Python process;
+        1, the default, gives each cell a job of its own. The cells a sweep
+        submits are grouped in order, so a job runs up to this many. ``timeout_min``
+        is the job's, for all of them, and ``array_parallelism`` counts jobs,
+        not cells. What a cell leaves in the process (module state, GPU
+        memory it still references) is there for the next.
     check : bool
         Check the request against the cluster when this is called: see below.
     **extra
@@ -124,6 +134,7 @@ def slurm(
     inside a job. The answer is kept for five minutes.
     """
     gpus = _whole("gpus", gpus, 0)
+    cells_per_job = _whole("cells_per_job", cells_per_job, 1)
     timeout_min_given = timeout_min is not None
     timeout_min = _whole("timeout_min", 60 if timeout_min is None else timeout_min, 1)
     config: dict[str, Any] = {
@@ -146,6 +157,10 @@ def slurm(
             config[key] = value
     if setup is not None:
         config["setup"] = _setup_lines(setup)
+    if cells_per_job > 1:
+        # Only when asked for: the config of one cell per job stays the
+        # plugin's own fields (#348).
+        config["cells_per_job"] = cells_per_job
     clash = sorted(config.keys() & extra.keys())
     if clash:
         raise ValueError(

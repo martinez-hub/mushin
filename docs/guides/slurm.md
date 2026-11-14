@@ -2,7 +2,9 @@
 
 mushin can submit a sweep's cells to a SLURM cluster itself: no `sbatch` script
 to write. Each cell runs as one SLURM job (a task of a job array, when several
-are submitted together), in its own directory under the sweep's `working_dir`, and `run()` gathers the results into
+are submitted together), or, for a sweep of many short cells, each job runs
+several cells in turn ([Many small cells](#many-small-cells)). Every cell runs
+in its own directory under the sweep's `working_dir`, and `run()` gathers the results into
 the same `xarray.Dataset` a local sweep gives. This guide covers ordinary
 sweeps, where each cell runs in one process. For a cell trained with DDP across
 several GPUs or nodes, see the [multi-node guide](multinode.md).
@@ -142,7 +144,8 @@ cell sent to a job again is `queued` in place of the earlier run's status
 until that job starts.
 `mushin.show("/scratch/me/lr-sweep", jobs=True)` also lists each cell's job id
 (`job`), the node it ran on (`host`) and the folder of its logs (`logs`); a
-queued cell has only its job id.
+queued cell has only its job id. With `cells_per_job`, the cells a running job
+has not reached yet are `queued`, with that job's id.
 
 The driver names the jobs of each submission in a file under
 `<working_dir>/mushin_jobs/`, which `show` reads, and removes the file once
@@ -177,6 +180,17 @@ returning, what ended it and where its log is. A reload of the sweep
 (`load_from_dir`) can then report the cell failed too, as the run did. The
 [resilience guide](resilience.md) covers failed cells and checkpoints.
 
+A job of several cells (`cells_per_job`, below) goes on to its next cell
+after one raises. When the job itself ends without returning, the cells it
+finished keep their results when their records hold them (a metrics file the
+record names, or a task that returned None); the cell it was running and
+those it had not reached fail, and a resume runs them again. Each of those
+cells reports the job's error, not one of its own. At the time limit, a job
+that is not requeued (the plugin's default for SLURM, `max_num_timeout=0`)
+fails the cell it was running and goes on to the next ones until SLURM ends
+it; a job that is requeued skips the cells it finished and runs the
+interrupted one again.
+
 ## Resume, and cancel
 
 Run the same sweep again with `resume=True` and the same `working_dir`.
@@ -188,7 +202,8 @@ cannot judge the cell as the job would. Among others: a cell whose config
 reads the environment (`${oc.env:...}`), a cell whose job imports modules the
 driver cannot (a `PYTHONPATH` set in `setup`, say), and every cell of a sweep
 with Hydra callbacks, since the job's environment, imports and callbacks are
-not the driver's.
+not the driver's. With `cells_per_job`, a resume groups only the cells it
+submits, so its jobs can be fewer than the first run's.
 
 To cancel a sweep, pass its `working_dir` to `mushin.cancel`, on a machine
 where `scontrol` and `scancel` work (a login node), with the driver running or
@@ -204,7 +219,8 @@ mushin.cancel("/scratch/me/lr-sweep")  # cancels them, and returns their ids
 It reads the submissions listed under `<working_dir>/mushin_jobs/`, asks
 `scontrol` about each one's job array, and runs `scancel` once, for the arrays
 still queued or running. A driver still running records the cancelled cells as
-failed, and a later `resume=True` runs them again. Once a submission's jobs are
+failed, and a later `resume=True` runs them again. With `cells_per_job`,
+cancelling a running job also cancels the cells it had not reached. Once a submission's jobs are
 cancelled or over, `cancel` removes its file, so `show` no longer lists its
 cells as `queued`. Some cases follow:
 
@@ -231,12 +247,40 @@ submission of its own.
 
 ## Many small cells
 
-Each cell is its own job, so a sweep of many short cells spends much of its
-time in the queue, and a large grid can hit the cluster's limits on a job
-array's size (`MaxArraySize`) or on how many jobs you may have queued. Ways to
-do better:
+By default each cell is its own job, so a sweep of many short cells spends
+much of its time in the queue, and a large grid can hit the cluster's limits
+on a job array's size (`MaxArraySize`) or on how many jobs you may have
+queued. `cells_per_job` gives each job several cells, which it runs one after
+another:
 
-- give each job more of the sweep's work: fewer, longer cells; or
+```python
+launcher_config = mushin.slurm(gpus=1, timeout_min=120, cells_per_job=20)
+```
+
+The cells a sweep submits are grouped in order, up to 20 to a job (the last
+job may get fewer), so 1,000 cells make 50 jobs. Each cell keeps its own
+directory, record, metrics file and `.hydra/` snapshot, and `run()` returns
+the same dataset.
+
+- `timeout_min` is the whole job's time limit, for all of its cells: allow
+  for `cells_per_job` of them.
+- The cells of a job share one Python process, as a reused joblib worker's
+  do. What one cell leaves behind is there for the next: module-level state,
+  the random state of a library the task does not seed, GPU memory a task
+  still references, a `torch.distributed` process group left initialized,
+  and environment variables the task sets (`hydra.job.env_set` is restored
+  after each cell). `pin_gpu_round_robin` raises in every cell after a job's
+  first. The cells of a job also share its submitit log.
+- A job of several tasks (`tasks_per_node` or `nodes` above 1, as for DDP)
+  cannot run several cells: the sweep is refused before anything is
+  submitted.
+- `array_parallelism` caps how many jobs run at once, not cells.
+- Choose `cells_per_job` so the number of jobs fits the cluster's
+  `MaxArraySize` and your queue limit.
+
+Other ways to do better:
+
+- give each cell more of the sweep's work: fewer, longer cells; or
 - run the sweep inside one allocation: request the GPUs once, in one `sbatch`
   job, then sweep with `launcher="joblib"` and `pin_gpu_round_robin`, as the
   [packing guide](packing.md#a-sweep-inside-one-slurm-allocation) shows. That

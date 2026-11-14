@@ -72,8 +72,10 @@ devices. `num_gpus` must not exceed the size of that allocation.
 ## A sweep inside one SLURM allocation
 
 On a cluster, the same recipe packs a sweep into one allocation instead of a
-SLURM job per cell (the [SLURM guide](slurm.md) covers that one). Request the
-GPUs once and run the sweep's script on the allocated node:
+SLURM job per cell (the [SLURM guide](slurm.md) covers that one, and its
+[`cells_per_job`](slurm.md#many-small-cells) runs several cells in each job,
+one after another in one process, so `pin_gpu_round_robin` does not suit it).
+Request the GPUs once and run the sweep's script on the allocated node:
 
 ```bash
 sbatch --nodes=1 --gpus-per-node=4 --cpus-per-task=16 --time=08:00:00 --wrap "python sweep.py"

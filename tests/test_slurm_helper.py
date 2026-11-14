@@ -1,7 +1,7 @@
 # Copyright 2023, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
 # SPDX-License-Identifier: MIT
-"""`mushin.slurm`: a sweep's SLURM resources, one cell per job, and the
-check of the request against `scontrol` (#346). No test reaches a real
+"""`mushin.slurm`: a sweep's SLURM resources, and the check of the request
+against `scontrol` (#346). No test reaches a real
 `scontrol`: each stands in its output."""
 
 from __future__ import annotations
@@ -208,6 +208,29 @@ def test_every_key_is_a_field_of_the_plugins_slurm_config():
         gpus=1, mem_gb=8, partition="p", account="a", qos="q", setup=["true"]
     )
     assert set(config) <= fields
+
+
+def test_cells_per_job():
+    """Several cells per job (#348): written only above 1, so the config of
+    one cell per job is the same as before. The first two asserts pass
+    without the argument too (it fell into ``**extra``): guards."""
+    assert mushin.slurm(cells_per_job=4)["cells_per_job"] == 4
+    assert "cells_per_job" not in mushin.slurm()
+    assert "cells_per_job" not in mushin.slurm(cells_per_job=1)
+    for bad in (0, True, 1.5):
+        with pytest.raises(ValueError, match="cells_per_job must be"):
+            mushin.slurm(cells_per_job=bad)
+
+
+def test_cells_per_job_is_a_field_of_mushins_slurm_config():
+    """Not of the plugin's: `run()` routes `submitit_slurm` to mushin's."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from omegaconf import OmegaConf
+
+    from hydra_plugins.mushin_submitit.launcher import MushinSlurmQueueConf
+
+    fields = set(OmegaConf.structured(MushinSlurmQueueConf).keys())
+    assert set(mushin.slurm(gpus=1, cells_per_job=4)) <= fields
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a stand-in srun script")

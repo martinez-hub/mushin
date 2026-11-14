@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """The launchers behind `run(launcher="submitit_slurm")` and `"submitit_local"`.
 
-They are hydra-submitit-launcher's own launchers, changed in two places.
+They are hydra-submitit-launcher's own launchers, changed in three places.
 They submit only the cells that need a job: a cell `sample=` leaves out, a
 resume reuses or a `cache_dir` holds is settled in the driver first, by the
 runner's own rules. And they wait on every job: the plugin waits in a list
@@ -13,11 +13,13 @@ driver while the later jobs still run, unobserved, and the sweep records
 nothing. Here a job that ends without a result comes back to mushin as a
 failed cell, which `on_error` then handles as it does a task that raised,
 unless the cell's own record holds the result the job could not return
-(#345).
+(#345). And with ``cells_per_job`` above 1, each job runs several cells, one
+after another, so a sweep of many short cells costs fewer jobs (#348).
 
 `run()` sends the plugin's two names here (`mushin_submitit_slurm` and
-`mushin_submitit_local`); their config is the plugin's, field for field, so
-`launcher_config` and `submitit_slurm_config` work unchanged.
+`mushin_submitit_local`); their config is the plugin's, field for field, plus
+``cells_per_job``, so `launcher_config` and `submitit_slurm_config` work
+unchanged.
 
 For mushin's runner, each launch also names its jobs in a launch file
 under `<working_dir>/mushin_jobs/` until it has waited on them, so
@@ -55,11 +57,56 @@ if _plugin_launcher is not None:
     from omegaconf import OmegaConf, open_dict, read_write
 
     class _MushinSubmititMixin:
-        """Submit as the plugin does, but only the cells that need a job;
-        wait on every job (#345).
+        """Submit as the plugin does, but only the cells that need a job,
+        several to a job when ``cells_per_job`` says so (#348); wait on every
+        job (#345).
 
-        Holds no state of its own: the launcher is pickled into every job
-        (`map_array(self, ...)`) and into `checkpoint()`'s resubmission."""
+        Holds nothing but its config: the launcher is pickled into every job
+        (`map_array(self, ...)`, or a `_CellGroup` holding it) and into
+        `checkpoint()`'s resubmission."""
+
+        def __init__(self, *, cells_per_job=1, **params):
+            # Kept out of the plugin's params: `_submit` hands those to
+            # submitit's `update_parameters`, which refuses a key it does not
+            # know (#348).
+            super().__init__(**params)
+            self._cells_per_job = cells_per_job
+
+        def setup(self, *, hydra_context, task_function, config):
+            """The plugin's `setup`, then the refusals of ``cells_per_job``:
+            Hydra sets the launcher up before it writes anything for the
+            sweep (``multirun.yaml``), and `launcher_config` and a raw
+            ``hydra.launcher.cells_per_job`` override both arrive here."""
+            super().setup(
+                hydra_context=hydra_context,
+                task_function=task_function,
+                config=config,
+            )
+            cells = self._cells_per_job
+            # Not a bool: `True` is an int, but not a count anyone means.
+            if isinstance(cells, bool) or not isinstance(cells, int) or cells < 1:
+                raise ValueError(
+                    f"cells_per_job must be a whole number >= 1, got {cells!r}"
+                )
+            if cells == 1:
+                return
+            tasks = _tasks_per_job(self.params)
+            if tasks > 1:
+                # Every task of a job runs every cell (#365), so several
+                # tasks cannot share out a job's cells.
+                raise ValueError(
+                    f"cells_per_job={cells} needs a job of one task; this "
+                    f"launcher config gives each job {tasks} tasks "
+                    "(tasks_per_node x nodes). Use cells_per_job=1 for a "
+                    "cell of several tasks, such as DDP."
+                )
+            if not getattr(task_function, "_mushin_collects_dead_jobs", False):
+                # A dead job's cells are sorted out from their records, which
+                # only mushin's runner writes.
+                raise ValueError(
+                    f"cells_per_job={cells} runs only a mushin sweep's cells "
+                    "(`run()`), not a plain Hydra task function."
+                )
 
         def launch(self, job_overrides, initial_job_idx):
             settled = self._settled_in_driver(job_overrides, initial_job_idx)
@@ -260,8 +307,22 @@ if _plugin_launcher is not None:
                     )
                 )
 
+            # mushin's: several cells per job (#348).
+            if self._cells_per_job > 1:
+                return self._submit_groups(executor, job_params), job_params
             jobs = executor.map_array(self, *zip(*job_params))  # noqa: B905
             return jobs, job_params
+
+        def _submit_groups(self, executor, job_params):
+            """Submit the cells of ``job_params`` (one per cell, in order) as
+            jobs of up to ``cells_per_job`` consecutive cells, in one array,
+            each running a `_CellGroup`; return one job per cell, a job's
+            `Job` repeated for each of its cells, so the launch file, `_wait`
+            and `launch()` stay keyed by cell (#348)."""
+            size = self._cells_per_job
+            groups = [job_params[i : i + size] for i in range(0, len(job_params), size)]
+            jobs = executor.map_array(_CellGroup(self), groups)
+            return [job for job, group in zip(jobs, groups, strict=True) for _ in group]
 
         def _record_launch(self, jobs, job_params) -> Path | None:
             """Write the launch file that names ``jobs`` (#345), and return
@@ -310,39 +371,61 @@ if _plugin_launcher is not None:
                 return None
 
         def _wait(self, jobs, job_params):
-            """Every job's result, in submission order.
+            """Every cell's return, in launch order.
+
+            ``jobs`` and ``job_params`` are per cell, in launch order. The
+            cells of a job of several (``cells_per_job``, #348) are
+            consecutive and share one `Job` object, whose `results()` is
+            read once (submitit caches nothing, and waits on a job with no
+            result before it raises), and whose outcome stands for each of
+            them. Such a job returns a `_GroupReturns`, from which each cell
+            takes its own return, as a one-cell job's is its first result. A
+            cell in it with no return of its own comes back as a dead job's
+            cell: one that raised (`_Unreturned`) as a job that pickled an
+            error in place of its result, one not run (or missing) as a job
+            that gave no result.
 
             For mushin's runner, a job that ended without a result comes
-            back as its cell's record says (`_dead_return`): a failed cell,
-            or the result the cell recorded, and the later jobs are still
-            waited on. An error that cannot become one (a job not known to have
-            ended, or a cell that cannot be composed here) is raised once
-            every job has been waited on. Any other task function sees the
-            first error at once, as the plugin raises it."""
+            back as its cell's record says (`_dead_return`), each of its
+            cells so: a failed cell, or the result the cell recorded, and the
+            later jobs are still waited on. An error that cannot become one
+            (a job not known to have ended, or a cell that cannot be
+            composed here) is raised once every job has been waited on. Any
+            other task function sees the first error at once, as the plugin
+            raises it (it never runs several cells per job)."""
             from submitit.core.utils import FailedJobError, UncompletedJobError
 
             collects = getattr(self.task_function, "_mushin_collects_dead_jobs", False)
+            outcomes: dict = {}
             returns, unrecorded = [], None
             for job, params in zip(jobs, job_params, strict=True):
-                try:
-                    results = job.results()
-                except (UncompletedJobError, FailedJobError) as exc:
-                    # submitit raises these once the job has ended.
-                    if not collects:
-                        raise
-                    error, ended = exc, True
-                except Exception as exc:  # noqa: BLE001 - e.g. an unreadable result
-                    if not collects:
-                        raise
-                    error, ended = exc, _ended(job)
-                else:
-                    # Outside the try: the job gave its results, so nothing
-                    # here may send it down the dead-job path.
-                    several = collects and len(results) > 1
-                    returns.append(
-                        self._job_return(job, results) if several else results[0]
-                    )
-                    continue
+                if id(job) not in outcomes:
+                    outcomes[id(job)] = _outcome(job, collects)
+                results, error, ended = outcomes[id(job)]
+                if results is not None:
+                    # The job gave its results, so nothing here may send its
+                    # cell down the dead-job path but the cell's own entry.
+                    first = results[0]
+                    if not isinstance(first, _GroupReturns):
+                        several = collects and len(results) > 1
+                        returns.append(
+                            self._job_return(job, results) if several else first
+                        )
+                        continue
+                    entry = first.get(params[2])
+                    if not isinstance(entry, _Unreturned) and entry is not None:
+                        returns.append(entry)
+                        continue
+                    ended = True
+                    if entry is not None and entry.why == "raised":
+                        error = FailedJobError(entry.text)
+                    elif entry is not None:
+                        error = UncompletedJobError(entry.text)
+                    else:
+                        error = UncompletedJobError(
+                            f"submitit job {job.job_id} returned nothing for "
+                            f"cell #{params[2]}"
+                        )
                 try:
                     if not ended:
                         # Recording a cell whose job may still run would
@@ -447,6 +530,38 @@ if _plugin_launcher is not None:
                     "record holds one, which stands for it (#345)"
                 )
             return ret
+
+    def _outcome(job, collects):
+        """A job's ``(results, error, ended)``: its results, or the error
+        reading them raised and whether submitit knows the job has ended.
+        Any task function but mushin's runner gets the error raised, as the
+        plugin raises it."""
+        from submitit.core.utils import FailedJobError, UncompletedJobError
+
+        try:
+            return job.results(), None, True
+        except (UncompletedJobError, FailedJobError) as exc:
+            # submitit raises these once the job has ended.
+            if not collects:
+                raise
+            return None, exc, True
+        except Exception as exc:  # noqa: BLE001 - e.g. an unreadable result
+            if not collects:
+                raise
+            return None, exc, _ended(job)
+
+    def _tasks_per_job(params) -> int:
+        """How many tasks a launcher config gives each job: ``tasks_per_node``
+        times ``nodes``, each 1 when absent or unreadable. An ``ntasks`` in
+        ``additional_parameters`` is not seen."""
+
+        def count(name: str) -> int:
+            try:
+                return max(int(params.get(name) or 1), 1)
+            except (TypeError, ValueError):
+                return 1
+
+        return count("tasks_per_node") * count("nodes")
 
     def _entry_of(job) -> dict | None:
         """The job's id and log folder for its cell's record (#345); None
@@ -575,19 +690,113 @@ if _plugin_launcher is not None:
         )
         return f"{type(exc).__name__}({message!r})"
 
+    class _Unreturned:
+        """A cell of a job of several with no return of its own (#348):
+        ``why`` is ``"raised"`` (its Hydra job raised outside its task, or
+        its return would not load once pickled, so it would take the whole
+        job's result down with it) or ``"not run"`` (an error between two
+        cells, a time limit's signal say, stopped the job before it), and
+        ``text`` the traceback."""
+
+        def __init__(self, why: str, text: str):
+            self.why, self.text = why, text
+
+    class _GroupReturns(dict):
+        """What a job of several cells returns: each cell's return, a
+        `JobReturn` or an `_Unreturned`, by its Hydra job number (#348).
+        `_wait` tells it from a one-cell job's `JobReturn` by its type."""
+
+    class _CellGroup:
+        """The callable each job of several cells runs (#348): the cells'
+        Hydra jobs, one after another, each through the launcher's own
+        `__call__` (so through Hydra's `run_job`, as a one-cell job runs),
+        skipping those in ``done``, which a requeued job carries from its
+        `checkpoint()`.
+
+        A cell's error never stops the job: Hydra returns a task that raised
+        as a FAILED return, and an error outside the task (in `run_job`, or
+        a return that would not load) is the cell's `_Unreturned`, so the
+        job's later cells still run and its result can still be saved, as
+        the other cells' one-cell jobs would. Only an `Exception` is caught:
+        submitit's requeue exits with `SystemExit`, and the local
+        controller stops a job with `SIGINT`.
+
+        ``done`` maps a finished cell's job number to ``(how, value)``: its
+        return (``"returned"``), or the traceback of a cell that
+        ``"raised"``."""
+
+        def __init__(self, launcher, done=()):
+            self.launcher = launcher
+            self.done = dict(done)
+
+        def __call__(self, cells):
+            import pickle
+            import traceback
+
+            import cloudpickle
+
+            done = dict(self.done)
+            try:
+                for params in cells:
+                    num = params[2]
+                    if num in done:
+                        continue  # finished before a requeue
+                    try:
+                        ret = self.launcher(*params)
+                        # Loaded back as the driver will load it: a return
+                        # that pickles but does not unpickle (an exception
+                        # whose __init__ takes two arguments) would make the
+                        # whole job's result unreadable.
+                        pickle.loads(cloudpickle.dumps(ret))
+                        done[num] = ("returned", ret)
+                    except Exception:  # noqa: BLE001 - the cell's, not the job's
+                        done[num] = ("raised", traceback.format_exc())
+                    self.done = dict(done)
+            except Exception:  # noqa: BLE001 - e.g. a signal's error between cells
+                # Raised outside any cell's Hydra job: the job stops here,
+                # and returns what it finished.
+                text = traceback.format_exc()
+                for params in cells:
+                    done.setdefault(params[2], ("not run", text))
+            # Built only now: the first cell's `run_job` runs Hydra's plugin
+            # scan, which executes this module again and rebinds its classes,
+            # and cloudpickle pickles an instance of a class since rebound by
+            # value, as a class the driver's `_wait` would not know.
+            return _GroupReturns(
+                {
+                    num: value if how == "returned" else _Unreturned(how, value)
+                    for num, (how, value) in done.items()
+                }
+            )
+
+        def checkpoint(self, cells):
+            """The plugin's `checkpoint`, carrying the cells this job
+            finished, so a requeued job skips them and runs again only the
+            one it was in, as that cell's one-cell job would."""
+            import submitit
+
+            return submitit.helpers.DelayedSubmission(
+                _CellGroup(self.launcher, self.done), cells
+            )
+
     class MushinSlurmLauncher(_MushinSubmititMixin, _plugin_launcher.SlurmLauncher):
         pass
 
     class MushinLocalLauncher(_MushinSubmititMixin, _plugin_launcher.LocalLauncher):
         pass
 
+    # The plugin's configs, plus mushin's one field: how many cells each job
+    # runs, one after another (#348). The launcher's `__init__` takes it out
+    # of the params submitit sees.
     @dataclass
     class MushinSlurmQueueConf(_plugin_config.SlurmQueueConf):
         _target_: str = "hydra_plugins.mushin_submitit.launcher.MushinSlurmLauncher"
+        cells_per_job: int = 1
 
     @dataclass
     class MushinLocalQueueConf(_plugin_config.LocalQueueConf):
         _target_: str = "hydra_plugins.mushin_submitit.launcher.MushinLocalLauncher"
+        cells_per_job: int = 1
 
     ConfigStore.instance().store(
         group="hydra/launcher",

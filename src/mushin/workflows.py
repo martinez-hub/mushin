@@ -3551,7 +3551,10 @@ class BaseWorkflow:
             one SLURM job, e.g. ``run(launcher="submitit_slurm",
             launcher_config=mushin.slurm(gpus=1, partition="gpu"))``, or
             with `mushin.submitit_slurm_config` for DDP cells, a task per GPU.
-            Requires ``launcher=``.
+            ``cells_per_job`` (``mushin.slurm(..., cells_per_job=20)``) has
+            each job run several cells, one after another, on
+            ``"submitit_slurm"`` or ``"submitit_local"`` only. Requires
+            ``launcher=``.
 
         overrides: List[str] | None (default: None)
             Parameter overrides not considered part of the swept workflow
@@ -3692,6 +3695,19 @@ class BaseWorkflow:
                     "configure that launcher (e.g. launcher='submitit_slurm' "
                     "with mushin.slurm(...), or mushin.submitit_slurm_config(...) "
                     "for DDP)."
+                )
+            if "cells_per_job" in launcher_config and launcher not in (
+                *_MUSHIN_SUBMITIT,
+                *_MUSHIN_SUBMITIT.values(),
+            ):
+                # Hydra's own error for a key the launcher's config lacks
+                # says to append it with `+`, which would only fail later
+                # (#348): name the launchers that have the field instead.
+                raise ValueError(
+                    "`cells_per_job` is a field of mushin's submitit launchers: "
+                    "use launcher='submitit_slurm' (or 'submitit_local') to run "
+                    f"several cells per job; launcher={launcher!r} has no such "
+                    "field."
                 )
             # Emit the `hydra.launcher.*` overrides so callers never hand-roll
             # them (values serialized like sweep elements: numbers/bools bare,
@@ -5930,7 +5946,10 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
             one SLURM job, e.g. ``run(launcher="submitit_slurm",
             launcher_config=mushin.slurm(gpus=1, partition="gpu"))``, or
             with `mushin.submitit_slurm_config` for DDP cells, a task per GPU.
-            Requires ``launcher=``.
+            ``cells_per_job`` (``mushin.slurm(..., cells_per_job=20)``) has
+            each job run several cells, one after another, on
+            ``"submitit_slurm"`` or ``"submitit_local"`` only. Requires
+            ``launcher=``.
 
         overrides: List[str] | None (default: None)
             Parameter overrides not considered part of the swept workflow
