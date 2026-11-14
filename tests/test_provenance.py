@@ -758,3 +758,24 @@ def test_a_config_holding_a_path_is_recorded(tmp_path):
     write_provenance(tmp_path, OmegaConf.structured(Cfg))
     record = json.loads((tmp_path / "mushin_provenance.json").read_text())
     assert record["config"]["data"] == str(pathlib.Path("/data/train"))
+
+
+def test_a_secret_shaped_value_json_cannot_write_is_redacted(tmp_path):
+    """A value json cannot write (a Path) is written as its text, and that
+    text is redacted as a string would be (#398)."""
+    import json
+    import pathlib
+    from dataclasses import dataclass
+
+    from omegaconf import OmegaConf
+
+    from mushin._provenance import write_provenance
+
+    @dataclass
+    class Cfg:
+        data: pathlib.Path = pathlib.Path("hf_123456789abcdef")
+
+    write_provenance(tmp_path, OmegaConf.structured(Cfg))
+    text = (tmp_path / "mushin_provenance.json").read_text()
+    assert "hf_123456789abcdef" not in text
+    assert json.loads(text)["config"]["data"] == "***REDACTED***"

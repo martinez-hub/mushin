@@ -311,7 +311,8 @@ def _redact_config(obj: Any) -> Any:
     A value under a secret-named key (``api_key``, ``token``, ...) is redacted
     wholesale; a provider-token-shaped string (``sk-...``, ``hf_...``) is
     redacted even under an innocent key. Structure and non-secret values are
-    preserved so the record stays useful.
+    preserved so the record stays useful. A value json cannot write (a Path)
+    is taken as its text, and redacted as a string is (#398).
     """
     if isinstance(obj, dict):
         return {
@@ -320,9 +321,10 @@ def _redact_config(obj: Any) -> Any:
         }
     if isinstance(obj, list):
         return [_redact_config(v) for v in obj]
-    if isinstance(obj, str) and _REDACT_VALUE_RE.search(obj):
-        return _REDACTED
-    return obj
+    if obj is None or isinstance(obj, (bool, int, float)):
+        return obj
+    text = obj if isinstance(obj, str) else str(obj)
+    return _REDACTED if _REDACT_VALUE_RE.search(text) else text
 
 
 def authored_config(cfg):
