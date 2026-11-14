@@ -805,6 +805,19 @@ def _resolve_in_place(cfg) -> None:
         pass
 
 
+def _tasks_per_cell(launcher_config) -> int:
+    """How many tasks a submitit launcher config gives each cell's job:
+    ``tasks_per_node`` times ``nodes``, each 1 when absent or unreadable."""
+
+    def count(name: str) -> int:
+        try:
+            return max(int(launcher_config.get(name, 1)), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    return count("tasks_per_node") * count("nodes")
+
+
 def _read_swept_value(cfg, name: str):
     """Read swept param ``name`` from a job config. A literal flat key wins;
     otherwise ``name`` is treated as a nested config *path* (``model.width``),
@@ -1598,16 +1611,22 @@ class _TaskRunner:
 
     def _began_under_this_budget(self, cell_dir) -> bool:
         """Whether this cell already started under this run's budget: its own
-        status sidecar says 'running' with this run's `budget_id`. A cell that
-        a scheduler preempted and requeued (SLURM `requeue`) enters again in a
-        new process, possibly after the deadline; it started before the
-        deadline, and a running cell is never cut short, so it runs on."""
+        status sidecar says 'running' with this run's `budget_id`, or is an
+        end this run recorded ('completed' or 'failed' with its `run_id`). A
+        cell that a scheduler preempted and requeued (SLURM `requeue`) enters
+        again in a new process, possibly after the deadline; it started before
+        the deadline, and a running cell is never cut short, so it runs on.
+        One preempted after its 'completed' write, before its job ended, would
+        otherwise be recorded skipped, and its metrics file removed."""
         from ._resume import read_cell_status
 
         status = read_cell_status(cell_dir) or {}
+        if status.get("status") == "running":
+            return status.get("budget_id") == self.budget_id
         return (
-            status.get("status") == "running"
-            and status.get("budget_id") == self.budget_id
+            status.get("status") in ("completed", "failed")
+            and self.run_id is not None
+            and status.get("run_id") == self.run_id
         )
 
     def _cache_key(self, config_hash, deps) -> str | None:
@@ -2030,7 +2049,9 @@ class _TaskRunner:
         this run wrote it for this cell (its ``run_id`` and combo). A
         completed one whose attempt wrote a metrics file holding the result
         whole (its ``metrics``, that file's digest) gives the cell's result
-        from that file, while the file is still that one, as a resume would, when the job had one task and did not pickle an error
+        from that file, while the file is still that one, as a resume would,
+        and one whose task returned None (its ``no_metrics``) gives None,
+        when the job had one task and did not pickle an error
         in place of its result (`_DeadJob.keepable`): it finished, but its
         result did not reach the driver, as when it came after submitit
         stopped waiting. A skipped one is skipped. Any other terminal record
@@ -2048,7 +2069,7 @@ class _TaskRunner:
         sweeper raises it after the batch); under ``"nan"`` a COMPLETED
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
-        from ._resume import read_cell_status
+        from ._resume import read_cell_status, wrote_no_metrics
         from ._sweep_io import read_metrics_sidecar_written
 
         num = ret.hydra_cfg.hydra.job.num
@@ -2069,6 +2090,10 @@ class _TaskRunner:
             this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
         )
         written = prior.get("metrics")
+        if own and status == "completed" and dead.keepable and wrote_no_metrics(prior):
+            # Its task returned None and wrote no metrics (#364): that is the
+            # result, as the run would have had it.
+            return JobStatus.COMPLETED, None
         if own and status == "completed" and dead.keepable and isinstance(written, str):
             # Only the file this record names: another job in a shared dir
             # may have written its own since.
@@ -2322,6 +2347,9 @@ class _TaskRunner:
                 # result if the job's own return is lost, while it is still
                 # this one (#345).
                 metrics=written,
+                # A task that returned None wrote no metrics file: a reload
+                # reads that, not a lost file (#364).
+                no_metrics=result is None,
             )
             return result
         except Exception as exc:  # noqa: BLE001 - fail-soft sentinel or re-raise
@@ -3093,7 +3121,8 @@ class BaseWorkflow:
             several ranks or tasks (a multi-rank DDP launch, or a submitit job
             with ``tasks_per_node > 1``, ``submitit_local`` included), because
             each checks it at its own moment: DDP could hang, or a late task
-            record the cell skipped.
+            record the cell skipped. When ``launcher_config`` gives each cell
+            several tasks, ``run()`` also warns before it submits anything.
 
         sample : int | None (default: None)
             Run a random ``sample``-cell subset of the grid (rest NaN) for fast
@@ -3185,6 +3214,22 @@ class BaseWorkflow:
                 f"hydra.launcher.{k}={_to_override_element(v)}"
                 for k, v in launcher_config.items()
             )
+            tasks = _tasks_per_cell(launcher_config)
+            if max_total_seconds is not None and tasks > 1:
+                # Each task disables the budget for itself and says so in its
+                # job's log (`_TaskRunner._multi_rank_world`); say it here
+                # too, where the caller sees it (#370).
+                import warnings
+
+                warnings.warn(
+                    "`max_total_seconds` is disabled for this sweep's cells: "
+                    f"`launcher_config` gives each cell {tasks} tasks "
+                    "(`tasks_per_node` x `nodes`), which would check the "
+                    "deadline at different moments. Bound the jobs with the "
+                    "launcher's time limit (e.g. `timeout_min`) instead.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # The workflow depends on Hydra changing the working directory per job
         # at runtime: each job writes and reads its metrics sidecar in its own
@@ -4966,6 +5011,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         if isinstance(metrics_filename, str):
             metrics_filename = [metrics_filename]
 
+        from ._resume import wrote_no_metrics
+        from ._sweep_io import METRICS_FILE
+
         job_metrics: list[Any] = []
         for i, dir_ in enumerate(self.multirun_working_dirs):
             # A cell recorded 'failed' or 'skipped' (fail-soft, `sample=`, or an
@@ -4986,12 +5034,34 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             ):
                 job_metrics.append(None)
                 continue
+            # A completed cell whose task returned None wrote no metrics
+            # file, and its record says so (#364): its sidecar is not looked
+            # for. Any other missing file still raises: a lost one, a file of
+            # the user's own, and a record from before the flag.
             _metrics = {}
             for name in metrics_filename:
                 files = sorted(dir_.glob(name))
+                if (
+                    not files
+                    and Path(name) == Path(METRICS_FILE)
+                    and wrote_no_metrics(record)
+                ):
+                    continue
                 if not files:
+                    hint = ""
+                    if (
+                        Path(name) == Path(METRICS_FILE)
+                        and (record or {}).get("status") == "completed"
+                        and "run_id" not in (record or {})
+                    ):
+                        hint = (
+                            " (this completed cell's record is from an earlier "
+                            "mushin version, which did not record a task that "
+                            "returned no metrics: re-run the cell to reload it)"
+                        )
                     raise FileNotFoundError(
                         f"No files with the path/pattern {dir_ / name} were found"
+                        + hint
                     )
 
                 for f_ in files:
