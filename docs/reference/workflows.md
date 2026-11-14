@@ -25,10 +25,15 @@ Re-exported from hydra-zen.
 ## Running on SLURM
 
 The resources of a sweep whose cells each run as one SLURM job, for
-`run(launcher="submitit_slurm", launcher_config=...)`. For a cell trained with
-DDP, a task per GPU, see [`submitit_slurm_config`](lightning.md).
+`run(launcher="submitit_slurm", launcher_config=...)`, and the way to cancel
+the jobs such a sweep left queued or running. For a cell trained with DDP, a
+task per GPU, see [`submitit_slurm_config`](lightning.md).
 
 ::: mushin.slurm
+    options:
+      heading_level: 3
+
+::: mushin.cancel
     options:
       heading_level: 3
 
