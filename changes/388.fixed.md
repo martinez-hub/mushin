@@ -1,0 +1,1 @@
+A resume now reuses a completed cell whose task returned None, as it reuses one that wrote metrics, instead of running it again: its record says it completed with no metrics (#364). A cell recorded by an earlier version, whose record cannot say so, still runs again.

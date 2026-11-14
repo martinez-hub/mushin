@@ -564,6 +564,19 @@ def test_a_job_of_several_tasks_runs_its_cell_without_the_budget(tmp_path):
         assert "`max_total_seconds` is disabled" in log.read_text()
 
 
+def test_a_resume_submits_no_job_for_a_cell_that_returned_none(tmp_path):
+    """The driver settles a completed cell whose task returned None as it
+    settles one with metrics, so a resume submits nothing (#373)."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
+    tasks.none_on_one.run(**sweep)
+    submitted = len(_job_dirs(wd))
+    again = tasks.none_on_one.run(resume=True, **sweep)
+    assert len(_job_dirs(wd)) == submitted
+    v = again["v"].values
+    assert v[0] == 0.0 and np.isnan(v[1]) and v[2] == 2.0
+
+
 @pytest.mark.parametrize("on_error", ["raise", "nan"])
 @pytest.mark.parametrize(
     "task",
