@@ -2956,6 +2956,17 @@ class BaseWorkflow:
                     values.append(driver if same else voters[0])
                 else:
                     values.append(text)
+            # An element whose value keys as another element's coordinate
+            # (job 0's `${hydra:job.num}` beside a written 0) would put two
+            # elements' cells under one key, one result overwriting the
+            # other: such an element keeps its text (#386).
+            keys = [_value_key(self._element_coord(v)) for v in values]
+            values = [
+                text
+                if keys.count(key) > 1 and _holds_interpolation(str(text))
+                else value
+                for value, key, text in zip(values, keys, written, strict=True)
+            ]
             coordinates[name] = values
         if known:
             self._interpolated_cells = elements_of

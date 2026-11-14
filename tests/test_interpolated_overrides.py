@@ -605,3 +605,23 @@ def test_a_dict_element_with_a_nan_key_is_its_own_element():
     assert _same_element({float("nan"): "a"}, {float("nan"): "a"})
     assert not _same_element({float("nan"): "a"}, {float("nan"): "b"})
     assert not _same_element({float("nan"): "a"}, {1.0: "a"})
+
+
+class Dirred(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):
+        return dict(v=float(Path.cwd().name))
+
+
+def test_an_element_that_resolves_to_anothers_value_keeps_its_cell(tmp_path):
+    """Job 0's ``${hydra:job.num}`` resolves to 0, the other element's
+    value: keyed by it, the two cells would share a key and one result would
+    overwrite the other. The element keeps its text instead (#386)."""
+    wf = Dirred()
+    wf.run(x=multirun(["${hydra:job.num}", 0]), working_dir=tmp_path)
+    assert sorted(_values(wf)) == [0.0, 1.0]
+    back = Dirred().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert sorted(_values(back)) == [0.0, 1.0]
+    assert [str(x) for x in back.multirun_task_overrides["x"]] == [
+        str(x) for x in wf.multirun_task_overrides["x"]
+    ]
