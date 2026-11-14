@@ -406,8 +406,9 @@ def _get_provenance(
     """Per-run ``mushin_provenance.json`` records (git/packages, and the
     accelerator when the cell's process imported torch).
 
-    The per-run resolved config is omitted unless ``include_config``; it is
-    the bulky part and ``get_config`` already serves it."""
+    The per-run config (as written: interpolations unresolved) is omitted
+    unless ``include_config``; it is the bulky part and ``get_config``
+    already serves it."""
 
     p = _resolve(path, root)
     if not p.exists():
@@ -434,7 +435,8 @@ def _get_config(
     job: int | None = None,
     root: str | Path | None = None,
 ) -> dict:
-    """Return the resolved Hydra config for one run (``job``) or all runs."""
+    """Return the Hydra config for one run (``job``) or all runs, as written:
+    its interpolations are not resolved."""
     p = _resolve(path, root)
     cfgs = [_to_jsonable(e.cfg) for e in _load_runs(p, root)]
     if job is not None:
@@ -531,7 +533,8 @@ def create_server(root: str | Path | None = None):
 
     @mcp.tool()
     def get_config(path: str, job: int | None = None) -> dict:
-        """Resolved Hydra config for one run (job index) or all runs."""
+        """Hydra config for one run (job index) or all runs, as written:
+        its interpolations are not resolved."""
         return _get_config(path, job, rootp)
 
     @mcp.tool()
