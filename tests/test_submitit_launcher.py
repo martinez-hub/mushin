@@ -874,3 +874,57 @@ def test_a_dead_job_keeps_a_swept_non_finite_cells_own_result(tmp_path, x):
     status, value = runner.record_dead_cell(ret, dead)
     assert status is JobStatus.COMPLETED
     assert value == {"v": 1.0}
+
+
+def test_a_dead_job_keeps_its_result_when_its_value_resolves_anew(tmp_path):
+    """A swept value that resolves differently each time (a clock): the
+    driver's composition of the job's config does not give the value the
+    job recorded, but the record names this run and this job, so it is the
+    job's own, and its result stands (#384)."""
+    from hydra.core.utils import JobStatus
+    from omegaconf import OmegaConf
+
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _DeadJob, _TaskRunner
+
+    cell = tmp_path / "0"
+    written = write_metrics_sidecar(cell, {"v": 1.0})
+    write_cell_status(
+        cell,
+        status="completed",
+        combo={"lr": "12-00-00-000001"},
+        attempt=1,
+        run_id="this",
+        job_id="7",
+        metrics=written,
+    )
+    ret = _dead_ret(tmp_path)
+    ret.cfg = OmegaConf.create({"lr": "12-00-05-000002"})  # resolved again
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "nan", "this"
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')", keepable=True)
+    status, value = runner.record_dead_cell(ret, dead)
+    assert status is JobStatus.COMPLETED and value == {"v": 1.0}
+
+
+def test_a_dead_jobs_record_keeps_the_combo_its_job_resolved(tmp_path):
+    from omegaconf import OmegaConf
+
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _TaskRunner
+
+    cell = tmp_path / "0"
+    cell.mkdir()
+    write_cell_status(
+        cell, status="running", combo={"lr": "t1"}, attempt=1, run_id="this", job_id="7"
+    )
+    ret = _dead_ret(tmp_path)
+    ret.cfg = OmegaConf.create({"lr": "t2"})  # resolved again in the driver
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "nan", "this"
+    runner.record_dead_cell(ret, _DeadJob(RuntimeError("x"), "died"))
+    record = read_cell_status(cell)
+    assert record["status"] == "failed" and record["combo"] == {"lr": "t1"}
