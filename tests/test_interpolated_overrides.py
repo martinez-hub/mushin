@@ -480,13 +480,18 @@ class Tagged(MultiRunMetricsWorkflow):
 
 
 def test_an_interpolation_that_reads_as_several_elements(tmp_path):
-    """`${tag}` resolves to "foo,bar", which the driver's reading splits in
-    two: that reading is not the axis's, and the cells key by their own."""
+    """An unquoted `${tag}` that resolves to "foo,bar" reads, in the driver,
+    as three elements where the axis has two: that reading is not the
+    axis's. With no record or saved decision for the element (its job died,
+    and so did the driver), it keys by its text, not by the reading's first
+    part."""
     wf = Tagged()
-    wf.run(tag="foo,bar", name=multirun(["${tag}", "b"]), working_dir=tmp_path)
+    wf.run(tag="foo,bar", overrides=["+name=${tag},b"], working_dir=tmp_path)
     assert _values(wf) == [7.0, 1.0]
+    (tmp_path / MANIFEST_FILE).unlink()
+    (tmp_path / "0" / "mushin_cell_status.json").unlink()
     back = Tagged().load_from_dir(tmp_path, "mushin_metrics.json")
-    assert _values(back) == [7.0, 1.0]
+    assert back.multirun_task_overrides["name"] == ["${tag}", "b"]
 
 
 def test_a_load_replaces_a_runs_manifest(tmp_path):
