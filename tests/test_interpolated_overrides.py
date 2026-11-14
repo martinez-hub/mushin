@@ -539,9 +539,20 @@ def test_a_load_replaces_a_runs_manifest(tmp_path):
     assert first.notes == fresh.notes
 
 
+def _seen(value):
+    """Keep the value a task received in its cell's dir (the cwd): what its
+    job resolved, whatever provenance records."""
+    Path("seen.json").write_text(json.dumps(value))
+
+
+def _seen_in(cell: Path):
+    return json.loads((cell / "seen.json").read_text())
+
+
 class Stamped(MultiRunMetricsWorkflow):
     @staticmethod
     def task(x, stamp):
+        _seen(stamp)
         return dict(v=float(x))
 
 
@@ -553,13 +564,8 @@ def test_a_fixed_interpolation_is_the_runs_value_on_every_read(tmp_path, spec):
     stamp = "${now:" + spec + "}"
     wf = Stamped()
     wf.run(x=multirun([1, 2]), stamp=stamp, working_dir=tmp_path)
-    provenance = [
-        json.loads((tmp_path / d / "mushin_provenance.json").read_text())["config"][
-            "stamp"
-        ]
-        for d in ("0", "1")
-    ]
-    expected = provenance[0] if provenance[0] == provenance[1] else stamp
+    seen = [_seen_in(tmp_path / d) for d in ("0", "1")]
+    expected = seen[0] if seen[0] == seen[1] else stamp
     assert wf.multirun_task_overrides["stamp"] == expected
     for _ in range(2):
         back = Stamped().load_from_dir(tmp_path, "mushin_metrics.json")
@@ -569,6 +575,7 @@ def test_a_fixed_interpolation_is_the_runs_value_on_every_read(tmp_path, spec):
 class Listed2(MultiRunMetricsWorkflow):
     @staticmethod
     def task(x, stamps):
+        _seen(list(stamps))
         return dict(v=float(x))
 
 
@@ -588,8 +595,7 @@ def test_a_fixed_container_is_read_only_from_jobs_that_resolved_it(tmp_path):
         )
     ran = [d for d in ("0", "1") if (tmp_path / d / "mushin_metrics.json").exists()]
     assert len(ran) == 1
-    provenance = json.loads((tmp_path / ran[0] / "mushin_provenance.json").read_text())
-    assert wf.multirun_task_overrides["stamps"] == provenance["config"]["stamps"]
+    assert wf.multirun_task_overrides["stamps"] == _seen_in(tmp_path / ran[0])
 
 
 @pytest.mark.config_group("model")
