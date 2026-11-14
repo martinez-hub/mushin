@@ -77,6 +77,15 @@ def die_when_told(seed):
     return dict(v=float(seed), pid=float(os.getpid()))
 
 
+@mushin.sweep
+def die_when_told_over_x(x, seed):
+    """`die_when_told` with a second axis, for a sweep whose `x` each job
+    resolves for itself (an interpolation, #386)."""
+    if os.environ.get("MUSHIN_TEST_DIE") == str(seed):
+        os._exit(9)
+    return dict(v=float(seed))
+
+
 def _die_before_start(num):
     """A `hydra.sweep.subdir` resolver. Inside a job whose number is in
     `MUSHIN_TEST_DIE_BEFORE_START`, it ends the process while Hydra computes

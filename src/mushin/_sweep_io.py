@@ -201,6 +201,22 @@ def read_metrics_sidecar_written(job_dir, digest: str) -> dict | None:
         return None
 
 
+def metrics_sidecar_differs(job_dir, digest: Any) -> bool:
+    """Whether ``job_dir`` holds a metrics file other than the one whose
+    digest `write_metrics_sidecar` returned: another job's, in a dir two
+    cells share, which that job's own record will name (#406). False when
+    the file is missing or unreadable, or ``digest`` is not a digest (the
+    record does not claim the file), so the caller removes the file as
+    every other failure path does."""
+    if not isinstance(digest, str):
+        return False
+    try:
+        text = (Path(job_dir) / METRICS_FILE).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return _digest(text) != digest
+
+
 def _digest(text: str) -> str:
     import hashlib
 

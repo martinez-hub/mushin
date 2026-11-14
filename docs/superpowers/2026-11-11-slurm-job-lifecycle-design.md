@@ -151,6 +151,7 @@ states under both `on_error` values with main).
   child ranks run their own Hydra app, not mushin's runner; but tasks SLURM
   starts outside submitit's count (`additional_parameters={"ntasks": ...}`)
   are not seen (T9). The launcher logs each result it takes this way.
+  (Changed by #406, see G2.)
 - **E3. A skipped record of the job's own is skipped.** Any other own
   terminal record stays and the cell fails, as in PR 1.
 - **E4. Every other record is as PR 1 left it:** a 'running' record or none
@@ -159,7 +160,7 @@ states under both `on_error` values with main).
   whose job dies before its runner keeps the previous attempt's error file;
   refreshing such a record was tried and cut (a stale read of it could
   delete a result the job had just written). A dir another cell used keeps
-  that cell's metrics and checkpoints (#355).
+  that cell's metrics and checkpoints (#355). (Changed by #406, see G3.)
 - **E5. One read of the record, no retry.** On a slow filesystem the driver
   can still see an older 'running' record of a cell that completed, and then
   records the cell failed over it and removes its metrics file, as in PR 1;
@@ -212,6 +213,65 @@ states under both `on_error` values with main).
   `hydra.sweep.mode`, as the plugin does). The rest are submitted under
   their own job numbers (three lines in the copied submission body skip the
   others; the pin test strips exactly that edit).
+
+## Decisions (#406)
+
+A reload (`load_from_dir`) of a sweep could report completed a cell the run
+had failed because its job ended without a result: the dead-job path left
+the job's own completed record when it could not stand for the result, and
+left an earlier run's end with nothing in the dir naming this run.
+
+- **G1. After the driver collects a job that ended without a result, the
+  cell's dir says what the run reported for that cell.** Either the record
+  is this run's and its status is the run's verdict (`failed`, or `skipped`
+  for a cell `sample=` left out), or the record is another run's and the
+  dir's `.hydra/` snapshot names this run, so every reader that judges
+  records by run stamp (`load_from_dir`, `show`, `best`, `export`) sets it
+  aside and the reload takes the cell's end from this run's manifest.
+- **G2. A completed record of the job's own that cannot stand for its
+  result is recorded with the run's verdict** (a job of several tasks; a
+  result submitit could not save, whose record names no metrics digest; a
+  metrics file that is not the one the record names). Its metrics file is
+  removed, unless the file has another digest (another job's, in a dir two
+  cells share, which that job's coming record names), and so is the entry
+  its attempt wrote to `cache_dir`, keyed from the record as read. This
+  reverses E2's "the record stays for a resume" (and #389's review round 1,
+  which reverted recording such a job failed): the run rejected the value
+  on the evidence a resume would use, a job of several tasks one of whose
+  tasks raised is already recorded failed (#389), and leaving it gave the
+  run, the reload, a resume and the cache three answers for one cell. The
+  cost: such a cell is recomputed on resume (from its own last checkpoint,
+  when it saves one; `build_resume_context` sees a failed record of the same
+  cell as a resume), including a job whose ranks all finished but whose
+  results reached the driver late.
+- **G3. Another run's terminal record (of this cell or another) stays,
+  with this run's snapshot beside it** (`_write_run_snapshot`, which keeps
+  a snapshot that already names this run). Writing a failed record over it
+  was not done, since it would destroy a result a resume may reuse, and a
+  stale driver read could overwrite a result the job had just written (E4).
+  The snapshot is safe under that stale read: a record the job did write
+  names this run and stands whatever the snapshot's age. No snapshot over a
+  record of this cell that already says the run's verdict (an earlier
+  `failed` one, say), which `show` lists correctly as it is, unless one of
+  the job's overrides sets an interpolation: the run's coordinate for such
+  a value can differ from the one the earlier record stored, and without
+  this run's snapshot the reload keyed the dir outside the grid (#386).
+  Hydra's sweeper escapes an interpolation in a job's override text, so
+  each override is read through Hydra's parser. Best-effort: a snapshot
+  that cannot be written never fails the run.
+- **G4. Not chosen: keep the value under a failed status** (`kept_metrics`:
+  the digest, with the metrics file and cache entry kept). Four readers
+  would change (`Manifest.from_cell_status` and `_PriorCells`, `_settle`,
+  `_show._scan` and the MCP tools), and for a result submitit could not
+  save it would reuse a value the file holds only as text.
+
+Limits: the rule runs when the driver collects the job, so a driver killed
+before that (or a detached sweep) leaves the job's last record; under
+`on_error="raise"` (no manifest) a reload reports a G3 cell not run rather
+than failed; `show` leaves a G3 cell out rather than listing it failed; the
+MCP server's `_load_runs` pairs `.hydra/config.yaml` with metrics without
+reading the record, so it can pair this run's snapshot with an earlier
+run's metrics (#407).
 
 ## Needs a cluster
 

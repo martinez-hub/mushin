@@ -102,7 +102,9 @@ error outside the task, such as the job failing to import it) fails its cell
 the same way, and under `on_error="nan"` the cell's `mushin_error.txt` then
 names the job's log. A job of one task that ends so after its cell has
 completed (its result reached the driver too late, say) can keep the cell's
-result: mushin reads it from the cell's directory.
+result: mushin reads it from the cell's directory. Otherwise (a job of
+several tasks, or a result submitit could not save) the cell fails, its
+record says so too, and a resume runs it again.
 (mushin runs `launcher="submitit_slurm"` through its own subclass of the
 plugin's launcher, which waits on every job, so a cell's `.hydra/hydra.yaml`
 names `mushin_submitit_slurm`.)

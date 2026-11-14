@@ -173,7 +173,8 @@ that requeue then) runs its cell again instead, from the start or from its
 checkpoint. With `on_error="nan"`, the
 sweep goes on, the cell is NaN in the dataset, and `mushin_error.txt` in the
 cell's directory holds the traceback, or, for a job that ended without
-returning, what ended it and where its log is. The
+returning, what ended it and where its log is. A reload of the sweep
+(`load_from_dir`) can then report the cell failed too, as the run did. The
 [resilience guide](resilience.md) covers failed cells and checkpoints.
 
 ## Resume, and cancel
