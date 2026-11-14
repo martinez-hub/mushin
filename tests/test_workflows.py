@@ -2516,16 +2516,20 @@ def _a_job_died_before_its_first_record(
         hydra.write_text(
             "\n".join(line for line in text.splitlines() if "mushin_run_id" not in line)
         )
-    # Hydra writes the snapshot after the earlier record, whatever the copy did,
-    # and the later sweep's manifest after that.
-    record = path.stat().st_mtime_ns
+    # Hydra writes the snapshot after the earlier run ended (its record, then
+    # its manifest), whatever the copy did, and the later sweep's manifest after
+    # that. Dated from the earlier manifest too: a slow runner can take more
+    # than the second below between the earlier record and that manifest.
+    earlier = max(
+        path.stat().st_mtime_ns, (wd / "mushin_sweep_manifest.json").stat().st_mtime_ns
+    )
     for name in ("config.yaml", "hydra.yaml", "overrides.yaml"):
-        os.utime(wd / dead / ".hydra" / name, ns=(record + 10**9, record + 10**9))
+        os.utime(wd / dead / ".hydra" / name, ns=(earlier + 10**9, earlier + 10**9))
     if manifest:
         # Written after the snapshot, or in the same tick of a coarse clock.
         shutil.copy(later / "mushin_sweep_manifest.json", wd)
         tick = 10**9 if manifest == "same tick" else 2 * 10**9
-        os.utime(wd / "mushin_sweep_manifest.json", ns=(record + tick,) * 2)
+        os.utime(wd / "mushin_sweep_manifest.json", ns=(earlier + tick,) * 2)
     return wd
 
 
@@ -2852,6 +2856,97 @@ def test_a_run_stamp_reads_alike_on_both_read_paths(stamp, read):
         tree = {"hydra": {"job": "${other}"}, "other": {"mushin_run_id": "abc123"}}
     assert hydra_run_stamp(tree) == read
     assert hydra_run_stamp(OmegaConf.create(tree)) == read
+
+
+class _SometimesNone(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):
+        return None if x == 2 else dict(v=float(x))
+
+
+def test_a_reload_reads_a_cell_that_returned_no_metrics_as_the_run_does(tmp_path):
+    """#364: a completed cell whose task returned None has no metrics file,
+    and its record says so: the reload gives it NaN, as the run does,
+    instead of raising."""
+    wf = _SometimesNone()
+    wf.run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    ran = wf.to_xarray()["v"].values.tolist()
+    loaded = _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+    values = loaded.to_xarray()["v"].values.tolist()
+    assert values[0] == ran[0] == 1.0
+    assert values[1] != values[1] and ran[1] != ran[1]
+    assert loaded.is_complete == wf.is_complete
+    assert [f["combo"] for f in loaded.failures] == [f["combo"] for f in wf.failures]
+    assert [s["combo"] for s in loaded.skipped] == [s["combo"] for s in wf.skipped]
+
+
+def test_a_metrics_file_a_cell_wrote_and_lost_still_raises(tmp_path):
+    """Only a task that returned None is recorded as writing no metrics: a
+    missing file of a cell whose task returned metrics was lost."""
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    (tmp_path / "0" / "mushin_metrics.json").unlink()
+    with pytest.raises(FileNotFoundError, match="No files") as info:
+        _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert "earlier mushin version" not in str(info.value)
+
+
+def test_a_record_from_before_the_flag_still_raises_with_a_hint(tmp_path):
+    """A released version's record says nothing of a task that returned
+    None, so it cannot tell that from a lost file: a reload raises, and says
+    why."""
+    import json
+
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    path = tmp_path / "1" / "mushin_cell_status.json"
+    record = json.loads(path.read_text())
+    for key in ("no_metrics", "run_id"):
+        del record[key]
+    path.write_text(json.dumps(record))
+    with pytest.raises(FileNotFoundError, match="No files.*earlier mushin version"):
+        _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+
+
+def test_the_earlier_version_hint_is_only_for_the_sidecar(tmp_path):
+    import json
+
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    path = tmp_path / "0" / "mushin_cell_status.json"
+    record = json.loads(path.read_text())
+    del record["run_id"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(FileNotFoundError, match="fit_metrics.pt") as info:
+        _SometimesNone().load_from_dir(
+            tmp_path, ["mushin_metrics.json", "fit_metrics.pt"]
+        )
+    assert "earlier mushin version" not in str(info.value)
+
+
+@pytest.mark.parametrize("name", ["fit_metrics.pt", "nothing_*.json"])
+def test_a_missing_file_of_the_users_own_still_raises(tmp_path, name):
+    """A cell that returned None: only the sidecar is not looked for. Its
+    job is the first, so no other cell's missing file raises first."""
+    _SometimesNone().run(x=multirun([2, 1]), working_dir=str(tmp_path))
+    with pytest.raises(FileNotFoundError, match="No files") as info:
+        _SometimesNone().load_from_dir(tmp_path, ["mushin_metrics.json", name])
+    assert str(tmp_path / "0") in str(info.value)
+
+
+def test_the_sidecar_may_be_named_as_a_path(tmp_path):
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    loaded = _SometimesNone().load_from_dir(tmp_path, "./mushin_metrics.json")
+    values = loaded.to_xarray()["v"].values.tolist()
+    assert values[0] == 1.0 and values[1] != values[1]
+
+
+def test_a_none_cell_whose_metrics_file_exists_loads_it(tmp_path):
+    """In a job of several tasks, one returning None can write its record
+    over that of the task that wrote the metrics: a file there still loads."""
+    from mushin._sweep_io import write_metrics_sidecar
+
+    _SometimesNone().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    write_metrics_sidecar(tmp_path / "1", {"v": 2.0})
+    loaded = _SometimesNone().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert loaded.to_xarray()["v"].values.tolist() == [1.0, 2.0]
 
 
 def test_a_cell_that_returns_none_keeps_no_metrics_an_earlier_sweep_left(tmp_path):
