@@ -232,18 +232,25 @@ class Train(MultiRunMetricsWorkflow):
         # mushin_resume.dir       -> this cell's directory (write your checkpoint here)
         # mushin_resume.is_resume -> True when a prior attempt of THIS cell left artifacts
         # mushin_resume.last_ckpt -> newest checkpoint in dir, or None
-        ckpt = mushin_resume.last_ckpt if mushin_resume else None
-        trainer.fit(
-            model, ckpt_path=ckpt
-        )  # Lightning: default_root_dir=mushin_resume.dir
+        ckpt = mushin_resume.last_ckpt  # None on a cell's first attempt
+        # Lightning: save last.ckpt at the top of the cell's directory
+        trainer = Trainer(
+            callbacks=[ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)]
+        )
+        trainer.fit(model, ckpt_path=ckpt)
         return dict(accuracy=...)
 ```
 
-Write your checkpoint into `mushin_resume.dir` (Lightning: set
-`default_root_dir=mushin_resume.dir` with `ModelCheckpoint(save_last=True)`).
+Write your checkpoint at the top of `mushin_resume.dir`, where `last_ckpt`
+looks (Lightning: `ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)`).
+With only `default_root_dir` set, Lightning writes it under
+`lightning_logs/version_<n>/checkpoints/`, which `last_ckpt` does not search.
 Re-running the **same** sweep (same grid) reuses each cell's directory, so a
-resumed cell finds its own checkpoint; a cell is never handed a checkpoint from a
-different cell. Tasks that don't declare `mushin_resume` are unaffected.
+resumed cell finds its own checkpoint. The directories are named by job number,
+so a sweep over another grid in the same `working_dir` runs its cells in
+directories earlier cells used, and a cell there can be handed an earlier
+cell's checkpoint: run another grid in a new `working_dir`. Tasks that don't
+declare `mushin_resume` are unaffected.
 
 ## Provenance
 
