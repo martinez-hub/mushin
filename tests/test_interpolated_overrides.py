@@ -725,3 +725,65 @@ def test_dict_elements_whose_keys_differ_only_in_type_are_two_elements():
 
     assert not _same_element({True: "a"}, {1: "a"})
     assert _same_element({1: "a"}, {1: "a"})
+
+
+def test_a_coordinate_json_cannot_keep_reloads_as_it_ran(tmp_path):
+    """JSON keeps a dict's keys only as text: a coordinate holding ``{1: "a"}``
+    is not saved in that lossy form, so a reload reads it as the run did
+    (#386)."""
+    wf = Listed()
+    wf.run(base_lr=1, xs=multirun([[{1: "a"}], ["${base_lr}"]]), working_dir=tmp_path)
+    back = Listed().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert [str(x) for x in back.multirun_task_overrides["xs"]] == [
+        str(x) for x in wf.multirun_task_overrides["xs"]
+    ]
+    assert _values(back) == _values(wf)
+
+
+def test_a_dict_element_with_a_nan_key_is_its_own_element():
+    """A NaN key equals a NaN key, as a NaN value does (#386)."""
+    from mushin.workflows import _same_element
+
+    assert _same_element({float("nan"): "a"}, {float("nan"): "a"})
+    assert not _same_element({float("nan"): "a"}, {float("nan"): "b"})
+    assert not _same_element({float("nan"): "a"}, {1.0: "a"})
+
+
+class Tokened(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, token):
+        return dict(v=float(x))
+
+
+def test_a_fixed_value_read_from_the_environment_is_not_saved(tmp_path, monkeypatch):
+    """A credential a fixed override reads from the environment never
+    reaches the manifest; it is read again, as before (#392)."""
+    monkeypatch.setenv("MUSHIN_TEST_TOKEN", "tok-should-not-be-saved")
+    wf = Tokened()
+    wf.run(
+        x=multirun([1, 2]), token="${oc.env:MUSHIN_TEST_TOKEN}", working_dir=tmp_path
+    )
+    assert "tok-should-not-be-saved" not in (tmp_path / MANIFEST_FILE).read_text()
+    back = Tokened().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.multirun_task_overrides["token"] == wf.multirun_task_overrides["token"]
+
+
+class Keyed(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, d, base_lr=None):
+        return dict(v=float(x))
+
+
+def test_a_fixed_dict_with_a_number_key_reloads_as_it_ran(tmp_path):
+    """JSON keeps a dict's keys only as text: a fixed value holding ``{1: ...}``
+    is not saved in that lossy form, and reloads as the run read it (#392)."""
+    wf = Keyed()
+    wf.run(
+        base_lr=0.01,
+        x=multirun([1, 2]),
+        overrides=["+d={1:'${base_lr}'}"],
+        working_dir=tmp_path,
+    )
+    back = Keyed().load_from_dir(tmp_path, "mushin_metrics.json")
+    ran, read = wf.multirun_task_overrides["d"], back.multirun_task_overrides["d"]
+    assert list(read) == list(ran) and type(next(iter(read))) is int

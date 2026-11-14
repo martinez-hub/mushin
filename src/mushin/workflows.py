@@ -7,6 +7,7 @@ import dataclasses
 import functools
 import json
 import math
+import re
 import uuid
 from collections import UserList, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -798,12 +799,38 @@ def _same_element(a: Any, b: Any) -> bool:
     if isinstance(a, (list, tuple)):
         return len(a) == len(b) and all(map(_same_element, a, b))
     if isinstance(a, dict):
-        # Keys by type too: ``True`` and ``1`` are one key to a dict.
-        typed = {(type(k), k) for k in a}
-        if typed != {(type(k), k) for k in b}:
+        # Each key matched by this rule too: ``True`` and ``1`` are one key
+        # to a dict, and two NaN keys are two.
+        if len(a) != len(b):
             return False
-        return all(_same_element(a[k], b[k]) for k in a)
+        rest = list(b.items())
+        for key, value in a.items():
+            for j, (other, its) in enumerate(rest):
+                if _same_element(key, other):
+                    if not _same_element(value, its):
+                        return False
+                    del rest[j]
+                    break
+            else:
+                return False
+        return True
     return a == b
+
+
+def _round_trips(value: Any) -> bool:
+    """Whether ``value`` reads back from the manifest as itself. JSON keeps
+    a dict's keys only as text, so ``{1: "a"}`` would read back as
+    ``{"1": "a"}``: such a value is not saved, and is read again instead
+    (a NaN is tagged, `_tag_nan`)."""
+    import json
+
+    from ._sweep_io import _json_normalize
+
+    try:
+        text = json.dumps(_json_normalize(_tag_nan(value)))
+        return _same_element(_restore_tags(json.loads(text)), value)
+    except Exception:  # noqa: BLE001 - not saved: read again instead
+        return False
 
 
 def _index_of(elements: list, value: Any) -> int | None:
@@ -1123,6 +1150,11 @@ def _resolved(path: Path) -> Path:
         return Path(os.path.abspath(path))
 
 
+# An interpolation that reads the environment: ``${oc.env:...}``, OmegaConf's
+# older ``${env:...}``, spaced as OmegaConf allows.
+_ENV_READ = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
+
+
 def _reads_environment(ret: JobReturn) -> bool:
     """Whether a job's config may resolve differently in its own process:
     it, or a variable ``hydra.job.env_set`` sets for the job, reads the
@@ -1131,15 +1163,11 @@ def _reads_environment(ret: JobReturn) -> bool:
     scheduler's variables). Setting variables to fixed values changes
     nothing the driver cannot apply itself (`settle_in_driver`). A custom
     resolver that reads ``os.environ`` is not seen."""
-    import re
-
     from omegaconf import OmegaConf
-
-    env = re.compile(r"\$\{\s*(?:oc\.)?env\s*:")
 
     def reads(node: Any) -> bool:
         if isinstance(node, str):
-            return env.search(node) is not None
+            return _ENV_READ.search(node) is not None
         if isinstance(node, Mapping):
             return any(reads(v) for v in node.values())
         if isinstance(node, (list, tuple)):
@@ -2847,13 +2875,23 @@ class BaseWorkflow:
         values = self._fixed_values(fixed, run_id, known)
         output.update(values)
         if known and (axes or fixed):
-            self._interpolated_decision = {
-                "run_id": run_id,
-                "coords": {
+            decision: dict = {"run_id": run_id}
+            # Coordinates are saved only when every one reads back as itself;
+            # else a reload decides again from the records (`_round_trips`).
+            if all(_round_trips(c) for v in coordinates.values() for c in v):
+                decision["coords"] = {
                     name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
-                },
-                "fixed": {name: _tag_nan(v) for name, v in values.items()},
+                }
+            # A fixed value is saved when it reads back as itself, and never
+            # when its text reads the environment: an `${oc.env:API_TOKEN}`
+            # would put a credential in the manifest. Such a value is read
+            # again as before, by the reader (#392).
+            decision["fixed"] = {
+                name: _tag_nan(v)
+                for name, v in values.items()
+                if not _ENV_READ.search(str(fixed[name][0])) and _round_trips(v)
             }
+            self._interpolated_decision = decision
         return output, known
 
     def _fixed_values(self, fixed: dict, run_id, known: bool) -> dict:
