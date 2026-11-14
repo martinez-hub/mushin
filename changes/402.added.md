@@ -1,0 +1,1 @@
+A cell run by a submitit launcher names its job in `mushin_cell_status.json`: a `submitit` entry holds the job's id, its log folder (each task's `<id>_<task>_log.out` and `.err`), the node it ran on and, on SLURM, its partition. A job that died before its code started names only its id and logs, and a cell a resume reused keeps the entry of the job that computed it (#345).

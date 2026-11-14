@@ -608,6 +608,8 @@ def test_a_job_whose_task_raises_fails_its_cell_and_its_record(
         assert re.search(r"RuntimeError: task . of seed 0", error)
     record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
     assert record["status"] == "failed"
+    # The failed record still names the job (#345).
+    assert record["submitit"]["job_id"] == record["job_id"]
     assert not (wd / "0" / "mushin_metrics.json").exists()
     loaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
     assert [f["combo"] for f in loaded.failures] == ["seed=0"]
@@ -623,7 +625,7 @@ def _records(wd: Path) -> dict[str, dict]:
     out = {}
     for path in sorted(wd.glob("[0-9]*/mushin_cell_status.json")):
         record = json.loads(path.read_text())
-        for key in ("run_id", "job_id"):
+        for key in ("run_id", "job_id", "submitit"):
             record.pop(key, None)
         if "metrics" in record:
             record["metrics"] = "a digest"
@@ -973,3 +975,89 @@ def test_variables_the_driver_cannot_resolve_leave_the_cell_to_its_job(
     assert not [w for w in seen if "could not be settled" in str(w.message)]
     assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
     assert again["pid"].values.tolist() == first["pid"].values.tolist()
+
+
+# Each record names the submitit job that wrote it: its id, log folder and
+# host, so a cell can be traced to its job and its logs (#345).
+
+
+def _entry(wd: Path, cell: str) -> tuple[dict, dict]:
+    record = json.loads((wd / cell / "mushin_cell_status.json").read_text())
+    return record, record.get("submitit")
+
+
+def _logs_of(entry: dict) -> Path:
+    return Path(entry["logs"]) / f"{entry['job_id']}_0_log.out"
+
+
+def test_each_record_names_its_jobs_host_and_logs(tmp_path):
+    import socket
+
+    wd = tmp_path / "s"
+    tasks.record_pid.run(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    for cell in ("0", "1"):
+        record, entry = _entry(wd, cell)
+        assert entry["job_id"] == record["job_id"]
+        assert entry["host"] == socket.gethostname()
+        assert Path(entry["logs"]).resolve().parent == (wd / ".submitit").resolve()
+        assert _logs_of(entry).is_file()
+        assert "partition" not in entry  # not on SLURM
+
+
+def test_a_cell_dead_while_running_keeps_its_host_and_names_its_logs(
+    tmp_path, monkeypatch
+):
+    """The driver records the dead cell from the job it waited on: the job's
+    log folder, and the host its own 'running' record named."""
+    import socket
+
+    wd = tmp_path / "s"
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(
+            seed=multirun([0, 1, 2]), working_dir=str(wd), on_error="nan", **LOCAL
+        )
+    record, entry = _entry(wd, "1")
+    assert record["status"] == "failed"
+    assert entry["job_id"] == record["job_id"]
+    assert entry["host"] == socket.gethostname()
+    assert _logs_of(entry).is_file()
+
+
+def test_a_cell_dead_before_its_runner_names_its_logs_not_a_host(tmp_path, monkeypatch):
+    wd = tmp_path / "s"
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(
+            seed=multirun([0, 1, 2]),
+            working_dir=str(wd),
+            on_error="nan",
+            overrides=[tasks.DIE_BEFORE_START],
+            **LOCAL,
+        )
+    record, entry = _entry(wd, "1")
+    assert record["status"] == "failed"
+    assert entry["job_id"] == record["job_id"] and "host" not in entry
+    assert _logs_of(entry).is_file()
+
+
+@pytest.mark.parametrize("driver", [True, False], ids=["driver", "jobs"])
+def test_a_resume_keeps_the_entry_of_the_job_that_computed_the_cell(
+    tmp_path, monkeypatch, driver
+):
+    """A reused cell's record names the job that computed its result, whose
+    log holds that computation; the recomputed cell names its new job."""
+    if not driver:
+        _without_the_driver_pass(monkeypatch)
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(on_error="nan", **sweep)
+    before = {cell: _entry(wd, cell)[1] for cell in ("0", "1", "2")}
+    monkeypatch.delenv("MUSHIN_TEST_DIE")
+    tasks.die_when_told.run(resume=True, **sweep)
+    after = {cell: _entry(wd, cell)[1] for cell in ("0", "1", "2")}
+    assert after["0"] == before["0"] and after["2"] == before["2"]
+    assert after["1"]["job_id"] != before["1"]["job_id"]
+    assert _logs_of(after["1"]).is_file()

@@ -372,6 +372,7 @@ if _plugin_launcher is not None:
                 _bounded(exc, job.paths.folder),
                 _summary(job, exc, self.params),
                 keepable=_keepable(job, exc),
+                job=_entry_of(job),
             )
             with self._composed(overrides, idx, str(job.job_id)) as ret:
                 # Inside: the cell's config-group choices come from the
@@ -383,6 +384,14 @@ if _plugin_launcher is not None:
                     "record holds one, which stands for it (#345)"
                 )
             return ret
+
+    def _entry_of(job) -> dict | None:
+        """The job's id and log folder for its cell's record (#345); None
+        when submitit cannot give them."""
+        try:
+            return {"job_id": str(job.job_id), "logs": str(job.paths.folder)}
+        except Exception:  # noqa: BLE001 - the record names no job
+            return None
 
     def _task_failed(ret) -> bool:
         """Whether one task's return is a failure, as `jobs_post_process`
