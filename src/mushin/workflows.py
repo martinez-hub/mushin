@@ -1987,13 +1987,25 @@ class _TaskRunner:
             return JobStatus.FAILED, dead.exception
         return JobStatus.COMPLETED, dead
 
-    def _combo_after_task(self, cfg, combo):
-        """The cell's combo read again once the task's wrapper has run (it
-        may have resolved the config in place, #353); the one read before
-        when it cannot be read now."""
+    @staticmethod
+    def _resolves(wrapper) -> bool:
+        """Whether ``wrapper`` resolved the config in place before it called
+        its function, as zen does by default (``resolve_pre_call``, kept as
+        its ``_resolve``). Read only: mushin adds no resolution of its own."""
+        return getattr(wrapper, "_resolve", False) is True
+
+    def _combo_after(self, wrapper, cfg, combo):
+        """The cell's combo read again after ``wrapper`` ran, when it
+        resolved the config in place (#353): the values its function got. A
+        wrapper that does not resolve leaves the combo read before it, as a
+        raw function may change its config (that is not the cell's
+        identity); one that cannot be read again (an escaped value now
+        literal) leaves it too (Codex, #385)."""
+        if not self._resolves(wrapper):
+            return combo
         try:
             return self._combo(cfg, self.swept_names)
-        except Exception:  # noqa: BLE001 - keep the one already recorded
+        except Exception:  # noqa: BLE001 - keep the one already read
             return combo
 
     def __call__(self, cfg):
@@ -2145,7 +2157,7 @@ class _TaskRunner:
             # each wrapper has run, so the record holds what the task ran
             # with; mushin resolves nothing itself, since a second pass
             # changes an escaped interpolation (Codex, #385).
-            combo = self._combo(cfg, self.swept_names)
+            combo = self._combo_after(self.pre_task, cfg, combo)
             if rc.is_resume:
                 # pre_task may stage a checkpoint into the cell dir (the
                 # resilience guide's pattern), so the checkpoint is looked for
@@ -2163,7 +2175,7 @@ class _TaskRunner:
             try:
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
-                combo = self._combo_after_task(cfg, combo)
+                combo = self._combo_after(self.task, cfg, combo)
                 try:
                     write_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
                 except OSError:
@@ -2183,7 +2195,7 @@ class _TaskRunner:
                 # from before the task.
                 record_accelerator(cwd, written)
             # The task's own wrapper may have resolved the config just now.
-            combo = self._combo_after_task(cfg, combo)
+            combo = self._combo_after(self.task, cfg, combo)
             written = None
             if isinstance(result, dict):
                 written = write_metrics_sidecar(cwd, result)
