@@ -3275,3 +3275,23 @@ def test_a_non_resolving_pre_task_runs_before_the_tasks_resolution(
     assert seen == ["from-pre-task"]
     record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
     assert record["combo"]["d"] == "from-pre-task"
+
+
+def test_an_escaped_interpolation_is_resolved_only_by_the_wrapper(tmp_path):
+    """mushin adds no resolution pass of its own: a second pass turns an
+    escaped interpolation, which the first made literal text, into a live
+    one that may not resolve (Codex, #385)."""
+    from hydra_zen import make_config
+
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):  # raw: called with the whole config
+            seen.append(x.x)
+            return dict(v=1.0)
+
+    W(make_config(tmpl="\\${missing}")).run(
+        x=multirun([1]), working_dir=str(tmp_path), task_fn_wrapper=None
+    )
+    assert seen == [1]

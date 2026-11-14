@@ -674,20 +674,6 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
-def _resolve_in_place(cfg) -> None:
-    """Resolve a job config's interpolations in place, as zen does before it
-    calls a task, so everything read from it afterwards sees one value per
-    interpolation. A config that cannot be resolved is left as it is, to fail
-    where it did."""
-    try:
-        from omegaconf import OmegaConf
-
-        if OmegaConf.is_config(cfg):
-            OmegaConf.resolve(cfg)
-    except Exception:  # noqa: BLE001 - zen raises it when it resolves
-        pass
-
-
 def _tasks_per_cell(launcher_config) -> int:
     """How many tasks a submitit launcher config gives each cell's job:
     ``tasks_per_node`` times ``nodes``, each 1 when absent or unreadable."""
@@ -2001,12 +1987,14 @@ class _TaskRunner:
             return JobStatus.FAILED, dead.exception
         return JobStatus.COMPLETED, dead
 
-    @staticmethod
-    def _resolves(wrapper) -> bool:
-        """Whether ``wrapper`` resolves the config in place before it calls,
-        as zen does by default (``resolve_pre_call``, kept as its
-        ``_resolve``)."""
-        return getattr(wrapper, "_resolve", False) is True
+    def _combo_after_task(self, cfg, combo):
+        """The cell's combo read again once the task's wrapper has run (it
+        may have resolved the config in place, #353); the one read before
+        when it cannot be read now."""
+        try:
+            return self._combo(cfg, self.swept_names)
+        except Exception:  # noqa: BLE001 - keep the one already recorded
+            return combo
 
     def __call__(self, cfg):
         import warnings
@@ -2047,21 +2035,6 @@ class _TaskRunner:
         if settled is not _COMPUTE:
             record()
             return settled
-
-        # One resolution for what the cell records and what its task runs
-        # with (#353). A zen wrapper resolves the config in place before it
-        # calls (`resolve_pre_call`), so the cell's record, read before
-        # `pre_task`, and the task each resolved it: a resolver that gives a
-        # new value each call (a counter) gave them different values. Done
-        # where the first resolving wrapper would do it: here when
-        # `pre_task`'s does; just before the task when only the task's does
-        # (so `pre_task` still runs first, as it did); not at all when
-        # neither does.
-        resolve_before_task = not self._resolves(self.pre_task) and self._resolves(
-            self.task
-        )
-        if self._resolves(self.pre_task):
-            _resolve_in_place(cfg)
 
         # (1.5) wall-clock budget: once the deadline passes, skip the remaining
         # cells (no compute) so a long sweep ends gracefully instead of running
@@ -2165,6 +2138,14 @@ class _TaskRunner:
                 budget_id=self.budget_id,
             )
             self.pre_task(cfg)
+            # A zen wrapper resolves the config in place before it calls
+            # (`resolve_pre_call`), and a resolver that gives a new value on
+            # each call (a counter) gave the combo read before it another
+            # value than the task's (#353). The combo is read again after
+            # each wrapper has run, so the record holds what the task ran
+            # with; mushin resolves nothing itself, since a second pass
+            # changes an escaped interpolation (Codex, #385).
+            combo = self._combo(cfg, self.swept_names)
             if rc.is_resume:
                 # pre_task may stage a checkpoint into the cell dir (the
                 # resilience guide's pattern), so the checkpoint is looked for
@@ -2180,12 +2161,9 @@ class _TaskRunner:
             # ResumeContext leaking into later in-process cells.
             token = _CURRENT_RESUME.set(rc) if self.inject_resume else None
             try:
-                if resolve_before_task:
-                    # As the task's wrapper would, and the record follows it.
-                    _resolve_in_place(cfg)
-                    combo = self._combo(cfg, self.swept_names)
                 result = self.task(cfg)
             except Exception:  # noqa: BLE001 - durable failed status, then re-raise
+                combo = self._combo_after_task(cfg, combo)
                 try:
                     write_status(cwd, status="failed", combo=combo, attempt=rc.attempt)
                 except OSError:
@@ -2204,6 +2182,8 @@ class _TaskRunner:
                 # raised; the record written above carries this process's view
                 # from before the task.
                 record_accelerator(cwd, written)
+            # The task's own wrapper may have resolved the config just now.
+            combo = self._combo_after_task(cfg, combo)
             written = None
             if isinstance(result, dict):
                 written = write_metrics_sidecar(cwd, result)
