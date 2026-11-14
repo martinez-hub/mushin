@@ -141,8 +141,15 @@ def restore_combo_value(v: Any) -> Any:
     infinity restored, a ``null`` left None (a swept None; a record from
     before NaN was tagged stored a NaN so too)."""
     if isinstance(v, dict):
-        if set(v) == {_NONFINITE_TAG} and v[_NONFINITE_TAG] in _COMBO_NONFINITE:
-            return _COMBO_NONFINITE[v[_NONFINITE_TAG]]
+        tag = v.get(_NONFINITE_TAG)
+        # Only a tag mushin writes (a string): a list or dict there is a
+        # value of the user's, and not hashable (Codex, #382).
+        if (
+            set(v) == {_NONFINITE_TAG}
+            and isinstance(tag, str)
+            and tag in _COMBO_NONFINITE
+        ):
+            return _COMBO_NONFINITE[tag]
         return {k: restore_combo_value(x) for k, x in v.items()}
     if isinstance(v, list):
         return [restore_combo_value(x) for x in v]
