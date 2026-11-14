@@ -168,6 +168,23 @@ def _wait_for(name, text=""):
     raise TimeoutError(f"{name} never held {text!r}")
 
 
+def _raising(task: str) -> None:
+    """Mark, in the cell's dir, that ``task`` is about to raise: a file of
+    its own, which no record write replaces (a 'failed' record can be, by
+    the other task's 'running' write if it starts late)."""
+    from pathlib import Path
+
+    Path(f"{task}.raises").touch()
+
+
+def _after_the_other_failed(task: str) -> None:
+    """Wait until ``task`` raised and its runner recorded the failure."""
+    import time
+
+    _wait_for(f"{task}.raises")
+    time.sleep(1.0)  # its runner's 'failed' write, after the raise
+
+
 @mushin.sweep
 def second_task_raises_late(seed):
     """In a job of two tasks, the first returns metrics and the second
@@ -187,8 +204,9 @@ def first_task_raises_early(seed):
     import submitit
 
     if submitit.JobEnvironment().global_rank == 0:
+        _raising("task0")
         raise RuntimeError(f"task 0 of seed {seed}")
-    _wait_for("mushin_cell_status.json", '"failed"')
+    _after_the_other_failed("task0")
     return dict(v=float(seed) + 100)
 
 
@@ -200,8 +218,9 @@ def second_task_raises_early(seed):
     import submitit
 
     if submitit.JobEnvironment().global_rank == 1:
+        _raising("task1")
         raise RuntimeError(f"task 1 of seed {seed}")
-    _wait_for("mushin_cell_status.json", '"failed"')
+    _after_the_other_failed("task1")
     return dict(v=float(seed))
 
 
