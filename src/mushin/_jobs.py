@@ -14,8 +14,11 @@ while an earlier run's jobs still wait) need no lock. A file is written once,
 by `_atomic_write_json` (a temporary file, then a rename), so its mtime is the
 submission time on the filesystem clock that also stamps the cells' records.
 
-Standard library only: the launcher imports this module in the driver, and
-`show` on a login node.
+`mushin.cancel` reads the same files to cancel the jobs a sweep left queued
+or running (a driver killed mid-sweep leaves its files behind).
+
+Standard library only: the launcher imports this module in the driver, `show`
+on a login node, and `import mushin` loads it for `cancel`.
 """
 
 from __future__ import annotations
@@ -24,13 +27,23 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import sys
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from ._slurm import _SCONTROL_TIMEOUT_S
+
 log = logging.getLogger(__name__)
+
+# How `cancel` finds and runs SLURM's commands: seams the tests replace, so
+# no test needs SLURM or ever reaches a real one.
+_which = shutil.which
+_run = subprocess.run
 
 #: The dir under a sweep's ``working_dir`` that holds its launch files. It has
 #: no status record, so whatever walks the sweep root for cells skips it.
@@ -261,3 +274,299 @@ def _alive(pid: int) -> bool:
     except (OSError, OverflowError):
         return True
     return True
+
+
+def cancel(working_dir, *, dry_run: bool = False) -> list[str]:
+    """Cancel a sweep's SLURM jobs that are still queued or running.
+
+    Each submission of ``run(launcher="submitit_slurm")`` names the jobs it
+    sent in a file under ``<working_dir>/mushin_jobs/``, which its driver
+    removes once it has waited on them, so the files that remain name jobs
+    that may not have ended: a running sweep's, or those of a driver killed
+    mid-sweep (Ctrl-C, a lost login session). ``cancel`` asks SLURM about
+    each of their job arrays and runs ``scancel`` once, for those still
+    queued or running. Call it where ``scontrol`` and ``scancel`` reach the
+    cluster, such as a login node, with the driver running or not.
+
+    Parameters
+    ----------
+    working_dir : str or os.PathLike
+        The sweep's ``working_dir``.
+    dry_run : bool
+        Return the ids it would cancel, and cancel and remove nothing.
+
+    Returns
+    -------
+    list of str
+        The ids cancelled, one per job array (or per job, for a submission
+        of one cell); with ``dry_run``, the ids it would cancel.
+
+    Raises
+    ------
+    FileNotFoundError
+        ``working_dir`` is not a directory.
+    RuntimeError
+        ``scontrol`` or ``scancel`` is not found, SLURM's answer about a job
+        cannot be read (it took too long, failed, or is not in the expected
+        form), or ``scancel`` fails. In the first two cases nothing is
+        cancelled, and the message names the ``scancel`` command to run by
+        hand.
+
+    Notes
+    -----
+    A job is cancelled only while SLURM lists it as not ended and its
+    script or log paths lie under the sweep's submitit folder. A job id
+    SLURM has since given another job is left alone, with a warning. A job
+    SLURM no longer lists (it forgets one some minutes after it ends) is
+    over.
+
+    Once a submission's jobs are cancelled or over, its file is removed,
+    so `mushin.show` no longer lists its cells as ``queued``: a cell whose
+    job never started shows its dir's earlier record, or no row. A driver
+    still running records the cancelled cells as failed, and a later
+    ``resume=True`` runs them again.
+
+    Two kinds of submission are not checked. A ``launcher="submitit_local"``
+    job's id is a process id on the machine that submitted it, not SLURM's:
+    it is skipped with a warning, and its file is removed only on that
+    machine, once none of its processes runs. A submission sent to other
+    clusters (``--clusters``) is out of plain ``scontrol``'s sight: the
+    warning names the ``scancel --clusters=...`` command to run, and its
+    file is removed.
+    """
+    from ._console import echo
+
+    root = Path(working_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"mushin.cancel: {str(root)!r} is not a directory")
+    launches, bad = read_launches(root)
+    if bad:
+        warnings.warn(
+            f"mushin.cancel could not read the launch files {[p.name for p in bad]} "
+            f"in {str(root / JOBS_DIR)!r}; the jobs they name, if any, are not "
+            "cancelled.",
+            UserWarning,
+            stacklevel=2,
+        )
+    # Launch files to remove once every job is known to be over or
+    # cancelled, and the SLURM launches to ask about, with their arrays.
+    over: list[Path] = []
+    asked: list[tuple[Launch, list[str]]] = []
+    for launch in launches:
+        # A task of an array is `<array>_<index>`; scancel takes the array.
+        arrays = list(dict.fromkeys(c.job_id.split("_")[0] for c in launch.cells))
+        if launch.executor == "local":
+            # A process id, not SLURM's: never passed to scancel. On its
+            # host, a launch none of whose processes lives is over.
+            if ended_locally(launch):
+                over.append(launch.path)
+            else:
+                warnings.warn(
+                    f"mushin.cancel leaves the jobs of {launch.path.name} alone: "
+                    "a submitit_local job's ids are process ids on the host that "
+                    f"submitted it ({launch.host!r}), not SLURM jobs.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            continue
+        if launch.clusters is not None:
+            # Plain `scontrol` sees only the default cluster's jobs, so these
+            # cannot be checked; the file goes with the others (nothing here
+            # would ever retire it), and the user is told how to cancel them.
+            # Warned now, so a call that raises later still names the command.
+            warnings.warn(
+                f"mushin.cancel cannot check the jobs of {launch.path.name}, sent to "
+                f"SLURM clusters {launch.clusters!r}. If they are still queued or "
+                f"running, cancel them with `scancel --clusters={launch.clusters} "
+                f"{' '.join(arrays)}`.",
+                UserWarning,
+                stacklevel=2,
+            )
+            over.append(launch.path)
+            continue
+        asked.append((launch, arrays))
+
+    ids = list(dict.fromkeys(a for _, arrays in asked for a in arrays))
+    if not ids:
+        if not dry_run:
+            _forget_all(over)
+        echo(f"mushin.cancel: nothing to cancel in {root}")
+        return []
+    scontrol, scancel = _which("scontrol"), _which("scancel")
+    if scontrol is None or scancel is None:
+        missing = "scontrol" if scontrol is None else "scancel"
+        raise RuntimeError(
+            f"mushin.cancel needs SLURM's scontrol and scancel, and finds no "
+            f"{missing} here; nothing was cancelled. Where SLURM is, check that "
+            "each job is this sweep's (`scontrol show job <id>`) and cancel them "
+            f"with `scancel {' '.join(ids)}`."
+        )
+
+    answers = {array: _ask(scontrol, array) for array in ids}
+    to_cancel: set[str] = set()
+    for launch, arrays in asked:
+        verdicts = {}
+        for array in arrays:
+            kind, detail = answers[array]
+            verdicts[array] = _judge(detail, launch.folder) if kind == "shown" else kind
+        for array, verdict in verdicts.items():
+            if verdict == "live":
+                to_cancel.add(array)
+            elif verdict == "not ours":
+                warnings.warn(
+                    f"mushin.cancel leaves job {array} alone: SLURM lists it, but "
+                    f"its script and logs are not under {launch.folder!r}, so it is "
+                    "not this sweep's (SLURM may have given its id to another job). "
+                    f"Its launch file {launch.path.name} is kept.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        # A launch with a job that is not this sweep's keeps its file: the
+        # check may have misread a job that is, and the file still names it.
+        if all(v in ("gone", "live") for v in verdicts.values()):
+            over.append(launch.path)
+    unknown = {a: detail for a, (kind, detail) in answers.items() if kind == "unknown"}
+    if unknown:
+        # Never names a job that is gone or not this sweep's.
+        by_hand = [a for a in ids if a in to_cancel or a in unknown]
+        why = "; ".join(f"job {a}: {reason}" for a, reason in unknown.items())
+        raise RuntimeError(
+            f"mushin.cancel could not check every job, so it cancelled nothing "
+            f"({why}). Try again, or check them (`scontrol show job <id>`) and "
+            f"cancel them by hand: `scancel {' '.join(by_hand)}`."
+        )
+
+    cancelled = [a for a in ids if a in to_cancel]
+    if dry_run:
+        if cancelled:
+            echo(f"mushin.cancel would cancel: {' '.join(cancelled)} (dry run)")
+        else:
+            echo("mushin.cancel: no job of this sweep is queued or running (dry run)")
+        return cancelled
+    if cancelled:
+        _scancel(scancel, cancelled)
+    _forget_all(over)
+    if cancelled:
+        echo(f"mushin.cancel cancelled: {' '.join(cancelled)}")
+    else:
+        echo("mushin.cancel: no job of this sweep is queued or running")
+    return cancelled
+
+
+# The states of a job that has ended (SLURM's JOB STATE CODES). Any other,
+# a state this list does not know included, counts as not ended.
+_ENDED = frozenset(
+    {
+        "BOOT_FAIL",
+        "CANCELLED",
+        "COMPLETED",
+        "DEADLINE",
+        "FAILED",
+        "NODE_FAIL",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "REVOKED",
+        "TIMEOUT",
+    }
+)
+# A job's line of `scontrol --oneliner show job`, and its state. Fields are
+# `Key=value` tokens: a field name starts the line or follows whitespace, so
+# `ArrayJobId=` is not `JobId=`.
+_JOB_LINE = re.compile(r"(?:^|\s)JobId=\S")
+_STATE = re.compile(r"(?:^|\s)JobState=(\S+)")
+
+
+def _ask(scontrol: str, array: str) -> tuple[str, Any]:
+    """scontrol's account of job ``array``: ``("shown", lines)``, a line per
+    job (or per run of pending array tasks); ``("gone", None)`` once SLURM
+    has forgotten it; ``("unknown", why)`` for an answer that tells
+    neither."""
+    try:
+        # `--all`, as `_slurm` asks: a job in a hidden partition is listed too.
+        out = _run(
+            [scontrol, "--all", "--oneliner", "show", "job", array],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SCONTROL_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "unknown", f"scontrol gave no answer in {_SCONTROL_TIMEOUT_S} s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "unknown", f"scontrol could not run ({exc!r})"
+    stdout, stderr = out.stdout or "", out.stderr or ""
+    if out.returncode != 0:
+        # SLURM's answer for a job it has purged, some minutes after it ended.
+        if "invalid job id" in f"{stdout}\n{stderr}".lower():
+            return "gone", None
+        message = _first_line(stderr) or _first_line(stdout) or "no message"
+        return "unknown", f"scontrol failed with exit code {out.returncode}: {message}"
+    lines = [line for line in stdout.splitlines() if _JOB_LINE.search(line)]
+    if not lines:
+        return "unknown", f"scontrol listed no job: {_first_line(stdout) or 'nothing'}"
+    if not all(_STATE.search(line) for line in lines):
+        return "unknown", "scontrol listed a job with no JobState"
+    return "shown", lines
+
+
+def _judge(lines: list[str], folder: str) -> str:
+    """``"live"``, ``"gone"`` or ``"not ours"``: what scontrol's ``lines``
+    for one array say of a launch whose jobs submitit wrote under
+    ``folder``."""
+    if all(_STATE.search(line)[1] in _ENDED for line in lines):
+        return "gone"
+    # Matched as text, so a folder holding a space matches, and on a path
+    # boundary, so `/s/.submitit2` is not under `/s/.submitit`. `Command=` is
+    # submitit's job script in that folder, there even when
+    # `additional_parameters` moves the logs.
+    under = re.escape(folder.rstrip("/") + "/")
+    ours = re.compile(rf"(?:^|\s)(?:Command|StdOut|StdErr)={under}")
+    return "live" if all(ours.search(line) for line in lines) else "not ours"
+
+
+def _scancel(scancel: str, ids: list[str]) -> None:
+    """Cancel ``ids``; raise when scancel fails for any but a job that ended
+    since it was checked."""
+    command = f"scancel {' '.join(ids)}"
+    try:
+        out = _run(
+            [scancel, *ids],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SCONTROL_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"mushin.cancel: `{command}` did not finish in {_SCONTROL_TIMEOUT_S} s, "
+            "so some jobs may not be cancelled. Check them with `squeue --me`, "
+            "and call mushin.cancel again."
+        ) from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"mushin.cancel: `{command}` could not run ({exc!r})."
+        ) from exc
+    if out.returncode == 0:
+        return
+    lines = [line for line in (out.stderr or "").splitlines() if line.strip()]
+    # A job that ended between the check and scancel is not an error.
+    other = [line for line in lines if "invalid job id" not in line.lower()]
+    if other or not lines:
+        message = " ".join(other) or "no message"
+        raise RuntimeError(
+            f"mushin.cancel: `{command}` failed with exit code {out.returncode}: "
+            f"{message}. Check the jobs with `squeue --me`."
+        )
+
+
+def _first_line(text: str) -> str:
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+def _forget_all(paths: Iterable[Path]) -> None:
+    for path in paths:
+        forget_launch(path)

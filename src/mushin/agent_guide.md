@@ -293,7 +293,9 @@ Use the default launcher for a sweep you run this way. If the process died
 with cells still `running`, check that nothing from that run is still alive
 before you relaunch the same script with `resume=True`: with
 `launcher="joblib"`, the worker processes outlive the main one and keep
-computing cells.
+computing cells. On SLURM the jobs keep running too; `mushin.cancel(working_dir)`
+cancels those still queued or running and returns their ids (with
+`dry_run=True` it only lists them).
 
 ## Where results go, and how to reload them
 

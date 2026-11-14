@@ -152,7 +152,7 @@ it has waited on those jobs. Some cases follow from that:
   its file, and so does a driver whose wait raised before the scheduler could
   say every job had ended. A cell whose job never started then stays
   `queued` until a later run of the sweep, such as a `resume=True`, records
-  the cell.
+  the cell, or until `mushin.cancel` (below) removes the file.
 - A job that dies before its code starts can show `queued` until the driver
   has waited on every job of its submission.
 - A sweep whose `hydra.sweep.subdir` puts each cell more than one directory
@@ -189,11 +189,40 @@ driver cannot (a `PYTHONPATH` set in `setup`, say), and every cell of a sweep
 with Hydra callbacks, since the job's environment, imports and callbacks are
 not the driver's.
 
-To cancel a sweep, cancel its jobs: `scancel <job id>` for each submission
-`squeue --me` lists (a job array has one id for all its tasks). Each
-submission's folders under `<working_dir>/.submitit/` begin with its id, and a
-resume adds a submission of its own. A driver still running records the
-cancelled cells as failed, and a later `resume=True` runs them again.
+To cancel a sweep, pass its `working_dir` to `mushin.cancel`, on a machine
+where `scontrol` and `scancel` work (a login node), with the driver running or
+not:
+
+```python
+import mushin
+
+mushin.cancel("/scratch/me/lr-sweep", dry_run=True)  # the job ids it would cancel
+mushin.cancel("/scratch/me/lr-sweep")  # cancels them, and returns their ids
+```
+
+It reads the submissions listed under `<working_dir>/mushin_jobs/`, asks
+`scontrol` about each one's job array, and runs `scancel` once, for the arrays
+still queued or running. A driver still running records the cancelled cells as
+failed, and a later `resume=True` runs them again. Once a submission's jobs are
+cancelled or over, `cancel` removes its file, so `show` no longer lists its
+cells as `queued`. Some cases follow:
+
+- SLURM reuses job ids. A job is cancelled only when its script or logs lie
+  under the sweep's submitit folder (`<working_dir>/.submitit/` by default);
+  a job id SLURM has given another job is left alone, with a warning.
+- When `scontrol` takes too long, fails, or answers in a form `cancel` cannot
+  read, it cancels nothing and raises, naming the `scancel` command to run by
+  hand.
+- Jobs sent to another cluster (`additional_parameters={"clusters": ...}`, or
+  `SBATCH_CLUSTERS`) are not checked: `cancel` warns with the
+  `scancel --clusters=...` command to run, and removes their file.
+- Jobs of `launcher="submitit_local"` are processes, not SLURM jobs: `cancel`
+  skips them with a warning.
+
+By hand, `scancel <job id>` for each submission `squeue --me` lists cancels the
+same jobs (a job array has one id for all its tasks). Each submission's folders
+under `<working_dir>/.submitit/` begin with its id, and a resume adds a
+submission of its own.
 
 ## Many small cells
 

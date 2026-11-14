@@ -26,6 +26,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 from ._extras import eval_available as _eval_available
+from ._jobs import cancel
 from ._packing import pin_gpu_round_robin
 from ._resume import ResumeContext
 from ._show import best, diff, show
@@ -141,6 +142,7 @@ __all__ = [
     "pin_gpu_round_robin",
     "HydraFSDP",
     "slurm",
+    "cancel",
     "submitit_slurm_config",
     "seed_everything_per_rank",
     "multirun",
