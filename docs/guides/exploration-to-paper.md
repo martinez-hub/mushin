@@ -190,8 +190,8 @@ When the paper run is done, the sweep directory *is* the artifact a reviewer
 needs. To hand it off:
 
 - **Per-cell provenance:** every cell's `mushin_provenance.json` records the git
-  commit, dirty flag, package versions, and resolved config. `wf.provenance`
-  reads a representative one.
+  commit, dirty flag, package versions, and the config as written
+  (interpolations unresolved). `wf.provenance` reads a representative one.
 - **Environment snapshot:** `capture_env=True` wrote `mushin_env.txt` (a pinned
   dependency list) at the sweep root.
 - **A flat results table:** `mushin.export.table("runs/paper/main-result",

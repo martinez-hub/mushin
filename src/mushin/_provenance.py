@@ -292,12 +292,14 @@ def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> A
     # Atomic: under an external multi-rank launch every rank writes the same
     # cell's record, and a reader (show, the MCP server, record_accelerator)
     # must never see a torn file. Plain json.dumps, not the metrics
-    # normalizer: a config value of inf stays `Infinity`, as it always was. No
-    # mkdir: the cell directory exists, and a write to one that does not
-    # raises into the runner's best-effort guard rather than inventing it.
+    # normalizer: a config value of inf stays `Infinity`, as it always was. A
+    # value json cannot write (a Path) is written as its text, rather than
+    # costing the cell its record (#383). No mkdir: the cell directory
+    # exists, and a write to one that does not raises into the runner's
+    # best-effort guard rather than inventing it.
     _atomic_write_text(
         Path(job_dir) / "mushin_provenance.json",
-        json.dumps(record, indent=2),
+        json.dumps(record, indent=2, default=str),
         mkdir=False,
     )
     return record["accelerator"]
@@ -309,7 +311,8 @@ def _redact_config(obj: Any) -> Any:
     A value under a secret-named key (``api_key``, ``token``, ...) is redacted
     wholesale; a provider-token-shaped string (``sk-...``, ``hf_...``) is
     redacted even under an innocent key. Structure and non-secret values are
-    preserved so the record stays useful.
+    preserved so the record stays useful. A value json cannot write (a Path)
+    is taken as its text, and redacted as a string is (#398).
     """
     if isinstance(obj, dict):
         return {
@@ -318,19 +321,31 @@ def _redact_config(obj: Any) -> Any:
         }
     if isinstance(obj, list):
         return [_redact_config(v) for v in obj]
-    if isinstance(obj, str) and _REDACT_VALUE_RE.search(obj):
-        return _REDACTED
-    return obj
+    if obj is None or isinstance(obj, (bool, int, float)):
+        return obj
+    text = obj if isinstance(obj, str) else str(obj)
+    return _REDACTED if _REDACT_VALUE_RE.search(text) else text
 
 
-def _to_plain(cfg):
+def authored_config(cfg):
+    """``cfg`` as written, as plain containers, or None when it cannot be
+    read. Its interpolations are never evaluated (e.g. `${oc.env:SECRET}`,
+    which would bake a resolved secret into the on-disk record), and an Enum
+    is its name (json cannot write the Enum, and the record would be lost).
+    The runner takes it before the task's wrapper runs: hydra-zen's ``zen``
+    resolves the job's config in place, so a config read after it holds
+    every resolved value (#383)."""
     try:
         from omegaconf import OmegaConf
 
-        # resolve=False: never evaluate interpolations (e.g. `${oc.env:SECRET}`),
-        # which would bake a resolved secret into the on-disk record; the config
-        # is recorded as authored. Literal secret values are then redacted.
-        plain = OmegaConf.to_container(cfg, resolve=False)
+        return OmegaConf.to_container(cfg, resolve=False, enum_to_str=True)
     except Exception:
         return None
-    return _redact_config(plain)
+
+
+def _to_plain(cfg):
+    """The config a record holds: ``cfg`` as written (`authored_config`; a
+    dict or list is taken as `authored_config`'s output, plain containers
+    throughout), its literal secret values redacted."""
+    plain = cfg if isinstance(cfg, (dict, list)) else authored_config(cfg)
+    return None if plain is None else _redact_config(plain)
