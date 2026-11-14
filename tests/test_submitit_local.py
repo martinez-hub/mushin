@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -574,6 +575,42 @@ def test_a_resume_submits_no_job_for_a_cell_that_returned_none(tmp_path):
     assert len(_job_dirs(wd)) == submitted
     v = again["v"].values
     assert v[0] == 0.0 and np.isnan(v[1]) and v[2] == 2.0
+
+
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+@pytest.mark.parametrize(
+    "task",
+    ["second_task_raises_late", "first_task_raises_early", "second_task_raises_early"],
+)
+def test_a_job_whose_task_raises_fails_its_cell_and_its_record(
+    tmp_path, on_error, task
+):
+    """A job of several tasks fails its cell when any task raises, whichever
+    task records last, and the cell's record says so, so a reload agrees
+    with the run (#365). On main the run took the first task's return."""
+    wd = tmp_path / "s"
+    sweep = dict(
+        seed=multirun([0]),
+        working_dir=str(wd),
+        on_error=on_error,
+        launcher="submitit_local",
+        launcher_config={"timeout_min": 2, "tasks_per_node": 2},
+    )
+    if on_error == "raise":
+        with pytest.raises(RuntimeError, match="task . of seed 0"):
+            getattr(tasks, task).run(**sweep)
+    else:
+        with pytest.warns(UserWarning, match=r"failed: \['seed=0'\]"):
+            ds = getattr(tasks, task).run(**sweep)
+        assert "v" not in ds or np.isnan(ds["v"].values).all()
+        # The task's own error, not a wait that timed out: the order ran.
+        error = (wd / "0" / "mushin_error.txt").read_text()
+        assert re.search(r"RuntimeError: task . of seed 0", error)
+    record = json.loads((wd / "0" / "mushin_cell_status.json").read_text())
+    assert record["status"] == "failed"
+    assert not (wd / "0" / "mushin_metrics.json").exists()
+    loaded = MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+    assert [f["combo"] for f in loaded.failures] == ["seed=0"]
 
 
 # Cells that need no job are settled in the driver (#345): only the rest are

@@ -70,7 +70,9 @@ _NONFINITE_TAG = "__mushin_nonfinite__"
 _NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
 
 
-def _json_normalize(v: Any, as_text: list | None = None) -> Any:
+def _json_normalize(
+    v: Any, as_text: list | None = None, *, tag_nan: bool = False
+) -> Any:
     """Recursively normalize a metric value to strict-JSON-native types.
 
     Handles the full metric shape (nested dicts and lists), converts
@@ -81,26 +83,30 @@ def _json_normalize(v: Any, as_text: list | None = None) -> Any:
     ``None`` metric value also encodes as ``null``, so it reads back as NaN,
     the one remaining lossy case. ``as_text``, when given, collects the type
     of each value (and dict key) written as its text instead of as itself.
+    ``tag_nan`` tags a NaN too, as a cell's combo is stored, where a ``null``
+    is a swept None (#355).
     """
     import math
 
     if hasattr(v, "item") and getattr(v, "ndim", None) == 0:  # 0-d np/torch scalar
         v = v.item()
     elif hasattr(v, "tolist"):  # numpy/torch array
-        return _json_normalize(v.tolist(), as_text)
+        return _json_normalize(v.tolist(), as_text, tag_nan=tag_nan)
     if isinstance(v, dict):
         if as_text is not None:
             as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
-        return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
+        return {
+            str(k): _json_normalize(x, as_text, tag_nan=tag_nan) for k, x in v.items()
+        }
     if isinstance(v, (list, tuple)):
-        return [_json_normalize(x, as_text) for x in v]
+        return [_json_normalize(x, as_text, tag_nan=tag_nan) for x in v]
     if isinstance(v, bool) or v is None:
         return v
     if isinstance(v, float):
         if math.isfinite(v):
             return v
         if math.isnan(v):
-            return None
+            return {_NONFINITE_TAG: "nan"} if tag_nan else None
         return {_NONFINITE_TAG: "inf" if v > 0 else "-inf"}
     if isinstance(v, (int, str)):
         return v
@@ -123,6 +129,40 @@ def _restore_nonfinite(v: Any) -> Any:
     if isinstance(v, list):
         return [_restore_nonfinite(x) for x in v]
     return float("nan") if v is None else v
+
+
+# A cell's combo tags a NaN too (`_json_normalize(tag_nan=True)`); metrics
+# files keep NaN as null, so this table is the combo's alone.
+_COMBO_NONFINITE = {**_NONFINITE_VALUES, "nan": float("nan")}
+
+
+def restore_combo_value(v: Any) -> Any:
+    """One value of a cell's stored combo as it was swept: a tagged NaN or
+    infinity restored, a ``null`` left None (a swept None; a record from
+    before NaN was tagged stored a NaN so too)."""
+    if isinstance(v, dict):
+        tag = v.get(_NONFINITE_TAG)
+        # Only a tag mushin writes (a string): a list or dict there is a
+        # value of the user's, and not hashable (Codex, #382).
+        if (
+            set(v) == {_NONFINITE_TAG}
+            and isinstance(tag, str)
+            and tag in _COMBO_NONFINITE
+        ):
+            return _COMBO_NONFINITE[tag]
+        return {k: restore_combo_value(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [restore_combo_value(x) for x in v]
+    return v
+
+
+def combo_text(combo: Any) -> str:
+    """A combo as a record stores it, as canonical text: two combos are the
+    same cell's when their texts are equal. A NaN equals a NaN, and differs
+    from None; 1, 1.0 and True differ, as their `combo_key` does."""
+    return json.dumps(
+        _json_normalize(combo, tag_nan=True), sort_keys=True, allow_nan=False
+    )
 
 
 def write_metrics_sidecar(job_dir, metrics: dict[str, Any]) -> str | None:

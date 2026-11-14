@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._sweep_io import _atomic_write_json
+from ._sweep_io import _atomic_write_json, _json_normalize
 
 STATUS_FILE = "mushin_cell_status.json"
 
@@ -93,7 +93,8 @@ def write_cell_status(
 
     payload: dict[str, Any] = {
         "status": status,
-        "combo": combo,
+        # A copy, NaN tagged: a null is a swept None (#355).
+        "combo": _json_normalize(combo, tag_nan=True),
         "attempt": int(attempt),
     }
     if config_hash is not None:
@@ -5397,6 +5398,21 @@ def changed_project_code(prior, current) -> list[str] | None:
     return sorted(k for k in a.keys() & b.keys() if a[k] != b[k])
 
 
+def same_cell(record_combo: Any, combo: Any) -> bool:
+    """Whether a record's combo is the live ``combo``'s: the two as a record
+    stores them (`combo_text`) are equal. ``==`` on the values took a swept
+    NaN for a swept None (both stored null) and True for 1. A combo that
+    cannot be stored is no cell's (#355)."""
+    from ._sweep_io import combo_text
+
+    if not isinstance(record_combo, dict):
+        return False
+    try:
+        return combo_text(record_combo) == combo_text(combo)
+    except Exception:  # noqa: BLE001 - e.g. a value whose str() raises
+        return False
+
+
 def read_cell_status(cell_dir) -> dict | None:
     """Read a cell status sidecar; a missing/corrupt/wrong-shape one reads as
     None (so callers degrade rather than crash on `.get`)."""
@@ -5411,7 +5427,21 @@ def read_cell_status(cell_dir) -> dict | None:
         # read as a corrupt sidecar, as the MCP server lists a directory of runs
         # it did not write.
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("combo"), dict):
+        # A swept NaN or inf is stored tagged: read each value back as it was
+        # swept, so the combo keys as the live one does (#355). A combo
+        # nested too deep to restore keeps its stored form.
+        from ._sweep_io import restore_combo_value
+
+        try:
+            data["combo"] = {
+                k: restore_combo_value(v) for k, v in data["combo"].items()
+            }
+        except RecursionError:
+            pass
+    return data
 
 
 def discover_last_ckpt(cell_dir) -> Path | None:
@@ -5450,7 +5480,7 @@ def build_resume_context(cell_dir, combo: dict[str, Any]) -> ResumeContext:
     combo cannot distinguish cells.)"""
     cell_dir = Path(cell_dir)
     prior = read_cell_status(cell_dir)
-    matches = prior is not None and prior.get("combo") == combo
+    matches = prior is not None and same_cell(prior.get("combo"), combo)
     last = discover_last_ckpt(cell_dir) if matches else None
     # Coerce a malformed/older-schema `attempt` (missing, null, "3") to an int
     # so it degrades to a fresh attempt instead of raising inside the wrapper.

@@ -352,6 +352,36 @@ def launcher(monkeypatch):
 PARAMS = [([f"seed={i}"], "hydra.sweep.dir", 10 + i) for i in range(4)]
 
 
+@pytest.mark.parametrize("on_error", ["raise", "nan"])
+def test_a_job_of_several_tasks_returns_its_failing_task(launcher, on_error):
+    """A task that raised before the runner's fail-soft guard comes back
+    FAILED. Under "nan" the job's return is the runner's failure, which
+    fails the cell; a FAILED return would stop the whole sweep (#365)."""
+    from hydra.core.utils import JobReturn, JobStatus
+
+    from mushin.workflows import _FailedRun
+
+    launcher.task_function.on_error, launcher.task_function.run_id = on_error, "r"
+    ok, bad = JobReturn(), JobReturn()
+    ok.status, ok._return_value = JobStatus.COMPLETED, {"v": 1.0}
+    bad.status, bad._return_value = JobStatus.FAILED, RuntimeError("task 1")
+
+    class Several(_Job):
+        job_id = "7"
+
+        def results(self):
+            self.waited = True
+            return [ok, bad]
+
+    (ret,) = launcher._wait([Several(None)], PARAMS[:1])
+    if on_error == "raise":
+        assert ret.status is JobStatus.FAILED
+    else:
+        assert ret.status is JobStatus.COMPLETED
+        assert isinstance(ret._return_value, _FailedRun)
+        assert str(ret._return_value.exception) == "task 1"
+
+
 def test_every_job_is_waited_on_and_each_dead_one_comes_back(launcher):
     """The plugin waited in submission order and stopped at the first job
     that ended without a result; every job is waited on here, in order."""
@@ -842,3 +872,35 @@ def test_a_dir_that_cannot_be_resolved_is_taken_as_written(tmp_path):
     os.symlink(tmp_path / "b", tmp_path / "a")
     os.symlink(tmp_path / "a", tmp_path / "b")
     assert _resolved(tmp_path / "a" / "0").is_absolute()
+
+
+@pytest.mark.parametrize("x", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_a_dead_job_keeps_a_swept_non_finite_cells_own_result(tmp_path, x):
+    """The record stores the combo's NaN or inf tagged; the dead job still
+    knows the cell's completed record as its own (#355)."""
+    from hydra.core.utils import JobStatus
+    from omegaconf import OmegaConf
+
+    from mushin._resume import write_cell_status
+    from mushin._sweep_io import write_metrics_sidecar
+    from mushin.workflows import _DeadJob, _TaskRunner
+
+    cell = tmp_path / "0"
+    written = write_metrics_sidecar(cell, {"v": 1.0})
+    write_cell_status(
+        cell,
+        status="completed",
+        combo={"lr": x},
+        attempt=1,
+        run_id="this",
+        metrics=written,
+    )
+    ret = _dead_ret(tmp_path)
+    ret.cfg = OmegaConf.create({"lr": x})
+    runner = object.__new__(_TaskRunner)
+    runner.swept_names, runner.sampled_indices = ["lr"], None
+    runner.on_error, runner.run_id = "nan", "this"
+    dead = _DeadJob(RuntimeError("x"), "RuntimeError('died')", keepable=True)
+    status, value = runner.record_dead_cell(ret, dead)
+    assert status is JobStatus.COMPLETED
+    assert value == {"v": 1.0}
