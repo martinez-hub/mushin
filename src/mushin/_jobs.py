@@ -492,6 +492,7 @@ def _ask(scontrol: str, array: str) -> tuple[str, Any]:
             errors="replace",
             timeout=_SCONTROL_TIMEOUT_S,
             check=False,
+            env=_scheduler_env(),
         )
     except subprocess.TimeoutExpired:
         return "unknown", f"scontrol gave no answer in {_SCONTROL_TIMEOUT_S} s"
@@ -533,6 +534,20 @@ def _judge(lines: list[str], folder: str) -> str:
     return "live" if all(ours.search(line) for line in lines) else "not ours"
 
 
+def _scheduler_env() -> dict[str, str]:
+    """The environment for ``scontrol`` and ``scancel``: this process's,
+    without what changes the jobs they act on. A shell's ``SCANCEL_STATE``
+    or ``SCANCEL_PARTITION`` filters the ids scancel is given, so a job the
+    check found live would stay running with no error, and ``SLURM_CLUSTERS``
+    sends both commands to another cluster, where the sweep's ids read as
+    gone. ``SCONTROL_*`` goes too, for what scontrol reports (#405)."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("SCANCEL_", "SCONTROL_")) and k != "SLURM_CLUSTERS"
+    }
+
+
 def _scancel(scancel: str, ids: list[str]) -> None:
     """Cancel ``ids``; raise when scancel fails for any but a job that ended
     since it was checked."""
@@ -546,6 +561,7 @@ def _scancel(scancel: str, ids: list[str]) -> None:
             errors="replace",
             timeout=_SCONTROL_TIMEOUT_S,
             check=False,
+            env=_scheduler_env(),
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(

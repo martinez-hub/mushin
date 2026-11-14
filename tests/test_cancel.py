@@ -48,10 +48,12 @@ class Scheduler:
         self.jobs: dict = {}
         self.scancel_answer = (0, "", "")
         self.calls: list[list[str]] = []
+        self.envs: list = []
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
         self.calls.append(argv)
+        self.envs.append(kwargs.get("env"))
         assert kwargs.get("timeout") and kwargs.get("check") is False
         if argv[0] == SCONTROL:
             *command, job_id = argv
@@ -499,3 +501,26 @@ def test_a_preempted_job_is_cancelled(tmp_path, slurm):
     slurm.jobs["100"] = _shown(_job("PREEMPTED", folder, task=0))
     assert mushin.cancel(tmp_path) == ["100"]
     assert slurm.scancels and not path.exists()
+
+
+def test_the_scheduler_commands_ignore_filters_the_shell_exported(
+    tmp_path, slurm, monkeypatch
+):
+    """`SCANCEL_STATE=PENDING` in the caller's shell would make scancel skip
+    the running jobs it was given, with no error, and `SLURM_CLUSTERS` would
+    send both commands to another cluster, where the sweep's ids read as
+    gone: neither reaches them (#405)."""
+    monkeypatch.setenv("SCANCEL_STATE", "PENDING")
+    monkeypatch.setenv("SCONTROL_LOCAL", "1")
+    monkeypatch.setenv("SLURM_CLUSTERS", "elsewhere")
+    folder = str(tmp_path / ".submitit")
+    _launch(tmp_path, R1, [(0, "100_0")])
+    slurm.jobs["100"] = _shown(_job("RUNNING", folder, task=0))
+    assert mushin.cancel(tmp_path) == ["100"]
+    assert slurm.envs and all(env is not None for env in slurm.envs)
+    for env in slurm.envs:
+        assert not any(
+            k.startswith(("SCANCEL_", "SCONTROL_")) or k == "SLURM_CLUSTERS"
+            for k in env
+        )
+    assert slurm.envs[0].get("PATH") == os.environ.get("PATH")
