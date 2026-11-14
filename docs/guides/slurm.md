@@ -258,7 +258,9 @@ launcher_config = mushin.slurm(gpus=1, timeout_min=120, cells_per_job=20)
 ```
 
 The cells a sweep submits are grouped in order, up to 20 to a job (the last
-job may get fewer), so 1,000 cells make 50 jobs. Each cell keeps its own
+job may get fewer), so 1,000 cells make 50 jobs. They are grouped within each
+of the sweeper's batches, so a `hydra.sweeper.max_batch_size` can give more,
+smaller jobs. Each cell keeps its own
 directory, record, metrics file and `.hydra/` snapshot, and `run()` returns
 the same dataset.
 
@@ -269,11 +271,13 @@ the same dataset.
   the random state of a library the task does not seed, GPU memory a task
   still references, a `torch.distributed` process group left initialized,
   and environment variables the task sets (`hydra.job.env_set` is restored
-  after each cell). `pin_gpu_round_robin` raises in every cell after a job's
-  first. The cells of a job also share its submitit log.
+  after each cell). `pin_gpu_round_robin` raises in a later cell once an
+  earlier cell of the job has initialized CUDA. The cells of a job also share
+  its submitit log.
 - A job of several tasks (`tasks_per_node` or `nodes` above 1, as for DDP)
   cannot run several cells: the sweep is refused before anything is
-  submitted.
+  submitted. A task count set another way (`additional_parameters` with
+  `ntasks`) is not seen: do not combine it with `cells_per_job`.
 - `array_parallelism` caps how many jobs run at once, not cells.
 - Choose `cells_per_job` so the number of jobs fits the cluster's
   `MaxArraySize` and your queue limit.
