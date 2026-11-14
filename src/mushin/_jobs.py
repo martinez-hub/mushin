@@ -9,13 +9,16 @@ naming the jobs it sent, and its driver removes the file once it has waited on
 them. `mushin.show` reads these files to list queued cells.
 
 A driver writes only its own files and never rewrites one: there is no
-read-modify-write anywhere, so two drivers on one ``working_dir`` (a resume
-while an earlier run's jobs still wait) need no lock. A file is written once,
-by `_atomic_write_json` (a temporary file, then a rename), so its mtime is the
-submission time on the filesystem clock that also stamps the cells' records.
+read-modify-write anywhere, so the files need no lock even when two drivers
+share one ``working_dir``. A file is written once, by `_atomic_write_json` (a
+temporary file, then a rename), so its mtime is the submission time on the
+filesystem clock that also stamps the cells' records.
 
 `mushin.cancel` reads the same files to cancel the jobs a sweep left queued
-or running (a driver killed mid-sweep leaves its files behind).
+or running (a driver killed mid-sweep leaves its files behind), and `run()`
+reads them to refuse a ``working_dir`` whose earlier jobs may still run
+(`refuse_live_launches`): two drivers would each submit the sweep's cells,
+and two jobs would then write one cell.
 
 Standard library only: the launcher imports this module in the driver, `show`
 on a login node, and `import mushin` loads it for `cancel`.
@@ -248,32 +251,145 @@ def ended_locally(launch: Launch) -> bool:
     on the driver's host, so there, and only there, a launch whose
     processes have all exited is over, though no driver removed its file
     (the driver was killed). A process that has exited but that its parent
-    has not reaped still counts as running, as does a pid the system has
-    since given another process: the launch is then read as before."""
+    has not reaped (a zombie) has ended. A pid the system has since given
+    another process still counts as running: the launch is then read as
+    before."""
+    return launch.executor == "local" and _local_state(launch, launch.cells) == "ended"
+
+
+def _local_state(launch: Launch, cells, *, own_command: bool = False) -> str:
+    """``"ended"`` when none of ``cells``' jobs of local ``launch`` still
+    runs, ``"live"`` when one may, and ``"unknown"`` where that cannot be
+    told: on another host than the one that submitted it, on Windows, or
+    for an id that is not a pid. With ``own_command``, a process counts as
+    a job only if its command line is the launch's controller's."""
     import socket  # here, not at the top: the module stays cheap to import
 
-    if launch.executor != "local" or launch.host != socket.gethostname():
-        return False
+    if launch.host != socket.gethostname():
+        return "unknown"
     # On Windows `os.kill` terminates the process it is given: never probe
     # there (submitit's local executor does not run there either).
     if sys.platform == "win32":
-        return False
+        return "unknown"
     # A local job's id is a bare pid; anything else cannot be probed.
-    if not all(cell.job_id.isdigit() for cell in launch.cells):
-        return False
-    return not any(_alive(int(cell.job_id)) for cell in launch.cells)
+    if not all(cell.job_id.isdigit() for cell in cells):
+        return "unknown"
+    pids = [int(cell.job_id) for cell in cells]
+    folder = launch.folder if own_command else None
+    return "live" if _any_alive(pids, folder) else "ended"
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+#: The module a submitit_local job's controller runs, as submitit's
+#: `start_controller` starts it: `python -m submitit.local._local <folder>`,
+#: the executor's folder (``<working_dir>/.submitit/%j`` by default), which
+#: lies under the launch's ``folder``.
+_LOCAL_CONTROLLER = "submitit.local._local"
+#: How long reading the process table with ``ps`` may take.
+_PS_TIMEOUT_S = 10
+
+
+def _any_alive(pids: list[int], folder: str | None) -> bool:
+    """Whether any of ``pids`` names a process that still runs: one that
+    exists and is not a zombie. A job's controller is a child of the driver
+    that submitted it, so once it exits it stays a zombie until that driver
+    reaps it, which a driver interrupted mid-wait in a live process (Ctrl-C
+    in a notebook) may never do. It is not reaped here either: that would
+    take the exit status from the driver's own handle on it. With
+    ``folder``, a process counts only if its command line runs submitit's
+    local controller on a path under ``folder``, since the system may have
+    given an ended job's pid to any process. A pid whose process cannot be
+    read counts as running: it is not known to have ended."""
+    existing = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass  # another user's process: it exists
+        # An id no process can have, which only a hand-edited file holds.
+        except (OSError, OverflowError):
+            return True
+        existing.append(pid)
+    if not existing:
         return False
-    # Not known to have exited: a process of another user (PermissionError),
-    # or an id no process can have, which only a hand-edited file holds.
-    except (OSError, OverflowError):
+    found = _processes(existing)
+    if found is None:
         return True
-    return True
+    for pid in existing:
+        if pid not in found:
+            continue  # it exited after `os.kill` found it
+        state, command = found[pid]
+        if state.startswith("Z"):
+            continue
+        if folder is None or _runs_controller(command, folder):
+            return True
+    return False
+
+
+def _processes(pids: list[int]) -> dict[int, tuple[str, str]] | None:
+    """Each of ``pids`` that names a process, mapped to its state code
+    (``Z`` for a zombie) and its command line, its arguments joined by
+    spaces; None when the process table cannot be read. From ``/proc`` on
+    Linux; elsewhere (macOS) from ``ps``, run here rather than through
+    `_run`, which is the scheduler's (the tests fail it closed)."""
+    if sys.platform.startswith("linux") and os.path.isdir("/proc/self"):
+        found = {}
+        for pid in pids:
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text(errors="replace")
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # it has exited
+            except OSError:
+                return None
+            # `<pid> (<name>) <state> ...`: the name may hold spaces and
+            # parentheses, so the state is the first field after the last `)`.
+            state = stat.rpartition(")")[2].split()[:1]
+            if not state:
+                return None
+            # Arguments end in NUL; a zombie's command line is empty.
+            command = argv.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            found[pid] = (state[0], command)
+        return found
+    try:
+        out = subprocess.run(
+            # A flag per column: POSIX leaves a comma after `=` open to
+            # reading as part of the header.
+            ["ps", "-ww", "-o", "pid=", "-o", "stat=", "-o", "command="]
+            + ["-p", ",".join(map(str, pids))],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_PS_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # ps exits 1, printing nothing, when none of the pids names a process.
+    if out.returncode not in (0, 1) or out.stderr.strip():
+        return None
+    found = {}
+    for line in out.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or not fields[0].isdigit():
+            return None
+        # A zombie's command reads `<defunct>` on macOS.
+        found[int(fields[0])] = (fields[1], fields[2] if len(fields) > 2 else "")
+    return found
+
+
+def _runs_controller(command: str, folder: str) -> bool:
+    """Whether ``command`` runs submitit's local controller on a path under
+    ``folder``. Read as text: ``ps`` joins the arguments with spaces, and
+    with submitit's ``setup`` the process is a shell given the controller's
+    command as one argument, its folder quoted. On a path boundary, so
+    ``/s/.submitit2`` is not under ``/s/.submitit``."""
+    if _LOCAL_CONTROLLER not in command:
+        return False
+    under = re.escape(folder.rstrip("/"))
+    return re.search(rf"{under}(?:/|['\"\s]|$)", command) is not None
 
 
 def cancel(working_dir, *, dry_run: bool = False) -> list[str]:
@@ -595,3 +711,208 @@ def _first_line(text: str) -> str:
 def _forget_all(paths: Iterable[Path]) -> None:
     for path in paths:
         forget_launch(path)
+
+
+#: A record's statuses once its job has run its cell to an end, or its
+#: driver has recorded the job's end.
+_RECORDED_ENDS = frozenset({"completed", "failed", "skipped"})
+
+
+def refuse_live_launches(working_dir) -> list[Path]:
+    """Refuse a run into ``working_dir`` while jobs an earlier run submitted
+    there may still be queued or running (#345). Return the launch files of
+    those found over, for `run()` to remove once its own launch has returned:
+    the new run has then superseded them, and nothing else would remove
+    them, so every later run would ask about them again.
+
+    Two drivers on one sweep (a resume started while the earlier run's jobs
+    still wait, or the same script run twice) each submit the cells they
+    find unfinished, and two jobs then write one cell. A launch's job has
+    ended once its cell holds a record of the launch's run that says so;
+    otherwise:
+
+    - a SLURM job is asked about with ``scontrol``, as `cancel` asks
+      (`_ask`, `_judge`). One not ended (PREEMPTED included: SLURM may
+      requeue it) refuses the run with a ValueError, and one SLURM no longer
+      lists is over. One SLURM lists that is not this sweep's (its id
+      reused) does not refuse the run: it warns, and the launch file is
+      kept, as `cancel` keeps it. When scontrol is found but gives no answer
+      to read (it failed, or took too long), the run is refused with a
+      RuntimeError, as `cancel` then cancels nothing; so is a launch sent to
+      other clusters (``--clusters``), whose jobs plain scontrol would call
+      purged.
+    - a local job's id is its controller's process id: on the host that
+      submitted it, a process that runs submitit's local controller on the
+      launch's folder, and is not a zombie, refuses the run.
+
+    Where the jobs cannot be checked at all (no scontrol here, or a local
+    launch of another host), the run warns and goes ahead: the check is a
+    net for the likely mistake, not a lock, and refusing would block every
+    run on a machine without SLURM whose dir once ran there. Each message
+    names the launch file to delete once its jobs are known to be over."""
+    root = Path(working_dir)
+    launches, bad = read_launches(root)
+    if bad:
+        warnings.warn(
+            f"mushin could not read the launch files {[str(p) for p in bad]}: if "
+            "they name jobs of an earlier run that are still queued or running, "
+            "those jobs and this run write the same cells.",
+            UserWarning,
+            stacklevel=3,
+        )
+    if not launches:
+        return []
+    recorded = _recorded_ends(root)
+    ended: list[Path] = []
+    # A line per launch for each message: those that refuse the run (live,
+    # or not readable), then those it only warns of.
+    live: list[str] = []
+    unreadable: list[str] = []
+    unchecked: list[str] = []
+    others: list[str] = []
+    asked: list[tuple[Launch, list[str]]] = []
+    for launch in launches:
+        cells = [
+            cell
+            for cell in launch.cells
+            if (launch.run_id, cell.job_id) not in recorded
+            and (launch.run_id, cell.num) not in recorded
+        ]
+        if not cells:
+            ended.append(launch.path)
+        elif launch.executor == "local":
+            state = _local_state(launch, cells, own_command=True)
+            ids = " ".join(cell.job_id for cell in cells)
+            if state == "ended":
+                ended.append(launch.path)
+            elif state == "live":
+                live.append(f"{launch.path}: local process ids {ids} on this host")
+            else:
+                unchecked.append(
+                    f"{launch.path}: local process ids {ids} on host {launch.host!r}"
+                )
+        elif launch.clusters is not None:
+            # Plain scontrol, asked, would call these jobs purged, and so let
+            # the run go ahead while they run; `cancel` retires the file.
+            unreadable.append(
+                f"{launch.path}: sent to SLURM clusters {launch.clusters!r}, which "
+                "plain scontrol does not see"
+            )
+        else:
+            # A task of an array is `<array>_<index>`: scontrol is asked
+            # about the array, as `cancel` asks.
+            arrays = list(dict.fromkeys(c.job_id.split("_")[0] for c in cells))
+            asked.append((launch, arrays))
+    if asked:
+        scontrol = _which("scontrol")
+        if scontrol is None:
+            unchecked.extend(
+                f"{launch.path}: SLURM jobs {' '.join(arrays)}, and no scontrol here"
+                for launch, arrays in asked
+            )
+        else:
+            answers: dict[str, tuple[str, Any]] = {}
+            for _, arrays in asked:
+                for array in arrays:
+                    if array not in answers:
+                        answers[array] = _ask(scontrol, array)
+            for launch, arrays in asked:
+                # The arrays of each verdict: "live", "gone", "not ours" or,
+                # when scontrol's answer could not be read, "unknown".
+                having: dict[str, list[str]] = {}
+                for array in arrays:
+                    kind, detail = answers[array]
+                    verdict = _judge(detail, launch.folder) if kind == "shown" else kind
+                    having.setdefault(verdict, []).append(array)
+                if "live" in having:
+                    live.append(f"{launch.path}: SLURM jobs {' '.join(having['live'])}")
+                elif "unknown" in having:
+                    why = "; ".join(
+                        f"job {a}: {answers[a][1]}" for a in having["unknown"]
+                    )
+                    unreadable.append(f"{launch.path}: {why}")
+                elif "not ours" in having:
+                    others.append(
+                        f"{launch.path}: SLURM jobs {' '.join(having['not ours'])}, "
+                        f"whose script and logs are not under {launch.folder!r}"
+                    )
+                else:
+                    ended.append(launch.path)
+    where = str(root)
+    if live:
+        also = (
+            "\nNor can it tell whether these have ended:\n" + _lines(unreadable)
+            if unreadable
+            else ""
+        )
+        raise ValueError(
+            f"mushin: jobs an earlier run submitted in working_dir {where!r} may "
+            "still be queued or running, and would write the same cells as this "
+            f"run:\n{_lines(live)}{also}\nWait for them to end (a driver still "
+            "waiting on them finishes its run, and a `resume=True` then reuses "
+            f"the cells they completed), or cancel them: `mushin.cancel({where!r})` "
+            "for SLURM jobs, or stop the processes of local ones. If they are not "
+            "this sweep's jobs, delete the launch file named and run again."
+        )
+    if unreadable:
+        raise RuntimeError(
+            "mushin could not tell whether jobs an earlier run submitted in "
+            f"working_dir {where!r} have ended, and two runs on one sweep would "
+            f"write the same cells:\n{_lines(unreadable)}\nTry again, or check "
+            "them with `scontrol show job <id>` (with `--clusters` for jobs sent "
+            "to other clusters). Once they have ended or are cancelled "
+            f"(`mushin.cancel({where!r})`), or if they are not this sweep's "
+            "jobs, delete the launch file named and run again."
+        )
+    if unchecked:
+        warnings.warn(
+            "mushin cannot check whether these jobs of an earlier run in "
+            f"working_dir {where!r} have ended, and runs anyway:\n"
+            f"{_lines(unchecked)}\nIf they are still queued or running, they "
+            "write the same cells as this run. Once they have ended, delete the "
+            "launch file named.",
+            UserWarning,
+            stacklevel=3,
+        )
+    if others:
+        warnings.warn(
+            "mushin found jobs under the ids an earlier run in working_dir "
+            f"{where!r} submitted that are not this sweep's (SLURM may have "
+            f"given the ids to other jobs), and runs anyway:\n{_lines(others)}\n"
+            "Once you are sure, delete the launch file named.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return ended
+
+
+def _lines(lines: list[str]) -> str:
+    return "\n".join(f"  {line}" for line in lines)
+
+
+def _recorded_ends(root: Path) -> set[tuple[str, Any]]:
+    """``(run id, job id)`` and ``(run id, job number)`` of each record in a
+    direct child of ``root`` (where `show` reads records) that says its
+    job's end, indexed as `show`'s rule 1 indexes a record of a job that
+    ran. A cell's dir further down is not read: its job is asked about."""
+    from ._resume import read_cell_status
+
+    ends: set[tuple[str, Any]] = set()
+    try:
+        dirs = [p for p in root.iterdir() if p.is_dir() and p.name != JOBS_DIR]
+    except OSError:
+        return ends
+    for d in dirs:
+        record = read_cell_status(d)
+        if record is None or record.get("status") not in _RECORDED_ENDS:
+            continue
+        # Only as written (a str, or an int): a hand-edited value may not
+        # even hash.
+        run = record.get("run_id")
+        if not isinstance(run, str):
+            continue
+        if isinstance(record.get("job_id"), str):
+            ends.add((run, record["job_id"]))
+        if type(record.get("job_num")) is int:  # not a bool
+            ends.add((run, record["job_num"]))
+    return ends

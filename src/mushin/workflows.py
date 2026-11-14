@@ -3518,7 +3518,12 @@ class BaseWorkflow:
 
         working_dir: str (default: None, the Hydra default will be used)
             The directory to run the experiment in.  This value is used for
-            setting `hydra.sweep.dir`.
+            setting `hydra.sweep.dir`. A run refuses a ``working_dir`` whose
+            earlier jobs, submitted by ``launcher="submitit_slurm"`` or
+            ``"submitit_local"``, may still be queued or running, whatever
+            launcher it uses: a ``ValueError``, or a ``RuntimeError`` when
+            ``scontrol`` gives no answer it can read. Where those jobs cannot
+            be checked (no ``scontrol``), it warns and runs.
 
         sweeper: str | None (default: None)
             The configuration name of the Hydra Sweeper to use (i.e., the override for
@@ -4062,6 +4067,19 @@ class BaseWorkflow:
                 f"the ceiling (e.g. `confirm_above={num_cells}`) to run it."
             )
 
+        # Two drivers on one sweep: refuse a working_dir whose earlier jobs,
+        # submitted by mushin's submitit launchers, may still be queued or
+        # running, whatever launcher this run uses (#345). Each driver would
+        # submit the cells it finds unfinished, and two jobs would write one
+        # cell. Before anything is written, and after every check that needs
+        # no scheduler. The launches it found over are removed once this
+        # run's own launch has returned.
+        _over_launches = []
+        if working_dir is not None:
+            from ._jobs import refuse_live_launches
+
+            _over_launches = refuse_live_launches(working_dir)
+
         if task_fn_wrapper is None:
             task_fn_wrapper = _identity
 
@@ -4203,6 +4221,16 @@ class BaseWorkflow:
             if amended is not None:
                 raise amended from e
             raise
+
+        # This run's launch returned: it has superseded the earlier runs'
+        # launches found over, whose files nothing else would remove (every
+        # later run would ask about them again). Not when the launch raised:
+        # this run then left its cells to a later one.
+        if _over_launches:
+            from ._jobs import forget_launch
+
+            for path in _over_launches:
+                forget_launch(path)
 
         if isinstance(jobs, list):
             # Hydra returns a list of per-batch job lists (one batch for the
@@ -5897,7 +5925,12 @@ class RobustnessCurve(MultiRunMetricsWorkflow):
 
         working_dir: str (default: None, the Hydra default will be used)
             The directory to run the experiment in.  This value is used for
-            setting `hydra.sweep.dir`.
+            setting `hydra.sweep.dir`. A run refuses a ``working_dir`` whose
+            earlier jobs, submitted by ``launcher="submitit_slurm"`` or
+            ``"submitit_local"``, may still be queued or running, whatever
+            launcher it uses: a ``ValueError``, or a ``RuntimeError`` when
+            ``scontrol`` gives no answer it can read. Where those jobs cannot
+            be checked (no ``scontrol``), it warns and runs.
 
         sweeper: str | None (default: None)
             The configuration name of the Hydra Sweeper to use (i.e., the override for

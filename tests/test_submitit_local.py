@@ -1534,6 +1534,82 @@ def test_cancel_leaves_a_local_launch_to_its_host(tmp_path, monkeypatch, mushin_
             job.cancel(check=False)
 
 
+def _end_launched(wd: Path, held: list) -> None:
+    """End a test's jobs: those it holds, and every process a launch file
+    names that is still a child of this process (a pid that is not, the
+    system may have given another process, and is left alone)."""
+    import signal
+
+    for job in held:
+        job.cancel(check=False)
+    for path in (wd / "mushin_jobs").glob("*.json"):
+        for cell in json.loads(path.read_text())["cells"]:
+            pid = int(cell["job_id"])
+            try:
+                if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+            except ChildProcessError:
+                continue
+
+
+def test_a_resume_is_refused_while_a_killed_drivers_jobs_run(
+    tmp_path, monkeypatch, mushin_local
+):
+    """A driver killed mid-sweep leaves its jobs running. A resume is refused
+    while they run; once they have ended, it reuses the cells they
+    completed and runs again the one whose job died. That job's controller
+    is a child of this process, never reaped (a zombie), and its cell's
+    record still says `running`: only its process says it has ended."""
+    from mushin import _jobs
+
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [0, 1])
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "2")
+    held = []  # the killed driver's jobs
+    original = mushin_local.MushinLocalLauncher._wait
+
+    def wait(self, jobs, job_params):
+        if not held:  # the first driver is killed while it waits
+            held.extend(jobs)
+            raise KeyboardInterrupt
+        return original(self, jobs, job_params)
+
+    def refused() -> bool:
+        try:
+            _jobs.refuse_live_launches(wd)
+        except ValueError:
+            return True
+        return False
+
+    def pid(cell: str) -> float:
+        return json.loads((wd / cell / "mushin_metrics.json").read_text())["pid"]
+
+    monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
+    sweep = dict(
+        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **LOCAL
+    )
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tasks.die_when_told.run(**sweep)
+        (launch,) = _launches(wd)
+        with pytest.raises(ValueError, match=re.escape(launch)):
+            tasks.die_when_told.run(resume=True, **sweep)
+        gate.touch()
+        assert _until(lambda: not refused())
+        assert _completed(wd / "0") and _completed(wd / "1")
+        assert _status(wd / "2") == "running"
+        pids = [pid("0"), pid("1")]
+        monkeypatch.delenv("MUSHIN_TEST_DIE")
+        ds = tasks.die_when_told.run(resume=True, **sweep)
+        assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
+        assert ds["pid"].values.tolist()[:2] == pids  # reused, not run again
+        assert _launches(wd) == []  # the killed driver's file is retired
+    finally:
+        gate.touch()
+        _end_launched(wd, held)
+
+
 @pytest.mark.config_group("m345")
 def test_launch_combos_match_records(
     tmp_path, monkeypatch, mushin_local, restore_config_group
