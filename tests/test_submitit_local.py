@@ -292,10 +292,14 @@ def test_a_cell_dead_while_running_resumes(tmp_path, monkeypatch):
     assert after[0] == before[0] and after[2] == before[2]  # reused
 
 
-def test_a_plain_hydra_task_on_mushins_launcher_sees_the_plugins_error(tmp_path):
+def test_a_plain_hydra_task_on_mushins_launcher_sees_the_plugins_error(
+    tmp_path, monkeypatch, mushin_local
+):
     """Only mushin's runner takes a dead job as a failed cell."""
     from hydra_zen import launch, make_config, zen
 
+    warned = []
+    monkeypatch.setattr(mushin_local.log, "warning", warned.append)
     with pytest.raises(submitit.core.utils.UncompletedJobError):
         launch(
             make_config(seed=0),
@@ -309,6 +313,9 @@ def test_a_plain_hydra_task_on_mushins_launcher_sees_the_plugins_error(tmp_path)
             multirun=True,
             version_base="1.3",
         )
+    # Only mushin's runner names its jobs for `show` (#345), and another
+    # task is not even tried.
+    assert not (tmp_path / "s" / "mushin_jobs").exists() and warned == []
 
 
 @pytest.mark.parametrize("raw", [False, True], ids=["launcher=", "override"])
@@ -1061,3 +1068,293 @@ def test_a_resume_keeps_the_entry_of_the_job_that_computed_the_cell(
     assert after["0"] == before["0"] and after["2"] == before["2"]
     assert after["1"]["job_id"] != before["1"]["job_id"]
     assert _logs_of(after["1"]).is_file()
+
+
+# A launch names its jobs in `mushin_jobs/` until it has waited on them, so
+# `mushin.show` lists the cells whose jobs have not started as queued (#345).
+
+
+@pytest.fixture
+def mushin_local():
+    """The launcher module, once Hydra's plugin scan has run: the scan
+    executes the module again, rebinding its classes, so a patch made
+    before the first Hydra app of the process would be lost."""
+    from hydra.core.plugins import Plugins
+
+    Plugins.instance()
+    return sys.modules["hydra_plugins.mushin_submitit.launcher"]
+
+
+def _gate(monkeypatch, tmp_path, nums) -> Path:
+    """Hold the jobs of cells ``nums`` before their runner starts (with
+    `tasks.GATE`) until the returned file exists."""
+    gate = tmp_path / "gate"
+    monkeypatch.setenv("MUSHIN_TEST_GATE", str(gate))
+    monkeypatch.setenv("MUSHIN_TEST_GATE_NUMS", ",".join(map(str, nums)))
+    return gate
+
+
+def _launches(wd: Path) -> list[str]:
+    return sorted(p.name for p in (wd / "mushin_jobs").glob("*.json"))
+
+
+def _completed(cell: Path) -> bool:
+    try:
+        return _status(cell) == "completed"
+    except (OSError, ValueError):  # not written yet, or mid-replace
+        return False
+
+
+def _until(condition, seconds=30) -> bool:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _show(wd: Path) -> dict:
+    """`show`'s status per seed, or the error it raised."""
+    try:
+        return {r["seed"]: r["status"] for r in mushin.show(wd).rows}
+    except Exception as exc:  # noqa: BLE001 - the test asserts on it
+        return {"error": exc}
+
+
+def _watch(monkeypatch, module, wd, gate=None, ungated=()):
+    """Wrap the launcher's `_wait`: once the ``ungated`` cells completed, note
+    the launch files, `show`'s rows (with the jobs' columns) and the jobs'
+    ids, open the gate, wait as the launcher does, then note `show`'s
+    statuses again. It asserts nothing: an AssertionError raised there would
+    take the launcher's error path."""
+    seen = {}
+    original = module.MushinLocalLauncher._wait
+
+    def wait(self, jobs, job_params):
+        try:
+            _until(lambda: all(_completed(wd / str(n)) for n in ungated))
+            seen["ids"] = [str(job.job_id) for job in jobs]
+            seen["launches"] = _launches(wd)
+            seen["before"] = _show(wd)
+            try:
+                seen["rows"] = mushin.show(wd, jobs=True).rows
+            except Exception as exc:  # noqa: BLE001 - the test asserts on it
+                seen["rows"] = exc
+        finally:
+            if gate is not None:
+                gate.touch()
+        waited = original(self, jobs, job_params)
+        seen["after"] = _show(wd)
+        seen["launches after"] = _launches(wd)
+        return waited
+
+    monkeypatch.setattr(module.MushinLocalLauncher, "_wait", wait)
+    return seen
+
+
+def test_show_lists_queued_cells_of_a_live_sweep(tmp_path, monkeypatch, mushin_local):
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [1, 2])
+    seen = _watch(monkeypatch, mushin_local, wd, gate, ungated=[0])
+    tasks.record_pid.run(
+        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **LOCAL
+    )
+    run_id = json.loads((wd / "0" / "mushin_cell_status.json").read_text())["run_id"]
+    assert seen["launches"] == [f"{run_id}.0.json"]
+    ids = seen["ids"]
+    rows = [(r["seed"], r["status"], r["job"]) for r in seen["rows"]]
+    assert rows == [
+        (0, "completed", ids[0]),
+        (1, "queued", ids[1]),
+        (2, "queued", ids[2]),
+    ]
+    assert _show(wd) == {0: "completed", 1: "completed", 2: "completed"}
+    assert (wd / "mushin_jobs").is_dir() and _launches(wd) == []
+
+
+def test_resume_shows_a_resubmitted_cell_queued(tmp_path, monkeypatch, mushin_local):
+    wd = tmp_path / "s"
+    sweep = dict(
+        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **LOCAL
+    )
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(on_error="nan", **sweep)
+    monkeypatch.delenv("MUSHIN_TEST_DIE")
+    gate = _gate(monkeypatch, tmp_path, [1])
+    seen = _watch(monkeypatch, mushin_local, wd, gate)
+    tasks.die_when_told.run(resume=True, **sweep)
+    # Cells 0 and 2 were reused in the driver; cell 1's earlier record is
+    # the first run's failure, which its queued job replaces.
+    assert seen["before"] == {0: "completed", 1: "queued", 2: "completed"}
+    assert _show(wd) == {0: "completed", 1: "completed", 2: "completed"}
+
+
+def test_dead_before_start_over_an_earlier_terminal_record(
+    tmp_path, monkeypatch, mushin_local
+):
+    """A resubmitted job dies before its runner, in a dir holding the first
+    run's failure, which the driver does not overwrite. The cell is queued
+    until the job has ended; then, its launch no longer read (a local job's
+    process has exited), the dir's earlier record shows."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **LOCAL)
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(on_error="nan", **sweep)
+    first = (wd / "1" / "mushin_cell_status.json").read_text()
+    monkeypatch.delenv("MUSHIN_TEST_DIE")
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+    seen = _watch(monkeypatch, mushin_local, wd)
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(
+            on_error="nan", resume=True, overrides=[tasks.DIE_BEFORE_START], **sweep
+        )
+    assert seen["before"][1] == "queued"
+    assert len(seen["launches after"]) == 1  # still there after `_wait`
+    assert seen["after"][1] == "failed"
+    assert (wd / "1" / "mushin_cell_status.json").read_text() == first
+    assert _show(wd)[1] == "failed" and _launches(wd) == []
+
+
+def test_dead_before_start_in_a_fresh_dir_is_queued_then_failed(
+    tmp_path, monkeypatch, mushin_local
+):
+    wd = tmp_path / "s"
+    monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+    seen = _watch(monkeypatch, mushin_local, wd)
+    with pytest.warns(UserWarning, match="failed"):
+        tasks.die_when_told.run(
+            seed=multirun([0, 1, 2]),
+            working_dir=str(wd),
+            on_error="nan",
+            overrides=[tasks.DIE_BEFORE_START],
+            **LOCAL,
+        )
+    assert seen["before"].get(1) == "queued"
+    assert seen["after"][1] == "failed"  # this run's record of the dead job
+
+
+def test_wait_raising_after_waiting_removes_the_launch(
+    tmp_path, monkeypatch, mushin_local
+):
+    wd = tmp_path / "s"
+    seen = {}
+    original = mushin_local.MushinLocalLauncher._wait
+
+    def wait(self, jobs, job_params):
+        seen["launches"] = _launches(wd)
+        original(self, jobs, job_params)
+        raise RuntimeError("after waiting")
+
+    monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
+    with pytest.raises(RuntimeError, match="after waiting"):
+        tasks.record_pid.run(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    assert len(seen["launches"]) == 1
+    assert _launches(wd) == []
+
+
+def test_launch_kept_when_a_jobs_end_is_unknown(tmp_path, monkeypatch, mushin_local):
+    """`_wait` raised, and submitit cannot tell that a job ended: it may
+    still be queued, so its launch stays."""
+    wd = tmp_path / "s"
+    original = mushin_local.MushinLocalLauncher._wait
+
+    def wait(self, jobs, job_params):
+        original(self, jobs, job_params)
+        raise RuntimeError("after waiting")
+
+    monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
+    monkeypatch.setattr(mushin_local, "_ended", lambda job: False)
+    with pytest.raises(RuntimeError, match="after waiting"):
+        tasks.record_pid.run(seed=multirun([0, 1]), working_dir=str(wd), **LOCAL)
+    assert len(_launches(wd)) == 1
+
+
+def test_ctrl_c_leaves_the_launch(tmp_path, monkeypatch, mushin_local):
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [0, 1])
+    held = []  # the jobs, for the teardown to cancel
+    asked = []  # the jobs the launcher asked the scheduler about
+
+    def wait(self, jobs, job_params):
+        held.extend(jobs)
+        raise KeyboardInterrupt
+
+    def ended(job):
+        asked.append(job)
+        return True
+
+    monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
+    monkeypatch.setattr(mushin_local, "_ended", ended)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tasks.record_pid.run(
+                seed=multirun([0, 1]),
+                working_dir=str(wd),
+                overrides=[tasks.GATE],
+                **LOCAL,
+            )
+        # Interrupted, the driver asks the scheduler nothing more.
+        assert len(_launches(wd)) == 1 and asked == []
+        assert _show(wd) == {0: "queued", 1: "queued"}
+        gate.touch()
+        assert _until(lambda: _completed(wd / "0") and _completed(wd / "1"))
+        # Each job's record is its launch's: the launch no longer counts.
+        assert _show(wd) == {0: "completed", 1: "completed"}
+    finally:
+        gate.touch()
+        for job in held:
+            job.cancel(check=False)
+
+
+@pytest.mark.config_group("m345")
+def test_launch_combos_match_records(
+    tmp_path, monkeypatch, mushin_local, restore_config_group
+):
+    """A launch's combos are its cells' overrides as parsed, which match the
+    records' but where a typed field converts the value."""
+    from hydra.core.config_store import ConfigStore
+
+    from mushin._sweep_io import combo_key
+
+    ConfigStore.instance().store(group="m345", name="small", node={"width": 4})
+    wd = tmp_path / "s"
+    seen = []
+    original = mushin_local.MushinLocalLauncher._wait
+
+    def wait(self, jobs, job_params):
+        seen.extend(
+            json.loads(p.read_text()) for p in (wd / "mushin_jobs").glob("*.json")
+        )
+        return original(self, jobs, job_params)
+
+    monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
+    tasks.Combos(tasks.CombosConfig).run(
+        seed=multirun([0, 1]),
+        lr=multirun([1]),  # a float field given an int
+        n=multirun([3]),
+        x=multirun([0.5]),
+        name=multirun(["a b"]),
+        flag=multirun([True]),
+        xs=multirun([[1, 2]]),
+        **{"opt.beta": multirun([0.9])},
+        m345=multirun(["small"]),
+        working_dir=str(wd),
+        **LOCAL,
+    )
+    (launch,) = seen
+    assert [cell["num"] for cell in launch["cells"]] == [0, 1]
+    for cell in launch["cells"]:
+        record = json.loads(
+            (wd / str(cell["num"]) / "mushin_cell_status.json").read_text()
+        )
+        submitted, recorded = cell["combo"], record["combo"]
+        assert submitted.pop("lr") == 1 and recorded.pop("lr") == 1.0
+        assert submitted == recorded
+        assert recorded["xs"] == "[1, 2]" and recorded["m345"] == "small"
+        # The typed float keys apart: `show` matches such a cell by its job.
+        assert combo_key({**submitted, "lr": 1}) != combo_key({**recorded, "lr": 1.0})

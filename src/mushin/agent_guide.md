@@ -280,9 +280,10 @@ python -c "import mushin; mushin.show('runs/compare-v1')"
 
 `show` prints one row per cell that has started, with its status (`running`,
 `completed`, `failed` or `skipped`) and metrics, and returns the rows. A cell
-that has not started has no row yet. This counts the finished cells; the
-sweep is done when the count reaches the dry run's `num_cells`, or when the
-process has exited and `mushin_sweep_manifest.json` exists:
+that has not started has no row yet; on the submitit launchers, a cell whose
+job is submitted but has not started is `queued`. This counts the finished
+cells; the sweep is done when the count reaches the dry run's `num_cells`, or
+when the process has exited and `mushin_sweep_manifest.json` exists:
 
 ```bash
 python -c "import mushin; r = mushin.show('runs/compare-v1'); print(sum(x['status'] == 'completed' for x in r.rows))"
@@ -303,6 +304,7 @@ under the directory it was launched from:
 runs/compare-v1/
   multirun.yaml                the sweep's overrides
   mushin_sweep_manifest.json   every cell's status, written when the run ends
+  mushin_jobs/                 submitit launchers: the jobs a run still waits on
   0/, 1/, ...                  one directory per cell, holding:
     mushin_cell_status.json    completed, failed, skipped or running
     mushin_metrics.json        the dict the task returned (none if it returned None)

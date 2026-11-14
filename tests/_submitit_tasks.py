@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass, field
+from typing import Any
 
 from omegaconf import OmegaConf
 
 import mushin
+from mushin.workflows import MultiRunMetricsWorkflow
 
 
 @mushin.sweep
@@ -94,6 +97,30 @@ OmegaConf.register_new_resolver(
 DIE_BEFORE_START = (
     "hydra.sweep.subdir='${mushin_test_die_before_start:${hydra.job.num}}'"
 )
+
+
+def _gate(num):
+    """A `hydra.sweep.subdir` resolver. Inside a job whose number is in
+    `MUSHIN_TEST_GATE_NUMS`, it waits, while Hydra computes the cell's dir
+    (before mushin's runner starts), until the file `MUSHIN_TEST_GATE`
+    names exists, so a test sees the job's cell queued. It gives up after
+    30 s, well within the jobs' time limit, so a broken test cannot hang a
+    job. The driver evaluates the subdir too, outside any job, where it
+    returns the default subdir at once."""
+    import time
+    from pathlib import Path
+
+    gated = os.environ.get("MUSHIN_TEST_GATE_NUMS", "").split(",")
+    gate = os.environ.get("MUSHIN_TEST_GATE")
+    if os.environ.get("SUBMITIT_EXECUTOR") and gate and str(num) in gated:
+        deadline = time.monotonic() + 30
+        while not Path(gate).exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+    return str(num)
+
+
+OmegaConf.register_new_resolver("mushin_test_gate", _gate, replace=True)
+GATE = "hydra.sweep.subdir='${mushin_test_gate:${hydra.job.num}}'"
 
 
 @mushin.sweep
@@ -247,3 +274,30 @@ def _job_only():
 
 
 OmegaConf.register_new_resolver("mushin_test_job_only", _job_only, replace=True)
+
+
+@dataclass
+class _Opt:
+    beta: float = 0.5
+
+
+@dataclass
+class CombosConfig:
+    """A config for one swept value of each kind. Its `lr` is typed float,
+    so a swept `1` reaches the task, and the cell's record, as 1.0."""
+
+    seed: int = 0
+    lr: float = 0.0
+    n: int = 0
+    x: float = 0.0
+    name: str = ""
+    flag: bool = False
+    xs: Any = None
+    opt: _Opt = field(default_factory=_Opt)
+    m345: Any = None
+
+
+class Combos(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(seed, lr, n, x, name, flag, xs, opt, m345):
+        return dict(v=float(seed))
