@@ -844,6 +844,23 @@ def _with_launcher_hint(error: Exception, launcher: str | None) -> Exception | N
     )
 
 
+def _kept_fingerprint(cell_dir, combo) -> dict:
+    """For the record of a cell that runs no attempt (one ``sample=`` leaves
+    out, or past the wall-clock budget): the prior record's fingerprint, when
+    that record is this cell's, so a later run under the config that left its
+    checkpoints is still handed them (#391); else nothing, and the record
+    takes this run's."""
+    from ._resume import read_cell_status, same_cell
+
+    prior = read_cell_status(cell_dir) or {}
+    if not same_cell(prior.get("combo"), combo):
+        return {}
+    return {
+        "config_hash": prior.get("config_hash"),
+        "code_hash": prior.get("code_hash"),
+    }
+
+
 def _group_choices_of_job(job) -> dict | None:
     """``runtime.choices`` recorded in a job's hydra config, or None."""
     from ._hydra_yaml import hydra_choices
@@ -1642,7 +1659,16 @@ class _TaskRunner:
                 combo = self._combo(cfg, self.swept_names)
 
                 def skipped():
-                    write_status(cwd, status="skipped", combo=combo, attempt=1)
+                    # No attempt ran (`_kept_fingerprint`). In the driver, a
+                    # config that reads the environment may also hash
+                    # differently from the job's.
+                    write_status(
+                        cwd,
+                        status="skipped",
+                        combo=combo,
+                        attempt=1,
+                        **_kept_fingerprint(cwd, combo),
+                    )
                     # A skipped cell has no valid metrics; drop any sidecar a
                     # prior sweep left in this reused dir so show/export don't
                     # list old metrics on a 'skipped' row while to_xarray
@@ -2182,7 +2208,13 @@ class _TaskRunner:
             if skip:
                 cwd = Path.cwd()
                 combo = self._combo(cfg, self.swept_names)
-                write_status(cwd, status="skipped", combo=combo, attempt=1)
+                write_status(
+                    cwd,
+                    status="skipped",
+                    combo=combo,
+                    attempt=1,
+                    **_kept_fingerprint(cwd, combo),
+                )
                 # Same reused-dir hygiene as the sampling skip above.
                 remove_sidecar(cwd / METRICS_FILE)
                 return _SkippedRun()

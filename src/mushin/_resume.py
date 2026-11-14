@@ -37,7 +37,9 @@ class ResumeContext:
     last_ckpt : Path | None
         The newest checkpoint in ``dir`` that is this cell's own, or None. One
         another cell left in ``dir`` before this cell took it over (a sweep
-        over another grid in the same ``working_dir``) is not.
+        over another grid in the same ``working_dir``) is not, nor is one this
+        cell wrote under another config or task code (a resume after either
+        changed): ``is_resume`` can then be True while this is None.
     attempt : int
         1 on the first run; increments on each re-execution of this combo.
     """
@@ -120,8 +122,9 @@ def write_cell_status(
         payload["no_metrics"] = True
     # A record that replaces another cell's marks the checkpoints that cell
     # left in the dir; this cell is never handed one of them, and its later
-    # records carry the mark (#355).
-    mark = _foreign_mark(Path(cell_dir), combo)
+    # records carry the mark (#355). So does one of this cell under another
+    # config or task code (#391).
+    mark = _foreign_mark(Path(cell_dir), combo, run_id, config_hash, code_hash)
     if mark is not None:
         payload["foreign_ckpts"] = mark
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
@@ -137,20 +140,49 @@ def wrote_no_metrics(record: Any) -> bool:
     )
 
 
-def _foreign_mark(cell_dir: Path, combo: Any) -> dict | None:
+def _foreign_mark(
+    cell_dir: Path,
+    combo: Any,
+    run_id: str | None = None,
+    config_hash: str | None = None,
+    code_hash: str | None = None,
+) -> dict | None:
     """For the record of ``combo`` about to be written in ``cell_dir``: the
     mark of a record of this cell, carried; when it replaces another cell's
-    record (or one that cannot be read, failing closed), the checkpoints
-    there (`_checkpoints_mark`); None over no record."""
+    record (or one that cannot be read, failing closed), or a record of this
+    cell under another config or task code (`_same_fingerprint`), the
+    checkpoints there (`_checkpoints_mark`); None over no record.
+
+    A record of this run (``run_id``) is this cell's whatever its
+    fingerprint: a requeued attempt, or another task of the job, composes its
+    config anew, and a resolver that reads a clock or a rank can give it
+    another hash (#391)."""
     prior = read_cell_status(cell_dir)
     if prior is None:
         if not (cell_dir / STATUS_FILE).exists():
             return None
         return _checkpoints_mark(cell_dir)
     if isinstance(prior.get("combo"), dict) and same_cell(prior["combo"], combo):
-        carried = prior.get("foreign_ckpts")
-        return carried if _is_mark(carried) else None
+        ours = run_id is not None and prior.get("run_id") == run_id
+        if ours or _same_fingerprint(prior, config_hash, code_hash):
+            carried = prior.get("foreign_ckpts")
+            return carried if _is_mark(carried) else None
     return _checkpoints_mark(cell_dir)
+
+
+def _same_fingerprint(prior: dict, config_hash: Any, code_hash: Any) -> bool:
+    """Whether a record of a cell has the config and task code of the record
+    about to replace it. A hash the prior record lacks (one from before
+    fingerprints, or a task with no source of its own) is not compared, as
+    resume reuse does not; one the new record lacks, under a prior that has
+    it, cannot be shown the same, so it counts as another (#391)."""
+    for was, now in (
+        (prior.get("config_hash"), config_hash),
+        (prior.get("code_hash"), code_hash),
+    ):
+        if was is not None and was != now:
+            return False
+    return True
 
 
 def _checkpoints_mark(cell_dir: Path) -> dict | None:
