@@ -679,3 +679,49 @@ def test_a_raw_task_that_changes_a_fixed_value_does_not_report_its_change(tmp_pa
     assert str(back.multirun_task_overrides["lr"]) == str(
         wf.multirun_task_overrides["lr"]
     )
+
+
+class Mapped(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(d, base=None):
+        return dict(v=float(len(str(d))))
+
+
+def test_a_nan_inside_a_dict_element_reloads_as_nan(tmp_path):
+    """A dict element written as itself keeps its NaN in the saved
+    coordinates, so a reload does not read it as None and key it with a
+    swept None (#386)."""
+    wf = Mapped()
+    wf.run(
+        base=1,
+        d=multirun([{"k": float("nan")}, {"k": "${base}"}, {"k": None}]),
+        working_dir=tmp_path,
+    )
+    back = Mapped().load_from_dir(tmp_path, "mushin_metrics.json")
+    for read in (wf, back):
+        first = read.multirun_task_overrides["d"][0]
+        assert isinstance(first["k"], float) and math.isnan(first["k"])
+        assert not any(math.isnan(v) for v in _values(read))
+
+
+def test_a_user_dict_shaped_like_a_tag_is_kept(tmp_path):
+    """A swept dict whose only key is the NaN tag's, holding something that
+    is not a tag, is a value of the user's: it is read as stored, and the
+    run does not raise (#386)."""
+    wf = Mapped()
+    wf.run(
+        base=1,
+        d=multirun([{"__mushin_nonfinite__": [1]}, {"k": "${base}"}]),
+        working_dir=tmp_path,
+    )
+    assert wf.multirun_task_overrides["d"][0] == {"__mushin_nonfinite__": [1]}
+    assert not any(math.isnan(v) for v in _values(wf))
+
+
+def test_dict_elements_whose_keys_differ_only_in_type_are_two_elements():
+    """A key ``True`` and a key ``1`` are equal to Python's dict; as parsed
+    override values they are two elements (#386)."""
+    from mushin.workflows import _same_element
+
+    assert not _same_element({True: "a"}, {1: "a"})
+    assert _same_element({1: "a"}, {1: "a"})
