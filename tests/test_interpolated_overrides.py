@@ -129,7 +129,7 @@ def test_a_swept_interpolation_that_cannot_be_resolved_reads_its_cells(tmp_path)
     # is the coordinate, in the run and in a reload.
     wf = Plain()
     wf.run(x=multirun([f"{HYDRA_DIR}/a", "b"]), working_dir=tmp_path)
-    own = str(tmp_path / "0" / "a")
+    own = f"{tmp_path / '0'}/a"  # the job's dir, then "/a" as written
     assert wf.multirun_task_overrides["x"] == [own, "b"]
     assert _scores(wf) == [1.0, 1.0] and wf.is_complete
     loaded = Plain()
