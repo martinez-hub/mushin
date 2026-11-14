@@ -958,3 +958,44 @@ def test_a_dead_jobs_record_keeps_the_combo_its_job_resolved(tmp_path):
     runner.record_dead_cell(ret, _DeadJob(RuntimeError("x"), "died"))
     record = read_cell_status(cell)
     assert record["status"] == "failed" and record["combo"] == {"lr": "t1"}
+
+
+@pytest.mark.parametrize(
+    ("run_id", "entry_job", "host"),
+    [("this", "7", "n1"), ("this", "3", None), ("earlier", "7", None)],
+    ids=["its-own", "a-reused-cells", "another-runs"],
+)
+def test_a_dead_cell_names_its_job_and_only_its_own_host(
+    tmp_path, run_id, entry_job, host
+):
+    """The dead job's id and log folder come from the launcher; a host only
+    from the cell's record of this job, in this run, whose entry is that
+    job's own: a cell the job reused names the job that computed it (#345)."""
+    from mushin._resume import read_cell_status, write_cell_status
+    from mushin.workflows import _DeadJob, _record_dead_cell
+
+    cell = tmp_path / "0"
+    cell.mkdir()
+    write_cell_status(
+        cell,
+        status="running",
+        combo={"lr": 0.2},
+        attempt=1,
+        run_id=run_id,
+        job_id="7",
+        submitit={"job_id": entry_job, "logs": "/s/.submitit/x", "host": "n1"},
+    )
+    _record_dead_cell(
+        _dead_ret(tmp_path),
+        _DeadJob(
+            RuntimeError("x"), "died", job={"job_id": "7", "logs": "/s/.submitit/7"}
+        ),
+        combo={"lr": 0.2},
+        status="failed",
+        on_error="raise",
+        prior=read_cell_status(cell),
+        run_id="this",
+    )
+    entry = read_cell_status(cell)["submitit"]
+    assert (entry["job_id"], entry["logs"]) == ("7", "/s/.submitit/7")
+    assert entry.get("host") == host

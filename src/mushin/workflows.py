@@ -970,7 +970,8 @@ def _record_dead_cell(
         job_id = _job_id_or_none(OmegaConf.select(hydra, "job.id"))
         # The job's id and log folder, from the launcher; its host and
         # partition only from the cell's own record of this job, written
-        # once its runner started (#345).
+        # once its runner started, whose entry is this job's: a cell the job
+        # reused names the job that computed it (#345).
         entry = dict(dead.job) if isinstance(dead.job, dict) else {}
         carried = prior.get("submitit")
         if (
@@ -978,6 +979,7 @@ def _record_dead_cell(
             and run_id is not None
             and prior.get("run_id") == run_id
             and prior.get("job_id") == job_id
+            and carried.get("job_id") == job_id
         ):
             entry.update({k: carried[k] for k in ("host", "partition") if k in carried})
         # Creates the cell's dir if nothing above did (no `output_subdir`).
