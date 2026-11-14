@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +70,14 @@ _NONFINITE_TAG = "__mushin_nonfinite__"
 _NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
 
 
+def _is_list_config(v: Any) -> bool:
+    try:
+        from omegaconf import ListConfig
+    except ImportError:  # pragma: no cover - a core dependency
+        return False
+    return isinstance(v, ListConfig)
+
+
 def _json_normalize(
     v: Any, as_text: list | None = None, *, tag_nan: bool = False
 ) -> Any:
@@ -92,13 +100,15 @@ def _json_normalize(
         v = v.item()
     elif hasattr(v, "tolist"):  # numpy/torch array
         return _json_normalize(v.tolist(), as_text, tag_nan=tag_nan)
-    if isinstance(v, dict):
+    if isinstance(v, Mapping):  # a UserDict or DictConfig too (#369)
         if as_text is not None:
             as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
         return {
             str(k): _json_normalize(x, as_text, tag_nan=tag_nan) for k, x in v.items()
         }
-    if isinstance(v, (list, tuple)):
+    if isinstance(v, (list, tuple)) or _is_list_config(v):
+        # A ListConfig too (#369), as a list. Not any Sequence: a UserString
+        # is one whose items are UserStrings again.
         return [_json_normalize(x, as_text, tag_nan=tag_nan) for x in v]
     if isinstance(v, bool) or v is None:
         return v

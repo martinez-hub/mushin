@@ -674,6 +674,17 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
+def _as_metrics(result: Mapping) -> dict:
+    """A task's Mapping result as the dict its metrics file holds: a
+    DictConfig with its interpolations resolved, any other Mapping by its
+    items (a nested one is written as a dict too, `_json_normalize`)."""
+    from omegaconf import OmegaConf
+
+    if OmegaConf.is_config(result):
+        return OmegaConf.to_container(result, resolve=True)  # type: ignore[return-value]
+    return dict(result)
+
+
 def _tasks_per_cell(launcher_config) -> int:
     """How many tasks a submitit launcher config gives each cell's job:
     ``tasks_per_node`` times ``nodes``, each 1 when absent or unreadable."""
@@ -2206,8 +2217,12 @@ class _TaskRunner:
                 # from before the task.
                 record_accelerator(cwd, written)
             written = None
-            if isinstance(result, dict):
-                written = write_metrics_sidecar(cwd, result)
+            if isinstance(result, Mapping):
+                # Any Mapping the run takes as metrics, written as a dict
+                # (#369): a UserDict or DictConfig wrote no file, and a reload
+                # raised for it.
+                metrics = _as_metrics(result)
+                written = write_metrics_sidecar(cwd, metrics)
                 # Store the freshly-computed cell in the content-addressed cache
                 # so a future sweep with the same config+code reuses it. Keyed on
                 # the fingerprints; best-effort (a cache-write failure must never
@@ -2217,7 +2232,7 @@ class _TaskRunner:
                     try:
                         cache_cell = Path(self.cache_dir) / cache_key
                         cache_cell.mkdir(parents=True, exist_ok=True)
-                        write_metrics_sidecar(cache_cell, result)
+                        write_metrics_sidecar(cache_cell, metrics)
                     except OSError:
                         pass
             write_status(
