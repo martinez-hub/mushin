@@ -779,14 +779,26 @@ def _read_override(loaded, i: int, text: str, parse, name: str):
     return None if _holds_interpolation(str(value)) else value
 
 
+def _same_element(a: Any, b: Any) -> bool:
+    """Whether two parsed override values are the same element: equal and
+    of one type throughout (``1`` is not ``True``), a NaN equal to a NaN,
+    inside a list or dict too."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, float) and a != a:
+        return b != b
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(map(_same_element, a, b))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_element(a[k], b[k]) for k in a)
+    return a == b
+
+
 def _index_of(elements: list, value: Any) -> int | None:
     """The index of the element of an axis that a job's own override gave
     it, or None."""
     for j, element in enumerate(elements):
-        if type(element) is type(value) and (
-            element == value
-            or (isinstance(value, float) and value != value and element != element)
-        ):
+        if _same_element(element, value):
             return j
     return None
 

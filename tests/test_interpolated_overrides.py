@@ -261,6 +261,24 @@ def test_an_interpolation_inside_a_swept_list(tmp_path):
     assert _values(back) == [2.0, 1.0]
 
 
+def test_a_nan_inside_a_swept_list_with_an_interpolation(tmp_path):
+    """A job's own list element holding a NaN maps to its element (a NaN
+    equals a NaN there too), so its cell keeps its value in the run and in a
+    reload (#386)."""
+    wf = Listed()
+    wf.run(
+        base_lr=0.01,
+        xs=multirun([["${base_lr}", float("nan")], [3]]),
+        working_dir=tmp_path,
+    )
+    assert _values(wf) == [2.0, 1.0]
+    back = Listed().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert _values(back) == [2.0, 1.0]
+    assert [str(x) for x in back.multirun_task_overrides["xs"]] == [
+        str(x) for x in wf.multirun_task_overrides["xs"]
+    ]
+
+
 class FailsOnB(MultiRunMetricsWorkflow):
     @staticmethod
     def task(x, seed):
