@@ -462,3 +462,30 @@ def test_show_after_cancel(tmp_path, slurm):
     assert mushin.cancel(tmp_path) == ["100"]
     statuses = [(r["lr"], r["status"]) for r in mushin.show(tmp_path).rows]
     assert statuses == [(0.0, "failed")]
+
+
+def test_scancel_naming_a_job_already_completing_is_not_an_error(tmp_path, slurm):
+    """A job that finished between the check and scancel: SLURM says it is
+    already completing, which is no failure of the cancel (#405)."""
+    folder = str(tmp_path / ".submitit")
+    path = _launch(tmp_path, R1, [(0, "100_0")])
+    slurm.jobs["100"] = _shown(_job("RUNNING", folder, task=0))
+    slurm.scancel_answer = (
+        1,
+        "",
+        "scancel: error: Kill job error on job id 100: "
+        "Job/step already completing or completed\n",
+    )
+    assert mushin.cancel(tmp_path) == ["100"]
+    assert not path.exists()
+
+
+def test_a_launch_under_the_root_folder_is_not_cancelled(tmp_path, slurm):
+    """A submitit folder at the filesystem's root would take any job's paths
+    as under it: such a launch's jobs cannot be told from another's, so they
+    are not cancelled and the launch is kept (#405)."""
+    path = _launch(tmp_path, R1, [(0, "100_0")], folder="/")
+    slurm.jobs["100"] = _shown(_job("RUNNING", "/elsewhere", task=0))
+    with pytest.warns(UserWarning):
+        assert mushin.cancel(tmp_path) == []
+    assert slurm.scancels == [] and path.exists()

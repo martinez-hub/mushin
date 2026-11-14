@@ -33,7 +33,7 @@ import sys
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from ._slurm import _SCONTROL_TIMEOUT_S
@@ -517,6 +517,12 @@ def _judge(lines: list[str], folder: str) -> str:
     ``folder``."""
     if all(_STATE.search(line)[1] in _ENDED for line in lines):
         return "gone"
+    # A folder at or just under the filesystem's root (`/`, `/scratch`) would
+    # take nearly any job's paths as under it, so its jobs cannot be told from
+    # another's: not cancelled. The check is only as strict as the folder:
+    # one that several sweeps share cannot tell their jobs apart either.
+    if len(PurePath(folder).parts) < 3:
+        return "not ours"
     # Matched as text, so a folder holding a space matches, and on a path
     # boundary, so `/s/.submitit2` is not under `/s/.submitit`. `Command=` is
     # submitit's job script in that folder, there even when
@@ -553,8 +559,10 @@ def _scancel(scancel: str, ids: list[str]) -> None:
     if out.returncode == 0:
         return
     lines = [line for line in (out.stderr or "").splitlines() if line.strip()]
-    # A job that ended between the check and scancel is not an error.
-    other = [line for line in lines if "invalid job id" not in line.lower()]
+    # A job that ended between the check and scancel is not an error: SLURM
+    # says its id is invalid (purged) or that it is already completing.
+    ended = ("invalid job id", "already completing or completed")
+    other = [line for line in lines if not any(e in line.lower() for e in ended)]
     if other or not lines:
         message = " ".join(other) or "no message"
         raise RuntimeError(

@@ -209,7 +209,11 @@ cells as `queued`. Some cases follow:
 
 - SLURM reuses job ids. A job is cancelled only when its script or logs lie
   under the sweep's submitit folder (`<working_dir>/.submitit/` by default);
-  a job id SLURM has given another job is left alone, with a warning.
+  a job id SLURM has given another job is left alone, with a warning. The
+  check is only as strict as that folder: a `submitit_folder` several sweeps
+  share cannot tell their jobs apart, and one at or just below the
+  filesystem's root (`/%j`, `/scratch/%j`) is not trusted at all, so its
+  jobs are not cancelled.
 - When `scontrol` takes too long, fails, or answers in a form `cancel` cannot
   read, it cancels nothing and raises, naming the `scancel` command to run by
   hand.
