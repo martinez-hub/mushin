@@ -9,6 +9,7 @@ import pytest
 from mushin._resume import (
     STATUS_FILE,
     ResumeContext,
+    build_resume_context,
     discover_last_ckpt,
     read_cell_status,
     sidecar_job_fields,
@@ -233,6 +234,291 @@ def test_build_resume_context_tolerates_sidecar_missing_attempt(tmp_path):
     rc = build_resume_context(tmp_path, {"seed": 0})
     assert rc.is_resume is True
     assert rc.attempt == 1  # missing attempt -> 0 + 1
+
+
+# A swept NaN or inf is stored tagged in a cell's record; every reader reads
+# it as the value it was swept (#355).
+
+
+def test_a_combo_reads_back_as_swept(tmp_path):
+    import math
+
+    combo = {
+        "a": float("inf"),
+        "b": -float("inf"),
+        "c": float("nan"),
+        "d": None,
+        "e": [1, float("nan")],
+    }
+    write_cell_status(tmp_path, status="completed", combo=combo, attempt=1)
+    back = read_cell_status(tmp_path)["combo"]
+    assert back["a"] == float("inf") and back["b"] == -float("inf")
+    assert math.isnan(back["c"]) and back["d"] is None
+    assert back["e"][0] == 1 and math.isnan(back["e"][1])
+    assert math.isnan(combo["c"])  # the caller's combo is not changed
+    # A swept param named like the tag stays a param.
+    write_cell_status(
+        tmp_path, status="completed", combo={"__mushin_nonfinite__": "inf"}, attempt=1
+    )
+    assert read_cell_status(tmp_path)["combo"] == {"__mushin_nonfinite__": "inf"}
+
+
+@pytest.mark.parametrize("value", [[], {}, ["inf"]])
+def test_a_tag_shaped_value_that_is_not_a_tag_reads_as_stored(tmp_path, value):
+    stored = {"x": {"__mushin_nonfinite__": value}}
+    (tmp_path / STATUS_FILE).write_text(
+        json.dumps({"status": "completed", "combo": stored})
+    )
+    assert read_cell_status(tmp_path)["combo"] == stored
+
+
+def test_a_record_too_deep_to_restore_keeps_its_stored_combo(tmp_path, monkeypatch):
+    """A combo nested deeper than the restore can recurse reads in its stored
+    form, as it did before combos were restored. (How deep that is depends on
+    the Python version, so the restore is made to raise.)"""
+    from mushin import _sweep_io
+
+    def too_deep(value):
+        raise RecursionError
+
+    monkeypatch.setattr(_sweep_io, "restore_combo_value", too_deep)
+    stored = {"x": {"__mushin_nonfinite__": "nan"}}
+    (tmp_path / STATUS_FILE).write_text(
+        json.dumps({"status": "completed", "combo": stored})
+    )
+    record = read_cell_status(tmp_path)
+    assert record is not None and record["combo"] == stored
+
+
+class _NoText:
+    def __str__(self):
+        raise RuntimeError("no text")
+
+
+@pytest.mark.parametrize(
+    "stored, live, same",
+    [
+        ({"x": float("nan")}, {"x": float("nan")}, True),
+        ({"x": None}, {"x": float("nan")}, False),
+        ({"x": float("nan")}, {"x": None}, False),
+        ({"x": float("inf")}, {"x": float("inf")}, True),
+        ({"x": 1}, {"x": True}, False),
+        ({"x": 1}, {"x": 1.0}, False),
+        ({"x": [1, 2]}, {"x": (1, 2)}, True),
+        ({"x": 1}, {"x": _NoText()}, False),
+        (None, {}, False),
+    ],
+)
+def test_same_cell_compares_combos_as_stored(stored, live, same):
+    from mushin._resume import same_cell
+
+    assert same_cell(stored, live) is same
+
+
+def test_a_nan_cell_does_not_resume_a_none_cells_checkpoint(tmp_path):
+    """A record from a swept None in a reused dir is another cell's: both
+    were stored null before NaN was tagged."""
+    write_cell_status(tmp_path, status="failed", combo={"x": None}, attempt=1)
+    (tmp_path / "last.ckpt").write_text("weights of x=None")
+    rc = build_resume_context(tmp_path, {"x": float("nan")})
+    assert rc.is_resume is False and rc.last_ckpt is None
+
+
+@pytest.mark.parametrize("x", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_a_swept_non_finite_cell_resumes_its_own_checkpoint(tmp_path, x):
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen[mushin_resume.attempt] = None if last is None else last.read_text()
+            if mushin_resume.attempt == 1:
+                (Path.cwd() / "last.ckpt").write_text(f"x={x}")
+                raise RuntimeError("first attempt fails")
+            return dict(v=1.0)
+
+    sweep = dict(x=multirun([x]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(on_error="nan", **sweep)
+    W().run(resume=True, **sweep)
+    assert seen == {1: None, 2: f"x={x}"}
+
+
+@pytest.mark.parametrize("x", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_a_resume_without_its_manifest_reuses_a_non_finite_cell(tmp_path, x):
+    """The manifest is rebuilt from the cells' records when it is gone (a
+    driver killed before its last save): a NaN cell keys as the live one."""
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    calls = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            calls.append(x)
+            return dict(v=1.0)
+
+    W().run(x=multirun([1.0, x]), working_dir=str(tmp_path))
+    (tmp_path / "mushin_sweep_manifest.json").unlink()
+    calls.clear()
+    W().run(x=multirun([1.0, x]), working_dir=str(tmp_path), resume=True)
+    assert calls == []
+
+
+# A cell that takes a dir over records the checkpoints another cell left
+# there, and is never handed them (#355 item 2).
+
+
+def _old_ckpt(path, text):
+    path.write_text(text)
+    old = 10**9 * 1_600_000_000  # long before this test
+    os.utime(path, ns=(old, old))
+
+
+def test_a_cell_taking_a_dir_over_is_not_handed_its_checkpoints(tmp_path):
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    assert read_cell_status(tmp_path)["foreign_ckpts"]["names"] == ["last.ckpt"]
+    write_cell_status(tmp_path, status="failed", combo={"x": 2}, attempt=1)
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.is_resume is True and rc.last_ckpt is None
+    # Its own checkpoint, written since, is handed over.
+    (tmp_path / "last.ckpt").write_text("x=2")
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt is not None and rc.last_ckpt.read_text() == "x=2"
+
+
+def test_a_cells_own_checkpoint_is_preferred_to_a_foreign_last(tmp_path):
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    (tmp_path / "epoch=1.ckpt").write_text("x=2")
+    write_cell_status(tmp_path, status="completed", combo={"x": 2}, attempt=1)
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt.name == "epoch=1.ckpt"
+
+
+def test_a_cells_own_checkpoints_are_never_foreign(tmp_path):
+    write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="failed", combo={"x": 1}, attempt=1)
+    assert "foreign_ckpts" not in read_cell_status(tmp_path)
+    assert build_resume_context(tmp_path, {"x": 1}).last_ckpt.read_text() == "x=1"
+
+
+def test_a_second_grid_does_not_resume_from_the_firsts_weights(tmp_path):
+    """The issue's case: a second sweep over another grid into the same
+    working_dir reuses dir 0, and its failed cell's resume must not start
+    from the first sweep's checkpoint (main handed it over)."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen.append(None if last is None else last.read_text())
+            if x == 1:
+                (Path.cwd() / "last.ckpt").write_text("weights of x=1")
+                return dict(v=1.0)
+            if mushin_resume.attempt == 1:
+                raise RuntimeError("first attempt fails")
+            return dict(v=float(x))
+
+    W().run(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(x=multirun([3]), working_dir=str(tmp_path), on_error="nan")
+    W().run(x=multirun([3]), working_dir=str(tmp_path), resume=True)
+    assert seen == [None, None, None]
+
+
+@pytest.mark.parametrize("kind", ["dir", "Last.ckpt", "truncated"])
+def test_a_foreign_checkpoint_of_any_shape_is_never_handed(tmp_path, kind):
+    """A sharded checkpoint is a directory, a name may differ in case, and a
+    copy may keep only whole seconds of a file's time: none of them is newer
+    than the mark, so none is the new cell's (#355 review)."""
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    old = 10**9 * 1_600_000_000 + 123_456_789
+    if kind == "dir":
+        path = tmp_path / "last.ckpt"
+        path.mkdir()
+        (path / "shard_0").write_text("x=1")
+    else:
+        path = tmp_path / ("Last.ckpt" if kind == "Last.ckpt" else "last.ckpt")
+        path.write_text("x=1")
+    os.utime(path, ns=(old, old))
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    if kind == "truncated":
+        whole = old - old % 10**9
+        os.utime(path, ns=(whole, whole))
+    assert build_resume_context(tmp_path, {"x": 2}).last_ckpt is None
+
+
+def test_an_unreadable_record_counts_as_another_cells(tmp_path):
+    """A record that cannot be read may be another cell's: its checkpoints
+    are not handed over (failing closed)."""
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    (tmp_path / STATUS_FILE).write_text("{not json")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    assert build_resume_context(tmp_path, {"x": 2}).last_ckpt is None
+
+
+def test_a_sample_fill_in_does_not_resume_from_an_earlier_cells_weights(tmp_path):
+    """A cell `sample=` left out records its skip over the earlier cell's
+    record; the run that fills it in is not handed that cell's checkpoint."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen[x] = None if last is None else last.read_text()
+            (Path.cwd() / "last.ckpt").write_text(f"weights of x={x}")
+            return dict(v=float(x))
+
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(x=multirun([3, 4]), working_dir=str(tmp_path), sample=1)
+    left_out = 4 if 3 in seen else 3
+    W().run(x=multirun([3, 4]), working_dir=str(tmp_path), resume=True)
+    assert seen[left_out] is None
+
+
+def test_a_checkpoint_staged_with_an_old_time_is_the_cells_own(tmp_path):
+    """`pre_task` may stage a checkpoint copied with its source's time
+    (`shutil.copy2`), older than another cell's: it was not there when the
+    cell took the dir over, so it is the cell's own (#390 review)."""
+    import shutil
+
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    (tmp_path / "last.ckpt").write_text("x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    source = tmp_path / "source"
+    source.mkdir()
+    _old_ckpt(source / "staged.ckpt", "x=2, staged")
+    shutil.copy2(source / "staged.ckpt", tmp_path / "staged.ckpt")
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt is not None and rc.last_ckpt.name == "staged.ckpt"
 
 
 RECIPE = "ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)"

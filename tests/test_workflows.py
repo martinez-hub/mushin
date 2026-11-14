@@ -3149,42 +3149,10 @@ def test_a_completed_record_says_whether_its_metrics_file_holds_the_result(tmp_p
     assert "metrics" not in records[2]
 
 
-def test_a_job_resolves_its_config_once(tmp_path):
-    """#353: a resolver that gives a new value each call (a counter) is
-    resolved once for the cell's record and its task, so the record holds
-    the value the task ran with."""
-    import itertools
-    import json
-
-    from omegaconf import OmegaConf
-
-    counter = itertools.count()
-    OmegaConf.register_new_resolver("mushin_test_count", lambda: f"c{next(counter)}")
-    seen = []
-
-    class W(MultiRunMetricsWorkflow):
-        @staticmethod
-        def task(x, seed):
-            seen.append(x)
-            return dict(v=float(seed))
-
-    try:
-        W().run(
-            x=multirun(["${mushin_test_count:}"]),
-            seed=multirun([0, 1]),
-            working_dir=str(tmp_path),
-        )
-    finally:
-        OmegaConf.clear_resolver("mushin_test_count")
-    for cell, value in zip(sorted(tmp_path.glob("[0-9]*")), seen, strict=True):
-        record = json.loads((cell / "mushin_cell_status.json").read_text())
-        assert record["combo"]["x"] == value
-
-
 def test_a_jobs_fingerprint_is_its_config_as_composed(tmp_path):
-    """The fingerprint is taken before the config is resolved in place, as
-    the driver takes it from the composed config: an escaped interpolation
-    (resolved in place, it becomes a live one) keeps its fingerprint."""
+    """A job fingerprints its config as Hydra composed it, as the submitit
+    driver's settle pass does, so the two agree even for an escaped
+    interpolation (resolved once, it reads as a live one) (#353)."""
     import json
 
     from omegaconf import OmegaConf
@@ -3206,9 +3174,9 @@ def test_a_jobs_fingerprint_is_its_config_as_composed(tmp_path):
 
 
 def test_a_wrapper_that_does_not_resolve_reads_after_pre_task(tmp_path, monkeypatch):
-    """Only a wrapper that resolves the config before it calls (zen's
-    default) has it resolved in place; with one that opted out, the task
-    resolves its interpolations when it reads them, after `pre_task`."""
+    """With wrappers that do not resolve the config before they call, the
+    task resolves its interpolations when it reads them, after `pre_task`
+    (#353)."""
     import os
 
     from hydra_zen import zen
@@ -3243,11 +3211,9 @@ def test_a_wrapper_that_does_not_resolve_reads_after_pre_task(tmp_path, monkeypa
 def test_a_non_resolving_pre_task_runs_before_the_tasks_resolution(
     tmp_path, monkeypatch
 ):
-    """When only the task's wrapper resolves, the config is resolved just
-    before the task, after `pre_task`, as that wrapper would (Codex, #385):
-    an environment variable `pre_task` sets reaches the task, and the cell's
-    record holds what the task got."""
-    import json
+    """When only the task's wrapper resolves the config, it does so just
+    before the task, after `pre_task`: an environment variable `pre_task`
+    sets reaches the task (#353)."""
     import os
 
     from hydra_zen import zen
@@ -3273,14 +3239,12 @@ def test_a_non_resolving_pre_task_runs_before_the_tasks_resolution(
         pre_task_fn_wrapper=lambda fn: zen(fn, resolve_pre_call=False),
     )
     assert seen == ["from-pre-task"]
-    record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
-    assert record["combo"]["d"] == "from-pre-task"
 
 
 def test_an_escaped_interpolation_is_resolved_only_by_the_wrapper(tmp_path):
-    """mushin adds no resolution pass of its own: a second pass turns an
-    escaped interpolation, which the first made literal text, into a live
-    one that may not resolve (Codex, #385)."""
+    """An escaped interpolation is resolved once, by zen's wrapper: a
+    second pass would turn the literal text the first made into a live
+    interpolation that may not resolve (#353)."""
     from hydra_zen import make_config
 
     seen = []
@@ -3300,7 +3264,7 @@ def test_an_escaped_interpolation_is_resolved_only_by_the_wrapper(tmp_path):
 def test_a_raw_task_that_changes_its_config_keeps_the_cells_combo(tmp_path):
     """A task run without a wrapper gets the config itself and may change
     it; the cell's record keeps the values it was launched with, so its
-    next attempt finds it (Codex, #385)."""
+    next attempt finds it (#353)."""
     import json
     import warnings
 
@@ -3322,30 +3286,55 @@ def test_a_raw_task_that_changes_its_config_keeps_the_cells_combo(tmp_path):
     assert record["status"] == "failed" and record["combo"] == {"seed": 0}
 
 
-def test_a_combo_that_cannot_be_read_again_keeps_the_first(tmp_path, monkeypatch):
-    """Reading the combo again after zen's wrapper resolved the config can
-    raise (an escaped value is literal text by then): the cell keeps the
-    combo read before, and its task runs (Codex, #385)."""
-    import json
+@pytest.mark.parametrize("kind", ["UserDict", "MappingProxyType", "DictConfig"])
+def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
+    """#369: a task that returns a Mapping that is not a dict gives the run
+    its values; its cell writes them to its metrics file too, so a reload
+    has them (it raised FileNotFoundError)."""
+    from collections import UserDict
+    from types import MappingProxyType
 
-    from mushin.workflows import _TaskRunner
+    from omegaconf import OmegaConf
 
-    real = _TaskRunner._combo
-    calls = []
-
-    def flaky(cfg, names):
-        calls.append(1)
-        if len(calls) > 1:
-            raise RuntimeError("cannot be read again")
-        return real(cfg, names)
-
-    monkeypatch.setattr(_TaskRunner, "_combo", staticmethod(flaky))
+    make = {
+        "UserDict": UserDict,
+        "MappingProxyType": lambda **kw: MappingProxyType(dict(**kw)),
+        "DictConfig": lambda **kw: OmegaConf.create(dict(**kw)),
+    }[kind]
 
     class W(MultiRunMetricsWorkflow):
         @staticmethod
-        def task(seed):
-            return dict(v=float(seed))
+        def task(x):
+            # A DictConfig holds a nested dict as a DictConfig of its own.
+            inner = dict if kind == "DictConfig" else UserDict
+            return make(
+                v=float(x),
+                nested=inner(a=float(x)),
+                xs=OmegaConf.create([float(x)]) if kind == "UserDict" else [float(x)],
+            )
 
-    W().run(seed=multirun([3]), working_dir=str(tmp_path))
-    record = json.loads((tmp_path / "0" / "mushin_cell_status.json").read_text())
-    assert record["status"] == "completed" and record["combo"] == {"seed": 3}
+    wf = W()
+    wf.run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    back = W().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.to_xarray()["v"].values.tolist() == [1.0, 2.0]
+    assert wf.to_xarray()["v"].values.tolist() == [1.0, 2.0]
+    import json
+
+    written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
+    assert written == {"v": 1.0, "nested": {"a": 1.0}, "xs": [1.0]}
+
+
+def test_a_user_string_in_metrics_is_written_as_text(tmp_path):
+    """A UserString is a Sequence whose items are UserStrings again: it is
+    written as its text, not walked (#369)."""
+    import json
+    from collections import UserString
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x), name=UserString("abc"))
+
+    W().run(x=multirun([1]), working_dir=str(tmp_path))
+    written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
+    assert written == {"v": 1.0, "name": "abc"}

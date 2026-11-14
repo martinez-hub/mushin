@@ -22,7 +22,8 @@ unless the cell's own record holds the result the job could not return
 Hydra imports every module under `hydra_plugins` whenever any Hydra
 application starts, and reports an ImportError there as a warning (an error
 under `-W error`). So this module imports nothing heavy, and without the
-plugin it defines nothing. mushin itself is imported only when a job died.
+plugin it defines nothing. mushin itself is imported only when a job died
+or a job of several tasks returned.
 """
 
 import contextlib
@@ -261,8 +262,7 @@ if _plugin_launcher is not None:
             returns, unrecorded = [], None
             for job, params in zip(jobs, job_params, strict=True):
                 try:
-                    returns.append(job.results()[0])
-                    continue
+                    results = job.results()
                 except (UncompletedJobError, FailedJobError) as exc:
                     # submitit raises these once the job has ended.
                     if not collects:
@@ -272,6 +272,14 @@ if _plugin_launcher is not None:
                     if not collects:
                         raise
                     error, ended = exc, _ended(job)
+                else:
+                    # Outside the try: the job gave its results, so nothing
+                    # here may send it down the dead-job path.
+                    several = collects and len(results) > 1
+                    returns.append(
+                        self._job_return(job, results) if several else results[0]
+                    )
+                    continue
                 try:
                     if not ended:
                         # Recording a cell whose job may still run would
@@ -284,6 +292,29 @@ if _plugin_launcher is not None:
             if unrecorded is not None:
                 raise unrecorded
             return returns
+
+        def _job_return(self, job, results):
+            """The return a job of several tasks of mushin's runner stands
+            for: its first task's, unless a task failed (raised: Hydra returns
+            that as a FAILED return, or, under ``on_error="nan"``, the runner
+            returns its sentinel), when the cell failed: the first failing
+            task's, the first task's when it failed. Under ``"nan"`` a FAILED
+            one comes back as the runner's failure, as a dead job's does, so
+            the sweep goes on. The cell's record is made to agree (#365)."""
+            from hydra.core.utils import JobStatus
+
+            from mushin.workflows import _FailedRun
+
+            failed = [r for r in results if _task_failed(r)]
+            if not failed:
+                return results[0]
+            runner = self.task_function
+            runner.record_a_failed_task(failed[0], str(job.job_id))
+            ret = failed[0]
+            if ret.status != JobStatus.COMPLETED and runner.on_error != "raise":
+                ret.status = JobStatus.COMPLETED
+                ret._return_value = _FailedRun(ret._return_value)
+            return ret
 
         @contextlib.contextmanager
         def _composed(self, overrides, idx, job_id):
@@ -352,6 +383,18 @@ if _plugin_launcher is not None:
                     "record holds one, which stands for it (#345)"
                 )
             return ret
+
+    def _task_failed(ret) -> bool:
+        """Whether one task's return is a failure, as `jobs_post_process`
+        judges a job's: not COMPLETED (its error is not read, which would
+        raise it), or the runner's sentinel."""
+        from hydra.core.utils import JobStatus
+
+        from mushin.workflows import _FailedRun
+
+        return getattr(ret, "status", None) != JobStatus.COMPLETED or isinstance(
+            getattr(ret, "_return_value", None), _FailedRun
+        )
 
     def _keepable(job, exc) -> bool:
         """Whether a completed record the job's cell holds can stand for the
