@@ -18,7 +18,7 @@ import pytest
 from hydra_zen import make_config
 from omegaconf import OmegaConf
 
-from mushin import MultiRunMetricsWorkflow, multirun
+from mushin import MultiRunMetricsWorkflow, hydra_list, multirun
 from mushin._sweep_io import MANIFEST_FILE
 
 HYDRA_DIR = "${hydra:runtime.output_dir}"
@@ -528,3 +528,29 @@ def test_a_fixed_interpolation_is_the_runs_value_on_every_read(tmp_path, spec):
     for _ in range(2):
         back = Stamped().load_from_dir(tmp_path, "mushin_metrics.json")
         assert back.multirun_task_overrides["stamp"] == expected
+
+
+class Listed2(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, stamps):
+        return dict(v=float(x))
+
+
+def test_a_fixed_container_is_read_only_from_jobs_that_resolved_it(tmp_path):
+    """A cell `sample=` left out never resolved its config; a list holding
+    an interpolation there is not read (it would resolve now, in the
+    driver), so the run's value is the computed cell's (Codex, #392)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wf = Listed2()
+        wf.run(
+            x=multirun([1, 2]),
+            stamps=hydra_list(["${now:%H-%M-%S-%f}"]),
+            working_dir=tmp_path,
+            sample=1,
+            sample_seed=0,
+        )
+    ran = [d for d in ("0", "1") if (tmp_path / d / "mushin_metrics.json").exists()]
+    assert len(ran) == 1
+    provenance = json.loads((tmp_path / ran[0] / "mushin_provenance.json").read_text())
+    assert wf.multirun_task_overrides["stamps"] == provenance["config"]["stamps"]

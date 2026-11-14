@@ -2822,6 +2822,13 @@ class BaseWorkflow:
             except Exception:  # noqa: BLE001 - not this job's to say
                 continue
             if OmegaConf.is_config(value):
+                # A job that resolved its config holds no interpolation
+                # inside a list or dict either; one that did not (a cell
+                # `sample=` left out) would be resolved now, here.
+                if _holds_interpolation(
+                    str(OmegaConf.to_container(value, resolve=False))
+                ):
+                    continue
                 value = OmegaConf.to_container(value, resolve=True)
             values.append(value)
         return values
