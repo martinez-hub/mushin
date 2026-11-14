@@ -674,6 +674,17 @@ def _override_texts(overrides) -> list[str]:
     return texts
 
 
+def _as_metrics(result: Mapping) -> dict:
+    """A task's Mapping result as the dict its metrics file holds: a
+    DictConfig with its interpolations resolved, any other Mapping by its
+    items (a nested one is written as a dict too, `_json_normalize`)."""
+    from omegaconf import OmegaConf
+
+    if OmegaConf.is_config(result):
+        return OmegaConf.to_container(result, resolve=True)  # type: ignore[return-value]
+    return dict(result)
+
+
 def _tasks_per_cell(launcher_config) -> int:
     """How many tasks a submitit launcher config gives each cell's job:
     ``tasks_per_node`` times ``nodes``, each 1 when absent or unreadable."""
@@ -2000,6 +2011,8 @@ class _TaskRunner:
         sweeper raises it after the batch); under ``"nan"`` a COMPLETED
         return with the `_DeadJob`, which ``jobs_post_process`` takes as a
         failed cell (a FAILED return is raised whatever ``on_error`` says)."""
+        from omegaconf import OmegaConf
+
         from ._resume import read_cell_status, same_cell, wrote_no_metrics
         from ._sweep_io import read_metrics_sidecar_written
 
@@ -2017,8 +2030,17 @@ class _TaskRunner:
             cell_dir, prior = None, {}
         status = prior.get("status")
         this_cell = combo is not None and same_cell(prior.get("combo"), combo)
+        # This run's record of this job: by its combo, or by the job's id,
+        # which the job recorded, since a swept value that resolves anew (a
+        # clock) does not give, here, the value the job recorded (#384).
+        try:
+            job_id = _job_id_or_none(OmegaConf.select(ret.hydra_cfg.hydra, "job.id"))
+        except Exception:  # noqa: BLE001 - judged by its combo alone
+            job_id = None
         own = (
-            this_cell and self.run_id is not None and prior.get("run_id") == self.run_id
+            self.run_id is not None
+            and prior.get("run_id") == self.run_id
+            and (this_cell or (job_id is not None and prior.get("job_id") == job_id))
         )
         written = prior.get("metrics")
         if own and status == "completed" and dead.keepable and wrote_no_metrics(prior):
@@ -2037,7 +2059,8 @@ class _TaskRunner:
             _record_dead_cell(
                 ret,
                 dead,
-                combo=combo,
+                # The job's own record keeps the combo the job resolved.
+                combo=None if own else combo,
                 status="skipped" if skipped else "failed",
                 on_error=self.on_error,
                 prior=prior,
@@ -2226,8 +2249,12 @@ class _TaskRunner:
                 # from before the task.
                 record_accelerator(cwd, written)
             written = None
-            if isinstance(result, dict):
-                written = write_metrics_sidecar(cwd, result)
+            if isinstance(result, Mapping):
+                # Any Mapping the run takes as metrics, written as a dict
+                # (#369): a UserDict or DictConfig wrote no file, and a reload
+                # raised for it.
+                metrics = _as_metrics(result)
+                written = write_metrics_sidecar(cwd, metrics)
                 # Store the freshly-computed cell in the content-addressed cache
                 # so a future sweep with the same config+code reuses it. Keyed on
                 # the fingerprints; best-effort (a cache-write failure must never
@@ -2237,7 +2264,7 @@ class _TaskRunner:
                     try:
                         cache_cell = Path(self.cache_dir) / cache_key
                         cache_cell.mkdir(parents=True, exist_ok=True)
-                        write_metrics_sidecar(cache_cell, result)
+                        write_metrics_sidecar(cache_cell, metrics)
                     except OSError:
                         pass
             write_status(

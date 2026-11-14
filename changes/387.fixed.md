@@ -1,0 +1,1 @@
+A task that returns a `Mapping` other than a `dict` (a `UserDict`, a `MappingProxyType`, an OmegaConf `DictConfig`) now writes its metrics file as a dict does, so a reload, `show`/`best` and a launcher that lost the job's return read its values. A reload raised `FileNotFoundError` for it, and a nested `Mapping` value was written as its text.

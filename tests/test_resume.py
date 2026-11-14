@@ -373,6 +373,154 @@ def test_a_resume_without_its_manifest_reuses_a_non_finite_cell(tmp_path, x):
     assert calls == []
 
 
+# A cell that takes a dir over records the checkpoints another cell left
+# there, and is never handed them (#355 item 2).
+
+
+def _old_ckpt(path, text):
+    path.write_text(text)
+    old = 10**9 * 1_600_000_000  # long before this test
+    os.utime(path, ns=(old, old))
+
+
+def test_a_cell_taking_a_dir_over_is_not_handed_its_checkpoints(tmp_path):
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    assert read_cell_status(tmp_path)["foreign_ckpts"]["names"] == ["last.ckpt"]
+    write_cell_status(tmp_path, status="failed", combo={"x": 2}, attempt=1)
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.is_resume is True and rc.last_ckpt is None
+    # Its own checkpoint, written since, is handed over.
+    (tmp_path / "last.ckpt").write_text("x=2")
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt is not None and rc.last_ckpt.read_text() == "x=2"
+
+
+def test_a_cells_own_checkpoint_is_preferred_to_a_foreign_last(tmp_path):
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    (tmp_path / "epoch=1.ckpt").write_text("x=2")
+    write_cell_status(tmp_path, status="completed", combo={"x": 2}, attempt=1)
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt.name == "epoch=1.ckpt"
+
+
+def test_a_cells_own_checkpoints_are_never_foreign(tmp_path):
+    write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    write_cell_status(tmp_path, status="failed", combo={"x": 1}, attempt=1)
+    assert "foreign_ckpts" not in read_cell_status(tmp_path)
+    assert build_resume_context(tmp_path, {"x": 1}).last_ckpt.read_text() == "x=1"
+
+
+def test_a_second_grid_does_not_resume_from_the_firsts_weights(tmp_path):
+    """The issue's case: a second sweep over another grid into the same
+    working_dir reuses dir 0, and its failed cell's resume must not start
+    from the first sweep's checkpoint (main handed it over)."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = []
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen.append(None if last is None else last.read_text())
+            if x == 1:
+                (Path.cwd() / "last.ckpt").write_text("weights of x=1")
+                return dict(v=1.0)
+            if mushin_resume.attempt == 1:
+                raise RuntimeError("first attempt fails")
+            return dict(v=float(x))
+
+    W().run(x=multirun([1]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(x=multirun([3]), working_dir=str(tmp_path), on_error="nan")
+    W().run(x=multirun([3]), working_dir=str(tmp_path), resume=True)
+    assert seen == [None, None, None]
+
+
+@pytest.mark.parametrize("kind", ["dir", "Last.ckpt", "truncated"])
+def test_a_foreign_checkpoint_of_any_shape_is_never_handed(tmp_path, kind):
+    """A sharded checkpoint is a directory, a name may differ in case, and a
+    copy may keep only whole seconds of a file's time: none of them is newer
+    than the mark, so none is the new cell's (#355 review)."""
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    old = 10**9 * 1_600_000_000 + 123_456_789
+    if kind == "dir":
+        path = tmp_path / "last.ckpt"
+        path.mkdir()
+        (path / "shard_0").write_text("x=1")
+    else:
+        path = tmp_path / ("Last.ckpt" if kind == "Last.ckpt" else "last.ckpt")
+        path.write_text("x=1")
+    os.utime(path, ns=(old, old))
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    if kind == "truncated":
+        whole = old - old % 10**9
+        os.utime(path, ns=(whole, whole))
+    assert build_resume_context(tmp_path, {"x": 2}).last_ckpt is None
+
+
+def test_an_unreadable_record_counts_as_another_cells(tmp_path):
+    """A record that cannot be read may be another cell's: its checkpoints
+    are not handed over (failing closed)."""
+    _old_ckpt(tmp_path / "last.ckpt", "x=1")
+    (tmp_path / STATUS_FILE).write_text("{not json")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    assert build_resume_context(tmp_path, {"x": 2}).last_ckpt is None
+
+
+def test_a_sample_fill_in_does_not_resume_from_an_earlier_cells_weights(tmp_path):
+    """A cell `sample=` left out records its skip over the earlier cell's
+    record; the run that fills it in is not handed that cell's checkpoint."""
+    import warnings
+
+    from mushin import multirun
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    seen = {}
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, mushin_resume=None):
+            last = mushin_resume.last_ckpt
+            seen[x] = None if last is None else last.read_text()
+            (Path.cwd() / "last.ckpt").write_text(f"weights of x={x}")
+            return dict(v=float(x))
+
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        W().run(x=multirun([3, 4]), working_dir=str(tmp_path), sample=1)
+    left_out = 4 if 3 in seen else 3
+    W().run(x=multirun([3, 4]), working_dir=str(tmp_path), resume=True)
+    assert seen[left_out] is None
+
+
+def test_a_checkpoint_staged_with_an_old_time_is_the_cells_own(tmp_path):
+    """`pre_task` may stage a checkpoint copied with its source's time
+    (`shutil.copy2`), older than another cell's: it was not there when the
+    cell took the dir over, so it is the cell's own (#390 review)."""
+    import shutil
+
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    (tmp_path / "last.ckpt").write_text("x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    source = tmp_path / "source"
+    source.mkdir()
+    _old_ckpt(source / "staged.ckpt", "x=2, staged")
+    shutil.copy2(source / "staged.ckpt", tmp_path / "staged.ckpt")
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt is not None and rc.last_ckpt.name == "staged.ckpt"
+
+
 RECIPE = "ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)"
 
 
