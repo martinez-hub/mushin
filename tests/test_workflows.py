@@ -3185,3 +3185,19 @@ def test_a_mapping_return_reloads_as_the_run_has_it(tmp_path, kind):
 
     written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
     assert written == {"v": 1.0, "nested": {"a": 1.0}, "xs": [1.0]}
+
+
+def test_a_user_string_in_metrics_is_written_as_text(tmp_path):
+    """A UserString is a Sequence whose items are UserStrings again: it is
+    written as its text, not walked (Codex, #387)."""
+    import json
+    from collections import UserString
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x), name=UserString("abc"))
+
+    W().run(x=multirun([1]), working_dir=str(tmp_path))
+    written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
+    assert written == {"v": 1.0, "name": "abc"}

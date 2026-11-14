@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +70,14 @@ _NONFINITE_TAG = "__mushin_nonfinite__"
 _NONFINITE_VALUES = {"inf": float("inf"), "-inf": float("-inf")}
 
 
+def _is_list_config(v: Any) -> bool:
+    try:
+        from omegaconf import ListConfig
+    except ImportError:  # pragma: no cover - a core dependency
+        return False
+    return isinstance(v, ListConfig)
+
+
 def _json_normalize(v: Any, as_text: list | None = None) -> Any:
     """Recursively normalize a metric value to strict-JSON-native types.
 
@@ -92,8 +100,9 @@ def _json_normalize(v: Any, as_text: list | None = None) -> Any:
         if as_text is not None:
             as_text.extend(type(k).__name__ for k in v if not isinstance(k, str))
         return {str(k): _json_normalize(x, as_text) for k, x in v.items()}
-    if isinstance(v, Sequence) and not isinstance(v, (str, bytes, bytearray)):
-        # A ListConfig too (#369), as a list.
+    if isinstance(v, (list, tuple)) or _is_list_config(v):
+        # A ListConfig too (#369), as a list. Not any Sequence: a UserString
+        # is one whose items are UserStrings again.
         return [_json_normalize(x, as_text) for x in v]
     if isinstance(v, bool) or v is None:
         return v
