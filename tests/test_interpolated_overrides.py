@@ -583,3 +583,25 @@ def test_dict_elements_whose_keys_differ_only_in_type_are_two_elements():
 
     assert not _same_element({True: "a"}, {1: "a"})
     assert _same_element({1: "a"}, {1: "a"})
+
+
+def test_a_coordinate_json_cannot_keep_reloads_as_it_ran(tmp_path):
+    """JSON keeps a dict's keys only as text: a coordinate holding ``{1: "a"}``
+    is not saved in that lossy form, so a reload reads it as the run did
+    (#386)."""
+    wf = Listed()
+    wf.run(base_lr=1, xs=multirun([[{1: "a"}], ["${base_lr}"]]), working_dir=tmp_path)
+    back = Listed().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert [str(x) for x in back.multirun_task_overrides["xs"]] == [
+        str(x) for x in wf.multirun_task_overrides["xs"]
+    ]
+    assert _values(back) == _values(wf)
+
+
+def test_a_dict_element_with_a_nan_key_is_its_own_element():
+    """A NaN key equals a NaN key, as a NaN value does (#386)."""
+    from mushin.workflows import _same_element
+
+    assert _same_element({float("nan"): "a"}, {float("nan"): "a"})
+    assert not _same_element({float("nan"): "a"}, {float("nan"): "b"})
+    assert not _same_element({float("nan"): "a"}, {1.0: "a"})

@@ -798,12 +798,38 @@ def _same_element(a: Any, b: Any) -> bool:
     if isinstance(a, (list, tuple)):
         return len(a) == len(b) and all(map(_same_element, a, b))
     if isinstance(a, dict):
-        # Keys by type too: ``True`` and ``1`` are one key to a dict.
-        typed = {(type(k), k) for k in a}
-        if typed != {(type(k), k) for k in b}:
+        # Each key matched by this rule too: ``True`` and ``1`` are one key
+        # to a dict, and two NaN keys are two.
+        if len(a) != len(b):
             return False
-        return all(_same_element(a[k], b[k]) for k in a)
+        rest = list(b.items())
+        for key, value in a.items():
+            for j, (other, its) in enumerate(rest):
+                if _same_element(key, other):
+                    if not _same_element(value, its):
+                        return False
+                    del rest[j]
+                    break
+            else:
+                return False
+        return True
     return a == b
+
+
+def _round_trips(value: Any) -> bool:
+    """Whether ``value`` reads back from the manifest as itself. JSON keeps
+    a dict's keys only as text, so ``{1: "a"}`` would read back as
+    ``{"1": "a"}``: such a value is not saved, and is read again instead
+    (a NaN is tagged, `_tag_nan`)."""
+    import json
+
+    from ._sweep_io import _json_normalize
+
+    try:
+        text = json.dumps(_json_normalize(_tag_nan(value)))
+        return _same_element(_restore_tags(json.loads(text)), value)
+    except Exception:  # noqa: BLE001 - not saved: read again instead
+        return False
 
 
 def _index_of(elements: list, value: Any) -> int | None:
@@ -2913,12 +2939,16 @@ class BaseWorkflow:
             coordinates[name] = values
         if known:
             self._interpolated_cells = elements_of
-            self._interpolated_decision = {
-                "run_id": run_id,
-                "coords": {
-                    name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
-                },
-            }
+            # Saved only when every coordinate reads back as itself; else a
+            # reload decides again from the records (`_round_trips`).
+            if all(_round_trips(c) for v in coordinates.values() for c in v):
+                self._interpolated_decision = {
+                    "run_id": run_id,
+                    "coords": {
+                        name: [_tag_nan(c) for c in v]
+                        for name, v in coordinates.items()
+                    },
+                }
         return coordinates, known
 
     def _saved_coordinates(self, run_id, axes) -> dict | None:
