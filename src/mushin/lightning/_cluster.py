@@ -61,9 +61,12 @@ def submitit_slurm_config(
 def _rank_from_env() -> int:
     """Best-effort global rank: ``RANK`` (torchrun/external launchers), then
     ``SLURM_PROCID``, then ``LOCAL_RANK`` (the only variable a plain
-    single-node HydraDDP child exports, equal to the global rank there).
-    A malformed value degrades to the next source rather than crashing."""
-    for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
+    single-node HydraDDP child exports, equal to the global rank there), then
+    ``SUBMITIT_LOCAL_GLOBALID``, the only one a task of a ``submitit_local``
+    job of several sets (#371). That id comes last because any process a task
+    starts, such as HydraDDP's children, inherits it. A malformed value
+    degrades to the next source rather than crashing."""
+    for var in ("RANK", "SLURM_PROCID", "LOCAL_RANK", "SUBMITIT_LOCAL_GLOBALID"):
         v = os.environ.get(var)
         if v:
             try:
@@ -77,7 +80,9 @@ def seed_everything_per_rank(base: int, workers: bool = True) -> int:
     """Seed each process with ``base + global_rank`` so a multi-GPU/-node run is as
     reproducible as a single-GPU run (each rank gets a distinct but deterministic
     seed). Reads the global rank from ``RANK`` (preferred), ``SLURM_PROCID``,
-    or ``LOCAL_RANK`` (single-node), defaulting to 0. Returns the seed used."""
+    ``LOCAL_RANK`` (single-node), or ``SUBMITIT_LOCAL_GLOBALID`` (a task of a
+    ``submitit_local`` job of several), defaulting to 0. Returns the seed
+    used."""
     rank = _rank_from_env()
     seed = int(base) + rank
     seed_everything(seed, workers=workers)

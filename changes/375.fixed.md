@@ -1,0 +1,1 @@
+A cell that SLURM requeued after the `max_total_seconds` deadline, having recorded itself completed before it was preempted, now runs again instead of being recorded skipped and losing its metrics file: a cell this run already recorded as finished started under its budget, as a running one did.

@@ -519,3 +519,53 @@ def test_a_checkpoint_staged_with_an_old_time_is_the_cells_own(tmp_path):
     shutil.copy2(source / "staged.ckpt", tmp_path / "staged.ckpt")
     rc = build_resume_context(tmp_path, {"x": 2})
     assert rc.last_ckpt is not None and rc.last_ckpt.name == "staged.ckpt"
+
+
+RECIPE = "ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)"
+
+
+def test_the_guides_lightning_recipe_resumes_from_its_checkpoint(tmp_path):
+    """#368: the resilience guide's Lightning recipe writes `last.ckpt` at the
+    cell dir's top, where `last_ckpt` looks (and where another cell's
+    checkpoints are set aside), so a resumed cell starts from it. Lightning's
+    default folder, `lightning_logs/.../checkpoints/`, is not looked in."""
+    pl = pytest.importorskip("pytorch_lightning")
+    from pytorch_lightning.callbacks import ModelCheckpoint
+
+    from mushin import multirun
+    from mushin.testing.lightning import SimpleLightningModule
+    from mushin.workflows import MultiRunMetricsWorkflow
+
+    guide = Path(__file__).parents[1] / "docs" / "guides" / "resilience.md"
+    assert RECIPE in guide.read_text(encoding="utf-8")
+
+    seen = []
+
+    class Train(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed, mushin_resume=None):
+            ckpt = mushin_resume.last_ckpt
+            seen.append(ckpt)
+            trainer = pl.Trainer(
+                default_root_dir=mushin_resume.dir,
+                callbacks=[ModelCheckpoint(dirpath=mushin_resume.dir, save_last=True)],
+                max_epochs=1 if ckpt is None else 2,
+                limit_train_batches=2,
+                limit_val_batches=1,
+                logger=False,
+                enable_progress_bar=False,
+                enable_model_summary=False,
+            )
+            trainer.fit(SimpleLightningModule(), ckpt_path=ckpt)
+            if ckpt is None:
+                raise RuntimeError("preempted after its first epoch")
+            return dict(epochs=float(trainer.current_epoch))
+
+    wd = str(tmp_path / "s")
+    with pytest.warns(UserWarning, match="failed"):
+        Train().run(seed=multirun([0]), working_dir=wd, on_error="nan")
+    resumed = Train()
+    resumed.run(seed=multirun([0]), working_dir=wd, resume=True)
+    assert seen[0] is None
+    assert seen[1] is not None and Path(seen[1]).name == "last.ckpt"
+    assert resumed.to_xarray()["epochs"].values.tolist() == [2.0]
