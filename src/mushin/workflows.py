@@ -1621,6 +1621,7 @@ class _TaskRunner:
             changed_project_code,
             merge_project_records,
             read_cell_status,
+            wrote_no_metrics,
         )
         from ._sweep_io import (
             METRICS_FILE,
@@ -1756,6 +1757,25 @@ class _TaskRunner:
                             )
 
                         return cached, deps, reused
+                    if wrote_no_metrics(prior):
+                        # Its task returned None, so it wrote no metrics file,
+                        # and its record says so (#364): reused as completed
+                        # with no metrics, rather than run again (#373). A
+                        # metrics file in this dir is not its result.
+                        merged = merge_project_records(prior_deps, deps)
+
+                        def reused_none(merged=merged):
+                            remove_sidecar(cwd / METRICS_FILE)
+                            write_status(
+                                cwd,
+                                status="completed",
+                                combo=sc,
+                                attempt=1,
+                                code_deps=merged,
+                                no_metrics=True,
+                            )
+
+                        return None, deps, reused_none
 
         # (1.4) content-addressed cache: reuse a cell computed under the same
         # resolved config, task source AND project code in ANY working_dir. Keyed on the
