@@ -1311,6 +1311,58 @@ def test_ctrl_c_leaves_the_launch(tmp_path, monkeypatch, mushin_local):
             job.cancel(check=False)
 
 
+def test_cancel_leaves_a_local_launch_to_its_host(tmp_path, monkeypatch, mushin_local):
+    """`mushin.cancel` on the launch a driver killed mid-sweep leaves behind:
+    a local job's id is a process id on the driver's host, never SLURM's, so
+    it warns and asks no scheduler while the jobs live, and drops the launch
+    once their processes have all exited."""
+    import warnings
+
+    from mushin import _jobs
+
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [0, 1])
+    held = []  # the jobs, for the teardown to cancel
+
+    def wait(self, jobs, job_params):
+        held.extend(jobs)
+        raise KeyboardInterrupt
+
+    def scheduler(*args, **kwargs):
+        raise AssertionError(f"the scheduler was asked: {args!r}")
+
+    monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
+    monkeypatch.setattr(_jobs, "_run", scheduler)
+    monkeypatch.setattr(_jobs, "_which", scheduler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tasks.record_pid.run(
+                seed=multirun([0, 1]),
+                working_dir=str(wd),
+                overrides=[tasks.GATE],
+                **LOCAL,
+            )
+        (launch,) = _launches(wd)
+        with pytest.warns(UserWarning, match="process ids"):
+            assert mushin.cancel(wd) == []
+        assert _launches(wd) == [launch]
+        assert _show(wd) == {0: "queued", 1: "queued"}
+        gate.touch()
+        # `done()` polls each job's process, which reaps it: an exited but
+        # unreaped child still holds its pid.
+        assert _until(lambda: all(job.done() for job in held))
+        (read,), _ = _jobs.read_launches(wd)
+        assert _jobs.ended_locally(read)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert mushin.cancel(wd) == []
+        assert _launches(wd) == []
+    finally:
+        gate.touch()
+        for job in held:
+            job.cancel(check=False)
+
+
 @pytest.mark.config_group("m345")
 def test_launch_combos_match_records(
     tmp_path, monkeypatch, mushin_local, restore_config_group
