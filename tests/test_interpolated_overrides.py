@@ -575,7 +575,7 @@ class Listed2(MultiRunMetricsWorkflow):
 def test_a_fixed_container_is_read_only_from_jobs_that_resolved_it(tmp_path):
     """A cell `sample=` left out never resolved its config; a list holding
     an interpolation there is not read (it would resolve now, in the
-    driver), so the run's value is the computed cell's (Codex, #392)."""
+    driver), so the run's value is the computed cell's (#392)."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         wf = Listed2()
@@ -590,3 +590,86 @@ def test_a_fixed_container_is_read_only_from_jobs_that_resolved_it(tmp_path):
     assert len(ran) == 1
     provenance = json.loads((tmp_path / ran[0] / "mushin_provenance.json").read_text())
     assert wf.multirun_task_overrides["stamps"] == provenance["config"]["stamps"]
+
+
+@pytest.mark.config_group("model")
+def test_a_fixed_interpolated_group_choice_reads_its_option_name(
+    tmp_path, restore_config_group, monkeypatch
+):
+    """A config group's option chosen through an interpolation reads as the
+    option's name, as on main, not as the composed node; a reload reads the
+    run's choice even where the interpolation now resolves to another (#392)."""
+    from hydra.core.config_store import ConfigStore
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class Grouped(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed, model=None):
+            return dict(w=float(model["width"]))
+
+    monkeypatch.setenv("MUSHIN_TEST_MODEL", "small")
+    wf = Grouped(make_config(model=None))
+    wf.run(
+        model="${oc.env:MUSHIN_TEST_MODEL}",
+        seed=multirun([0, 1]),
+        working_dir=tmp_path,
+    )
+    assert wf.multirun_task_overrides["model"] == "small"
+    monkeypatch.setenv("MUSHIN_TEST_MODEL", "big")
+    back = Grouped(make_config(model=None)).load_from_dir(
+        tmp_path, "mushin_metrics.json"
+    )
+    assert back.multirun_task_overrides["model"] == "small"
+
+
+class Weighted(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, ws, base_lr=None):
+        return dict(v=float(x))
+
+
+def test_a_fixed_container_keeps_its_nan_on_a_reload(tmp_path):
+    """The run saves a fixed list with its NaN tagged, so a reload reads NaN
+    there rather than None (#392)."""
+    wf = Weighted()
+    wf.run(
+        base_lr=0.01,
+        x=multirun([1, 2]),
+        ws=hydra_list([float("nan"), "${base_lr}"]),
+        working_dir=tmp_path,
+    )
+    ran = wf.multirun_task_overrides["ws"]
+    back = Weighted().load_from_dir(tmp_path, "mushin_metrics.json")
+    read = back.multirun_task_overrides["ws"]
+    assert str(read) == str(ran)
+    assert read[0] is not None
+
+
+class Mutates(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):  # raw: called with the whole config
+        x.lr = 99
+        return dict(v=1.0)
+
+
+def test_a_raw_task_that_changes_a_fixed_value_does_not_report_its_change(tmp_path):
+    """A task run without a wrapper gets the config itself and may change a
+    fixed value; the value reported is the one the sweep was launched with,
+    not the task's change (#392)."""
+    wf = Mutates()
+    wf.run(
+        base_lr=0.01,
+        lr="${base_lr}",
+        x=multirun([1, 2]),
+        working_dir=tmp_path,
+        task_fn_wrapper=None,
+    )
+    assert wf.multirun_task_overrides["lr"] != 99
+    back = Mutates().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.multirun_task_overrides["lr"] != 99
+    assert str(back.multirun_task_overrides["lr"]) == str(
+        wf.multirun_task_overrides["lr"]
+    )

@@ -716,12 +716,17 @@ def _restore_tags(value: Any) -> Any:
 
 
 def _tag_nan(value: Any) -> Any:
-    """A coordinate as the manifest keeps it: a NaN tagged, as a null would
-    read back as None (`_restore_tags`)."""
+    """A coordinate or fixed value as the manifest keeps it: each NaN in it
+    tagged, inside a list or dict too (a fixed container's, #392), as a null
+    would read back as None (`_restore_tags`)."""
     from ._sweep_io import _NONFINITE_TAG
 
     if isinstance(value, float) and value != value:
         return {_NONFINITE_TAG: "nan"}
+    if isinstance(value, dict):
+        return {k: _tag_nan(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_tag_nan(v) for v in value]
     return value
 
 
@@ -2872,32 +2877,44 @@ class BaseWorkflow:
         return values
 
     def _resolved_by_jobs(self, name: str) -> list:
-        """``name``'s value in each job of this run that resolved it itself
-        (its config holds no interpolation there any more)."""
+        """``name``'s value in each job of this run that resolved it itself:
+        a config group's option name from the job's choices (main reads the
+        name, not the composed node); any other value from the job's config,
+        when the task's wrapper resolved that config in place before the
+        task ran (hydra-zen's ``zen``) and it holds no interpolation there
+        any more. A raw task gets the config itself and may change it, so
+        its jobs' configs say nothing (#392)."""
         from omegaconf import OmegaConf
 
         jobs = getattr(self, "jobs", None)
         if not jobs or self.cfgs is None or len(jobs) != len(self.cfgs):
             return []
+        resolves = getattr(self, "_task_resolves", False)
         parent_path, _, key = name.rpartition(".")
         values = []
-        for cfg in self.cfgs:
+        for i, cfg in enumerate(self.cfgs):
+            choices = self._job_choices(i) or {}
+            if name in choices:
+                values.append(choices[name])
+                continue
+            if not resolves:
+                continue
             try:
                 parent = OmegaConf.select(cfg, parent_path) if parent_path else cfg
                 if parent is None or OmegaConf.is_interpolation(parent, key):
                     continue
                 value = parent[key]
+                if OmegaConf.is_config(value):
+                    # A job that resolved its config holds no interpolation
+                    # inside a list or dict either; one that did not (a cell
+                    # `sample=` left out) would be resolved now, here.
+                    if _holds_interpolation(
+                        str(OmegaConf.to_container(value, resolve=False))
+                    ):
+                        continue
+                    value = OmegaConf.to_container(value, resolve=True)
             except Exception:  # noqa: BLE001 - not this job's to say
                 continue
-            if OmegaConf.is_config(value):
-                # A job that resolved its config holds no interpolation
-                # inside a list or dict either; one that did not (a cell
-                # `sample=` left out) would be resolved now, here.
-                if _holds_interpolation(
-                    str(OmegaConf.to_container(value, resolve=False))
-                ):
-                    continue
-                value = OmegaConf.to_container(value, resolve=True)
             values.append(value)
         return values
 
@@ -3774,8 +3791,13 @@ class BaseWorkflow:
 
         _task_fn, _wants_resume = _prepare_task(self.task)
         _code_roots = (self.task, *getattr(self, "_mushin_code_roots", ()))
+        _wrapped_task = task_fn_wrapper(_task_fn)
+        # Whether each job's config holds the values its task ran with: a
+        # wrapper that resolves it in place first (hydra-zen's `zen`) leaves
+        # them there; a raw task may change it (`_resolved_by_jobs`, #392).
+        self._task_resolves = getattr(_wrapped_task, "_resolve", False) is True
         task_call = _TaskRunner(
-            task=task_fn_wrapper(_task_fn),
+            task=_wrapped_task,
             pre_task=pre_task_fn_wrapper(_signed(self.pre_task)),
             swept_names=_runner_swept,
             base_provenance=_base_provenance,
