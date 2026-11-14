@@ -2,7 +2,9 @@
 # Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014).
 # SPDX-License-Identifier: MIT
 import inspect
+import json
 import string
+import sys
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -3338,3 +3340,60 @@ def test_a_user_string_in_metrics_is_written_as_text(tmp_path):
     W().run(x=multirun([1]), working_dir=str(tmp_path))
     written = json.loads((tmp_path / "0" / "mushin_metrics.json").read_text())
     assert written == {"v": 1.0, "name": "abc"}
+
+
+def _stub_submitit(monkeypatch, job_id="12_3", folder="/s/.submitit/12_3"):
+    """A `submitit` module whose JobEnvironment is a job's, in sys.modules."""
+    import types
+
+    class Env:
+        def __init__(self):
+            self.job_id = job_id
+            self.hostname = "node7"
+            self.paths = types.SimpleNamespace(folder=Path(folder))
+
+    module = types.ModuleType("submitit")
+    module.JobEnvironment = Env
+    monkeypatch.setitem(sys.modules, "submitit", module)
+    monkeypatch.setenv("SUBMITIT_EXECUTOR", "slurm")
+
+
+def test_a_submitit_job_names_its_id_logs_host_and_partition(monkeypatch):
+    from mushin.workflows import _submitit_job_record
+
+    _stub_submitit(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_PARTITION", "gpu")
+    assert _submitit_job_record("12_3") == {
+        "job_id": "12_3",
+        "logs": str(Path("/s/.submitit/12_3")),
+        "host": "node7",
+        "partition": "gpu",
+    }
+
+
+def test_no_job_entry_outside_a_submitit_job_or_for_another_id(monkeypatch):
+    """A driver records nothing: its Hydra job id is not the submitit job's
+    (a driver inside an sbatch job sees that job's environment), and outside
+    a submitit job there is none (#345)."""
+    from mushin.workflows import _submitit_job_record
+
+    _stub_submitit(monkeypatch)
+    monkeypatch.delenv("SLURM_JOB_PARTITION", raising=False)
+    assert _submitit_job_record("driver_3") is None
+    assert _submitit_job_record(None) is None
+    monkeypatch.delenv("SUBMITIT_EXECUTOR")
+    assert _submitit_job_record("12_3") is None
+
+
+def test_the_basic_launcher_writes_no_job_entry(tmp_path):
+    from mushin import multirun
+
+    class W(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x):
+            return dict(v=float(x))
+
+    W().run(x=multirun([1, 2]), working_dir=str(tmp_path))
+    for cell in ("0", "1"):
+        record = json.loads((tmp_path / cell / "mushin_cell_status.json").read_text())
+        assert "submitit" not in record

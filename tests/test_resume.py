@@ -638,6 +638,35 @@ def test_a_resume_reuses_a_completed_cell_that_returned_none(tmp_path):
     assert calls == [2]
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"job_id": "12_3", "logs": "/s/.submitit/12_3", "unknown": "x"},
+        {"logs": "/s/.submitit/12_3"},
+        {"job_id": "", "logs": "/s"},
+        {"job_id": "12_3", "logs": 5},
+        "12_3",
+    ],
+    ids=["unknown key", "no job id", "empty", "not a string", "not a dict"],
+)
+def test_a_malformed_job_entry_is_not_written(tmp_path, entry):
+    """Only an entry of the job's id, log folder, host and partition, each a
+    non-empty string, is written; a malformed one carried from an old
+    record is dropped (#345)."""
+    write_cell_status(
+        tmp_path, status="running", combo={"x": 1}, attempt=1, submitit=entry
+    )
+    assert "submitit" not in read_cell_status(tmp_path)
+
+
+def test_a_job_entry_is_written_as_given(tmp_path):
+    entry = {"job_id": "12_3", "logs": "/s/.submitit/12_3", "host": "n1"}
+    write_cell_status(
+        tmp_path, status="running", combo={"x": 1}, attempt=1, submitit=entry
+    )
+    assert read_cell_status(tmp_path)["submitit"] == entry
+
+
 def test_a_reuse_of_a_none_cell_keeps_its_fingerprint(tmp_path, monkeypatch):
     """The same for a cell whose task returned None (#373): its reuse keeps the
     fingerprint it was completed under (#396)."""
