@@ -603,8 +603,9 @@ def test_a_fixed_interpolated_group_choice_reads_its_option_name(
     tmp_path, restore_config_group, monkeypatch
 ):
     """A config group's option chosen through an interpolation reads as the
-    option's name, as on main, not as the composed node; a reload reads the
-    run's choice even where the interpolation now resolves to another (#392)."""
+    option's name, as on main, not as the composed node, in the run and in a
+    reload (#392). Read from the environment, it is not saved: a reload reads
+    it again, as main does."""
     from hydra.core.config_store import ConfigStore
 
     cs = ConfigStore.instance()
@@ -624,7 +625,6 @@ def test_a_fixed_interpolated_group_choice_reads_its_option_name(
         working_dir=tmp_path,
     )
     assert wf.multirun_task_overrides["model"] == "small"
-    monkeypatch.setenv("MUSHIN_TEST_MODEL", "big")
     back = Grouped(make_config(model=None)).load_from_dir(
         tmp_path, "mushin_metrics.json"
     )
