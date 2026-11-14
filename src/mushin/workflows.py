@@ -589,7 +589,9 @@ class _DeadJob(_FailedRun):
     which goes to the cell's mushin_error.txt. ``keepable`` says a completed
     record the job's runner wrote can stand for the job's result: the job
     had one task, and gave no result rather than an error it pickled in its
-    place (it could not save its result, say)."""
+    place (it could not save its result, say). A completed record that
+    cannot stand for it is recorded failed, as the run reports the cell
+    (#406)."""
 
     __slots__ = ("keepable", "summary")
 
@@ -687,6 +689,22 @@ def _holds_interpolation(text: str) -> bool:
     """Whether an override's text holds an interpolation, which each job
     resolves for itself (#353)."""
     return "${" in text
+
+
+def _sets_interpolation(overrides: Any) -> bool:
+    """Whether one of a job's own overrides sets a value holding an
+    interpolation, which the job resolved for itself (#386). Hydra's sweeper
+    escapes one in a job's override text (``+x=$\\{hydra\\:job.num\\}``),
+    so each is read through Hydra's parser, as the job reads it; one that
+    cannot be read counts as one."""
+    for text in overrides or ():
+        try:
+            value = _override_parser().parse_override(str(text)).value()
+        except Exception:  # noqa: BLE001 - not readable: as if it did
+            return True
+        if _holds_interpolation(str(value)):
+            return True
+    return False
 
 
 def _value_key(value: Any) -> str:
@@ -1061,13 +1079,15 @@ def _record_dead_cell(
     on_error: str,
     prior: dict,
     run_id: str | None,
+    keep_metrics: bool = False,
 ) -> None:
     """Record in its cell that the cell's job ended without a result (#345).
 
     ``ret`` is the job as mushin's submitit launcher composed it in the
     driver, and ``prior`` the cell's record as the runner found it:
     'running', or none (the job died before the runner wrote anything,
-    perhaps before Hydra made the cell's dir).
+    perhaps before Hydra made the cell's dir), or the job's own completed
+    record when it cannot stand for the job's result (#406).
 
     The cell gets the ``status`` the runner would have recorded: 'skipped'
     for a cell ``sample=`` left out, else 'failed', as for a task that
@@ -1075,7 +1095,8 @@ def _record_dead_cell(
     Hydra's ``.hydra/`` snapshot of this run's job (none, or an earlier
     run's in a reused dir, which names another run or none) gets the one
     ``run_job`` would have written, so a reload finds this job's config
-    beside its record. A metrics file a prior attempt left is removed, and
+    beside its record. A metrics file a prior attempt left is removed,
+    unless ``keep_metrics`` (another job's, in a dir two cells share), and
     a failed cell under ``on_error="nan"`` gets mushin_error.txt: the
     one-line summary, which names the job's log, then submitit's message
     (under ``"raise"`` the raised error carries submitit's message alone).
@@ -1083,20 +1104,15 @@ def _record_dead_cell(
     return whatever happens here."""
     from omegaconf import OmegaConf
 
-    from ._resume import snapshot_run_stamp, write_cell_status
+    from ._resume import write_cell_status
     from ._sweep_io import METRICS_FILE, remove_sidecar
 
     try:
         cell_dir = _job_dir(ret)
         hydra = ret.hydra_cfg.hydra
         # Written before the status, which must be the newer of the two
-        # (`sidecar_job_fields`). Kept only when it is this run's job's: an
-        # earlier run's, in a reused dir, names another run (or none).
-        if hydra.output_subdir is not None:
-            existing = cell_dir / str(hydra.output_subdir) / "hydra.yaml"
-            _write_hydra_snapshot(
-                ret, cell_dir, replace=snapshot_run_stamp(existing) != run_id
-            )
+        # (`sidecar_job_fields`).
+        _write_run_snapshot(ret, cell_dir, run_id)
         # Creates the cell's dir if nothing above did (no `output_subdir`).
         write_cell_status(
             cell_dir,
@@ -1114,7 +1130,8 @@ def _record_dead_cell(
         )
         # After the record: a metrics file that cannot be removed must not keep
         # the cell's end from being recorded.
-        remove_sidecar(cell_dir / METRICS_FILE)
+        if not keep_metrics:
+            remove_sidecar(cell_dir / METRICS_FILE)
         if status == "failed" and on_error == "nan":
             # UTF-8 whatever the locale: the error stream is the job's output.
             (cell_dir / "mushin_error.txt").write_text(
@@ -1187,6 +1204,21 @@ def _reads_environment(ret: JobReturn) -> bool:
         )
     except Exception:  # noqa: BLE001 - not examinable: as if it did
         return True
+
+
+def _write_run_snapshot(ret: JobReturn, cell_dir: Path, run_id: str | None) -> None:
+    """Write Hydra's ``.hydra/`` snapshot of a job mushin composed in the
+    driver into ``cell_dir``, unless the one there already names this run
+    (``run_id``): an earlier run's, in a reused dir, names another run (or
+    none, from before runs were named), and a reload judges the dir's record
+    by the run its snapshot names. Raises; each caller keeps its own guard."""
+    from ._resume import snapshot_run_stamp
+
+    subdir = ret.hydra_cfg.hydra.output_subdir
+    if subdir is None:
+        return
+    existing = cell_dir / str(subdir) / "hydra.yaml"
+    _write_hydra_snapshot(ret, cell_dir, replace=snapshot_run_stamp(existing) != run_id)
 
 
 def _write_hydra_snapshot(ret: JobReturn, cell_dir: Path, *, replace: bool) -> None:
@@ -2178,14 +2210,24 @@ class _TaskRunner:
         when the job had one task and did not pickle an error
         in place of its result (`_DeadJob.keepable`): it finished, but its
         result did not reach the driver, as when it came after submitit
-        stopped waiting. A skipped one is skipped. Any other terminal record
-        of the job's own is kept as it is, and the cell fails.
+        stopped waiting. A skipped one is skipped. A completed one that
+        cannot stand for the result (a job of several tasks, a result
+        submitit could not save) is recorded with the run's verdict, as
+        `record_a_failed_task` records a job one of whose tasks raised: its
+        metrics file goes, unless it is another job's in a dir two cells
+        share, and so does the entry its attempt wrote to ``cache_dir``, so
+        a reload, a resume and a later run with that cache see the cell as
+        the run did (#406). Any other terminal record of the job's own is
+        kept as it is, and the cell fails.
 
         Otherwise, over a 'running' record or none, the job died before its
         runner recorded an end, and `_record_dead_cell` records it. Any
         other terminal record (an earlier run's, which a resume may reuse,
         or another cell's in a reused dir, #355) is left as it is, and the
-        cell fails for this run.
+        cell fails for this run. This run's ``.hydra/`` snapshot goes beside
+        it, so a reload sets that record aside (#406), unless the record is
+        this cell's, already says what the run says, and none of the job's
+        overrides sets an interpolation (`_sets_interpolation`).
 
         A cell ``sample=`` left out is skipped, as this runner skips it. A
         failed cell is, under ``on_error="raise"``, a FAILED return with the
@@ -2196,7 +2238,12 @@ class _TaskRunner:
         from omegaconf import OmegaConf
 
         from ._resume import read_cell_status, same_cell, wrote_no_metrics
-        from ._sweep_io import read_metrics_sidecar_written
+        from ._sweep_io import (
+            METRICS_FILE,
+            metrics_sidecar_differs,
+            read_metrics_sidecar_written,
+            remove_sidecar,
+        )
 
         num = ret.hydra_cfg.hydra.job.num
         sampled = getattr(self, "sampled_indices", None)
@@ -2237,17 +2284,55 @@ class _TaskRunner:
                 return JobStatus.COMPLETED, metrics
         if own and status == "skipped":
             return JobStatus.COMPLETED, _SkippedRun("recorded by its job")
-        if status in (None, "running"):
+        verdict = "skipped" if skipped else "failed"
+        # A completed record of the job's own that the branches above could
+        # not take: the run fails the cell, so the record must say so too, or
+        # a reload, a resume and a later run with the same cache_dir take the
+        # value the run failed (#406).
+        unkept = own and status == "completed"
+        if status in (None, "running") or unkept:
             _record_dead_cell(
                 ret,
                 dead,
                 # The job's own record keeps the combo the job resolved.
                 combo=None if own else combo,
-                status="skipped" if skipped else "failed",
+                status=verdict,
                 on_error=self.on_error,
                 prior=prior,
                 run_id=self.run_id,
+                # Another job's file, in a dir two cells share, stays: that
+                # job's coming record names it, and a reload raises over a
+                # record whose file is gone.
+                keep_metrics=unkept and metrics_sidecar_differs(cell_dir, written),
             )
+            if unkept:
+                # Keyed from the record as read: the failed one that replaced
+                # it keeps no project-code record. As in `record_a_failed_task`.
+                try:
+                    key = self._cache_key(
+                        prior.get("config_hash"), prior.get("code_deps")
+                    )
+                    if key is not None:
+                        remove_sidecar(Path(self.cache_dir) / key / METRICS_FILE)
+                except Exception:  # noqa: BLE001 - best-effort, as recording is
+                    pass
+        elif not own:
+            # Another run's end, or another cell's, stays: a resume may reuse
+            # it, and a stale read of it could have the driver write over a
+            # result the job had just recorded (#354). This run's snapshot
+            # goes beside it, so a reload, which sets aside a record older
+            # than a snapshot naming another run, takes the cell's end from
+            # this run (#406). Not beside an end of this cell that already
+            # says what the run says, which `show` lists as it is; unless a
+            # swept value each job resolves for itself (#386) may key this
+            # run's cell apart from the value the earlier record stored.
+            try:
+                if not (this_cell and status == verdict) or _sets_interpolation(
+                    ret.overrides
+                ):
+                    _write_run_snapshot(ret, cell_dir, self.run_id)
+            except Exception:  # noqa: BLE001 - this path never fails the run
+                pass
         if skipped:
             return JobStatus.COMPLETED, _SkippedRun("not sampled")
         if self.on_error == "raise":

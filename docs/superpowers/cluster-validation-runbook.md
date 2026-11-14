@@ -388,13 +388,26 @@ what SLURM does:
   arrived after submitit's 15 to 30 s wait, and the driver did not yet see
   the cell's completed record either (it reads the record once). Record the
   cell's `mushin_cell_status.json` and whether its `mushin_metrics.json`
-  survived;
+  survived. Since #406, such a cell whose record could not stand for its
+  result is recorded `failed` and recomputed on resume: count those cells;
 - with `launcher_config={"nodes": 1, "tasks_per_node": 2}`, a task where rank
   1 calls `os._exit(9)` after rank 0 has returned its metrics (read the rank
   from `SLURM_PROCID`; sleep a few seconds on rank 1 first). The cell fails
   (a job of several tasks is not kept: every rank writes the cell's
-  record). Record the cell's status in the manifest and its
-  `mushin_cell_status.json`, and the error line `run()` warned with.
+  record). Expect `failed` in both the manifest and the cell's
+  `mushin_cell_status.json`, and no `mushin_metrics.json` (#406). Record
+  them, the error line `run()` warned with, whether a reload
+  (`load_from_dir`) reports the cell failed, and whether every rank had
+  ended when `results()` raised (srun without `--kill-on-bad-exit` lets rank
+  0 run on);
+- (#406) run a 3-cell sweep into `t9_reuse`, then the same sweep again,
+  fresh (not `resume=True`), into the same `working_dir`, and `scancel
+  <array>_1` while that task is still pending, so it never starts. The
+  cell keeps the first run's `mushin_cell_status.json` and metrics, and its
+  `.hydra/hydra.yaml` now names the second run (the driver, on the login
+  node, wrote it). Check that a reload reports the cell failed, and record
+  the two files' mtimes on the shared filesystem (the record must be older
+  than the snapshot).
 
 **Report:** what `sacct` says for seeds 0, 2 and 3 (`TIMEOUT`,
 `OUT_OF_MEMORY`, `CANCELLED`),
