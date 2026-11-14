@@ -378,7 +378,7 @@ def test_a_cell_taking_a_dir_over_is_not_handed_its_checkpoints(tmp_path):
     write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
     _old_ckpt(tmp_path / "last.ckpt", "x=1")
     write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
-    assert isinstance(read_cell_status(tmp_path)["foreign_until_ns"], int)
+    assert read_cell_status(tmp_path)["foreign_ckpts"]["names"] == ["last.ckpt"]
     write_cell_status(tmp_path, status="failed", combo={"x": 2}, attempt=1)
     rc = build_resume_context(tmp_path, {"x": 2})
     assert rc.is_resume is True and rc.last_ckpt is None
@@ -402,7 +402,7 @@ def test_a_cells_own_checkpoints_are_never_foreign(tmp_path):
     write_cell_status(tmp_path, status="running", combo={"x": 1}, attempt=1)
     _old_ckpt(tmp_path / "last.ckpt", "x=1")
     write_cell_status(tmp_path, status="failed", combo={"x": 1}, attempt=1)
-    assert "foreign_until_ns" not in read_cell_status(tmp_path)
+    assert "foreign_ckpts" not in read_cell_status(tmp_path)
     assert build_resume_context(tmp_path, {"x": 1}).last_ckpt.read_text() == "x=1"
 
 
@@ -493,3 +493,20 @@ def test_a_sample_fill_in_does_not_resume_from_an_earlier_cells_weights(tmp_path
     left_out = 4 if 3 in seen else 3
     W().run(x=multirun([3, 4]), working_dir=str(tmp_path), resume=True)
     assert seen[left_out] is None
+
+
+def test_a_checkpoint_staged_with_an_old_time_is_the_cells_own(tmp_path):
+    """`pre_task` may stage a checkpoint copied with its source's time
+    (`shutil.copy2`), older than another cell's: it was not there when the
+    cell took the dir over, so it is the cell's own (#390 review)."""
+    import shutil
+
+    write_cell_status(tmp_path, status="completed", combo={"x": 1}, attempt=1)
+    (tmp_path / "last.ckpt").write_text("x=1")
+    write_cell_status(tmp_path, status="running", combo={"x": 2}, attempt=1)
+    source = tmp_path / "source"
+    source.mkdir()
+    _old_ckpt(source / "staged.ckpt", "x=2, staged")
+    shutil.copy2(source / "staged.ckpt", tmp_path / "staged.ckpt")
+    rc = build_resume_context(tmp_path, {"x": 2})
+    assert rc.last_ckpt is not None and rc.last_ckpt.name == "staged.ckpt"

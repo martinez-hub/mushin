@@ -111,36 +111,39 @@ def write_cell_status(
         payload["job_id"] = job_id
     if metrics is not None:
         payload["metrics"] = metrics
-    # A record that replaces another cell's notes the newest checkpoint that
-    # cell left in the dir; this cell is never handed one no newer, and its
-    # later records carry the mark (#355).
-    until = _foreign_until(Path(cell_dir), combo)
-    if until is not None:
-        payload["foreign_until_ns"] = until
+    # A record that replaces another cell's marks the checkpoints that cell
+    # left in the dir; this cell is never handed one of them, and its later
+    # records carry the mark (#355).
+    mark = _foreign_mark(Path(cell_dir), combo)
+    if mark is not None:
+        payload["foreign_ckpts"] = mark
     _atomic_write_json(Path(cell_dir) / STATUS_FILE, payload)
 
 
-def _foreign_until(cell_dir: Path, combo: Any) -> int | None:
+def _foreign_mark(cell_dir: Path, combo: Any) -> dict | None:
     """For the record of ``combo`` about to be written in ``cell_dir``: the
     mark of a record of this cell, carried; when it replaces another cell's
-    record (or one that cannot be read, failing closed), the newest mtime of
-    the checkpoints there (`_newest_checkpoint_ns`); None over no record."""
+    record (or one that cannot be read, failing closed), the checkpoints
+    there (`_checkpoints_mark`); None over no record."""
     prior = read_cell_status(cell_dir)
     if prior is None:
         if not (cell_dir / STATUS_FILE).exists():
             return None
-        return _newest_checkpoint_ns(cell_dir)
+        return _checkpoints_mark(cell_dir)
     if isinstance(prior.get("combo"), dict) and same_cell(prior["combo"], combo):
-        carried = prior.get("foreign_until_ns")
-        return carried if isinstance(carried, int) else None
-    return _newest_checkpoint_ns(cell_dir)
+        carried = prior.get("foreign_ckpts")
+        return carried if _is_mark(carried) else None
+    return _checkpoints_mark(cell_dir)
 
 
-def _newest_checkpoint_ns(cell_dir: Path) -> int | None:
-    """The newest mtime (ns) of the checkpoints at ``cell_dir``'s top: any
-    entry named ``*.ckpt`` in any case, a file or a directory (a sharded
-    checkpoint), as a resume could be handed one."""
-    newest = None
+def _checkpoints_mark(cell_dir: Path) -> dict | None:
+    """The checkpoints at ``cell_dir``'s top, as a record marks them
+    foreign: each entry named ``*.ckpt`` in any case, a file or a directory
+    (a sharded checkpoint), by its name lowercased, and the newest mtime
+    (ns) among them. One the cell writes later is newer, or has a new name
+    (one ``pre_task`` stages with its source's time); None when there is
+    none."""
+    names, newest = [], None
     try:
         entries = list(Path(cell_dir).iterdir())
     except OSError:
@@ -152,8 +155,19 @@ def _newest_checkpoint_ns(cell_dir: Path) -> int | None:
             mtime = entry.stat().st_mtime_ns
         except OSError:
             continue
+        names.append(entry.name.lower())
         newest = mtime if newest is None else max(newest, mtime)
-    return newest
+    if newest is None:
+        return None
+    return {"names": sorted(names), "until_ns": newest}
+
+
+def _is_mark(mark: Any) -> bool:
+    return (
+        isinstance(mark, dict)
+        and isinstance(mark.get("names"), list)
+        and isinstance(mark.get("until_ns"), int)
+    )
 
 
 def _records_job_fields(num: Any, choices: Any) -> bool:
@@ -5474,17 +5488,17 @@ def read_cell_status(cell_dir) -> dict | None:
 def discover_last_ckpt(cell_dir) -> Path | None:
     """Best-effort: the checkpoint a resuming task should load. Prefers an exact
     ``last.ckpt``; otherwise the most-recently-modified ``*.ckpt`` in ``cell_dir``.
-    Returns None if there is none. A checkpoint no newer than the cell's
-    record's ``foreign_until_ns`` is another cell's, left in the dir before
-    this cell took it over, and is never one (#355)."""
+    Returns None if there is none. A checkpoint the cell's record marks as
+    another cell's (``foreign_ckpts``: there when this cell took the dir
+    over, and no newer since) is never one (#355)."""
     d = Path(cell_dir)
-    until = (read_cell_status(d) or {}).get("foreign_until_ns")
+    mark = (read_cell_status(d) or {}).get("foreign_ckpts")
 
     def own(path: Path) -> bool:
-        if not isinstance(until, int):
+        if not _is_mark(mark) or path.name.lower() not in mark["names"]:
             return True
         try:
-            return path.stat().st_mtime_ns > until
+            return path.stat().st_mtime_ns > mark["until_ns"]
         except OSError:
             return False
 
