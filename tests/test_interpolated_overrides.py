@@ -18,7 +18,7 @@ import pytest
 from hydra_zen import make_config
 from omegaconf import OmegaConf
 
-from mushin import MultiRunMetricsWorkflow, multirun
+from mushin import MultiRunMetricsWorkflow, hydra_list, multirun
 from mushin._sweep_io import MANIFEST_FILE
 
 HYDRA_DIR = "${hydra:runtime.output_dir}"
@@ -539,6 +539,148 @@ def test_a_load_replaces_a_runs_manifest(tmp_path):
     assert first.notes == fresh.notes
 
 
+def _seen(value):
+    """Keep the value a task received in its cell's dir (the cwd): what its
+    job resolved, whatever provenance records."""
+    Path("seen.json").write_text(json.dumps(value))
+
+
+def _seen_in(cell: Path):
+    return json.loads((cell / "seen.json").read_text())
+
+
+class Stamped(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, stamp):
+        _seen(stamp)
+        return dict(v=float(x))
+
+
+@pytest.mark.parametrize("spec", ["%Y", "%H-%M-%S-%f"])
+def test_a_fixed_interpolation_is_the_runs_value_on_every_read(tmp_path, spec):
+    """The issue's second case: a fixed value is the one its jobs resolved
+    when they agree (the run's year), else its text, not the reader's
+    reading at reload time."""
+    stamp = "${now:" + spec + "}"
+    wf = Stamped()
+    wf.run(x=multirun([1, 2]), stamp=stamp, working_dir=tmp_path)
+    seen = [_seen_in(tmp_path / d) for d in ("0", "1")]
+    expected = seen[0] if seen[0] == seen[1] else stamp
+    assert wf.multirun_task_overrides["stamp"] == expected
+    for _ in range(2):
+        back = Stamped().load_from_dir(tmp_path, "mushin_metrics.json")
+        assert back.multirun_task_overrides["stamp"] == expected
+
+
+class Listed2(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, stamps):
+        _seen(list(stamps))
+        return dict(v=float(x))
+
+
+def test_a_fixed_container_is_read_only_from_jobs_that_resolved_it(tmp_path):
+    """A cell `sample=` left out never resolved its config; a list holding
+    an interpolation there is not read (it would resolve now, in the
+    driver), so the run's value is the computed cell's (#392)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wf = Listed2()
+        wf.run(
+            x=multirun([1, 2]),
+            stamps=hydra_list(["${now:%H-%M-%S-%f}"]),
+            working_dir=tmp_path,
+            sample=1,
+            sample_seed=0,
+        )
+    ran = [d for d in ("0", "1") if (tmp_path / d / "mushin_metrics.json").exists()]
+    assert len(ran) == 1
+    assert wf.multirun_task_overrides["stamps"] == _seen_in(tmp_path / ran[0])
+
+
+@pytest.mark.config_group("model")
+def test_a_fixed_interpolated_group_choice_reads_its_option_name(
+    tmp_path, restore_config_group, monkeypatch
+):
+    """A config group's option chosen through an interpolation reads as the
+    option's name, as on main, not as the composed node, in the run and in a
+    reload (#392). Read from the environment, it is not saved: a reload reads
+    it again, as main does."""
+    from hydra.core.config_store import ConfigStore
+
+    cs = ConfigStore.instance()
+    cs.store(group="model", name="small", node={"width": 4})
+    cs.store(group="model", name="big", node={"width": 8})
+
+    class Grouped(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(seed, model=None):
+            return dict(w=float(model["width"]))
+
+    monkeypatch.setenv("MUSHIN_TEST_MODEL", "small")
+    wf = Grouped(make_config(model=None))
+    wf.run(
+        model="${oc.env:MUSHIN_TEST_MODEL}",
+        seed=multirun([0, 1]),
+        working_dir=tmp_path,
+    )
+    assert wf.multirun_task_overrides["model"] == "small"
+    back = Grouped(make_config(model=None)).load_from_dir(
+        tmp_path, "mushin_metrics.json"
+    )
+    assert back.multirun_task_overrides["model"] == "small"
+
+
+class Weighted(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, ws, base_lr=None):
+        return dict(v=float(x))
+
+
+def test_a_fixed_container_keeps_its_nan_on_a_reload(tmp_path):
+    """The run saves a fixed list with its NaN tagged, so a reload reads NaN
+    there rather than None (#392)."""
+    wf = Weighted()
+    wf.run(
+        base_lr=0.01,
+        x=multirun([1, 2]),
+        ws=hydra_list([float("nan"), "${base_lr}"]),
+        working_dir=tmp_path,
+    )
+    ran = wf.multirun_task_overrides["ws"]
+    back = Weighted().load_from_dir(tmp_path, "mushin_metrics.json")
+    read = back.multirun_task_overrides["ws"]
+    assert str(read) == str(ran)
+    assert read[0] is not None
+
+
+class Mutates(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):  # raw: called with the whole config
+        x.lr = 99
+        return dict(v=1.0)
+
+
+def test_a_raw_task_that_changes_a_fixed_value_does_not_report_its_change(tmp_path):
+    """A task run without a wrapper gets the config itself and may change a
+    fixed value; the value reported is the one the sweep was launched with,
+    not the task's change (#392)."""
+    wf = Mutates()
+    wf.run(
+        base_lr=0.01,
+        lr="${base_lr}",
+        x=multirun([1, 2]),
+        working_dir=tmp_path,
+        task_fn_wrapper=None,
+    )
+    assert wf.multirun_task_overrides["lr"] != 99
+    back = Mutates().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.multirun_task_overrides["lr"] != 99
+    assert str(back.multirun_task_overrides["lr"]) == str(
+        wf.multirun_task_overrides["lr"]
+    )
+
+
 class Mapped(MultiRunMetricsWorkflow):
     @staticmethod
     def task(d, base=None):
@@ -607,6 +749,46 @@ def test_a_dict_element_with_a_nan_key_is_its_own_element():
     assert not _same_element({float("nan"): "a"}, {1.0: "a"})
 
 
+class Tokened(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, token):
+        return dict(v=float(x))
+
+
+def test_a_fixed_value_read_from_the_environment_is_not_saved(tmp_path, monkeypatch):
+    """A credential a fixed override reads from the environment never
+    reaches the manifest; it is read again, as before (#392)."""
+    monkeypatch.setenv("MUSHIN_TEST_TOKEN", "tok-should-not-be-saved")
+    wf = Tokened()
+    wf.run(
+        x=multirun([1, 2]), token="${oc.env:MUSHIN_TEST_TOKEN}", working_dir=tmp_path
+    )
+    assert "tok-should-not-be-saved" not in (tmp_path / MANIFEST_FILE).read_text()
+    back = Tokened().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert back.multirun_task_overrides["token"] == wf.multirun_task_overrides["token"]
+
+
+class Keyed(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x, d, base_lr=None):
+        return dict(v=float(x))
+
+
+def test_a_fixed_dict_with_a_number_key_reloads_as_it_ran(tmp_path):
+    """JSON keeps a dict's keys only as text: a fixed value holding ``{1: ...}``
+    is not saved in that lossy form, and reloads as the run read it (#392)."""
+    wf = Keyed()
+    wf.run(
+        base_lr=0.01,
+        x=multirun([1, 2]),
+        overrides=["+d={1:'${base_lr}'}"],
+        working_dir=tmp_path,
+    )
+    back = Keyed().load_from_dir(tmp_path, "mushin_metrics.json")
+    ran, read = wf.multirun_task_overrides["d"], back.multirun_task_overrides["d"]
+    assert list(read) == list(ran) and type(next(iter(read))) is int
+
+
 class Dirred(MultiRunMetricsWorkflow):
     @staticmethod
     def task(x):
@@ -625,3 +807,46 @@ def test_an_element_that_resolves_to_anothers_value_keeps_its_cell(tmp_path):
     assert [str(x) for x in back.multirun_task_overrides["x"]] == [
         str(x) for x in wf.multirun_task_overrides["x"]
     ]
+
+
+@pytest.mark.parametrize("where", ["override", "config"])
+def test_a_fixed_value_resolved_through_an_environment_read_is_not_saved(
+    tmp_path, monkeypatch, where
+):
+    """``token="${api_key}"`` reads no environment itself, but ``api_key``
+    does (an override, or the base config): no fixed value of a run whose
+    config reads the environment is saved, so the credential never reaches
+    the manifest (#392)."""
+    monkeypatch.setenv("MUSHIN_TEST_TOKEN", "tok-indirect-secret")
+
+    class Creds(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, token, api_key=None):
+            return dict(v=float(x))
+
+    env = "${oc.env:MUSHIN_TEST_TOKEN}"
+    if where == "override":
+        wf = Creds()
+        wf.run(
+            api_key=env, token="${api_key}", x=multirun([1, 2]), working_dir=tmp_path
+        )
+    else:
+        wf = Creds(make_config(api_key=env))
+        wf.run(token="${api_key}", x=multirun([1, 2]), working_dir=tmp_path)
+    assert wf.multirun_task_overrides["token"] == "tok-indirect-secret"
+    assert "tok-indirect-secret" not in (tmp_path / MANIFEST_FILE).read_text()
+
+
+def test_a_fixed_value_is_saved_under_another_output_subdir(tmp_path):
+    """The environment check reads each job's config snapshot where the
+    sweep keeps it (``hydra.output_subdir``), so a sweep that keeps it
+    elsewhere still saves its fixed values (#392)."""
+    wf = Stamped()
+    wf.run(
+        x=multirun([1, 2]),
+        stamp="${now:%Y}",
+        overrides=["hydra.output_subdir=.snap"],
+        working_dir=tmp_path,
+    )
+    manifest = json.loads((tmp_path / MANIFEST_FILE).read_text())
+    assert manifest["interpolated"]["fixed"].get("stamp") is not None
