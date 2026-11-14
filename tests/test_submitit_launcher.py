@@ -593,6 +593,45 @@ THIS, OTHER = {"lr": 0.2}, {"lr": 0.1}
             True,
         ),
         (None, False, True, "dead", True),
+        # This run's record of another cell of the same job, in the same dir
+        # (a job that runs several cells in turn shares its id among them):
+        # the job's id is this cell's, but the job number is not, so it is not
+        # this cell's end. Before, the job id alone made it so, and the cell
+        # took the other cell's result.
+        pytest.param(
+            dict(
+                status="completed",
+                run_id="this",
+                job_id="7",
+                job_num=1,
+                choices={},
+                combo=OTHER,
+                metrics="OURS",
+            ),
+            True,
+            True,
+            "dead",
+            False,
+            id="same-job-other-num",
+        ),
+        # Guard (it passes before the number was read): this cell's number,
+        # under a combo that resolved anew (#384's clock), is still its own.
+        pytest.param(
+            dict(
+                status="completed",
+                run_id="this",
+                job_id="7",
+                job_num=0,
+                choices={},
+                combo=OTHER,
+                metrics="OURS",
+            ),
+            True,
+            True,
+            "metrics",
+            False,
+            id="guard-same-job-same-num",
+        ),
     ],
 )
 def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
@@ -621,6 +660,9 @@ def test_a_dead_job_keeps_its_own_end_and_records_only_over_what_it_may(
     if metrics:
         (cell / "mushin_metrics.json").write_text(file)
     before = read_cell_status(cell)
+    if prior is not None and "job_num" in prior:
+        # The record holds the number the row means it to.
+        assert before["job_num"] == prior["job_num"]
 
     runner = object.__new__(_TaskRunner)
     runner.swept_names, runner.sampled_indices = ["lr"], None

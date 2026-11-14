@@ -2322,8 +2322,15 @@ class _TaskRunner:
         job's config, from which the combo reads config-group choices.
 
         The cell's record says how far the job got. It is the job's own when
-        this run wrote it for this cell (its ``run_id`` and combo). A
-        completed one whose attempt wrote a metrics file holding the result
+        this run wrote it for this cell (its ``run_id`` and combo), or for
+        this job and this cell's job number (its ``job_id`` and ``job_num``):
+        a job that runs several cells in turn gives them one job id, so the
+        id alone would take another cell's record in a dir they share for
+        this one's. A record with no job number (one whose config-group
+        choices could not be recorded, `write_cell_status`) is still judged
+        by its job id alone, so in a dir cells of one job share, such a
+        record can still be taken for another cell's. A completed one whose
+        attempt wrote a metrics file holding the result
         whole (its ``metrics``, that file's digest) gives the cell's result
         from that file, while the file is still that one, as a resume would,
         and one whose task returned None (its ``no_metrics``) gives None,
@@ -2381,7 +2388,9 @@ class _TaskRunner:
         this_cell = combo is not None and same_cell(prior.get("combo"), combo)
         # This run's record of this job: by its combo, or by the job's id,
         # which the job recorded, since a swept value that resolves anew (a
-        # clock) does not give, here, the value the job recorded (#384).
+        # clock) does not give, here, the value the job recorded (#384). With
+        # the job's number too, where the record has one: a job of several
+        # cells gives each the same id, and two of them can share a dir.
         try:
             job_id = _job_id_or_none(OmegaConf.select(ret.hydra_cfg.hydra, "job.id"))
         except Exception:  # noqa: BLE001 - judged by its combo alone
@@ -2389,7 +2398,14 @@ class _TaskRunner:
         own = (
             self.run_id is not None
             and prior.get("run_id") == self.run_id
-            and (this_cell or (job_id is not None and prior.get("job_id") == job_id))
+            and (
+                this_cell
+                or (
+                    job_id is not None
+                    and prior.get("job_id") == job_id
+                    and prior.get("job_num") in (None, num)
+                )
+            )
         )
         written = prior.get("metrics")
         if own and status == "completed" and dead.keepable and wrote_no_metrics(prior):
