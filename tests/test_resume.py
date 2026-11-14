@@ -740,3 +740,25 @@ def test_a_cell_sample_left_out_keeps_its_checkpoint_for_its_config(tmp_path):
         seen.clear()
         _ckpt_sweep(seen)().run(lr=0.1, resume=True, **sweep)
     assert sorted(map(str, seen)) == ["None", "lr=0.1"]
+
+
+def test_a_cell_the_budget_skips_keeps_its_checkpoint_for_its_config(tmp_path):
+    """A cell the wall-clock budget skips records no attempt either: a later
+    run under the config that left its checkpoint is handed it (#391)."""
+    import warnings
+
+    from mushin import multirun
+
+    seen = []
+    sweep = dict(x=multirun([1, 2]), working_dir=str(tmp_path), on_error="nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _ckpt_sweep(seen, fail=True)().run(lr=0.1, **sweep)
+        # The first cell starts the clock and runs; the second is past it.
+        _ckpt_sweep(seen, fail=True)().run(
+            lr=0.2, resume=True, max_total_seconds=1e-6, **sweep
+        )
+        assert len(seen) == 3
+        seen.clear()
+        _ckpt_sweep(seen)().run(lr=0.1, resume=True, **sweep)
+    assert seen == [None, "lr=0.1"]

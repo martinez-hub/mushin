@@ -254,11 +254,10 @@ cell's checkpoint: run another grid in a new `working_dir`. Tasks that don't
 declare `mushin_resume` are unaffected.
 
 A checkpoint goes only to an attempt under the config and task code that wrote
-it. When either has changed since (mushin warns that it re-runs the cell),
-`last_ckpt` is None and the cell trains from scratch, though `is_resume` is
-still True. To continue from the old checkpoint on purpose (a raised
-`max_epochs`, say), load it from `mushin_resume.dir` yourself before the task
-writes its own there.
+it. When either has changed since, `last_ckpt` is None and the cell trains from
+scratch, though `is_resume` is still True. To continue from the old checkpoint
+on purpose (a raised `max_epochs`, say), load it from `mushin_resume.dir`
+yourself before the task writes its own there.
 
 ## Provenance
 
