@@ -119,18 +119,20 @@ def test_a_preempted_job_counts_as_live(tmp_path, slurm):
 
 
 def test_only_the_live_launch_is_named(tmp_path, slurm):
-    """A launch each of whose cells has a record of its run's end, by job
-    id or by job number, is over: SLURM is not asked about it."""
+    """SLURM is asked about every launch, a job whose cells recorded their
+    ends included: it may have been requeued (#410). Only the live one is
+    named."""
     wd = tmp_path / "s"
     over = launch(wd, R1, [(0, "100_0"), (1, "100_1")])
     _record(wd, "0", run=R1, num=0, status="completed")
     _record(wd, "1", run=R1, job_id="100_1", status="failed")
     live = launch(wd, R2, [(2, "200")])
+    slurm.jobs["100"] = PURGED
     slurm.jobs["200"] = shown(job("RUNNING", _ours(wd), job="200"))
     with pytest.raises(ValueError) as caught:
         _run(wd)
     assert live.name in str(caught.value) and over.name not in str(caught.value)
-    assert slurm.asked == ["200"]
+    assert sorted(slurm.asked) == ["100", "200"]
 
 
 @pytest.mark.parametrize(
@@ -508,3 +510,43 @@ def test_a_launch_file_keeps_its_jobs_task_count(tmp_path):
     path.write_text(json.dumps(data))
     (read,), _ = _jobs.read_launches(tmp_path)
     assert read.tasks == 1
+
+
+def test_a_requeued_job_is_asked_about_whatever_its_cell_records(tmp_path, slurm):
+    """A job preempted after its cell recorded its end can be requeued, and
+    run the cell again: SLURM, not the record, says whether it has ended
+    (#410)."""
+    wd = tmp_path / "s"
+    launch(wd, R1, [(0, "100")])
+    _record(wd, "0", run=R1, status="completed", num=0, job_id="100")
+    slurm.jobs["100"] = shown(job("PENDING", _ours(wd)))
+    with pytest.raises(ValueError, match="queued or running"):
+        _run(wd)
+    assert slurm.asked == ["100"]
+
+
+def test_with_no_scontrol_a_recorded_end_ends_the_job(tmp_path, slurm, monkeypatch):
+    """Where SLURM cannot be asked, a cell's recorded end is the best word on
+    its job: a launch whose cells all recorded theirs is over, with no
+    warning (#410)."""
+    wd = tmp_path / "s"
+    path = launch(wd, R1, [(0, "100")])
+    _record(wd, "0", run=R1, status="completed", num=0, job_id="100")
+    monkeypatch.setattr(_jobs, "_which", lambda name: None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _run(wd)
+    assert not path.exists()
+
+
+def test_an_interpolated_working_dir_is_checked_where_it_resolves(
+    tmp_path, slurm, monkeypatch
+):
+    """`working_dir="${oc.env:...}"` names the dir Hydra writes to, not its
+    text: the launches there are checked (#410)."""
+    wd = tmp_path / "s"
+    launch(wd, R1, [(0, "100")])
+    slurm.jobs["100"] = shown(job("RUNNING", _ours(wd)))
+    monkeypatch.setenv("MUSHIN_TEST_SWEEP", str(wd))
+    with pytest.raises(ValueError, match="queued or running"):
+        _task.run(lr=multirun([0.1, 0.2]), working_dir="${oc.env:MUSHIN_TEST_SWEEP}")

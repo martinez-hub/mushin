@@ -781,7 +781,7 @@ def refuse_live_launches(working_dir) -> list[Path]:
     unreadable: list[str] = []
     unchecked: list[str] = []
     others: list[str] = []
-    asked: list[tuple[Launch, list[str]]] = []
+    asked: list[tuple[Launch, list[str], list[LaunchCell]]] = []
     for launch in launches:
         # A cell's recorded end is its job's only for a job of one task:
         # each task of a job of several writes the cell's record, so one
@@ -795,7 +795,14 @@ def refuse_live_launches(working_dir) -> list[Path]:
                 and (launch.run_id, cell.num) not in recorded
             )
         ]
-        if not cells:
+        if launch.executor == "slurm" and launch.clusters is None:
+            # SLURM is asked about every job, recorded ends or not: a job
+            # preempted after its cell recorded its end can be requeued and
+            # run the cell again (#410). The records stand only where SLURM
+            # cannot be asked (no scontrol here, below).
+            arrays = list(dict.fromkeys(c.job_id.split("_")[0] for c in launch.cells))
+            asked.append((launch, arrays, cells))
+        elif not cells:
             ended.append(launch.path)
         elif launch.executor == "local":
             state = _local_state(launch, cells, own_command=True)
@@ -815,22 +822,22 @@ def refuse_live_launches(working_dir) -> list[Path]:
                 f"{launch.path}: sent to SLURM clusters {launch.clusters!r}, which "
                 "plain scontrol does not see"
             )
-        else:
-            # A task of an array is `<array>_<index>`: scontrol is asked
-            # about the array, as `cancel` asks.
-            arrays = list(dict.fromkeys(c.job_id.split("_")[0] for c in cells))
-            asked.append((launch, arrays))
     if asked:
         scontrol = _which("scontrol")
         if scontrol is None:
-            unchecked.extend(
-                f"{launch.path}: SLURM jobs {' '.join(arrays)}, and no scontrol here"
-                for launch, arrays in asked
-            )
+            # The cells' recorded ends are the best word left on their jobs.
+            for launch, arrays, unrecorded in asked:
+                if unrecorded:
+                    unchecked.append(
+                        f"{launch.path}: SLURM jobs {' '.join(arrays)}, "
+                        "and no scontrol here"
+                    )
+                else:
+                    ended.append(launch.path)
         else:
             answers: dict[str, tuple[str, Any]] = {}
             stalled = None
-            for _, arrays in asked:
+            for _, arrays, _ in asked:
                 for array in arrays:
                     if array in answers:
                         continue
@@ -846,7 +853,7 @@ def refuse_live_launches(working_dir) -> list[Path]:
                     answers[array] = _ask(scontrol, array)
                     if answers[array][0] == "unknown":
                         stalled = array
-            for launch, arrays in asked:
+            for launch, arrays, _ in asked:
                 # The arrays of each verdict: "live", "gone", "not ours" or,
                 # when scontrol's answer could not be read, "unknown".
                 having: dict[str, list[str]] = {}

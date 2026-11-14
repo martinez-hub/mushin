@@ -393,6 +393,24 @@ def _hydra_quoted(text: str) -> str:
     return QuotedString(text=text, quote=Quote.single).with_quotes()
 
 
+def _resolved_working_dir(working_dir) -> str:
+    """``working_dir`` as Hydra resolves it, for a check made before the
+    launch: an interpolation (``${oc.env:SWEEP_ROOT}``) names the dir Hydra
+    writes to, not its text (#410). The backslashes are doubled first, as
+    `_quoted` writes the override Hydra reads, so a Windows path resolves as
+    Hydra's does. One that cannot be resolved before the launch (a
+    ``${hydra:...}``) is taken as written."""
+    text = str(working_dir)
+    if "${" not in text:
+        return text
+    try:
+        from omegaconf import OmegaConf
+
+        return str(OmegaConf.create({"dir": text.replace("\\", "\\\\")})["dir"])
+    except Exception:  # noqa: BLE001 - checked as written
+        return text
+
+
 def _quoted(text: str) -> str:
     """``text`` as a single-quoted Hydra string for an override.
 
@@ -4078,7 +4096,7 @@ class BaseWorkflow:
         if working_dir is not None:
             from ._jobs import refuse_live_launches
 
-            _over_launches = refuse_live_launches(working_dir)
+            _over_launches = refuse_live_launches(_resolved_working_dir(working_dir))
 
         if task_fn_wrapper is None:
             task_fn_wrapper = _identity

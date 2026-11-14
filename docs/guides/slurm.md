@@ -195,9 +195,11 @@ not the driver's.
 running, whichever launcher it uses: two drivers on one sweep would each
 submit the cells they find unfinished, and two jobs would then write one
 cell. It reads the submissions listed under `<working_dir>/mushin_jobs/`
-(below). A job whose cell has recorded its end is over; for each other job it
-asks `scontrol`, as `mushin.cancel` does, or, for `launcher="submitit_local"`
-on the machine that submitted it, looks for the job's process. Then:
+(below). It asks `scontrol` about each SLURM job, as `mushin.cancel` does,
+even one whose cell has recorded its end: a job preempted after that may be
+requeued. Where `scontrol` is not found, a job whose cell has recorded its end
+is taken as over. For `launcher="submitit_local"` on the machine that
+submitted it, it looks for the job's process. Then:
 
 - A job SLURM lists as not ended (pending, running, or preempted, since SLURM
   may requeue a preempted job), or a local job whose process still runs, makes
