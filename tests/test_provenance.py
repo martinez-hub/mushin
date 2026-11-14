@@ -738,3 +738,23 @@ def test_a_config_holding_an_enum_is_recorded(tmp_path):
     Painted(make_config(color=_Color.RED)).run(x=multirun([1]), working_dir=tmp_path)
     record = json.loads((tmp_path / "0" / "mushin_provenance.json").read_text())
     assert record["config"]["color"] == "RED"
+
+
+def test_a_config_holding_a_path_is_recorded(tmp_path):
+    """#383: a value json cannot write (a Path) is recorded as its text; the
+    cell got no record at all."""
+    import json
+    import pathlib
+    from dataclasses import dataclass
+
+    from omegaconf import OmegaConf
+
+    from mushin._provenance import write_provenance
+
+    @dataclass
+    class Cfg:
+        data: pathlib.Path = pathlib.Path("/data/train")
+
+    write_provenance(tmp_path, OmegaConf.structured(Cfg))
+    record = json.loads((tmp_path / "mushin_provenance.json").read_text())
+    assert record["config"]["data"] == str(pathlib.Path("/data/train"))

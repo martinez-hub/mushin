@@ -292,12 +292,14 @@ def write_provenance(job_dir, config: Any = None, base: dict | None = None) -> A
     # Atomic: under an external multi-rank launch every rank writes the same
     # cell's record, and a reader (show, the MCP server, record_accelerator)
     # must never see a torn file. Plain json.dumps, not the metrics
-    # normalizer: a config value of inf stays `Infinity`, as it always was. No
-    # mkdir: the cell directory exists, and a write to one that does not
-    # raises into the runner's best-effort guard rather than inventing it.
+    # normalizer: a config value of inf stays `Infinity`, as it always was. A
+    # value json cannot write (a Path) is written as its text, rather than
+    # costing the cell its record (#383). No mkdir: the cell directory
+    # exists, and a write to one that does not raises into the runner's
+    # best-effort guard rather than inventing it.
     _atomic_write_text(
         Path(job_dir) / "mushin_provenance.json",
-        json.dumps(record, indent=2),
+        json.dumps(record, indent=2, default=str),
         mkdir=False,
     )
     return record["accelerator"]
@@ -341,7 +343,7 @@ def authored_config(cfg):
 
 def _to_plain(cfg):
     """The config a record holds: ``cfg`` as written (`authored_config`; a
-    plain dict or list is taken as already that), its literal secret values
-    redacted."""
+    dict or list is taken as `authored_config`'s output, plain containers
+    throughout), its literal secret values redacted."""
     plain = cfg if isinstance(cfg, (dict, list)) else authored_config(cfg)
     return None if plain is None else _redact_config(plain)
