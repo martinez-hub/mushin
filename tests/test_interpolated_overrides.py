@@ -787,3 +787,51 @@ def test_a_fixed_dict_with_a_number_key_reloads_as_it_ran(tmp_path):
     back = Keyed().load_from_dir(tmp_path, "mushin_metrics.json")
     ran, read = wf.multirun_task_overrides["d"], back.multirun_task_overrides["d"]
     assert list(read) == list(ran) and type(next(iter(read))) is int
+
+
+class Dirred(MultiRunMetricsWorkflow):
+    @staticmethod
+    def task(x):
+        return dict(v=float(Path.cwd().name))
+
+
+def test_an_element_that_resolves_to_anothers_value_keeps_its_cell(tmp_path):
+    """Job 0's ``${hydra:job.num}`` resolves to 0, the other element's
+    value: keyed by it, the two cells would share a key and one result would
+    overwrite the other. The element keeps its text instead (#386)."""
+    wf = Dirred()
+    wf.run(x=multirun(["${hydra:job.num}", 0]), working_dir=tmp_path)
+    assert sorted(_values(wf)) == [0.0, 1.0]
+    back = Dirred().load_from_dir(tmp_path, "mushin_metrics.json")
+    assert sorted(_values(back)) == [0.0, 1.0]
+    assert [str(x) for x in back.multirun_task_overrides["x"]] == [
+        str(x) for x in wf.multirun_task_overrides["x"]
+    ]
+
+
+@pytest.mark.parametrize("where", ["override", "config"])
+def test_a_fixed_value_resolved_through_an_environment_read_is_not_saved(
+    tmp_path, monkeypatch, where
+):
+    """``token="${api_key}"`` reads no environment itself, but ``api_key``
+    does (an override, or the base config): no fixed value of a run whose
+    config reads the environment is saved, so the credential never reaches
+    the manifest (#392)."""
+    monkeypatch.setenv("MUSHIN_TEST_TOKEN", "tok-indirect-secret")
+
+    class Creds(MultiRunMetricsWorkflow):
+        @staticmethod
+        def task(x, token, api_key=None):
+            return dict(v=float(x))
+
+    env = "${oc.env:MUSHIN_TEST_TOKEN}"
+    if where == "override":
+        wf = Creds()
+        wf.run(
+            api_key=env, token="${api_key}", x=multirun([1, 2]), working_dir=tmp_path
+        )
+    else:
+        wf = Creds(make_config(api_key=env))
+        wf.run(token="${api_key}", x=multirun([1, 2]), working_dir=tmp_path)
+    assert wf.multirun_task_overrides["token"] == "tok-indirect-secret"
+    assert "tok-indirect-secret" not in (tmp_path / MANIFEST_FILE).read_text()

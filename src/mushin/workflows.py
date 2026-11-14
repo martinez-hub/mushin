@@ -2902,17 +2902,43 @@ class BaseWorkflow:
                 decision["coords"] = {
                     name: [_tag_nan(c) for c in v] for name, v in coordinates.items()
                 }
-            # A fixed value is saved when it reads back as itself, and never
-            # when its text reads the environment: an `${oc.env:API_TOKEN}`
-            # would put a credential in the manifest. Such a value is read
-            # again as before, by the reader (#392).
+            # A fixed value is saved when it reads back as itself, and none
+            # is when the run's config reads the environment anywhere: an
+            # `${oc.env:API_TOKEN}`, read directly or through another key
+            # (`token="${api_key}"`), would put a credential in the manifest.
+            # Such a value is read again as before, by the reader (#392).
+            reads_env = self._run_reads_environment(raw)
             decision["fixed"] = {
                 name: _tag_nan(v)
                 for name, v in values.items()
-                if not _ENV_READ.search(str(fixed[name][0])) and _round_trips(v)
+                if not reads_env and _round_trips(v)
             }
             self._interpolated_decision = decision
         return output, known
+
+    def _run_reads_environment(self, raw: list[str]) -> bool:
+        """Whether this run's config may read the environment anywhere: an
+        override's text, the sweep's multirun.yaml, or the config snapshot
+        (``.hydra/config.yaml``, as composed, unresolved) of a job of each
+        set of config-group choices. A job's config itself is no guide: its
+        task's wrapper resolved it in place. What cannot be read counts as
+        reading it (#392)."""
+        if any(_ENV_READ.search(text) for text in raw):
+            return True
+        try:
+            texts = [(self.working_dir / "multirun.yaml").read_text(encoding="utf-8")]
+            seen: set = set()
+            for i, cell in enumerate(self.multirun_working_dirs or []):
+                choices = self._job_choices(i) or {}
+                key = tuple(sorted((str(k), str(v)) for k, v in choices.items()))
+                if key in seen:
+                    continue
+                seen.add(key)
+                snapshot = Path(cell) / ".hydra" / "config.yaml"
+                texts.append(snapshot.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - not readable: as if it did
+            return True
+        return any(_ENV_READ.search(text) for text in texts)
 
     def _fixed_values(self, fixed: dict, run_id, known: bool) -> dict:
         """The value of each fixed override that holds an interpolation:
@@ -3049,6 +3075,17 @@ class BaseWorkflow:
                     values.append(driver if same else voters[0])
                 else:
                     values.append(text)
+            # An element whose value keys as another element's coordinate
+            # (job 0's `${hydra:job.num}` beside a written 0) would put two
+            # elements' cells under one key, one result overwriting the
+            # other: such an element keeps its text (#386).
+            keys = [_value_key(self._element_coord(v)) for v in values]
+            values = [
+                text
+                if keys.count(key) > 1 and _holds_interpolation(str(text))
+                else value
+                for value, key, text in zip(values, keys, written, strict=True)
+            ]
             coordinates[name] = values
         if known:
             self._interpolated_cells = elements_of
