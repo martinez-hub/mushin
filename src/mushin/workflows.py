@@ -128,6 +128,15 @@ def _to_override_element(item: Any) -> str:
 _LIST_TYPES = (list, tuple, range, UserList)
 
 
+def _override_value(value: Any) -> str:
+    """``value`` as run() writes a keyword's value into its override: a
+    `multirun` as a ``choice(...)`` sweep of its elements, any other value
+    as one element (a string quoted, a list in brackets)."""
+    if isinstance(value, multirun):
+        return f"choice({','.join(_to_override_element(item) for item in value)})"
+    return _to_override_element(value)
+
+
 def _is_list_config(item: Any) -> bool:
     from omegaconf import ListConfig
 
@@ -579,6 +588,81 @@ def _override_name_targets(task_fn) -> set[str] | None:
     return names
 
 
+#: `run()`'s ``wait`` when the call does not pass it: True, but told apart
+#: from a ``wait=`` the caller wrote, which may have been meant for the
+#: task's own ``wait`` (#345).
+_WAIT_DEFAULT: Any = object()
+
+
+def _takes_wait(fn) -> bool:
+    """Whether ``fn`` has a named parameter ``wait``."""
+    import inspect
+
+    try:
+        params = _task_signature(fn)[0].parameters
+    except (TypeError, ValueError):
+        return False
+    param = params.get("wait")
+    return param is not None and param.kind not in (
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    )
+
+
+def _detach_refusal(launcher, sweeper, overrides, working_dir) -> str | None:
+    """Why ``run(wait=False)`` cannot leave its jobs for `mushin.collect`,
+    or None when it can: only mushin's submitit launchers leave their jobs
+    running (any other would run every cell before returning, so nothing
+    would be left to collect); collect finds the sweep in ``working_dir``
+    (Hydra's default dir holds a time stamp); and only Hydra's basic sweeper
+    submits every cell at once (another chooses its next cells from the
+    last ones' results). Read from ``launcher=``/``sweeper=`` and raw
+    ``hydra/launcher=``/``hydra/sweeper=`` overrides; a sweeper a config's
+    defaults list chooses is refused by the launcher itself."""
+    chosen, raw_sweeper = launcher, None
+    for text in overrides or []:
+        key, sep, name = text.partition("=")
+        key = key.strip().lstrip("+")
+        if not sep:
+            continue
+        if key == "hydra/launcher" and launcher is None:
+            chosen = name.strip()
+        elif key == "hydra/sweeper":
+            raw_sweeper = name.strip()
+    if chosen not in {*_MUSHIN_SUBMITIT, *_MUSHIN_SUBMITIT.values()}:
+        return (
+            '`wait=False` needs `launcher="submitit_slurm"` (or '
+            '`launcher="submitit_local"`), whose jobs run on after run() '
+            f"returns; with launcher={chosen!r}, every cell would run before it "
+            "returned, leaving nothing to collect."
+        )
+    if not _mushin_launchers_available():
+        return (
+            "`wait=False` needs mushin's submitit launchers, which come with the "
+            "`slurm` extra: pip install 'mushin-py[slurm]'."
+        )
+    if working_dir is None:
+        return (
+            "`wait=False` needs `working_dir=`: `mushin.collect(working_dir)` finds "
+            "the sweep there, and Hydra's default dir holds a time stamp."
+        )
+    if "${" in _resolved_working_dir(working_dir):
+        # One only the launch resolves (`${hydra:...}`): run() would learn
+        # where its jobs write only after submitting them.
+        return (
+            f"`wait=False` needs a `working_dir` that names its dir before the "
+            f"launch, and {str(working_dir)!r} resolves only inside it."
+        )
+    if sweeper not in (None, "basic") or raw_sweeper not in (None, "basic"):
+        return (
+            "`wait=False` needs Hydra's basic sweeper (`sweeper=None` or "
+            '`"basic"`): it submits every cell at once, while another sweeper '
+            "chooses its next cells from the results of the last, which are not "
+            "there until the jobs end."
+        )
+    return None
+
+
 class _FailedRun:
     """Sentinel returned by a fail-soft task wrapper in place of a raised
     exception. Hydra's basic sweeper re-raises the first FAILED job's exception
@@ -644,6 +728,15 @@ class _SkippedRun:
 
     def __init__(self, reason: str = "budget") -> None:
         self.reason = reason
+
+
+class _Pending:
+    """The return mushin's submitit launcher gives a cell whose job it left
+    running for `mushin.collect`, under ``run(..., wait=False)`` (#345):
+    ``job_id`` is the scheduler's. `run()` returns once it sees one."""
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
 
 
 class _PriorCells:
@@ -1552,6 +1645,8 @@ class _TaskRunner:
         code_body_roots=(),
         cache_ok=True,
         script_entries=None,
+        detached=False,
+        lineage=None,
     ):
         self.task = task  # zen(_ResumeInjector(fn)) or zen(fn)
         self.pre_task = pre_task  # zen(self.pre_task)
@@ -1608,6 +1703,15 @@ class _TaskRunner:
         # same in every pickled copy: a job that ended without a result is
         # judged by whether its cell's record is this run's (#345).
         self.run_id = uuid.uuid4().hex
+        # `run(wait=False)`: mushin's submitit launcher records its jobs for
+        # `mushin.collect` and returns without waiting on them (#345). The
+        # launcher holds no state of its own, so it reads this here.
+        self.detached = detached
+        # The run's notes and tags as `jobs_post_process` would resolve them
+        # ({"notes", "tags"}), for collect to record in the manifest: taken
+        # at submission, when the prior manifest a resume falls back to is
+        # the one the driver would have read. None for a waited run.
+        self.lineage = lineage
         # True only in an unpickled copy (`__setstate__`).
         self._shared_budget = False
         # True once a launcher has pickled this runner (`__getstate__`): only
@@ -1644,6 +1748,9 @@ class _TaskRunner:
         self.__dict__.setdefault("script_entries", {})
         # Such a runner names no run: its records never count as this run's.
         self.__dict__.setdefault("run_id", None)
+        # Nor did its run leave its jobs to collect (#345).
+        self.__dict__.setdefault("detached", False)
+        self.__dict__.setdefault("lineage", None)
 
     def budget_start_path(self, root) -> Path:
         """The file in sweep root ``root`` that holds this run's budget start."""
@@ -3535,6 +3642,7 @@ class BaseWorkflow:
         sample: int | None = None,
         sample_seed: int = 0,
         cache_dir: str | None = None,
+        wait: bool = _WAIT_DEFAULT,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the experiment.
@@ -3653,12 +3761,49 @@ class BaseWorkflow:
             propagates. ``"nan"`` enables fail-soft: a failing job is recorded
             (in ``self.failures`` and the on-disk sweep manifest), its grid cell
             becomes NaN, a ``UserWarning`` is emitted, and the sweep completes.
+
+        wait : bool (default: True)
+            ``False`` submits the sweep's jobs and returns without waiting on
+            them, a summary dict in place of the result; once they have
+            ended, `mushin.collect` (or ``collect()``) builds the result.
+            Needs ``launcher="submitit_slurm"`` or ``"submitit_local"``, a
+            ``working_dir``, and Hydra's basic sweeper. See
+            `MultiRunMetricsWorkflow.run`.
         """
         if on_error not in {"raise", "nan"}:
             raise ValueError(
                 f"`on_error` must be one of {{'raise', 'nan'}}, got {on_error!r}"
             )
         self._on_error = on_error
+
+        # `wait` became run()'s own parameter (#345); before, `wait=` reached
+        # the task. A value written for a task, pre_task or config `wait` is
+        # refused, not taken for run()'s, whatever the value: the task would
+        # silently stop receiving it.
+        if wait is not _WAIT_DEFAULT and (
+            _takes_wait(getattr(self, "task", None))
+            or _takes_wait(getattr(self, "pre_task", None))
+            or "wait" in _config_field_names(self.eval_task_cfg)
+        ):
+            # The value as run() would write it, not its text: "a,b" would
+            # split, None arrive as the string "None", and a multirun sweep
+            # nothing. Then as a Python string literal, so the line pastes as
+            # written whatever quotes or backslashes the value holds: JSON's
+            # is one, and always double-quoted.
+            override = json.dumps(f"++wait={_override_value(wait)}", ensure_ascii=False)
+            raise ValueError(
+                "`wait` is run()'s own parameter (it leaves the jobs running for "
+                "`mushin.collect` when False), and this sweep's task, pre_task or "
+                "config also has a `wait`. Pass that one as an override: "
+                f"`overrides=[{override}]`."
+            )
+        detach = wait is False
+        if wait is not _WAIT_DEFAULT and not isinstance(wait, bool):
+            raise TypeError(f"`wait` must be True or False, got {wait!r}")
+        if detach:
+            why = _detach_refusal(launcher, sweeper, overrides, working_dir)
+            if why is not None:
+                raise ValueError(why)
 
         if resume and working_dir is None:
             raise ValueError("`resume=True` requires `working_dir` to be provided.")
@@ -4206,6 +4351,13 @@ class BaseWorkflow:
         # wrapper that resolves it in place first (hydra-zen's `zen`) leaves
         # them there; a raw task may change it (`_resolved_by_jobs`, #392).
         self._task_resolves = getattr(_wrapped_task, "_resolve", False) is True
+        # The run's notes and tags, resolved now for collect to record, as
+        # `jobs_post_process` would resolve them once the jobs end (#345).
+        _lineage = None
+        lineage_of = getattr(self, "_lineage_of", None)
+        if detach and lineage_of is not None:
+            _notes, _tags = lineage_of(Path(_resolved_working_dir(working_dir)))
+            _lineage = {"notes": _notes, "tags": list(_tags or [])}
         task_call = _TaskRunner(
             task=_wrapped_task,
             pre_task=pre_task_fn_wrapper(_signed(self.pre_task)),
@@ -4228,6 +4380,8 @@ class BaseWorkflow:
             code_body_roots=(self.pre_task,),
             cache_ok=partial_task_cacheable(self.task),
             script_entries=driver_script_entries((*_code_roots, self.pre_task)),
+            detached=detach,
+            lineage=_lineage,
         )
 
         self._capture_env = capture_env
@@ -4245,6 +4399,7 @@ class BaseWorkflow:
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
+        self._awaiting_collect = False
 
         # Run a Multirun over epsilons
         try:
@@ -4282,6 +4437,7 @@ class BaseWorkflow:
             for path in _over_launches:
                 forget_launch(path)
 
+        summary = None  # what `wait=False` returns
         if isinstance(jobs, list):
             # Hydra returns a list of per-batch job lists (one batch for the
             # basic sweeper, several when a sweeper/launcher batches — e.g.
@@ -4292,6 +4448,25 @@ class BaseWorkflow:
             for batch in jobs:
                 flat.extend(batch) if isinstance(batch, list) else flat.append(batch)
             jobs = flat
+            if detach:
+                pending = [
+                    j._return_value
+                    for j in jobs
+                    if isinstance(getattr(j, "_return_value", None), _Pending)
+                ]
+                summary = self._detached_summary(working_dir, task_call, pending)
+                if pending:
+                    # The jobs run on: their launch files stay for collect,
+                    # and so does the budget start they read. The run is in
+                    # the state of a waited run whose driver stopped
+                    # mid-wait, which `show`, `cancel` and resume read.
+                    if capture_env:
+                        # The environment is this driver's either way.
+                        try:
+                            _write_env_snapshot(self.working_dir)
+                        except Exception:  # noqa: BLE001 - best-effort
+                            pass
+                    return summary
             _job_nums = [j.hydra_cfg.hydra.job.num for j in jobs]
             # ensure jobs are always sorted by job-num
             jobs = _sort_x_by_k(jobs, _job_nums)
@@ -4315,6 +4490,42 @@ class BaseWorkflow:
                 _write_env_snapshot(self.working_dir)
             except Exception:  # noqa: BLE001 - env capture is best-effort
                 pass
+        if detach:
+            # Nothing needed a job (a resume reusing every cell): the run
+            # finished here, and returns the same shape either way.
+            return summary
+
+    def _detached_summary(self, working_dir, runner, pending: list) -> dict:
+        """What ``run(wait=False)`` returns (#345), once the launch has
+        returned. With ``pending`` jobs, the workflow waits for collect:
+        ``to_xarray`` raises until then. With none, the launch files a batch
+        whose cells all settled in the driver wrote for collect (a later
+        batch's jobs might have been left running) are removed: the run
+        finishes now."""
+        from ._jobs import forget_launch, read_launches
+
+        root = Path(_resolved_working_dir(working_dir))
+        self.working_dir = root
+        if pending:
+            from ._collect import _forget_run
+
+            # A run the workflow held before is not this one: its jobs,
+            # failures and manifest (which `notes` reads) go, as collect
+            # replaces them.
+            _forget_run(self)
+            self._awaiting_collect = True
+        else:
+            for launch in read_launches(self.working_dir)[0]:
+                if launch.run_id == runner.run_id:
+                    forget_launch(launch.path)
+        return {
+            "working_dir": str(self.working_dir),
+            "run_id": runner.run_id,
+            "submitted": len(pending),
+            # One per job array (or job), as `sbatch --dependency` and
+            # `squeue` take them.
+            "job_ids": list(dict.fromkeys(p.job_id.split("_")[0] for p in pending)),
+        }
 
     def jobs_post_process(self):  # pragma: no cover
         """Method to extract attributes and metrics relevant to the workflow."""
@@ -4452,7 +4663,10 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         from disk, whether its record (``failures``, ``skipped``) is empty: the
         record is rebuilt on each load, from the cells' statuses and, once
         metrics are loaded, their metrics. ``True`` for a workflow that has
-        neither swept nor loaded."""
+        neither swept nor loaded. False for a run submitted with
+        ``wait=False`` until it is collected."""
+        if getattr(self, "_awaiting_collect", False):
+            return False
         if self._manifest is not None:
             return self._manifest.is_complete()
         return not (self.failures or self.skipped)
@@ -4624,6 +4838,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         cache_dir: str | None = None,
         notes: str | None = None,
         tags: list[str] | None = None,
+        wait: bool = _WAIT_DEFAULT,
         **workflow_overrides: str | int | float | bool | multirun | hydra_list,
     ):
         """Run the sweep: one Hydra job per grid cell, metrics collected per cell.
@@ -4843,6 +5058,25 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         tags : list[str] | None (default: None)
             Tags recorded for the sweep, in the manifest, on ``wf.tags``, and as
             the dataset attr ``mushin_tags`` (preserved across a resume).
+        wait : bool (default: True)
+            ``False`` submits the sweep's jobs and returns at once, without
+            waiting on them, so a login node need not stay connected. It
+            returns a dict: ``working_dir`` (absolute), ``run_id``,
+            ``submitted`` (the cells left to jobs) and ``job_ids`` (one per
+            SLURM job array, as ``squeue`` and ``sbatch --dependency`` take
+            them). Once the jobs have ended, ``mushin.collect(working_dir)``
+            (or this workflow's ``collect()``) builds the result; until then
+            ``to_xarray`` raises and ``is_complete`` is False. A run with
+            nothing to submit (a resume reusing every cell) finishes at once
+            and returns the dict with ``submitted=0``. Needs
+            ``launcher="submitit_slurm"`` or ``"submitit_local"``, a
+            ``working_dir``, and Hydra's basic sweeper (a ``ValueError``
+            otherwise, before anything is written). Every batch of a
+            ``max_batch_size`` sweep is submitted at once, and a Hydra
+            ``on_multirun_end`` callback runs at submission. A ``wait=``
+            for a task, ``pre_task`` or config field of that name is
+            refused (it was the task's before ``wait`` was run()'s): pass
+            it as ``overrides=["++wait=..."]``.
         **workflow_overrides
             The sweep itself: ``param=value`` fixes a value,
             ``param=multirun([...])`` makes a grid dimension. Nested config
@@ -4909,6 +5143,9 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             sample=sample,
             sample_seed=sample_seed,
             cache_dir=cache_dir,
+            # The default passes as itself, so run() tells it from a `wait=`
+            # the caller wrote.
+            wait=wait,
             **workflow_overrides,
         )
 
@@ -5025,16 +5262,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # original run's lineage, while a fresh run reusing the dir starts clean
         # and an explicit `tags=[]` clears. (The fresh Manifest below is
         # deliberately not load_or_new — that is only to drop stale *cells*.)
-        _notes = getattr(self, "_notes", None)
-        _tags = getattr(self, "_tags", None)
-        if getattr(self, "_lineage_from_prior", False) and (
-            _notes is None or _tags is None
-        ):
-            _prev = Manifest.load_or_new(self.working_dir, [])
-            if _notes is None:
-                _notes = _prev.notes
-            if _tags is None:
-                _tags = _prev.tags
+        _notes, _tags = self._lineage_of(self.working_dir)
         manifest = Manifest(
             self.working_dir, swept_names, notes=_notes, tags=_tags or []
         )
@@ -5128,6 +5356,70 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
                 UserWarning,
                 stacklevel=2,
             )
+
+    def _lineage_of(self, root: Path) -> tuple[str | None, list[str] | None]:
+        """This run's notes and tags as its manifest in ``root`` records
+        them: as passed, falling back to the prior manifest's only on a
+        resume that did not pass them. `run(wait=False)` takes them at
+        submission, for collect (#345); the prior manifest is the same one
+        then, as no job writes it."""
+        from ._sweep_io import Manifest
+
+        notes = getattr(self, "_notes", None)
+        tags = getattr(self, "_tags", None)
+        if getattr(self, "_lineage_from_prior", False) and (
+            notes is None or tags is None
+        ):
+            prior = Manifest.load_or_new(root, [])
+            if notes is None:
+                notes = prior.notes
+            if tags is None:
+                tags = prior.tags
+        return notes, tags
+
+    def collect(
+        self: Self,
+        working_dir: str | Path | None = None,
+        metrics_filename: str | Sequence[str] = "mushin_metrics.json",
+    ) -> Self:
+        """Finish a run submitted with ``run(..., wait=False)``, once its
+        jobs have ended, as ``run()`` would have finished it, and return
+        ``self``. `mushin.collect` does the same and returns the dataset.
+
+        Parameters
+        ----------
+        working_dir : str | Path | None (default: None)
+            The run's ``working_dir``; None for the one this workflow last
+            ran in.
+        metrics_filename : str | Sequence[str] (default: "mushin_metrics.json")
+            For a run with nothing left to collect (collected already, run
+            with ``wait=True``, or its jobs cancelled): the metrics files
+            ``load_from_dir`` reads.
+
+        Returns
+        -------
+        Self
+
+        Raises
+        ------
+        RuntimeError
+            A job of the run has not ended (nothing is written), or cannot
+            be read here; or, under ``on_error="raise"``, a cell failed,
+            which is raised as a waited run raises it.
+
+        Notes
+        -----
+        See `mushin.collect`.
+        """
+        from ._collect import collect_into
+
+        if working_dir is None:
+            if self._working_dir is None:
+                raise ValueError(
+                    "collect() needs `working_dir=`: this workflow has not run."
+                )
+            working_dir = self._working_dir
+        return collect_into(self, working_dir, metrics_filename)
 
     def _swept_param_names(self) -> list[str]:
         """Names of the multirun (grid-dimension) parameters."""
@@ -5284,6 +5576,7 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
         # A previous run's jobs and manifest are not this sweep's.
         self.jobs = []
         self._manifest = None
+        self._awaiting_collect = False
         self._target_dir_multirun_overrides = None
         self._loaded_job_choices = None
         self._job_metrics_by_index = None
@@ -5700,6 +5993,12 @@ class MultiRunMetricsWorkflow(BaseWorkflow):
             correspond to the named results returned by the jobs."""
         import xarray as xr
 
+        if getattr(self, "_awaiting_collect", False):
+            raise RuntimeError(
+                "this run was submitted with `wait=False` and has not been "
+                f"collected: `mushin.collect({str(self.working_dir)!r})` (or this "
+                "workflow's collect()) builds the result once its jobs have ended."
+            )
         if metrics_filename is not None:
             if self.multirun_working_dirs is None:
                 self.load_from_dir(self.working_dir, metrics_filename=metrics_filename)

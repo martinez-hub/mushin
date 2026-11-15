@@ -25,6 +25,12 @@ For mushin's runner, each launch also names its jobs in a launch file
 under `<working_dir>/mushin_jobs/` until it has waited on them, so
 `mushin.show` can list the cells whose jobs have not started (`queued`).
 
+Under `run(..., wait=False)` a launch records its jobs and returns without
+waiting on them; `mushin.collect` later rebuilds the jobs from their files
+and waits on them with this launcher's own `_wait`, in another process
+(`rebuild_jobs` and the functions after it), so a detached run's cells are
+judged by the rules a waited run's are.
+
 Hydra imports every module under `hydra_plugins` whenever any Hydra
 application starts, and reports an ImportError there as a warning (an error
 under `-W error`). So this module imports nothing heavy, and without the
@@ -109,6 +115,14 @@ if _plugin_launcher is not None:
                 )
 
         def launch(self, job_overrides, initial_job_idx):
+            runner = self.task_function
+            # `run(wait=False)` (#345): the jobs are recorded for
+            # `mushin.collect`, and left running.
+            detached = getattr(runner, "_mushin_collects_dead_jobs", False) and (
+                getattr(runner, "detached", False) is True
+            )
+            if detached:
+                _refuse_another_sweeper(self.config)
             settled = self._settled_in_driver(job_overrides, initial_job_idx)
             numbers = [initial_job_idx + i for i in range(len(job_overrides))]
             if len(settled) == len(numbers):
@@ -119,11 +133,36 @@ if _plugin_launcher is not None:
                 if "mode" in self.config.hydra.sweep:
                     mode = int(str(self.config.hydra.sweep.mode), 8)
                     os.chmod(sweep_dir, mode=mode)
+                if detached:
+                    # Recorded for collect all the same: another batch may
+                    # leave its jobs running. run() removes the file when
+                    # none does.
+                    self._record_launch([], [], settled, job_overrides, initial_job_idx)
                 return [settled[n] for n in numbers]
             jobs, job_params = self._submit(
                 job_overrides, initial_job_idx, skip=settled
             )
-            launch = self._record_launch(jobs, job_params)
+            launch = self._record_launch(
+                jobs,
+                job_params,
+                settled if detached else None,
+                job_overrides,
+                initial_job_idx,
+            )
+            if detached:
+                if launch is not None:
+                    _hold(jobs)
+                    returns = {
+                        p[2]: _pending_return(job)
+                        for job, p in zip(jobs, job_params, strict=True)
+                    }
+                    returns.update(settled)
+                    return [returns[n] for n in numbers]
+                # Nothing would find these jobs later.
+                log.warning(
+                    "mushin could not record this launch's jobs for "
+                    "`mushin.collect`, so it waits on them, as with wait=True."
+                )
             try:
                 waited = self._wait(jobs, job_params)
             except Exception:
@@ -324,12 +363,21 @@ if _plugin_launcher is not None:
             jobs = executor.map_array(_CellGroup(self), groups)
             return [job for job, group in zip(jobs, groups, strict=True) for _ in group]
 
-        def _record_launch(self, jobs, job_params) -> Path | None:
+        def _record_launch(
+            self, jobs, job_params, settled=None, job_overrides=(), initial_job_idx=0
+        ) -> Path | None:
             """Write the launch file that names ``jobs`` (#345), and return
             its path; None for a task function other than mushin's runner,
             which `show` does not read, and when the file cannot be written:
             it is a view of the queue, and never fails a sweep. Stores
-            nothing on the launcher, which every job unpickles."""
+            nothing on the launcher, which every job unpickles.
+
+            With ``settled`` (the returns of the cells the driver settled,
+            by job number), the launch is detached (`run(wait=False)`): the
+            file also holds what `mushin.collect` needs, each cell's
+            overrides (from ``job_overrides``, numbered from
+            ``initial_job_idx``), what each settled cell returned,
+            submitit's folder, and the sweep dir as resolved here."""
             runner = self.task_function
             run_id = getattr(runner, "run_id", None)
             if not getattr(runner, "_mushin_collects_dead_jobs", False) or not run_id:
@@ -339,12 +387,26 @@ if _plugin_launcher is not None:
 
                 from submitit.core.utils import JobPaths
 
-                from mushin._jobs import LaunchCell, record_launch
+                from mushin._jobs import LaunchCell, SettledCell, record_launch
 
+                detached = settled is not None
                 combos = runner.submitted_combos([p[0] for p in job_params])
                 cells = [
-                    LaunchCell(params[2], str(job.job_id), combo)
+                    LaunchCell(
+                        params[2],
+                        str(job.job_id),
+                        combo,
+                        tuple(params[0]) if detached else None,
+                    )
                     for job, params, combo in zip(jobs, job_params, combos, strict=True)
+                ]
+                kept = [
+                    SettledCell(
+                        num,
+                        tuple(job_overrides[num - initial_job_idx]),
+                        _settled_value(ret),
+                    )
+                    for num, ret in sorted((settled or {}).items())
                 ]
                 # The folder every job's paths start with (its id comes
                 # after), as submitit wrote them into the scripts it
@@ -353,8 +415,9 @@ if _plugin_launcher is not None:
                 folder = JobPaths.get_first_id_independent_folder(
                     self.params["submitit_folder"]
                 )
+                root = Path(str(self.config.hydra.sweep.dir))
                 return record_launch(
-                    Path(str(self.config.hydra.sweep.dir)),
+                    root,
                     run_id=run_id,
                     executor=self._EXECUTOR,
                     folder=str(folder),
@@ -366,6 +429,22 @@ if _plugin_launcher is not None:
                     # so the guard asks about such a job whatever its cells
                     # record (#410).
                     tasks=max((getattr(j, "num_tasks", 1) for j in jobs), default=1),
+                    detached=detached,
+                    # The template each job's paths come from (`%j` and
+                    # all), as submitit made it absolute.
+                    submitit_folder=str(
+                        Path(str(self.params["submitit_folder"]))
+                        .expanduser()
+                        .absolute()
+                    )
+                    if detached
+                    else None,
+                    settled=kept,
+                    # The dir the cells are in, as this process resolved
+                    # `hydra.sweep.dir`: collect, in another process, may
+                    # resolve an interpolation in it (`${oc.env:...}`) or a
+                    # relative one to another dir, or none (review of #414).
+                    sweep_dir=str(root.resolve()) if detached else None,
                 )
             except Exception as exc:  # noqa: BLE001 - the sweep goes on
                 log.warning(
@@ -582,6 +661,297 @@ if _plugin_launcher is not None:
             from mushin._jobs import forget_launch
 
             forget_launch(launch)
+
+    # The processes of the local jobs a detached launch left running: dropped
+    # while its child runs, a `Popen` warns (a ResourceWarning, an error
+    # under `-W error`) at whatever moment it is collected. Held instead, and
+    # reaped once exited at the next detached launch, so a long-lived driver
+    # (a notebook) does not gather zombies; until then an exited one is a
+    # zombie, which `mushin._jobs` counts as ended. Hydra's plugin scan
+    # executes this module again in its own namespace (on every Hydra state
+    # swap, as collect's), so the list there is kept, not replaced.
+    _HELD: list = globals().setdefault("_HELD", [])
+
+    def _hold(jobs) -> None:
+        _HELD[:] = [p for p in _HELD if p.poll() is None]
+        _HELD.extend(
+            p for p in (getattr(job, "_process", None) for job in jobs) if p is not None
+        )
+
+    def _pending_return(job):
+        """The return of a cell whose job a detached launch left running."""
+        from hydra.core.utils import JobStatus
+
+        from mushin.workflows import _Pending
+
+        ret = JobReturn()
+        ret.status = JobStatus.COMPLETED
+        ret.return_value = _Pending(str(job.job_id))
+        return ret
+
+    def _settled_value(ret) -> str:
+        """What the driver settled a cell with, as a launch file records it
+        (`mushin._jobs.SETTLED_VALUES`)."""
+        from mushin.workflows import _SkippedRun
+
+        value = ret.return_value
+        if isinstance(value, _SkippedRun):
+            return "skipped"
+        return "none" if value is None else "metrics"
+
+    def _refuse_another_sweeper(config) -> None:
+        """`run(wait=False)` checks the sweeper it is given; this is for one
+        a config's defaults list chooses. Only the basic sweeper submits
+        every cell at once: another chooses its next batch from the last
+        one's results, which a detached launch does not have."""
+        from mushin.workflows import _BASIC_SWEEPER
+
+        target = OmegaConf.select(config, "hydra.sweeper._target_")
+        if target != _BASIC_SWEEPER:
+            raise ValueError(
+                f"`wait=False` needs Hydra's basic sweeper, and this sweep's is "
+                f"{target!r}: another sweeper chooses its next cells from the "
+                "results of the last, which are not there until the jobs end."
+            )
+
+    def rebuild_jobs(launch) -> list:
+        """The submitit jobs of a detached ``launch`` (`mushin._jobs.Launch`),
+        one per job, in the order its cells first name them, rebuilt from
+        their ids as submitit builds them, with the launch's tasks per job:
+        their paths, results and logs are the jobs'. The cells of a job of
+        several (``cells_per_job``, #348) all name its one id, and it is
+        rebuilt once: collect counts, asks the scheduler about and reads
+        each job once, and `collect_launch` hands its one object to each of
+        its cells, as `_wait` takes them. A SLURM job is registered with
+        submitit's shared sacct reader. A rebuilt local job has no process
+        to poll, so whether it has ended is told by its pid
+        (`mushin._jobs`)."""
+        if launch.executor == "slurm":
+            from submitit.slurm.slurm import SlurmJob as job_class
+        else:
+            from submitit.local.local import LocalJob as job_class
+        tasks = range(launch.tasks)
+        return [
+            job_class(folder=launch.submitit_folder, job_id=job_id, tasks=tasks)
+            for job_id in dict.fromkeys(cell.job_id for cell in launch.cells)
+        ]
+
+    def slurm_states(jobs) -> list:
+        """Each SLURM job's state from one sacct call for them all (through
+        submitit's reader, whose answer `_wait` then waits by), or
+        ``"ENDED"`` for a job each of whose tasks wrote its result. A state
+        sacct does not give (it failed, or does not list the job) is
+        ``"UNKNOWN"``."""
+        from submitit.slurm.slurm import SlurmJob
+
+        if jobs:
+            SlurmJob.watcher.update()
+        states = []
+        for job in jobs:
+            tasks = list(job._sub_jobs) or [job]
+            if all(task.paths.result_pickle.exists() for task in tasks):
+                states.append("ENDED")
+            else:
+                states.append(job.watcher.get_state(job.job_id, mode="cache"))
+        return states
+
+    def await_results(jobs) -> None:
+        """Wait once for the result files of ``jobs`` (all ended) that are
+        not there yet, as long as submitit waits for one, then have each job
+        read its result at once. submitit waits for each job's file in
+        turn, for a filesystem slow to show it, so a sweep whose every job
+        died (one that cannot import its task, say) would keep collect for
+        that long per job; one shared wait covers a slow filesystem as
+        well. `_results_timeout_s` is submitit's own, read per job
+        (`tests/test_submitit_local.py` pins it)."""
+        import time
+
+        tasks = [task for job in jobs for task in (list(job._sub_jobs) or [job])]
+        missing = [t for t in tasks if not t.paths.result_pickle.exists()]
+        if missing:
+            deadline = time.monotonic() + max(t._results_timeout_s for t in missing)
+            while missing and time.monotonic() < deadline:
+                time.sleep(0.5)
+                for folder in {t.paths.folder for t in missing}:
+                    try:
+                        # As submitit does: refreshes a network filesystem's
+                        # view of the folder.
+                        folder.chmod(folder.stat().st_mode)
+                    except OSError:
+                        pass
+                missing = [t for t in missing if not t.paths.result_pickle.exists()]
+        for job in jobs:
+            for task in (job, *job._sub_jobs):
+                task._results_timeout_s = 0
+
+    def load_submission(launch, jobs):
+        """The launcher and the Hydra state the driver sent ``launch``'s
+        jobs with, from the first of their submission files that loads;
+        raises, naming the files, when none does."""
+        from submitit.core.utils import DelayedSubmission
+
+        errors = []
+        for job in jobs:
+            path = job.paths.submitted_pickle
+            try:
+                submitted = DelayedSubmission.load(path)
+                function, args = submitted.function, submitted.args
+                if isinstance(function, _CellGroup):
+                    # A job of several cells (#348), as submitted or as its
+                    # `checkpoint()` requeued it: a `_CellGroup` holding the
+                    # launcher, called with the list of its cells' args,
+                    # each what a one-cell job is called with.
+                    function, args = function.launcher, args[0][0]
+                return function, args[4]
+            except Exception as exc:  # noqa: BLE001 - the next may load
+                errors.append(f"{path}: {exc!r}")
+        raise RuntimeError(
+            f"mushin.collect could not load the submission of any job of "
+            f"{launch.path.name} ({'; '.join(errors[:3])}). It needs the "
+            "sweep's `.submitit/` files as the jobs left them, and the task's "
+            "code importable here, as in the jobs; nothing was written."
+        )
+
+    def sweep_dir(launcher, state) -> str:
+        """The ``hydra.sweep.dir`` ``launcher`` was sent with, resolved as
+        `_composed` resolves it for a cell, under the Hydra state it was sent
+        with: a dead or settled cell's dir starts with it. Relative when
+        ``run()`` was given a relative ``working_dir``. For a launch file
+        from before its ``sweep_dir``, which collect pins instead
+        (`pin_sweep_dir`)."""
+        with _as_submitted(state):
+            return str(OmegaConf.select(launcher.config, "hydra.sweep.dir"))
+
+    def pin_sweep_dir(launcher, path: str) -> None:
+        """Make ``path`` the sweep dir of ``launcher`` and of every cell it
+        composes: the dir the driver resolved ``hydra.sweep.dir`` to, as
+        the launch file records it (review of #414). Otherwise collect
+        resolves the submitted value again, in this process: an
+        interpolation (``${oc.env:SWEEP_ROOT}``) may give another dir here
+        or none, and a relative one names a dir under this process's
+        working directory. `_composed` builds each cell's config anew from
+        the launcher's Hydra overrides (`load_sweep_config`), not from its
+        config, so the ``hydra.sweep.dir`` override is replaced too, not
+        only the config's node."""
+        from mushin.workflows import _to_override_element
+
+        config = launcher.config
+        key = "hydra.sweep.dir"
+        # The `hydra` node is read-only: Hydra's `HydraConfig.set_config`
+        # made it so in the driver, and the pickle kept the flag.
+        with read_write(config.hydra):
+            OmegaConf.update(config, key, path, merge=False)
+            # As written, as `load_sweep_config` reads them: an override
+            # holding `${...}` is an interpolation to OmegaConf, which
+            # iterating the list would resolve, here.
+            overrides = [
+                text
+                for text in OmegaConf.to_container(
+                    config.hydra.overrides.hydra, resolve=False
+                )
+                if text.partition("=")[0].strip().lstrip("+~") != key
+            ]
+            overrides.append(f"{key}={_to_override_element(path)}")
+            config.hydra.overrides.hydra = overrides
+
+    def load_results(jobs) -> None:
+        """Load every result file the tasks of ``jobs`` wrote, and raise,
+        naming the files, when one does not load. `_wait` reads a result it
+        cannot load as a job that gave none, and a cell of a job of several
+        tasks is then recorded failed, its metrics file and cache entry
+        deleted, though the job completed. A result holds what the task
+        returned, so one whose type comes from a module only the jobs import
+        loads there and not here: refused before anything is written, the
+        run can still be collected where it loads. `_wait` loads each again,
+        through submitit's `job.results()`, which takes none loaded
+        before."""
+        from submitit.core.utils import pickle_load
+
+        errors = []
+        for job in jobs:
+            for task in list(job._sub_jobs) or [job]:
+                path = task.paths.result_pickle
+                if not path.exists():
+                    continue  # the task died: `_wait` records its cell
+                try:
+                    pickle_load(path)
+                except Exception as exc:  # noqa: BLE001 - raised below
+                    errors.append(f"{path}: {exc!r}")
+        if errors:
+            more = f" and {len(errors) - 3} more" if len(errors) > 3 else ""
+            raise RuntimeError(
+                f"mushin.collect could not load these results of the run's jobs: "
+                f"{'; '.join(errors[:3])}{more}. A result holds what the task "
+                "returned, so collect where the task's code and the types it "
+                "returns import as in the jobs; nothing was written."
+            )
+
+    @contextlib.contextmanager
+    def _as_submitted(state):
+        """Hydra's singletons and OmegaConf's resolvers as the driver sent
+        them with the jobs, as each job's own `__call__` sets them; this
+        process's are restored after."""
+        from omegaconf.basecontainer import BaseContainer
+
+        saved = (Singleton._instances, BaseContainer._resolvers)
+        try:
+            Singleton.set_state(state)
+            yield
+        finally:
+            Singleton._instances, BaseContainer._resolvers = saved
+
+    def collect_launch(launcher, state, launch, jobs) -> dict:
+        """The returns of ``launch``'s cells, by job number: its jobs'
+        (``jobs``, from `rebuild_jobs`) from ``launcher``'s own `_wait` (a
+        dead job's cell recorded as the driver would have), and the cells
+        the driver settled, composed as it composed them, with what they
+        returned."""
+        from hydra.core.utils import JobStatus
+
+        from mushin._sweep_io import read_metrics_sidecar
+        from mushin.workflows import _job_dir, _SkippedRun
+
+        returns = {}
+        with _as_submitted(state):
+            if launch.cells:
+                # Each cell's job, as the launch gave them to `_wait`: the
+                # cells of a job of several (#348) share its one object,
+                # whose result `_wait` reads once and splits per cell.
+                by_id = {str(job.job_id): job for job in jobs}
+                params = [
+                    (
+                        list(cell.overrides),
+                        "hydra.sweep.dir",
+                        cell.num,
+                        f"job_id_for_{cell.num}",
+                        state,
+                    )
+                    for cell in launch.cells
+                ]
+                cells_jobs = [by_id[cell.job_id] for cell in launch.cells]
+                waited = launcher._wait(cells_jobs, params)
+                returns.update(zip([c.num for c in launch.cells], waited, strict=True))
+            for cell in launch.settled:
+                with launcher._composed(
+                    cell.overrides, cell.num, f"driver_{cell.num}"
+                ) as ret:
+                    pass
+                if cell.value == "skipped":
+                    value = _SkippedRun("not sampled")
+                elif cell.value == "none":
+                    value = None
+                else:
+                    # The driver wrote it into the cell's dir from the result
+                    # it reused, and no job writes that dir.
+                    value = read_metrics_sidecar(_job_dir(ret))
+                    if value is None:
+                        raise RuntimeError(
+                            f"mushin.collect: cell #{cell.num}'s metrics file, "
+                            f"which its run reused, is gone from {_job_dir(ret)}."
+                        )
+                ret.status, ret.return_value = JobStatus.COMPLETED, value
+                returns[cell.num] = ret
+        return returns
 
     def _clusters(params) -> str | None:
         """The SLURM clusters a launch's jobs were sent to, as sbatch reads

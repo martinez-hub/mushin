@@ -25,6 +25,7 @@ version.
 import importlib
 from typing import TYPE_CHECKING
 
+from ._collect import collect
 from ._extras import eval_available as _eval_available
 from ._jobs import cancel
 from ._packing import pin_gpu_round_robin
@@ -143,6 +144,7 @@ __all__ = [
     "HydraFSDP",
     "slurm",
     "cancel",
+    "collect",
     "submitit_slurm_config",
     "seed_everything_per_rank",
     "multirun",

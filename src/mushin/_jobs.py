@@ -20,6 +20,13 @@ reads them to refuse a ``working_dir`` whose earlier jobs may still run
 (`refuse_live_launches`): two drivers would each submit the sweep's cells,
 and two jobs would then write one cell.
 
+A run submitted with ``wait=False`` leaves its files for `mushin.collect`,
+which finishes the run once its jobs have ended: such a launch is
+``detached``, and its file also holds what collect needs to wait on the jobs
+as the driver would have (each cell's overrides, the cells the driver
+settled without a job, submitit's folder, and the sweep dir as the driver
+resolved it).
+
 Standard library only: the launcher imports this module in the driver, `show`
 on a login node, and `import mushin` loads it for `cancel`.
 """
@@ -71,11 +78,31 @@ class LaunchCell:
     cell's swept params as its overrides give them (for display; a record's
     combo may differ, as a typed field converts a value). A job that runs
     several cells in turn names one ``job_id`` for each of them, so the
-    cells, not the ids, are one per entry."""
+    cells, not the ids, are one per entry. A detached launch also keeps the
+    cell's Hydra ``overrides``, which collect composes the cell from."""
 
     num: int
     job_id: str
     combo: dict
+    overrides: tuple[str, ...] | None = None
+
+
+#: What the driver settled a cell with, for collect to give it as the
+#: driver's return did: left out by ``sample=`` (``"skipped"``), reused or
+#: cached with the metrics now in its dir (``"metrics"``), or reused from a
+#: cell whose task returned None (``"none"``).
+SETTLED_VALUES = frozenset({"skipped", "metrics", "none"})
+
+
+@dataclass(frozen=True)
+class SettledCell:
+    """A cell of a detached launch that the driver settled without a job
+    (#345): its Hydra job number ``num``, its Hydra ``overrides``, and what
+    it was settled with, one of `SETTLED_VALUES`."""
+
+    num: int
+    overrides: tuple[str, ...]
+    value: str
 
 
 @dataclass(frozen=True)
@@ -86,7 +113,13 @@ class Launch:
     jobs were sent to (None for the default one), the driver's ``host``, the
     ``depth`` of the cells' dirs below the sweep root (`hydra.sweep.subdir`'s
     parts), the file's ``mtime_ns``, its ``cells``, and the ``tasks`` of each
-    job (1 for a file from before the field)."""
+    job (1 for a file from before the field). A launch of ``run(wait=False)``
+    is ``detached``, and also names submitit's ``submitit_folder`` (the
+    template its jobs' paths come from, ``%j`` and all), the cells the
+    driver ``settled`` without a job (one whose cells all settled names no
+    job: ``cells`` is empty), and the ``sweep_dir`` the driver resolved
+    ``hydra.sweep.dir`` to, absolute, in which collect records the cells
+    (None for a file from before the field)."""
 
     path: Path
     run_id: str
@@ -98,6 +131,10 @@ class Launch:
     mtime_ns: int
     cells: tuple[LaunchCell, ...]
     tasks: int = 1
+    detached: bool = False
+    submitit_folder: str | None = None
+    settled: tuple[SettledCell, ...] = ()
+    sweep_dir: str | None = None
 
 
 def record_launch(
@@ -111,14 +148,19 @@ def record_launch(
     depth: int,
     cells: Iterable[LaunchCell],
     tasks: int = 1,
+    detached: bool = False,
+    submitit_folder: str | None = None,
+    settled: Iterable[SettledCell] = (),
+    sweep_dir: str | None = None,
 ) -> Path:
     """Write the launch file for ``cells``, the jobs one submission sent, in
-    submission order, and return its path. Named by the first job's number:
-    Hydra numbers each job once per run, so no two launches of a run share
-    a name."""
+    submission order, and return its path. Named by the first job's number
+    (the first settled cell's, for a detached launch that sent none): Hydra
+    numbers each job once per run, so no two launches of a run share a
+    name."""
     from ._sweep_io import _atomic_write_json, _json_normalize
 
-    cells = list(cells)
+    cells, settled = list(cells), list(settled)
     payload = {
         "schema": SCHEMA,
         "run_id": run_id,
@@ -135,11 +177,27 @@ def record_launch(
                 # As a record stores its combo: a NaN tagged, as a null is
                 # a swept None.
                 "combo": _json_normalize(cell.combo, tag_nan=True),
+                **(
+                    {}
+                    if cell.overrides is None
+                    else {"overrides": list(cell.overrides)}
+                ),
             }
             for cell in cells
         ],
+        "detached": detached,
     }
-    path = Path(root) / JOBS_DIR / f"{run_id}.{cells[0].num}.json"
+    if submitit_folder is not None:
+        payload["submitit_folder"] = submitit_folder
+    if settled:
+        payload["settled"] = [
+            {"num": c.num, "overrides": list(c.overrides), "value": c.value}
+            for c in settled
+        ]
+    if sweep_dir is not None:
+        payload["sweep_dir"] = sweep_dir
+    first = cells[0].num if cells else settled[0].num
+    path = Path(root) / JOBS_DIR / f"{run_id}.{first}.json"
     _atomic_write_json(path, payload)
     return path
 
@@ -199,6 +257,12 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
     folder, clusters = data.get("folder"), data.get("clusters")
     host, depth = data.get("host"), data.get("depth")
     tasks = data.get("tasks", 1)
+    # A file from before collect has none of the three.
+    detached = data.get("detached", False)
+    submitit_folder = data.get("submitit_folder")
+    settled = data.get("settled", [])
+    # Nor its sweep dir, which came later (review of #414).
+    sweep_dir = data.get("sweep_dir")
     if not (
         type(tasks) is int
         and tasks >= 1
@@ -211,8 +275,16 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
         and host
         and type(depth) is int
         and depth >= 1
+        and type(detached) is bool
+        and (
+            submitit_folder is None
+            or (isinstance(submitit_folder, str) and _absolute(submitit_folder))
+        )
+        and (sweep_dir is None or (isinstance(sweep_dir, str) and _absolute(sweep_dir)))
+        and isinstance(settled, list)
         and isinstance(cells, list)
-        and cells
+        # Only a detached launch names no job: one whose cells all settled.
+        and (cells or (detached and settled))
     ):
         return None
     read, nums = [], set()
@@ -220,6 +292,7 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
         if not isinstance(cell, dict):
             return None
         num, job_id, combo = cell.get("num"), cell.get("job_id"), cell.get("combo")
+        overrides = _overrides(cell.get("overrides"))
         if not (
             type(num) is int  # not a bool
             and num >= 0
@@ -227,6 +300,7 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
             and isinstance(job_id, str)
             and _JOB_ID.fullmatch(job_id)
             and isinstance(combo, dict)
+            and overrides is not False
         ):
             return None
         nums.add(num)
@@ -234,7 +308,22 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
             combo = {k: restore(v) for k, v in combo.items()}
         except RecursionError:  # nested too deep to restore: as stored
             pass
-        read.append(LaunchCell(num, job_id, combo))
+        read.append(LaunchCell(num, job_id, combo, overrides))
+    kept = []
+    for cell in settled:
+        if not isinstance(cell, dict):
+            return None
+        num, overrides = cell.get("num"), _overrides(cell.get("overrides"))
+        if not (
+            type(num) is int
+            and num >= 0
+            and num not in nums
+            and isinstance(overrides, tuple)
+            and cell.get("value") in SETTLED_VALUES
+        ):
+            return None
+        nums.add(num)
+        kept.append(SettledCell(num, overrides, cell["value"]))
     return Launch(
         path=path,
         run_id=run_id,
@@ -246,7 +335,22 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
         mtime_ns=mtime_ns,
         cells=tuple(read),
         tasks=tasks,
+        detached=detached,
+        submitit_folder=submitit_folder,
+        settled=tuple(kept),
+        sweep_dir=sweep_dir,
     )
+
+
+def _overrides(value: Any) -> tuple[str, ...] | None | bool:
+    """A cell's stored overrides as a tuple; None when it stores none (a
+    launch from before the field); False when they are not a list of
+    strings."""
+    if value is None:
+        return None
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return tuple(value)
+    return False
 
 
 def _absolute(folder: str) -> bool:
@@ -481,6 +585,10 @@ def cancel(working_dir, *, dry_run: bool = False) -> list[str]:
     over: list[Path] = []
     asked: list[tuple[Launch, list[str]]] = []
     for launch in launches:
+        if not launch.cells:
+            # A detached launch whose cells all settled in the driver: no
+            # job to cancel, and its file is collect's to read.
+            continue
         # A task of an array is `<array>_<index>`; scancel takes the array.
         arrays = list(dict.fromkeys(c.job_id.split("_")[0] for c in launch.cells))
         if launch.executor == "local":
@@ -761,8 +869,12 @@ def refuse_live_launches(working_dir) -> list[Path]:
     Where the jobs cannot be checked at all (no scontrol here, or a local
     launch of another host), the run warns and goes ahead: the check is a
     net for the likely mistake, not a lock, and refusing would block every
-    run on a machine without SLURM whose dir once ran there. Each message
-    names the launch file to delete once its jobs are known to be over."""
+    run on a machine without SLURM whose dir once ran there. Not for a run
+    submitted with ``wait=False`` and not yet collected (a detached
+    launch): going ahead would replace its multirun.yaml, and
+    `mushin.collect` could no longer find it, so the run is refused with a
+    RuntimeError. Each message names the launch file to delete once its
+    jobs are known to be over."""
     root = Path(working_dir)
     launches, bad = read_launches(root)
     if bad:
@@ -784,7 +896,15 @@ def refuse_live_launches(working_dir) -> list[Path]:
     unchecked: list[str] = []
     others: list[str] = []
     asked: list[tuple[Launch, list[str], list[LaunchCell]]] = []
+    # Whether a line names a detached launch, whose message says to collect.
+    detached = False
     for launch in launches:
+        if not launch.cells:
+            # A detached launch whose cells all settled in the driver: no
+            # job to wait for.
+            ended.append(launch.path)
+            continue
+        detached = detached or launch.detached
         # A cell's recorded end is its job's only for a job of one task:
         # each task of a job of several writes the cell's record, so one
         # task's end leaves the others to the scheduler (#410).
@@ -814,9 +934,9 @@ def refuse_live_launches(working_dir) -> list[Path]:
             elif state == "live":
                 live.append(f"{launch.path}: local process ids {ids} on this host")
             else:
-                unchecked.append(
-                    f"{launch.path}: local process ids {ids} on host {launch.host!r}"
-                )
+                line = f"{launch.path}: local process ids {ids} on host {launch.host!r}"
+                # A detached run's jobs, unchecked, would be orphaned.
+                (unreadable if launch.detached else unchecked).append(line)
         elif launch.clusters is not None:
             # Plain scontrol, asked, would call these jobs purged, and so let
             # the run go ahead while they run; `cancel` retires the file.
@@ -830,10 +950,11 @@ def refuse_live_launches(working_dir) -> list[Path]:
             # The cells' recorded ends are the best word left on their jobs.
             for launch, arrays, unrecorded in asked:
                 if unrecorded:
-                    unchecked.append(
+                    line = (
                         f"{launch.path}: SLURM jobs {' '.join(arrays)}, "
                         "and no scontrol here"
                     )
+                    (unreadable if launch.detached else unchecked).append(line)
                 else:
                     ended.append(launch.path)
         else:
@@ -878,6 +999,13 @@ def refuse_live_launches(working_dir) -> list[Path]:
                 else:
                     ended.append(launch.path)
     where = str(root)
+    collect = (
+        f" A run submitted with `wait=False` is finished by `mushin.collect({where!r})` "
+        "once its jobs have ended, where they can be checked: on the host that "
+        "submitted a submitit_local run, or where SLURM's commands are."
+        if detached
+        else ""
+    )
     if live:
         also = (
             "\nNor can it tell whether these have ended:\n" + _lines(unreadable)
@@ -891,7 +1019,7 @@ def refuse_live_launches(working_dir) -> list[Path]:
             "waiting on them finishes its run, and a `resume=True` then reuses "
             f"the cells they completed), or cancel them: `mushin.cancel({where!r})` "
             "for SLURM jobs, or stop the processes of local ones. If they are not "
-            "this sweep's jobs, delete the launch file named and run again."
+            f"this sweep's jobs, delete the launch file named and run again.{collect}"
         )
     if unreadable:
         raise RuntimeError(
@@ -901,7 +1029,7 @@ def refuse_live_launches(working_dir) -> list[Path]:
             "them with `scontrol show job <id>` (with `--clusters` for jobs sent "
             "to other clusters). Once they have ended or are cancelled "
             f"(`mushin.cancel({where!r})`), or if they are not this sweep's "
-            "jobs, delete the launch file named and run again."
+            f"jobs, delete the launch file named and run again.{collect}"
         )
     if unchecked:
         warnings.warn(

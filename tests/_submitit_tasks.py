@@ -43,6 +43,22 @@ def die_on_two(seed):
 
 
 @mushin.sweep
+def fates(seed):
+    """A cell of each fate: the seed `MUSHIN_TEST_DIE` names dies without a
+    result, seed 1 raises, and any other completes."""
+    if os.environ.get("MUSHIN_TEST_DIE") == str(seed):
+        os._exit(9)
+    if seed == 1:
+        raise RuntimeError("boom")
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def always_dies(seed):
+    os._exit(9)
+
+
+@mushin.sweep
 def die_loudly(seed):
     """Writes a long error stream, its cause at the end, then dies."""
     if seed == 1:
@@ -163,6 +179,31 @@ def unpicklable_result(seed):
 
     if seed == 0:
         return dict(v=float(seed), lock=threading.Lock())
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def returns_a_jobs_only_type(seed):
+    """In a job of two tasks, the second returns its metrics as a dict
+    subclass from `_mushin_jobs_only`, a module a test puts on the jobs'
+    PYTHONPATH only: a process without it cannot unpickle that task's
+    result. The first returns a dict, whose result loads anywhere, once the
+    second has started: under `cache_dir=`, a first task done before the
+    second looks in the cache leaves it the cell's entry to reuse, and the
+    second then returns that dict without running."""
+    import time
+
+    import submitit
+
+    started = "rank1_started"
+    if submitit.JobEnvironment().global_rank == 1:
+        open(started, "w").close()
+        import _mushin_jobs_only
+
+        return _mushin_jobs_only.Metrics(v=float(seed))
+    deadline = time.monotonic() + 50
+    while not os.path.exists(started) and time.monotonic() < deadline:
+        time.sleep(0.05)
     return dict(v=float(seed))
 
 

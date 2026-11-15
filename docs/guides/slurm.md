@@ -5,7 +5,8 @@ to write. Each cell runs as one SLURM job (a task of a job array, when several
 are submitted together), or, for a sweep of many short cells, each job runs
 several cells in turn ([Many small cells](#many-small-cells)). Every cell runs
 in its own directory under the sweep's `working_dir`, and `run()` gathers the results into
-the same `xarray.Dataset` a local sweep gives. This guide covers ordinary
+the same `xarray.Dataset` a local sweep gives, or, with `wait=False`, returns
+at once and leaves that to `mushin.collect`. This guide covers ordinary
 sweeps, where each cell runs in one process. For a cell trained with DDP across
 several GPUs or nodes, see the [multi-node guide](multinode.md).
 
@@ -75,11 +76,87 @@ time limit under a QoS (`qos=` or `SBATCH_QOS`), which can lift it;
 your shell overrides the job script, and mushin warns when one overrides an
 argument you gave. It never chooses a partition for you.
 
-## Submit, and keep the driver running
+## Submit, and come back later
 
-`run()` submits the jobs and then waits for every one of them to end before it
-returns the dataset. The process that calls `run()` (the driver) does little
-work, but it has to stay alive for the whole sweep. Either:
+By default `run()` submits the jobs and then waits for every one of them to
+end before it returns the dataset. With `wait=False` it submits them and
+returns at once, so you can log out of the login node while they queue and
+run:
+
+```python
+import mushin
+
+summary = experiment.run(
+    lr=mushin.multirun([1e-4, 3e-4, 1e-3]),
+    seed=mushin.multirun([0, 1, 2]),
+    working_dir="/scratch/me/lr-sweep",
+    launcher="submitit_slurm",
+    launcher_config=mushin.slurm(gpus=1, timeout_min=240, partition="gpu"),
+    wait=False,
+)
+# {"working_dir": "/scratch/me/lr-sweep", "run_id": "...", "submitted": 9,
+#  "job_ids": ["4242"]}
+```
+
+`summary["job_ids"]` lists one id per job array, the ids `squeue` shows and
+`sbatch --dependency=afterany:<id>` takes. Later, from any Python session on a
+machine that sees the filesystem and can run `sacct` (a login node), once the
+jobs have ended:
+
+```python
+ds = mushin.collect("/scratch/me/lr-sweep")
+```
+
+`collect` finishes the run as a waiting `run()` would have: a cell whose job
+ended without a result is recorded failed, the sweep's manifest is written,
+and the dataset is returned. It needs no import of the script that ran the
+sweep. Some details:
+
+- `wait=False` needs `launcher="submitit_slurm"` (or `"submitit_local"`), a
+  `working_dir`, and Hydra's basic sweeper; `run()` raises a `ValueError`
+  otherwise, before it writes anything. The workflow that ran it raises from
+  `to_xarray()` until it is collected, and its `collect()` does what
+  `mushin.collect` does.
+- While any job of the run is queued, running, or preempted (SLURM may
+  requeue it), `collect` raises a `RuntimeError` with the count of each state
+  and writes nothing: collect again later. It reads each job's state from
+  `sacct`. A job `sacct` does not report reads `UNKNOWN`, which also refuses:
+  `sacct` may be missing here, may not list the job yet, or may not see the
+  job's cluster.
+- `collect` loads the jobs' submission and result files under
+  `<working_dir>/.submitit/` and imports your task's code, as the jobs did:
+  keep that folder until you have collected, run `collect` where the code
+  and the types your task returns import as in the jobs, and only on a
+  `working_dir` you trust. A result that does not load stops `collect`, with
+  nothing written.
+- Collect a run in the dir it was submitted in: the run's launch file names
+  that dir, so `collect` refuses a copy or a move of it. A `submitit_folder`
+  outside the `working_dir` is fine. With a relative `working_dir`, collect
+  from the directory `run()` was called in.
+- `on_error` works as in a waited run. Under `"raise"`, `collect` records
+  every cell and raises the first failed cell's own error, with no manifest;
+  a second `collect` then reloads the sweep, the failed cell NaN. Under
+  `"nan"` it returns the dataset with failed cells NaN, and warns.
+- A job that died gives no result file. `collect` waits once, up to 15
+  seconds, for the result files of all such jobs (a shared filesystem can
+  show a file late), then records their cells.
+- With `max_total_seconds`, the budget runs from the first computed cell, so
+  time a job spends queued after that counts, as with a waiting driver.
+- Every batch of a `hydra.sweeper.max_batch_size` sweep is submitted at once,
+  each its own job array; `array_parallelism` still caps how many run. A Hydra
+  `on_multirun_end` callback runs at submission, not at collect.
+- Collecting a run collected already, or run with the default `wait=True`,
+  only reloads it (`load_from_dir`), and writes nothing.
+- A `launcher="submitit_local"` job's id is a process id on the machine that
+  submitted it, so collect such a run on that host.
+- `wait` is `run()`'s own parameter. A task, `pre_task` or config field of
+  that name takes its value as an override, `overrides=["++wait=..."]`;
+  `run(wait=...)` for such a sweep raises a `ValueError` saying so.
+
+## Or keep the driver running
+
+With the default `wait=True`, the process that calls `run()` (the driver) does
+little work, but it has to stay alive for the whole sweep. Either:
 
 - run the script inside `tmux` or `screen` on a login node, so it survives your
   logout (not a login node that stops long-running processes: check your
@@ -150,7 +227,8 @@ has not reached yet are `queued`, with that job's id.
 
 The driver names the jobs of each submission in a file under
 `<working_dir>/mushin_jobs/`, which `show` reads, and removes the file once
-it has waited on those jobs. Some cases follow from that:
+it has waited on those jobs (with `wait=False`, `collect` removes it). Some
+cases follow from that:
 
 - A driver killed before its jobs end (Ctrl-C, a lost login session) leaves
   its file, and so does a driver whose wait raised before the scheduler could
@@ -158,7 +236,8 @@ it has waited on those jobs. Some cases follow from that:
   `queued` until a later run of the sweep, such as a `resume=True`, records
   the cell or removes the file, or until `mushin.cancel` (below) removes it.
 - A job that dies before its code starts can show `queued` until the driver
-  has waited on every job of its submission.
+  has waited on every job of its submission, or, for a run submitted with
+  `wait=False`, until it is collected.
 - A sweep whose `hydra.sweep.subdir` puts each cell more than one directory
   below `working_dir` lists no cell as `queued`.
 - A login node may see a shared filesystem's files late, so a cell that has
@@ -230,6 +309,13 @@ submitted it, it looks for the job's process. Then:
 - Where the jobs cannot be checked at all (no `scontrol` on the machine, or
   `submitit_local` jobs of another machine), `run()` warns and goes ahead.
   It does the same when SLURM has given a job's id to another job.
+- A run submitted with `wait=False` and not yet collected is refused while
+  its jobs may run, and its message says to collect it. Where its jobs cannot
+  be checked, `run()` raises a `RuntimeError` instead of going ahead: a run
+  that went ahead would replace the sweep's `multirun.yaml`, and `collect`
+  could no longer find the earlier run. Once its jobs have ended, a
+  `resume=True` may go ahead in place of `collect`: it reuses the cells they
+  completed, and the earlier run can no longer be collected.
 
 Once you know a submission's jobs are over, or are not this sweep's, deleting
 the file the message names lets the run go ahead. A run that goes ahead
@@ -255,7 +341,8 @@ still queued or running. A driver still running records the cancelled cells as
 failed, and a later `resume=True` runs them again. With `cells_per_job`,
 cancelling a running job also cancels the cells it had not reached. Once a submission's jobs are
 cancelled or over, `cancel` removes its file, so `show` no longer lists its
-cells as `queued`. Some cases follow:
+cells as `queued`; a run submitted with `wait=False` is then over, and
+`collect` only reloads what its cells recorded. Some cases follow:
 
 - SLURM reuses job ids. A job is cancelled only when its script or logs lie
   under the sweep's submitit folder (`<working_dir>/.submitit/` by default);
@@ -312,6 +399,8 @@ the same dataset.
   submitted. A task count set another way (`additional_parameters` with
   `ntasks`) is not seen: do not combine it with `cells_per_job`.
 - `array_parallelism` caps how many jobs run at once, not cells.
+- With `wait=False`, `collect` counts each job once among those not yet
+  ended, and records its cells as a waiting `run()` would.
 - Choose `cells_per_job` so the number of jobs fits the cluster's
   `MaxArraySize` and your queue limit.
 

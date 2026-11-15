@@ -550,3 +550,75 @@ def test_an_interpolated_working_dir_is_checked_where_it_resolves(
     monkeypatch.setenv("MUSHIN_TEST_SWEEP", str(wd))
     with pytest.raises(ValueError, match="queued or running"):
         _task.run(lr=multirun([0.1, 0.2]), working_dir="${oc.env:MUSHIN_TEST_SWEEP}")
+
+
+# A run submitted with `wait=False` and not yet collected (#345): a run that
+# went ahead would replace its multirun.yaml, and collect could no longer
+# find it. Its jobs refuse a run while they live, as any launch's do, and
+# the message says to collect them.
+
+
+def test_a_detached_runs_live_jobs_say_to_collect(tmp_path, slurm):
+    wd = tmp_path / "s"
+    path = launch(wd, R1, [(0, "100")], detached=True)
+    slurm.jobs["100"] = shown(job("RUNNING", _ours(wd)))
+    with pytest.raises(ValueError, match=r"mushin\.collect") as caught:
+        _run(wd)
+    assert str(path) in str(caught.value)
+    assert _written(wd) == [] and path.exists()
+
+
+def test_a_detached_launch_no_scontrol_can_check_refuses(tmp_path, slurm, monkeypatch):
+    """Where SLURM cannot be asked, a launch a driver waited on warns and
+    the run goes ahead (`test_an_unknown_scheduler_warns_and_runs`); a
+    detached one refuses it."""
+    wd = tmp_path / "s"
+    path = launch(wd, R1, [(0, "100")], detached=True)
+    monkeypatch.setattr(_jobs, "_which", lambda name: None)
+    with pytest.raises(RuntimeError, match=r"mushin\.collect") as caught:
+        _run(wd)
+    assert str(path) in str(caught.value) and "no scontrol" in str(caught.value)
+    assert _written(wd) == [] and path.exists()
+
+
+@posix
+def test_a_detached_local_launch_of_another_host_refuses(tmp_path):
+    """A local launch of another host cannot be checked here: a waited one
+    warns (`test_a_local_launch_from_another_host_warns_and_runs`), a
+    detached one refuses the run."""
+    wd = tmp_path / "s"
+    path = launch(
+        wd,
+        R1,
+        [(0, str(os.getpid()))],
+        executor="local",
+        host="elsewhere",
+        detached=True,
+    )
+    with pytest.raises(RuntimeError, match="'elsewhere'") as caught:
+        _run(wd)
+    assert "mushin.collect" in str(caught.value) and str(path) in str(caught.value)
+    assert _written(wd) == [] and path.exists()
+
+
+def test_a_detached_launch_whose_cells_all_settled_is_over(tmp_path):
+    """A batch whose cells all needed no job names none: nothing to wait
+    for, and the run that goes ahead removes it."""
+    wd = tmp_path / "s"
+    path = _jobs.record_launch(
+        wd,
+        run_id=R1,
+        executor="slurm",
+        folder=_ours(wd),
+        clusters=None,
+        host="login1",
+        depth=1,
+        cells=[],
+        detached=True,
+        submitit_folder=_ours(wd) + "/%j",
+        settled=[_jobs.SettledCell(0, ("lr=0.1",), "skipped")],
+    )
+    assert mushin.show(wd).rows == []
+    assert mushin.cancel(wd) == [] and path.exists()
+    assert _run(wd)["v"].values.tolist() == [0.1, 0.2]
+    assert not path.exists()
