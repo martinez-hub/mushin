@@ -156,11 +156,19 @@ def collect_into(wf, working_dir, metrics_filename):
                 f"mushin.collect cannot rebuild the jobs of {launch.path.name}, "
                 "written without their submitit folder."
             )
-        if launch.cells:
-            # A copy or a move of the run's dir names the original's jobs.
-            _refuse_elsewhere(root, launch.submitit_folder, folder=True)
     rebuilt = {launch.path: plugin.rebuild_jobs(launch) for launch in ours}
     _refuse_unended(root, ours, rebuilt, plugin)
+    for launch in ours:
+        if launch.cells and not Path(launch.folder).is_dir():
+            # The jobs' files are gone from where the run put them: its dir
+            # moved, say. The folder may lie anywhere (logs on scratch), so
+            # only its being there is checked here; the dir the cells are
+            # recorded in is checked once the submission is loaded (#414).
+            raise RuntimeError(
+                f"mushin.collect: the jobs of {launch.path.name} keep their files "
+                f"in {launch.folder!r}, which is not there; nothing was written. "
+                "Collect a copied or moved run in the dir it was submitted in."
+            )
     plugin.await_results([job for jobs in rebuilt.values() for job in jobs])
     # Every submission is loaded before any cell is recorded, so a file that
     # will not load stops collect with nothing written.
@@ -172,7 +180,7 @@ def collect_into(wf, working_dir, metrics_filename):
     # Where a dead or settled cell is recorded: with the jobs' files moved
     # into this dir by hand, still the original.
     for launcher, state in loaded.values():
-        _refuse_elsewhere(root, plugin.sweep_dir(launcher, state), folder=False)
+        _refuse_elsewhere(root, plugin.sweep_dir(launcher, state))
     # And every result: one that does not load here would be read as a job
     # that gave none, and a completed cell recorded failed.
     plugin.load_results([job for jobs in rebuilt.values() for job in jobs])
@@ -264,41 +272,28 @@ def _run_id(root: Path) -> str | None:
     return hydra_run_stamp(load_from_yaml(path))
 
 
-def _refuse_elsewhere(root: Path, path: str, folder: bool) -> None:
-    """Raise, writing nothing, unless ``path`` lies under ``root``: the
-    jobs' submitit folder (``folder``), which the launch file names as an
-    absolute path, or the run's sweep dir, which their submission names as
-    ``run()`` was given it and collect, recording a cell there, makes
+def _refuse_elsewhere(root: Path, path: str) -> None:
+    """Raise, writing nothing, unless ``path``, the run's sweep dir as its
+    jobs' submission names it, lies under ``root``. The submission names it
+    as ``run()`` was given it, and collect, recording a cell there, makes it
     absolute against this process's working directory, so ``path`` is
-    resolved that way. In a copy or a move of the dir a run was submitted
-    in, both name the original, and for a relative ``working_dir``
-    collected from another dir, the sweep dir is one under that dir:
-    collect would read one dir's jobs, or record their cells in another.
-    Compared by path components, not by text: ``sweep-orig`` is not under
-    ``sweep``."""
+    resolved that way. In a copy of the dir a run was submitted in, it names
+    the original, and for a relative ``working_dir`` collected from another
+    dir, a dir under that one: collect would read one dir's jobs and record
+    their cells in another. Compared by path components, not by text:
+    ``sweep-orig`` is not under ``sweep``."""
     where = Path(path).resolve()
     if where.is_relative_to(root):
         return
     shown = repr(path)
     if not Path(path).is_absolute():
         shown += f", which from this process's working directory is {str(where)!r}"
-    if folder:
-        what = "keep their files in"
-        advice = (
-            "Collect a copied or moved run in the dir it was submitted in. A run "
-            "whose `submitit_folder` lies outside its `working_dir` cannot be "
-            "collected: once its jobs have ended, run the sweep again with "
-            "`resume=True`, which reuses the cells they completed."
-        )
-    else:
-        what = "record their cells in"
-        advice = (
-            "Collect a copied or moved run in the dir it was submitted in, and one "
-            "given a relative `working_dir` from the dir its run() was called in."
-        )
     raise RuntimeError(
         f"mushin.collect: this run was submitted in another dir than "
-        f"{str(root)!r}, as its jobs {what} {shown}; nothing was written. {advice}"
+        f"{str(root)!r}, as its jobs record their cells in {shown}; nothing was "
+        "written. Collect a copied or moved run in the dir it was submitted in, "
+        "and one given a relative `working_dir` from the dir its run() was "
+        "called in."
     )
 
 

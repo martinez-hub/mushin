@@ -2331,3 +2331,20 @@ def test_another_process_collects_while_the_submitting_one_lives(tmp_path, left)
         driver.wait()
     assert ds["v"].values.tolist() == [0.0, 1.0]
     assert _launches(wd) == []
+
+
+def test_a_run_whose_jobs_keep_their_files_elsewhere_collects(tmp_path, left):
+    """A `submitit_folder` outside the `working_dir` (logs on scratch, say)
+    is the run's own: collect reads its jobs there and records their cells
+    in the dir the run was submitted in (#414)."""
+    wd, logs = tmp_path / "s", tmp_path / "logs"
+    _detach(
+        tasks.record_pid,
+        wd,
+        left,
+        seed=multirun([0, 1]),
+        launcher="submitit_local",
+        launcher_config={"timeout_min": 1, "submitit_folder": f"{logs}/%j"},
+    )
+    ds = _collect(lambda: mushin.collect(wd))
+    assert ds["v"].values.tolist() == [0.0, 1.0]

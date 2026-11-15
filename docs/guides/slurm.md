@@ -127,11 +127,10 @@ sweep. Some details:
   and the types your task returns import as in the jobs, and only on a
   `working_dir` you trust. A result that does not load stops `collect`, with
   nothing written.
-- Collect a run in the dir it was submitted in: the jobs' files name that
-  dir, so `collect` refuses a copy or a move of it, and a run whose
-  `submitit_folder` lies outside its `working_dir` (once its jobs have ended,
-  a `resume=True` run reuses the cells they completed). With a relative
-  `working_dir`, collect from the directory `run()` was called in.
+- Collect a run in the dir it was submitted in: the jobs' submission names
+  that dir, so `collect` refuses a copy or a move of it. A `submitit_folder`
+  outside the `working_dir` is fine. With a relative `working_dir`, collect
+  from the directory `run()` was called in.
 - `on_error` works as in a waited run. Under `"raise"`, `collect` records
   every cell and raises the first failed cell's own error, with no manifest;
   a second `collect` then reloads the sweep, the failed cell NaN. Under

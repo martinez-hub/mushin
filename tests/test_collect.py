@@ -231,6 +231,8 @@ def _detached(wd: Path, cells, *, executor="slurm", host="login1", detached=True
     multirun.yaml naming run R, and a launch file naming ``cells``
     (``(num, job_id)``)."""
     wd.mkdir(parents=True, exist_ok=True)
+    # The jobs' folder, as submitit makes it on submission.
+    (wd / ".submitit").mkdir(exist_ok=True)
     nums = [n for n, _ in cells]
     values = ",".join(str(n / 10) for n in range(max(nums) + 1))
     (wd / "multirun.yaml").write_text(
@@ -262,7 +264,7 @@ def _detached(wd: Path, cells, *, executor="slurm", host="login1", detached=True
 def _untouched(wd: Path) -> list[str]:
     """What is in ``wd``: only what `_detached` wrote, for a collect that
     must write nothing."""
-    return sorted(p.name for p in wd.iterdir())
+    return sorted(p.name for p in wd.iterdir() if p.name != ".submitit")
 
 
 @pytest.fixture
