@@ -103,9 +103,10 @@ work, but it has to stay alive for the whole sweep. Either:
 If the driver stops anyway, the jobs keep running. Wait until they have ended
 (`squeue --me` lists none of them), or cancel them (below), then run the same
 script again with `resume=True`: it reuses the finished cells and runs only
-the rest. Do not resume while the earlier run's jobs are still queued or
-running: the resume submits those cells again, and two jobs then write the
-same cell.
+the rest. A resume started while the earlier run's jobs are still queued or
+running would submit those cells again, and two jobs would then write the
+same cell, so `run()` refuses it (see
+[Resume, and cancel](#resume-and-cancel)).
 
 ## What the jobs need
 
@@ -152,7 +153,7 @@ it has waited on those jobs. Some cases follow from that:
   its file, and so does a driver whose wait raised before the scheduler could
   say every job had ended. A cell whose job never started then stays
   `queued` until a later run of the sweep, such as a `resume=True`, records
-  the cell, or until `mushin.cancel` (below) removes the file.
+  the cell or removes the file, or until `mushin.cancel` (below) removes it.
 - A job that dies before its code starts can show `queued` until the driver
   has waited on every job of its submission.
 - A sweep whose `hydra.sweep.subdir` puts each cell more than one directory
@@ -189,6 +190,38 @@ reads the environment (`${oc.env:...}`), a cell whose job imports modules the
 driver cannot (a `PYTHONPATH` set in `setup`, say), and every cell of a sweep
 with Hydra callbacks, since the job's environment, imports and callbacks are
 not the driver's.
+
+`run()` refuses a `working_dir` whose earlier jobs may still be queued or
+running, whichever launcher it uses: two drivers on one sweep would each
+submit the cells they find unfinished, and two jobs would then write one
+cell. It reads the submissions listed under `<working_dir>/mushin_jobs/`
+(below). It asks `scontrol` about each SLURM job, as `mushin.cancel` does,
+even one whose cell has recorded its end: a job preempted after that may be
+requeued. Where `scontrol` is not found, a job whose cell has recorded its end
+is taken as over. For `launcher="submitit_local"` on the machine that
+submitted it, it looks for the job's process. Then:
+
+- A job SLURM lists as not ended (pending, running, or preempted, since SLURM
+  may requeue a preempted job), or a local job whose process still runs, makes
+  `run()` raise a `ValueError` that names the submission's file. Wait for those jobs to end:
+  a driver still waiting on them finishes its run, and a `resume=True` then
+  reuses the cells they completed. Or cancel them: `mushin.cancel` (below) for
+  SLURM jobs; stop the processes of local ones.
+- When `scontrol` is found but fails, takes too long or answers in a form
+  mushin cannot read, `run()` raises a `RuntimeError`, as `cancel` cancels
+  nothing then. So does a submission sent to another cluster, whose jobs
+  plain `scontrol` does not see; `mushin.cancel` names the command that
+  cancels those, and removes their file.
+- Where the jobs cannot be checked at all (no `scontrol` on the machine, or
+  `submitit_local` jobs of another machine), `run()` warns and goes ahead.
+  It does the same when SLURM has given a job's id to another job.
+
+Once you know a submission's jobs are over, or are not this sweep's, deleting
+the file the message names lets the run go ahead. A run that goes ahead
+removes the files of the submissions it found over, once its own cells have
+run. The check can miss jobs: it reads only the files under
+`<working_dir>/mushin_jobs/`, and a sweep whose directory is set by a
+`hydra.sweep.dir=` override, not `working_dir`, is not checked.
 
 To cancel a sweep, pass its `working_dir` to `mushin.cancel`, on a machine
 where `scontrol` and `scancel` work (a login node), with the driver running or
