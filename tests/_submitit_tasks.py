@@ -428,3 +428,14 @@ def slow(seed):
 
     time.sleep(float(os.environ.get("MUSHIN_TEST_SLEEP", "2")))
     return dict(v=float(seed))
+
+
+# One dict every call fills and returns, as a task that reuses its metrics
+# dict does: each cell's return must be its own, not the last cell's (#412).
+_SHARED_METRICS: dict = {}
+
+
+@mushin.sweep
+def shared_metrics(seed):
+    _SHARED_METRICS["v"] = float(seed)
+    return _SHARED_METRICS

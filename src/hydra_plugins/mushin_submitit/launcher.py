@@ -746,8 +746,11 @@ if _plugin_launcher is not None:
                         # Loaded back as the driver will load it: a return
                         # that pickles but does not unpickle (an exception
                         # whose __init__ takes two arguments) would make the
-                        # whole job's result unreadable.
-                        pickle.loads(cloudpickle.dumps(ret))
+                        # whole job's result unreadable. The copy is kept: a
+                        # task that refills and returns one dict for every
+                        # cell would otherwise leave each cell the last's
+                        # values by the time the job returns (#412).
+                        ret = pickle.loads(cloudpickle.dumps(ret))
                         done[num] = ("returned", ret)
                     except Exception:  # noqa: BLE001 - the cell's, not the job's
                         done[num] = ("raised", traceback.format_exc())

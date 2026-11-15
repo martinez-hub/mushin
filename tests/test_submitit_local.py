@@ -2022,3 +2022,13 @@ def test_the_budget_skips_the_cells_a_job_reaches_late(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSHIN_TEST_SLEEP", "0")
     again = tasks.slow.run(resume=True, **sweep)
     assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
+
+
+def test_a_cell_keeps_its_own_return_when_the_next_reuses_the_object(tmp_path):
+    """A task that fills and returns one dict for every cell: each cell of a
+    job keeps the return it gave, not what a later cell of the job left in
+    the dict (#412)."""
+    ds = tasks.shared_metrics.run(
+        seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), **GROUPS
+    )
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
