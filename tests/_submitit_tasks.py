@@ -351,3 +351,132 @@ class Combos(MultiRunMetricsWorkflow):
     @staticmethod
     def task(seed, lr, n, x, name, flag, xs, opt, m345):
         return dict(v=float(seed))
+
+
+# Jobs of several cells (`cells_per_job`, #348).
+
+
+def _raise_before_start(num):
+    """A `hydra.sweep.subdir` resolver. Inside a job, for a cell whose
+    number is in `MUSHIN_TEST_RAISE_BEFORE_START`, it raises while Hydra
+    computes the cell's dir, so `run_job` raises outside the task (before
+    mushin's runner starts). The driver gets the default subdir."""
+    doomed = os.environ.get("MUSHIN_TEST_RAISE_BEFORE_START", "").split(",")
+    if os.environ.get("SUBMITIT_EXECUTOR") and str(num) in doomed:
+        raise RuntimeError(f"cannot place cell {num}")
+    return str(num)
+
+
+OmegaConf.register_new_resolver(
+    "mushin_test_raise_before_start", _raise_before_start, replace=True
+)
+RAISE_BEFORE_START = (
+    "hydra.sweep.subdir='${mushin_test_raise_before_start:${hydra.job.num}}'"
+)
+
+
+def _shared_die(num):
+    """A `hydra.sweep.subdir` resolver that puts every cell in one dir,
+    `shared`. Inside a job, for a cell whose number is in
+    `MUSHIN_TEST_SHARED_DIE`, it ends the process first, before the cell's
+    runner starts."""
+    doomed = os.environ.get("MUSHIN_TEST_SHARED_DIE", "").split(",")
+    if os.environ.get("SUBMITIT_EXECUTOR") and str(num) in doomed:
+        os._exit(9)
+    return "shared"
+
+
+OmegaConf.register_new_resolver("mushin_test_shared_die", _shared_die, replace=True)
+SHARED_DIE = "hydra.sweep.subdir='${mushin_test_shared_die:${hydra.job.num}}'"
+
+
+@mushin.sweep
+def lr_value(lr, seed):
+    return dict(v=float(lr))
+
+
+@mushin.sweep
+def raise_when_told(seed):
+    """Raises on the seed `MUSHIN_TEST_RAISE` names: set for one run, unset
+    for the resume that follows."""
+    if os.environ.get("MUSHIN_TEST_RAISE") == str(seed):
+        raise RuntimeError(f"told to raise on {seed}")
+    return dict(v=float(seed))
+
+
+@mushin.sweep
+def signal_self_once(seed):
+    """Appends ``<seed> <pid>`` to the file `MUSHIN_TEST_RUNS` names on
+    every run, and on seed 1's first run sends its own job the signal a
+    scheduler sends before a time limit or a preemption (submitit's USR2),
+    then waits for submitit's handler to act."""
+    import signal
+    import time
+    from pathlib import Path
+
+    runs = Path(os.environ["MUSHIN_TEST_RUNS"])
+    with open(runs, "a") as f:
+        f.write(f"{seed} {os.getpid()}\n")
+    signalled = runs.with_suffix(".signalled")
+    if seed == 1 and not signalled.exists():
+        signalled.touch()
+        os.kill(os.getpid(), signal.SIGUSR2)
+        time.sleep(5)  # the handler requeues or raises well before this ends
+    return dict(v=float(seed))
+
+
+class TwoArgError(Exception):
+    """Pickles (its args are the message) but cannot be unpickled: its
+    `__init__` takes two arguments."""
+
+    def __init__(self, step, loss):
+        super().__init__(f"diverged at step {step}: loss {loss}")
+        self.step, self.loss = step, loss
+
+
+class Tag:
+    """A value with no JSON form: a metrics file holds its text, so the
+    cell's record names no digest, and cannot stand for a result its job
+    did not return."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return isinstance(other, Tag) and other.name == self.name
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __repr__(self):
+        return f"Tag({self.name!r})"
+
+
+@mushin.sweep
+def two_arg_error_on_one(seed):
+    """Seed 1 raises an error the driver cannot unpickle; the others return
+    a value only their job's result holds whole (`Tag`)."""
+    if seed == 1:
+        raise TwoArgError(seed, 3.0)
+    return dict(v=float(seed), tag=Tag(str(seed)))
+
+
+@mushin.sweep
+def slow(seed):
+    """Sleeps `MUSHIN_TEST_SLEEP` seconds (2 by default), for a budget a
+    job's later cells start past."""
+    import time
+
+    time.sleep(float(os.environ.get("MUSHIN_TEST_SLEEP", "2")))
+    return dict(v=float(seed))
+
+
+# One dict every call fills and returns, as a task that reuses its metrics
+# dict does: each cell's return must be its own, not the last cell's (#412).
+_SHARED_METRICS: dict = {}
+
+
+@mushin.sweep
+def shared_metrics(seed):
+    _SHARED_METRICS["v"] = float(seed)
+    return _SHARED_METRICS

@@ -73,6 +73,9 @@ until every job ends, and:
   `submitit_slurm` node, since which store wins depends on scan order. The
   launcher choice is not part of any hash a resume compares, so a sweep the
   plugin's launcher ran resumes here.
+  (#348 adds one field, `cells_per_job`, default 1: mushin's config is now
+  the plugin's plus that field, which the launcher's `__init__` takes out of
+  the params submitit sees.)
 - **D4. `launch()` is `_submit()` then `_wait()`.** `_submit` is the plugin
   1.2.0 body up to `map_array`, copied; a test pins a digest of the plugin's
   `launch` and compares the copy line by line. `_wait` waits on every job in
@@ -272,6 +275,81 @@ than failed; `show` leaves a G3 cell out rather than listing it failed; the
 MCP server's `_load_runs` pairs `.hydra/config.yaml` with metrics without
 reading the record, so it can pair this run's snapshot with an earlier
 run's metrics (#407).
+
+## Decisions (#348)
+
+`cells_per_job=k` (a field of mushin's two QueueConf dataclasses, and an
+argument of `mushin.slurm`) submits one array task per group of up to k
+cells. A job of k cells reports, cell by cell, what k one-cell jobs would
+have, except where one cell's death takes the cells after it in the same job
+with it.
+
+- **H1/H2. A launcher field, kept out of the plugin's params.** The mixin's
+  `__init__` takes `cells_per_job` out of `**params`, since submitit's
+  `update_parameters` refuses a key it does not know, and the pinned `_submit`
+  hands it the params.
+- **H3. Refused before anything is written**, in the mixin's `setup` (Hydra
+  builds and sets up the launcher before `multirun.yaml`): a value that is not
+  a whole number >= 1, k > 1 with several tasks per job (every task of a job
+  runs every cell), and k > 1 for a task function other than mushin's runner
+  (a dead job's cells are sorted out from records only the runner writes).
+  `run()` refuses the key for any launcher but the submitit ones, where Hydra
+  would say "use `+`". OmegaConf coerces `"2"` and rejects `True` and `1.5`
+  at composition, before `setup`.
+- **H4. Groups are consecutive, in submission order, after the driver has
+  settled what it can**, so a resume, `sample=` or a cache hit groups only the
+  cells it submits.
+- **H5. `_CellGroup(launcher, done)` is the callable each job runs.** It calls
+  the plugin's own `__call__` for each cell (one copy of composition and
+  `run_job`), checks that the return loads back once pickled
+  (`pickle.loads(cloudpickle.dumps(ret))`, so a return that pickles but does
+  not unpickle, such as an exception whose `__init__` takes two arguments,
+  cannot make the whole job's result unreadable), and returns a
+  `_GroupReturns`, the cells' returns by job number. A cell's `Exception` is
+  its `_Unreturned("raised")`; an error between cells (a signal's) marks the
+  rest `_Unreturned("not run")`. `BaseException` is not caught, so submitit's
+  requeue exit and the local controller's `SIGINT` end the job as before.
+  `checkpoint()` carries `done`, so a requeued job skips the cells it
+  finished. Residual: a return the job can load but the driver cannot (a
+  class only the job imports) still makes the job's result unreadable.
+- **H6. `_submit` gets a second strippable edit** before the pinned
+  `map_array` line: with k > 1 it returns `_submit_groups`, which calls
+  `map_array` once over the groups and returns one job per cell (the group's
+  `Job` repeated), so `launch()`, the launch file and `_forget` stay keyed by
+  cell. With k = 1 the submission is the plugin's, unchanged.
+- **H7. `_wait` reads each `Job`'s results once** (`results()` caches nothing,
+  and waits 15 s on a job with no result) and reuses the outcome for each of
+  its cells. A `_GroupReturns` gives each cell its own return; an
+  `_Unreturned("raised")` cell goes through `_dead_return` with a
+  `FailedJobError` (`keepable=False`, then #406's G2), a `"not run"` or
+  missing one with an `UncompletedJobError`. A job with no result sends each
+  of its cells through `_dead_return`, whose records then decide (E2, G2, G3).
+  The group is told by the result's type, not the launcher's field.
+- **H8/H9. A job goes on after a cell that raised, and after a time limit's
+  "not requeued" error** (raised inside the running cell, which fails with
+  its own traceback): one rule, and short cells can finish in the
+  `signal_delay_s` window. When the error lands between two cells, the job
+  stops there (H5).
+- **H10. Own-ness needs the job number once a job id is shared.**
+  `record_dead_cell` takes a record of this run and job as the cell's own only
+  when its `job_num` is the cell's, or absent (a record whose choices could
+  not be recorded, which therefore can still be taken for another cell of the
+  job in a dir they share). `show`'s queued rule 1 matches a launch's cell by
+  job id only when the launch names that id for that cell alone.
+- **H12. Known differences on a dead job:** a cell that never started, or
+  raised before its job died, reports the job's summary, not a reason of its
+  own; under `"raise"` the run raises the job's error. A cell whose return
+  fails H5's check reports "raised an error instead of returning", where a
+  one-cell job reports what submitit managed ("gave no result" when it could
+  not save the error either); the verdict is `failed` either way.
+- **H13 to H18.** The launch file is unchanged (cells of one job share a
+  `job_id`); `cancel` de-duplicates arrays already; a job's cells share one
+  process (globals, unseeded random state, GPU memory, a `torch.distributed`
+  group, `os.environ` changes), one submitit log, one `hydra.job.id` and one
+  time limit; the budget's per-process deadline is checked per cell, so a job
+  that starts late skips its remaining cells. #345 item 1 (`wait=False` and
+  `collect`), once it lands, must rebuild one `Job` per distinct job id of a
+  launch, read each once, and take `.launcher` from a submitted `_CellGroup`.
 
 ## Needs a cluster
 

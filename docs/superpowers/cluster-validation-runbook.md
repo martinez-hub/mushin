@@ -429,7 +429,7 @@ message matches the `job_id` in the cell's `mushin_cell_status.json` and
 
 **Report:** the `sacct` lines for each step.
 
-### T12: Submit and return, then collect (#345 item 1)
+### T13: Submit and return, then collect (#345 item 1)
 
 `collect` reads each job's end from `sacct` through submitit's reader; its
 tests fake `sacct` and use `submitit_local` jobs. On the cluster:
@@ -499,3 +499,42 @@ The check is written from SLURM's documentation; its tests stand in
    shows one task per job).
 
 **Report:** the saved output, the two error messages, and the `sacct` lines.
+
+### T12: Several cells per job (`cells_per_job`, #348)
+
+**Needs:** SLURM + the `slurm` extra. `submitit_local` covers grouping,
+records, a job that dies part-way and a self-sent requeue signal; these steps
+cover what only SLURM does.
+
+1. **An array of jobs of several cells.** Run 10 short cells with
+   `launcher_config=mushin.slurm(timeout_min=10, partition="<P>",
+   cells_per_job=4)`. `sacct -X -j <array id>` must list 3 tasks. Every
+   record of one job names the same `<array>_<i>` (`job_id`), and
+   `hydra.job.id` in each cell's `hydra.yaml` matches it. While it runs,
+   `mushin.show(wd, jobs=True)` lists the cells a job has not reached as
+   `queued` with its id, and `mushin.cancel(wd, dry_run=True)` names the
+   array once.
+2. **The time limit mid-job, without requeue** (the plugin's SLURM default,
+   `max_num_timeout=0`). Four 60 s cells per job with `timeout_min=2`: the
+   running cell at the limit fails with "Job not requeued", the next cells run
+   in the 120 s window, and the job is then killed. After the kill, the
+   finished cells keep their values from their records; record each cell's
+   record and metrics mtimes against the driver's read (a slow filesystem's
+   stale read can fail up to `cells_per_job - 1` finished cells).
+3. **Requeue.** The same with `max_num_timeout=2`, and once on a
+   preemptible partition: the requeued job skips the cells it finished and
+   runs the interrupted one again (its `attempt` is 2). Also SLURM's own
+   `--requeue` after a node failure, which reruns the whole job.
+4. **An out-of-memory kill and `scancel` part-way**: the finished cells keep
+   their values, the rest fail, and a resume runs them in fewer jobs.
+5. **Process reuse on GPUs.** A torch task that fills most of a GPU, four
+   cells per job: does the memory come back between cells? A single-task
+   multi-GPU `HydraDDP` cell, twice in one job: is the process group
+   initialized cleanly the second time?
+6. **The issue's question.** What the cluster says when a grid exceeds
+   `MaxArraySize` or the submit limit with one cell per job, and that
+   `cells_per_job` brings it under; the wall time of 500 cells of 30 s at
+   `cells_per_job=1` and `25`.
+
+**Report:** the `sacct` lines, the records' `job_id`s, the error file of the
+cell at the time limit, the mtimes in step 2, and the timings in step 6.
