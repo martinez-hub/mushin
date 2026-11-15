@@ -49,7 +49,8 @@ def test_hydra_finds_both_launchers_and_scans_without_a_warning(recwarn):
 
 
 def test_mushins_config_has_the_plugins_fields_and_only_another_target():
-    """`launcher_config` and `submitit_slurm_config` keys stay valid."""
+    """`launcher_config` and `submitit_slurm_config` keys stay valid: mushin's
+    config is the plugin's, with another target, plus `cells_per_job`."""
     import dataclasses
 
     stock = pytest.importorskip("hydra_plugins.hydra_submitit_launcher.config")
@@ -61,7 +62,9 @@ def test_mushins_config_has_the_plugins_fields_and_only_another_target():
     ]:
         a = {f.name: f.default for f in dataclasses.fields(mine)}
         b = {f.name: f.default for f in dataclasses.fields(theirs)}
-        assert a.keys() == b.keys()
+        # #348: mushin's one field of its own, one cell per job by default.
+        assert a.keys() == b.keys() | {"cells_per_job"}
+        assert a.pop("cells_per_job") == 1
         assert {k for k in a if a[k] != b[k]} == {"_target_"}
         assert a["_target_"].startswith("hydra_plugins.mushin_submitit.launcher.")
 
@@ -101,16 +104,26 @@ def test_the_submission_is_the_plugins_own():
         "jobs = executor.map_array",
     )
     original = body(theirs, "import submitit", "jobs = executor.map_array")
-    # mushin's edit, exactly: a cell settled in the driver needs no job.
+    # mushin's edits, exactly: a cell settled in the driver needs no job;
+    # and (#348) a job of several cells is submitted as `_submit_groups`
+    # submits it, just before the plugin's own submission.
     lines = copied.splitlines()
-    edit = [
-        "# mushin's: a cell settled in the driver needs no job.",
-        "if idx in skip:",
-        "continue",
-    ]
-    at = lines.index(edit[0])
-    assert lines[at : at + 3] == edit
-    del lines[at : at + 3]
+    for edit in (
+        [
+            "# mushin's: a cell settled in the driver needs no job.",
+            "if idx in skip:",
+            "continue",
+        ],
+        [
+            "# mushin's: several cells per job (#348).",
+            "if self._cells_per_job > 1:",
+            "return self._submit_groups(executor, job_params), job_params",
+        ],
+    ):
+        at = lines.index(edit[0])
+        assert lines[at : at + 3] == edit
+        del lines[at : at + 3]
+    assert lines[-1].startswith("jobs = executor.map_array")
     copied = "\n".join(lines)
     # The copy's only edits: names it reaches through the plugin's modules,
     # and the builtin generic.
@@ -1201,3 +1214,272 @@ def test_a_dead_cell_names_its_job_and_only_its_own_host(
     entry = read_cell_status(cell)["submitit"]
     assert (entry["job_id"], entry["logs"]) == ("7", "/s/.submitit/7")
     assert entry.get("host") == host
+
+
+# Several cells per job (#348). A job of several cells runs a `_CellGroup`,
+# which calls the launcher's own `__call__` for each cell in turn; `_wait`
+# unpacks what it returns. The sweeps are in tests/test_submitit_local.py.
+
+
+def test_cells_per_job_is_kept_out_of_the_executors_parameters():
+    """submitit's `update_parameters` refuses a key it does not know, and
+    `_submit` hands it the launcher's params."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from hydra_plugins.mushin_submitit.launcher import MushinLocalLauncher
+
+    launcher = MushinLocalLauncher(cells_per_job=3, timeout_min=1)
+    assert "cells_per_job" not in launcher.params
+    assert launcher.params["timeout_min"] == 1
+    assert launcher._cells_per_job == 3
+    assert MushinLocalLauncher()._cells_per_job == 1
+
+
+class _Collects:
+    """A stand-in for mushin's runner, as `setup` reads it."""
+
+    _mushin_collects_dead_jobs = True
+
+
+@pytest.mark.parametrize(
+    ("cells_per_job", "params", "task", "match"),
+    [
+        (0, {}, _Collects(), "cells_per_job must be a whole number >= 1"),
+        (-1, {}, _Collects(), "cells_per_job must be a whole number >= 1"),
+        (True, {}, _Collects(), "cells_per_job must be a whole number >= 1"),
+        (1.5, {}, _Collects(), "cells_per_job must be a whole number >= 1"),
+        ("2", {}, _Collects(), "cells_per_job must be a whole number >= 1"),
+        (2, {"tasks_per_node": 2}, _Collects(), "cells_per_job=2 .* 2 tasks"),
+        (2, {"nodes": 2}, _Collects(), "cells_per_job=2 .* 2 tasks"),
+        (2, {}, print, "cells_per_job=2 .* mushin"),
+    ],
+    ids=["0", "-1", "True", "1.5", "str", "tasks_per_node", "nodes", "plain-task"],
+)
+def test_cells_per_job_refusals(cells_per_job, params, task, match):
+    """Refused in `setup`, which Hydra calls before it writes anything for
+    the sweep, so a raw `hydra.launcher.cells_per_job=` override is judged
+    as `launcher_config` is."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from omegaconf import OmegaConf
+
+    from hydra_plugins.mushin_submitit.launcher import MushinLocalLauncher
+
+    launcher = MushinLocalLauncher(cells_per_job=cells_per_job, **params)
+    with pytest.raises(ValueError, match=match):
+        launcher.setup(
+            hydra_context=None, task_function=task, config=OmegaConf.create({})
+        )
+
+
+@pytest.mark.parametrize(
+    ("params", "task"),
+    [({}, _Collects()), ({"tasks_per_node": 2}, print), ({"nodes": 3}, _Collects())],
+)
+def test_one_cell_per_job_is_never_refused(params, task):
+    """A guard: the default, one cell per job, keeps every launch the
+    plugin's launcher takes."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from omegaconf import OmegaConf
+
+    from hydra_plugins.mushin_submitit.launcher import MushinLocalLauncher
+
+    launcher = MushinLocalLauncher(**params)
+    launcher.setup(hydra_context=None, task_function=task, config=OmegaConf.create({}))
+    assert launcher.task_function is task
+
+
+def test_run_refuses_cells_per_job_on_another_launcher(tmp_path):
+    """Hydra's own error for a key a launcher's config lacks says to append
+    it with `+`, which would only fail later: `run()` names the launchers
+    that have the field instead, before anything is written."""
+    import _submitit_tasks as tasks
+    from mushin import multirun
+
+    wd = tmp_path / "s"
+    with pytest.raises(ValueError, match="submitit_slurm.*submitit_local"):
+        tasks.record_pid.run(
+            seed=multirun([0, 1]),
+            working_dir=str(wd),
+            launcher="joblib",
+            launcher_config={"cells_per_job": 2},
+        )
+    assert not (wd / "multirun.yaml").exists()
+
+
+class _Cells:
+    """A stand-in for the launcher a job of several cells calls once per
+    cell: each cell's return by its job number (``ret<n>`` by default), an
+    exception to raise, or a function whose result is the return."""
+
+    def __init__(self, outcomes=None):
+        self.outcomes, self.calls = dict(outcomes or {}), []
+
+    def __call__(self, overrides, job_dir_key, num, job_id, singleton_state):
+        self.calls.append(num)
+        outcome = self.outcomes.get(num, f"ret{num}")
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome() if callable(outcome) else outcome
+
+
+def _cells(*nums):
+    """The plugin's per-cell job params, as `_submit` builds them."""
+    return [([f"seed={n}"], "hydra.sweep.dir", n, f"job_id_for_{n}", {}) for n in nums]
+
+
+def test_a_jobs_cells_run_in_turn_through_the_launchers_call():
+    """Every cell runs, in order, through the launcher's own `__call__`. A
+    cell whose Hydra job raises outside its task, or whose return would not
+    load in the driver, is that cell's `_Unreturned`, and the job goes on to
+    its next cell; its result stays one the driver can load."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    import pickle
+    import threading
+
+    import cloudpickle
+
+    import _submitit_tasks as tasks
+    from hydra_plugins.mushin_submitit.launcher import (
+        _CellGroup,
+        _GroupReturns,
+        _Unreturned,
+    )
+
+    fake = _Cells(
+        {
+            2: RuntimeError("outside the task"),
+            3: {"lock": threading.Lock()},  # does not pickle
+            # Returned (as a FAILED return holds a task's error): it pickles,
+            # but does not unpickle.
+            5: lambda: tasks.TwoArgError(1, 3.0),
+        }
+    )
+    out = _CellGroup(fake)(_cells(1, 2, 3, 4, 5, 6))
+    assert fake.calls == [1, 2, 3, 4, 5, 6]
+    assert type(out) is _GroupReturns
+    assert {n: out[n] for n in (1, 4, 6)} == {1: "ret1", 4: "ret4", 6: "ret6"}
+    for num, error in [
+        (2, "RuntimeError: outside the task"),
+        (3, "cannot pickle '_thread.lock' object"),
+        (5, "TypeError"),
+    ]:
+        assert isinstance(out[num], _Unreturned), num
+        assert out[num].why == "raised" and error in out[num].text
+    pickle.loads(cloudpickle.dumps(out))  # the job's result, as submitit saves it
+
+
+@pytest.mark.parametrize("stop", [SystemExit(0), KeyboardInterrupt()])
+def test_a_cell_that_ends_its_process_ends_the_job(stop):
+    """submitit's requeue exits with SystemExit, and the local controller
+    stops a job with SIGINT: neither is a cell's error."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from hydra_plugins.mushin_submitit.launcher import _CellGroup
+
+    fake = _Cells({2: stop})
+    with pytest.raises(type(stop)):
+        _CellGroup(fake)(_cells(1, 2, 3))
+    assert fake.calls == [1, 2]
+
+
+def test_an_error_between_cells_marks_the_rest_not_run():
+    """An error outside any cell's Hydra job (a time limit's signal landing
+    while the job notes a cell done) stops the job: it returns the cells it
+    finished, and the rest as not run."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from submitit.core.utils import UncompletedJobError
+
+    from hydra_plugins.mushin_submitit.launcher import _CellGroup, _Unreturned
+
+    class Interrupted(_CellGroup):
+        @property
+        def done(self):
+            return self._done
+
+        @done.setter
+        def done(self, value):
+            if 2 in value:
+                raise UncompletedJobError(
+                    "Job not requeued because: timed-out too many times."
+                )
+            self._done = value
+
+    fake = _Cells()
+    out = Interrupted(fake)(_cells(1, 2, 3, 4))
+    assert fake.calls == [1, 2]
+    assert (out[1], out[2]) == ("ret1", "ret2")
+    for num in (3, 4):
+        assert isinstance(out[num], _Unreturned) and out[num].why == "not run"
+        assert "timed-out too many times" in out[num].text
+
+
+def test_a_checkpoint_carries_the_finished_cells():
+    """A requeued job (a preemption, or a time limit with retries left) runs
+    again from `checkpoint()`'s submission: it skips the cells it finished
+    and runs again the one it was in, as that cell's one-cell job would."""
+    pytest.importorskip("hydra_plugins.hydra_submitit_launcher")
+    from submitit.helpers import DelayedSubmission
+
+    from hydra_plugins.mushin_submitit.launcher import _CellGroup
+
+    cells, held = _cells(1, 2, 3), {}
+    fake = _Cells()
+    group = _CellGroup(fake)
+
+    def requeued():
+        # submitit's signal handler, in the middle of cell 2: it dumps
+        # `checkpoint()`'s submission, then exits for the requeue.
+        held["delayed"] = group.checkpoint(cells)
+        raise SystemExit(0)
+
+    fake.outcomes[2] = requeued
+    with pytest.raises(SystemExit):
+        group(cells)
+    delayed = held["delayed"]
+    assert isinstance(delayed, DelayedSubmission) and delayed.args == (cells,)
+    del fake.outcomes[2]
+    fake.calls.clear()
+    assert delayed.result() == {1: "ret1", 2: "ret2", 3: "ret3"}
+    assert fake.calls == [2, 3]
+
+
+def test_a_job_of_several_cells_is_waited_on_once(launcher):
+    """The cells of a job share its `Job`, whose `results()` re-reads the
+    result each time (and waits 15 s first on a job that has none): it is
+    read once, and each cell takes its own return from it."""
+    from submitit.core.utils import FailedJobError, UncompletedJobError
+
+    from hydra_plugins.mushin_submitit.launcher import _GroupReturns, _Unreturned
+
+    class Counted(_Job):
+        job_id = "7"
+
+        def __init__(self, outcome):
+            super().__init__(outcome)
+            self.calls = 0
+
+        def results(self):
+            self.calls += 1
+            return super().results()
+
+    group = _GroupReturns(
+        {
+            10: "r10",
+            11: _Unreturned("raised", "Traceback ...\nRuntimeError: boom\n"),
+            12: _Unreturned("not run", "Traceback ...\nUncompletedJobError: x\n"),
+        }
+    )
+    lost = UncompletedJobError("no result")
+    j, k = Counted(group), Counted(lost)
+    returns = launcher._wait([j, j, j, j, k], [*PARAMS, (["seed=4"], "", 14)])
+    assert (j.calls, k.calls) == (1, 1)
+    assert returns[0] == "r10"
+    # A cell with no return of its own is a dead job's cell: one that
+    # raised as a job that pickled an error is, one not run (or missing)
+    # as a job that gave no result is.
+    kinds = [(r[0], r[1], type(r[2])) for r in returns[1:4]]
+    assert kinds == [
+        ("dead", 11, FailedJobError),
+        ("dead", 12, UncompletedJobError),
+        ("dead", 13, UncompletedJobError),
+    ]
+    assert "RuntimeError: boom" in str(returns[1][2])
+    assert returns[4] == ("dead", 14, lost)

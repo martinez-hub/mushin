@@ -1659,3 +1659,454 @@ def test_launch_combos_match_records(
         assert recorded["xs"] == "[1, 2]" and recorded["m345"] == "small"
         # The typed float keys apart: `show` matches such a cell by its job.
         assert combo_key({**submitted, "lr": 1}) != combo_key({**recorded, "lr": 1.0})
+
+
+# Several cells per job (`cells_per_job`, #348): each job runs its cells one
+# after another, each through the plugin's own per-cell `__call__`. A job of
+# k cells must report, cell by cell, what k one-cell jobs would have, except
+# where a job that dies takes its later cells with it. These tests cannot
+# fail before #348 on their assertions (the key is unknown there): each names
+# the mutant of the launcher it catches.
+
+GROUPS = dict(
+    launcher="submitit_local",
+    launcher_config={"timeout_min": 1, "cells_per_job": 3},
+)
+
+
+def _grouped(k: int) -> dict:
+    """The launcher arguments of a sweep of ``k`` cells per job."""
+    config = {"timeout_min": 1}
+    if k > 1:
+        config["cells_per_job"] = k
+    return dict(launcher="submitit_local", launcher_config=config)
+
+
+def _record(cell: Path) -> dict:
+    return json.loads((cell / "mushin_cell_status.json").read_text())
+
+
+def _reloaded(wd: Path):
+    return MultiRunMetricsWorkflow().load_from_dir(wd, "mushin_metrics.json")
+
+
+def test_a_jobs_cells_keep_their_own_dirs_and_records(tmp_path):
+    """Mutant caught: groups of one cell (`_submit_groups` with size 1)."""
+    wd = tmp_path / "s"
+    ds = tasks.record_pid.run(
+        seed=multirun(list(range(5))), working_dir=str(wd), **_grouped(2)
+    )
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+    pids = ds["pid"].values.tolist()
+    assert len(_job_dirs(wd)) == 3  # jobs of cells 0-1, 2-3 and 4
+    assert pids[0] == pids[1] and pids[2] == pids[3] and len(set(pids)) == 3
+    records = [_record(wd / str(n)) for n in range(5)]
+    for n, record in enumerate(records):
+        assert record["status"] == "completed" and record["job_num"] == n
+        assert (wd / str(n) / ".hydra" / "hydra.yaml").is_file()
+    ids = [record["job_id"] for record in records]
+    assert ids[0] == ids[1] and ids[2] == ids[3] and len(set(ids)) == 3
+    again = _reloaded(wd).to_xarray()
+    for name in ("v", "pid"):
+        np.testing.assert_array_equal(again[name].values, ds[name].values)
+
+
+# What a sweep leaves, compared between one cell per job and three. A dead
+# job's one-line summary names its id and log, and its kind can differ: a
+# cell whose return would not load is, in a job of several, one that "raised
+# an error instead of returning" (`_CellGroup`'s check), where its own job
+# reports what submitit managed ("gave no result", under the error the
+# driver's read raised). The verdict is failed either way.
+_SUMMARY = re.compile(
+    r"\w+\('submitit job \S+ (gave no result|raised an error instead of "
+    r"returning) \(state: \w+\); its log: [^']*'\)"
+)
+# The last line of a traceback's error, which the error file of either
+# shape holds (a job's error file ends with its log paths, a cell's in a job
+# of several with the traceback).
+_CAUSE = re.compile(r"^[\w.]+(Error|Exception)\b.*$", re.MULTILINE)
+
+
+def _summary_free(text):
+    return text if text is None else _SUMMARY.sub("<a dead job's summary>", text)
+
+
+def _left(wd: Path, run, ds) -> dict:
+    """What a sweep into ``wd`` left, without ids, paths or times: each
+    record's fields, each error file's first line and cause, the manifest's
+    cells, the run's failed and skipped cells, and the dataset."""
+    records, errors = {}, {}
+    for path in sorted(wd.glob("*/mushin_cell_status.json")):
+        record = json.loads(path.read_text())
+        records[path.parent.name] = (
+            record["status"],
+            record["combo"],
+            record["attempt"],
+            record.get("job_num"),
+            "metrics" in record,
+            record.get("no_metrics", False),
+        )
+    for path in sorted(wd.glob("*/mushin_error.txt")):
+        text = path.read_text()
+        causes = [m.group(0) for m in _CAUSE.finditer(text)]
+        errors[path.parent.name] = (
+            _summary_free(text.splitlines()[0]),
+            causes[-1] if causes else None,
+        )
+    manifest = wd / "mushin_sweep_manifest.json"
+    cells = None
+    if manifest.exists():
+        cells = {
+            key: (cell["status"], cell.get("dir"), _summary_free(cell.get("error")))
+            for key, cell in json.loads(manifest.read_text())["cells"].items()
+        }
+    left = dict(records=records, errors=errors, manifest=cells)
+    if run is not None:
+        left["failures"] = sorted(
+            (f["combo"], _summary_free(f["exception"])) for f in run.failures
+        )
+        left["skipped"] = sorted(s["combo"] for s in run.skipped)
+    if ds is not None:
+        # NaN as None, which compares equal to itself.
+        left["values"] = {
+            n: [None if x != x else x for x in ds[n].values.tolist()]
+            for n in [*ds.coords, *ds.data_vars]
+        }
+    return left
+
+
+def _scenario(name, wd, launch, monkeypatch, cache):
+    """Run scenario ``name`` into ``wd``: its dataset and workflow (None
+    when it raised), the error it raised, and the cells it fails."""
+    import warnings
+
+    nan = dict(on_error="nan", working_dir=str(wd), **launch)
+    seeds = multirun([0, 1, 2])
+    with monkeypatch.context() as m, warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if name == "raised-under-raise":
+            with pytest.raises(RuntimeError, match="boom") as raised:
+                tasks.fail_on_one.run(seed=seeds, working_dir=str(wd), **launch)
+            return None, None, raised.value, ["seed=1"]
+        if name == "completed":
+            task, sweep, failed = tasks.fail_on_one, dict(seed=multirun([0, 2, 3])), []
+        elif name == "raised":
+            task, sweep, failed = tasks.fail_on_one, dict(seed=seeds), ["seed=1"]
+        elif name == "none":
+            task, sweep, failed = tasks.none_on_one, dict(seed=seeds), []
+        elif name == "unpicklable":
+            task, sweep, failed = tasks.unpicklable_result, dict(seed=seeds), ["seed=0"]
+        elif name == "unloadable":
+            task, sweep, failed = (
+                tasks.two_arg_error_on_one,
+                dict(seed=seeds),
+                ["seed=1"],
+            )
+        elif name == "outside-the-task":
+            m.setenv("MUSHIN_TEST_RAISE_BEFORE_START", "1")
+            task, failed = tasks.fail_on_one, ["seed=2"]
+            sweep = dict(seed=multirun([0, 2, 3]), overrides=[tasks.RAISE_BEFORE_START])
+        elif name == "sample":
+            task, failed = tasks.fail_on_one, []
+            sweep = dict(seed=multirun([0, 2, 3, 4, 5]), sample=3, sample_seed=1)
+        elif name == "resume":
+            m.setenv("MUSHIN_TEST_RAISE", "1")
+            tasks.raise_when_told.run(seed=multirun([0, 1, 2, 3]), **nan)
+            m.delenv("MUSHIN_TEST_RAISE")
+            task, failed = tasks.raise_when_told, []
+            sweep = dict(seed=multirun([0, 1, 2, 3]), resume=True)
+        elif name == "cache":
+            # Two of four cells cached by a run into another dir.
+            first = {**nan, "working_dir": f"{wd}-first"}
+            tasks.fail_on_one.run(seed=multirun([0, 2]), cache_dir=str(cache), **first)
+            task, failed = tasks.fail_on_one, []
+            sweep = dict(seed=multirun([0, 2, 3, 4]), cache_dir=str(cache))
+        else:
+            raise AssertionError(f"no scenario {name!r}")
+        ds = task.run(**sweep, **nan)
+        return ds, task.workflow, None, failed
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "completed",
+        "raised",
+        "raised-under-raise",
+        "none",
+        "unpicklable",
+        "unloadable",
+        "outside-the-task",
+        "sample",
+        "resume",
+        "cache",
+    ],
+)
+def test_a_job_of_several_cells_records_what_one_cell_jobs_would(
+    tmp_path, monkeypatch, name
+):
+    """Each scenario runs with one cell per job and with three, and leaves
+    the same records, error files, manifest, failed and skipped cells and
+    dataset (the budget, which a job's late cells meet sooner, is
+    `test_the_budget_skips_the_cells_a_job_reaches_late`).
+
+    Mutants caught: the job stops after a failed cell (raised, unloadable,
+    outside-the-task); no per-cell `try` (outside-the-task); `_wait` takes
+    the group's result as one cell's return (every scenario); the cell's
+    return only dumped, not loaded back (unloadable)."""
+    left, raised, jobs = {}, {}, {}
+    for k in (1, 3):
+        wd = tmp_path / f"k{k}"
+        ds, run, error, failed = _scenario(
+            name, wd, _grouped(k), monkeypatch, tmp_path / f"cache{k}"
+        )
+        left[k] = _left(wd, run, ds)
+        raised[k] = None if error is None else (type(error), str(error))
+        jobs[k] = len(_job_dirs(wd))
+        # The run's verdict first, so a scenario that did not go where it
+        # means to cannot pass on two runs that went wrong alike.
+        if run is not None:
+            assert [f[0] for f in left[k]["failures"]] == failed, k
+    assert jobs[3] < jobs[1]  # cells were grouped
+    assert raised[3] == raised[1]
+    assert left[3].keys() == left[1].keys()
+    for part in left[1]:
+        assert left[3][part] == left[1][part], part
+
+
+@pytest.mark.parametrize("on_error", ["nan", "raise"])
+@pytest.mark.parametrize("where", ["while-running", "before-its-dir"])
+def test_a_job_that_dies_part_way_keeps_its_finished_cells(
+    tmp_path, monkeypatch, on_error, where
+):
+    """A job of cells 0 to 2 dies at cell 1: cell 0 keeps its result (its
+    record holds it), cells 1 and 2 fail, as the reload says too (#406). A
+    resume reuses cell 0 and runs 1 and 2, in one job. With one cell per job
+    cell 2 would have run: the difference a job of several cells gives up.
+
+    Mutant caught: a dead job's first cell's return used for its other
+    cells."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **GROUPS)
+    if where == "while-running":
+        monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    else:
+        monkeypatch.setenv("MUSHIN_TEST_DIE_BEFORE_START", "1")
+        sweep["overrides"] = [tasks.DIE_BEFORE_START]
+    if on_error == "raise":
+        with pytest.raises(submitit.core.utils.UncompletedJobError):
+            tasks.die_when_told.run(**sweep)
+    else:
+        with pytest.warns(UserWarning, match="2 run"):
+            ds = tasks.die_when_told.run(on_error="nan", **sweep)
+        assert ds["v"].values[0] == 0.0 and np.isnan(ds["v"].values[1:]).all()
+    assert [_status(wd / n) for n in "012"] == ["completed", "failed", "failed"]
+    errors = sorted(p.parent.name for p in wd.glob("*/mushin_error.txt"))
+    assert errors == (["1", "2"] if on_error == "nan" else [])
+    reloaded = _reloaded(wd)
+    again = reloaded.to_xarray()["v"].values
+    assert again[0] == 0.0 and np.isnan(again[1:]).all()
+    if on_error == "nan":  # under "raise" no manifest says failed
+        assert _combos(reloaded.failures) == ["seed=1", "seed=2"]
+    before = _record(wd / "0")
+
+    monkeypatch.delenv("MUSHIN_TEST_DIE", raising=False)
+    monkeypatch.delenv("MUSHIN_TEST_DIE_BEFORE_START", raising=False)
+    ds = tasks.die_when_told.run(resume=True, on_error=on_error, **sweep)
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
+    # Reused: its record names the job that computed it.
+    after = _record(wd / "0")
+    assert after["attempt"] == before["attempt"]
+    assert after["submitit"]["job_id"] == before["submitit"]["job_id"]
+    pids = ds["pid"].values
+    assert pids[1] == pids[2] != pids[0]  # one job, for the two cells it ran
+
+
+def test_a_dead_jobs_unreached_cell_leaves_an_earlier_runs_record(
+    tmp_path, monkeypatch
+):
+    """A fresh run (not a resume) into a dir an earlier run filled, whose job
+    dies at cell 1: cell 2, never reached, keeps the earlier run's record,
+    with this run's snapshot beside it, so the reload reports it failed as
+    the run did (#406, through a job of several cells). A guard of the dead
+    path per cell; the mutant of the test above fails it too."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **GROUPS)
+    tasks.die_when_told.run(**sweep)
+    earlier = (wd / "2" / "mushin_cell_status.json").read_text()
+    monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
+    with pytest.warns(UserWarning, match="2 run"):
+        tasks.die_when_told.run(on_error="nan", **sweep)
+    this_run = _record(wd / "0")["run_id"]
+    assert this_run != json.loads(earlier)["run_id"]
+    assert (wd / "2" / "mushin_cell_status.json").read_text() == earlier
+    assert snapshot_run_stamp(wd / "2" / ".hydra" / "hydra.yaml") == this_run
+    reloaded = _reloaded(wd)
+    assert _combos(reloaded.failures) == ["seed=1", "seed=2"]
+    assert reloaded.to_xarray()["v"].values[0] == 0.0
+
+
+def test_cells_sharing_a_dir_in_one_job_never_take_each_others_result(
+    tmp_path, monkeypatch
+):
+    """Two cells of one job in one dir (a constant `hydra.sweep.subdir`); the
+    second dies before its runner starts. Its job id is the first's, so only
+    the job number tells the first's completed record from its own.
+
+    Mutant caught: `record_dead_cell` matching by job id alone (the commit
+    before this one), which reports 0.1 for both."""
+    monkeypatch.setenv("MUSHIN_TEST_SHARED_DIE", "1")
+    with pytest.warns(UserWarning, match="1 run"):
+        ds = tasks.lr_value.run(
+            lr=multirun([0.1, 0.2]),
+            seed=0,
+            working_dir=str(tmp_path / "s"),
+            on_error="nan",
+            overrides=[tasks.SHARED_DIE],
+            **GROUPS,
+        )
+    v = ds["v"].values
+    assert v[0] == 0.1 and np.isnan(v[1])
+
+
+def _runs(path: Path) -> list[int]:
+    """The seeds `signal_self_once` logged, a line per run of its cell."""
+    return [int(line.split()[0]) for line in path.read_text().splitlines()]
+
+
+def test_a_requeued_job_skips_the_cells_it_finished(tmp_path, monkeypatch):
+    """Cell 1 sends its job the signal of a preemption: submitit checkpoints
+    the job and requeues it. The requeued job skips cell 0, which it
+    finished, and runs cell 1 again (its attempt 2), then cell 2. A large
+    time limit, so submitit takes the signal for a preemption (with one
+    minute, any signal is a time limit's).
+
+    Mutant caught: `checkpoint()` not carrying the finished cells, which
+    runs cell 0 again."""
+    runs = tmp_path / "runs.txt"
+    monkeypatch.setenv("MUSHIN_TEST_RUNS", str(runs))
+    wd = tmp_path / "s"
+    ds = tasks.signal_self_once.run(
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        launcher="submitit_local",
+        launcher_config={"timeout_min": 20, "cells_per_job": 3},
+    )
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
+    assert _runs(runs) == [0, 1, 1, 2]
+    records = [_record(wd / n) for n in "012"]
+    assert [r["attempt"] for r in records] == [1, 2, 1]
+    assert {r["status"] for r in records} == {"completed"}
+
+
+def test_out_of_time_fails_the_running_cell_and_the_job_runs_on(tmp_path, monkeypatch):
+    """With no requeue left at the time limit, submitit raises "Job not
+    requeued" in the running cell, which fails with that error; the job then
+    runs its next cell, as one-cell jobs would have. A guard of the design's
+    one rule (every cell of a job runs), which the job-stops-after-a-failed-
+    cell mutant fails."""
+    runs = tmp_path / "runs.txt"
+    monkeypatch.setenv("MUSHIN_TEST_RUNS", str(runs))
+    wd = tmp_path / "s"
+    with pytest.warns(UserWarning, match=r"failed: \['seed=1'\]"):
+        ds = tasks.signal_self_once.run(
+            seed=multirun([0, 1, 2]),
+            working_dir=str(wd),
+            on_error="nan",
+            overrides=["++hydra.launcher.max_num_timeout=0"],
+            **GROUPS,
+        )
+    v = ds["v"].values
+    assert v[0] == 0.0 and np.isnan(v[1]) and v[2] == 2.0
+    assert "not requeued" in (wd / "1" / "mushin_error.txt").read_text()
+    assert _status(wd / "2") == "completed"
+    assert _runs(runs) == [0, 1, 2]
+
+
+def test_show_lists_the_cells_a_job_has_not_reached_as_queued(
+    tmp_path, monkeypatch, mushin_local
+):
+    """Mid-run, the job has finished cell 0 and waits before cell 1: cells 1
+    and 2 are queued, with the job's id. The launch file names 3 cells and
+    one job id, and is gone once the job has been waited on.
+
+    Mutant caught: `show`'s rule 1 matching by a job id its launch shares
+    (the commit before this one), which lists no row for cells 1 and 2."""
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [1, 2])
+    seen = {}
+    watched = _watch(monkeypatch, mushin_local, wd, gate, ungated=[0])
+    wait = mushin_local.MushinLocalLauncher._wait
+
+    def wait_noting_the_launch(self, jobs, job_params):
+        seen["launch"] = [
+            json.loads(p.read_text()) for p in (wd / "mushin_jobs").glob("*.json")
+        ]
+        return wait(self, jobs, job_params)
+
+    monkeypatch.setattr(
+        mushin_local.MushinLocalLauncher, "_wait", wait_noting_the_launch
+    )
+    tasks.record_pid.run(
+        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **GROUPS
+    )
+    (launch,) = seen["launch"]
+    assert [c["num"] for c in launch["cells"]] == [0, 1, 2]
+    (job,) = {c["job_id"] for c in launch["cells"]}
+    assert watched["ids"] == [job] * 3
+    rows = [(r["seed"], r["status"], r["job"]) for r in watched["rows"]]
+    assert rows == [(0, "completed", job), (1, "queued", job), (2, "queued", job)]
+    assert _show(wd) == {0: "completed", 1: "completed", 2: "completed"}
+    assert _launches(wd) == []
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"timeout_min": 1, "cells_per_job": 2, "tasks_per_node": 2},
+        {"timeout_min": 1, "cells_per_job": 0},
+    ],
+    ids=["several-tasks", "zero"],
+)
+def test_cells_per_job_is_refused_before_anything_is_written(tmp_path, config):
+    """Refused in the launcher's `setup`, which Hydra runs before it writes
+    the sweep's `multirun.yaml`. (OmegaConf takes `"2"` as 2 and refuses
+    `True` and 1.5 itself, before `setup`.) Mutant caught: no check."""
+    wd = tmp_path / "s"
+    with pytest.raises(ValueError, match="cells_per_job"):
+        tasks.record_pid.run(
+            seed=multirun([0, 1]),
+            working_dir=str(wd),
+            launcher="submitit_local",
+            launcher_config=config,
+        )
+    assert not (wd / "multirun.yaml").exists()
+    assert _job_dirs(wd) == []
+
+
+def test_the_budget_skips_the_cells_a_job_reaches_late(tmp_path, monkeypatch):
+    """Every cell checks the budget when it starts, so a job's cells after
+    the deadline are skipped, and a resume with time to spare runs them. A
+    guard that a job of several cells keeps the runner's check per cell;
+    mutant caught: `_TaskRunner._budget_expired` always False."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1, 2]), working_dir=str(wd), **GROUPS)
+    with pytest.warns(UserWarning, match="skip"):
+        ds = tasks.slow.run(max_total_seconds=1, **sweep)
+    v = ds["v"].values
+    assert v[0] == 0.0 and np.isnan(v[1:]).all()
+    assert [_status(wd / n) for n in "012"] == ["completed", "skipped", "skipped"]
+    assert _combos(tasks.slow.workflow.skipped) == ["seed=1", "seed=2"]
+    monkeypatch.setenv("MUSHIN_TEST_SLEEP", "0")
+    again = tasks.slow.run(resume=True, **sweep)
+    assert again["v"].values.tolist() == [0.0, 1.0, 2.0]
+
+
+def test_a_cell_keeps_its_own_return_when_the_next_reuses_the_object(tmp_path):
+    """A task that fills and returns one dict for every cell: each cell of a
+    job keeps the return it gave, not what a later cell of the job left in
+    the dict (#412)."""
+    ds = tasks.shared_metrics.run(
+        seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), **GROUPS
+    )
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]

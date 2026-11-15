@@ -47,7 +47,7 @@ Python 3.11 to 3.15 is supported. Intel macOS is not.
 | Inspect finished runs | `mushin.show`, `mushin.best`, `mushin.diff`, or the MCP server |
 | Run cells in parallel on one machine | `launcher="joblib"` |
 | Run several jobs on each GPU | Ray; see the GPU packing guide (Going further). `pin_gpu_round_robin` needs a fresh process per job, which joblib stops giving once cells outnumber `n_jobs` |
-| Run each cell as a SLURM job | `launcher="submitit_slurm"` with `launcher_config=mushin.slurm(...)`; see the SLURM guide (Going further) |
+| Run each cell as a SLURM job | `launcher="submitit_slurm"` with `launcher_config=mushin.slurm(...)`; for many short cells, `mushin.slurm(..., cells_per_job=20)` runs 20 cells per job. See the SLURM guide (Going further) |
 | Train one cell across several GPUs or nodes | the multi-node guide (see Going further) |
 
 ## A template experiment
