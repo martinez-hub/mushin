@@ -36,7 +36,9 @@ def collect(working_dir, metrics_filename="mushin_metrics.json"):
     (out of memory, ``scancel``, a time limit) is recorded failed, the sweep
     manifest is written, the run's launch files and budget start file are
     removed, and the dataset is returned. Call it from a new Python session
-    if you like: it needs no import of the script that ran the sweep.
+    if you like: it needs no import of the script that ran the sweep. For a
+    relative ``working_dir``, call it from the directory ``run()`` was
+    called in.
 
     Parameters
     ----------
@@ -62,9 +64,15 @@ def collect(working_dir, metrics_filename="mushin_metrics.json"):
         preemption (nothing is written; collect again later). Or a job's
         end cannot be read here: ``sacct`` gives no answer (the state reads
         ``UNKNOWN``), or a ``submitit_local`` run was submitted from another
-        host. Or the jobs' files cannot be loaded. Or, under
-        ``on_error="raise"``, a cell failed: its own error is raised, once
-        every cell is recorded, as a waited run raises it.
+        host. Or the jobs' files cannot be loaded here: their submissions,
+        or a result whose type does not import here (nothing is written;
+        collect where it does). Or ``working_dir`` is not the dir the run
+        was submitted in (a copy or a move of it), the run's
+        ``submitit_folder`` lies outside it, or the run's ``working_dir``
+        was relative and this process's working directory is not the one
+        ``run()`` was called in (nothing is written). Or,
+        under ``on_error="raise"``, a cell failed: its own error is
+        raised, once every cell is recorded, as a waited run raises it.
     ImportError
         The ``slurm`` extra is not installed.
 
@@ -72,14 +80,13 @@ def collect(working_dir, metrics_filename="mushin_metrics.json"):
     -----
     A SLURM job's end is read from ``sacct``, as submitit reads it; a
     ``submitit_local`` job's from its process, on the host that submitted
-    it. Collect a ``submitit_local`` run from the process that submitted it,
-    or once that process has exited: another process cannot tell its
-    exited jobs from running ones until then.
+    it.
 
-    Collect unpickles the jobs' submission files under the sweep's
-    ``.submitit/`` folder, which hold the task, so collect a
-    ``working_dir`` you trust, with the task's code importable as in the
-    jobs, and keep ``.submitit/`` until the run is collected. While it
+    Collect unpickles the jobs' submission and result files under the
+    sweep's ``.submitit/`` folder, which hold the task and what it
+    returned, so collect a ``working_dir`` you trust, with the task's code
+    and the types it returns importable as in the jobs, and keep
+    ``.submitit/`` until the run is collected. While it
     waits on the jobs, collect sets Hydra's process-wide state to the
     driver's, and restores it after.
 
@@ -149,6 +156,9 @@ def collect_into(wf, working_dir, metrics_filename):
                 f"mushin.collect cannot rebuild the jobs of {launch.path.name}, "
                 "written without their submitit folder."
             )
+        if launch.cells:
+            # A copy or a move of the run's dir names the original's jobs.
+            _refuse_elsewhere(root, launch.submitit_folder, folder=True)
     rebuilt = {launch.path: plugin.rebuild_jobs(launch) for launch in ours}
     _refuse_unended(root, ours, rebuilt, plugin)
     plugin.await_results([job for jobs in rebuilt.values() for job in jobs])
@@ -159,6 +169,13 @@ def collect_into(wf, working_dir, metrics_filename):
         for launch in ours
         if launch.cells
     }
+    # Where a dead or settled cell is recorded: with the jobs' files moved
+    # into this dir by hand, still the original.
+    for launcher, state in loaded.values():
+        _refuse_elsewhere(root, plugin.sweep_dir(launcher, state), folder=False)
+    # And every result: one that does not load here would be read as a job
+    # that gave none, and a completed cell recorded failed.
+    plugin.load_results([job for jobs in rebuilt.values() for job in jobs])
     # A batch whose cells all settled composes them with another batch's
     # launcher, which is the same one, sent with the same config.
     anyone = next(iter(loaded.values()))
@@ -245,6 +262,44 @@ def _run_id(root: Path) -> str | None:
             "working_dir, or none of its cells was launched."
         )
     return hydra_run_stamp(load_from_yaml(path))
+
+
+def _refuse_elsewhere(root: Path, path: str, folder: bool) -> None:
+    """Raise, writing nothing, unless ``path`` lies under ``root``: the
+    jobs' submitit folder (``folder``), which the launch file names as an
+    absolute path, or the run's sweep dir, which their submission names as
+    ``run()`` was given it and collect, recording a cell there, makes
+    absolute against this process's working directory, so ``path`` is
+    resolved that way. In a copy or a move of the dir a run was submitted
+    in, both name the original, and for a relative ``working_dir``
+    collected from another dir, the sweep dir is one under that dir:
+    collect would read one dir's jobs, or record their cells in another.
+    Compared by path components, not by text: ``sweep-orig`` is not under
+    ``sweep``."""
+    where = Path(path).resolve()
+    if where.is_relative_to(root):
+        return
+    shown = repr(path)
+    if not Path(path).is_absolute():
+        shown += f", which from this process's working directory is {str(where)!r}"
+    if folder:
+        what = "keep their files in"
+        advice = (
+            "Collect a copied or moved run in the dir it was submitted in. A run "
+            "whose `submitit_folder` lies outside its `working_dir` cannot be "
+            "collected: once its jobs have ended, run the sweep again with "
+            "`resume=True`, which reuses the cells they completed."
+        )
+    else:
+        what = "record their cells in"
+        advice = (
+            "Collect a copied or moved run in the dir it was submitted in, and one "
+            "given a relative `working_dir` from the dir its run() was called in."
+        )
+    raise RuntimeError(
+        f"mushin.collect: this run was submitted in another dir than "
+        f"{str(root)!r}, as its jobs {what} {shown}; nothing was written. {advice}"
+    )
 
 
 def _refuse_missing(root: Path, launches) -> None:

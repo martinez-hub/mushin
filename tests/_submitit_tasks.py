@@ -183,6 +183,31 @@ def unpicklable_result(seed):
 
 
 @mushin.sweep
+def returns_a_jobs_only_type(seed):
+    """In a job of two tasks, the second returns its metrics as a dict
+    subclass from `_mushin_jobs_only`, a module a test puts on the jobs'
+    PYTHONPATH only: a process without it cannot unpickle that task's
+    result. The first returns a dict, whose result loads anywhere, once the
+    second has started: under `cache_dir=`, a first task done before the
+    second looks in the cache leaves it the cell's entry to reuse, and the
+    second then returns that dict without running."""
+    import time
+
+    import submitit
+
+    started = "rank1_started"
+    if submitit.JobEnvironment().global_rank == 1:
+        open(started, "w").close()
+        import _mushin_jobs_only
+
+        return _mushin_jobs_only.Metrics(v=float(seed))
+    deadline = time.monotonic() + 50
+    while not os.path.exists(started) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return dict(v=float(seed))
+
+
+@mushin.sweep
 def first_task_reports(seed):
     """In a job of two tasks, the first returns metrics at once and the
     second returns None once the first has written them."""

@@ -301,7 +301,8 @@ computing cells. On SLURM the jobs keep running too, and a `run()` on that
 To leave a SLURM sweep running without a live process, pass `wait=False`:
 `run()` submits the jobs and returns a dict (`working_dir`, `run_id`,
 `submitted`, `job_ids`) instead of the result. Once the jobs have ended,
-`mushin.collect(working_dir)` returns the dataset, from any session; it
+`mushin.collect(working_dir)` returns the dataset, from any session (for a
+relative `working_dir`, one in the directory `run()` was called in); it
 raises, writing nothing, while any job is queued or running. A `run()` on that
 `working_dir` is refused until the run is collected or its jobs have ended.
 

@@ -128,6 +128,15 @@ def _to_override_element(item: Any) -> str:
 _LIST_TYPES = (list, tuple, range, UserList)
 
 
+def _override_value(value: Any) -> str:
+    """``value`` as run() writes a keyword's value into its override: a
+    `multirun` as a ``choice(...)`` sweep of its elements, any other value
+    as one element (a string quoted, a list in brackets)."""
+    if isinstance(value, multirun):
+        return f"choice({','.join(_to_override_element(item) for item in value)})"
+    return _to_override_element(value)
+
+
 def _is_list_config(item: Any) -> bool:
     from omegaconf import ListConfig
 
@@ -3757,11 +3766,17 @@ class BaseWorkflow:
             or _takes_wait(getattr(self, "pre_task", None))
             or "wait" in _config_field_names(self.eval_task_cfg)
         ):
+            # The value as run() would write it, not its text: "a,b" would
+            # split, None arrive as the string "None", and a multirun sweep
+            # nothing. Then as a Python string literal, so the line pastes as
+            # written whatever quotes or backslashes the value holds: JSON's
+            # is one, and always double-quoted.
+            override = json.dumps(f"++wait={_override_value(wait)}", ensure_ascii=False)
             raise ValueError(
                 "`wait` is run()'s own parameter (it leaves the jobs running for "
                 "`mushin.collect` when False), and this sweep's task, pre_task or "
                 "config also has a `wait`. Pass that one as an override: "
-                f'`overrides=["++wait={wait}"]`.'
+                f"`overrides=[{override}]`."
             )
         detach = wait is False
         if wait is not _WAIT_DEFAULT and not isinstance(wait, bool):

@@ -679,6 +679,46 @@ if _plugin_launcher is not None:
             "code importable here, as in the jobs; nothing was written."
         )
 
+    def sweep_dir(launcher, state) -> str:
+        """The ``hydra.sweep.dir`` ``launcher`` was sent with, resolved as
+        `_composed` resolves it for a cell, under the Hydra state it was sent
+        with: a dead or settled cell's dir starts with it. Relative when
+        ``run()`` was given a relative ``working_dir``."""
+        with _as_submitted(state):
+            return str(OmegaConf.select(launcher.config, "hydra.sweep.dir"))
+
+    def load_results(jobs) -> None:
+        """Load every result file the tasks of ``jobs`` wrote, and raise,
+        naming the files, when one does not load. `_wait` reads a result it
+        cannot load as a job that gave none, and a cell of a job of several
+        tasks is then recorded failed, its metrics file and cache entry
+        deleted, though the job completed. A result holds what the task
+        returned, so one whose type comes from a module only the jobs import
+        loads there and not here: refused before anything is written, the
+        run can still be collected where it loads. `_wait` loads each again,
+        through submitit's `job.results()`, which takes none loaded
+        before."""
+        from submitit.core.utils import pickle_load
+
+        errors = []
+        for job in jobs:
+            for task in list(job._sub_jobs) or [job]:
+                path = task.paths.result_pickle
+                if not path.exists():
+                    continue  # the task died: `_wait` records its cell
+                try:
+                    pickle_load(path)
+                except Exception as exc:  # noqa: BLE001 - raised below
+                    errors.append(f"{path}: {exc!r}")
+        if errors:
+            more = f" and {len(errors) - 3} more" if len(errors) > 3 else ""
+            raise RuntimeError(
+                f"mushin.collect could not load these results of the run's jobs: "
+                f"{'; '.join(errors[:3])}{more}. A result holds what the task "
+                "returned, so collect where the task's code and the types it "
+                "returns import as in the jobs; nothing was written."
+            )
+
     @contextlib.contextmanager
     def _as_submitted(state):
         """Hydra's singletons and OmegaConf's resolvers as the driver sent

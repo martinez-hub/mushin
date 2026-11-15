@@ -13,6 +13,7 @@ Running jobs are in tests/test_submitit_local.py."""
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import json
 import re
@@ -59,6 +60,12 @@ def _task(lr):
 def _waits(lr, wait):
     """A task with a parameter of its own named `wait`."""
     return dict(v=float(lr) * wait)
+
+
+@mushin.sweep
+def _keeps_wait(lr, wait):
+    """A task with a `wait` of its own, of any type."""
+    return dict(v=float(lr))
 
 
 class _WaitField(MultiRunMetricsWorkflow):
@@ -156,6 +163,31 @@ def test_wait_is_refused_where_it_names_the_tasks_own_value(tmp_path, sweep):
     sweep.run(lr=multirun([1.0]), overrides=["++wait=2"], working_dir=str(wd))
     workflow = getattr(sweep, "workflow", sweep)
     assert [cfg["wait"] for cfg in workflow.cfgs] == [2]
+
+
+@pytest.mark.parametrize(
+    "wait, received",
+    [
+        pytest.param(2, [2], id="int"),
+        pytest.param(None, [None], id="None"),
+        pytest.param("a,b", ["a,b"], id="string"),
+        pytest.param('say "hi" in C:\\data', ['say "hi" in C:\\data'], id="quotes"),
+        pytest.param(multirun([0.5, 2.0]), [0.5, 2.0], id="multirun"),
+    ],
+)
+def test_the_wait_hint_passes_the_value_as_run_would(tmp_path, wait, received):
+    """The override the refusal suggests, pasted as written, gives the task
+    the value run(wait=...) was given: written as run() writes a keyword's
+    value (a string quoted, a `multirun` swept), not as its text, which
+    gave a string "None", split "a,b", and swept nothing (review of #414)."""
+    wd = tmp_path / "s"
+    with pytest.raises(ValueError, match=re.escape('overrides=["++wait=')) as info:
+        _keeps_wait.run(lr=multirun([1.0]), wait=wait, working_dir=str(wd))
+    written = re.search(r"`overrides=(\[.*\])`", str(info.value)).group(1)
+    _keeps_wait.run(
+        lr=multirun([1.0]), overrides=ast.literal_eval(written), working_dir=str(wd)
+    )
+    assert [cfg["wait"] for cfg in _keeps_wait.workflow.cfgs] == received
 
 
 def test_a_runner_pickled_by_an_earlier_mushin_waits():

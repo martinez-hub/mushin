@@ -2124,3 +2124,210 @@ def test_a_detached_runs_jobs_refuse_the_next_run(tmp_path, monkeypatch, left):
     gate.touch()
     ds = _collect(lambda: mushin.collect(wd))
     assert ds["v"].values.tolist() == [0.0, 1.0]
+
+
+def _tree(root: Path) -> dict:
+    """Every file under ``root``, by its content."""
+    return {p: p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _attempt(collect):
+    """The error ``collect()`` raised, or None; its warnings dropped."""
+    import warnings
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            collect()
+    except Exception as exc:  # noqa: BLE001 - the test asserts on it
+        return exc
+    return None
+
+
+def _ended(wd: Path):
+    """The one launch of ``wd``, once its jobs have ended."""
+    from mushin import _jobs
+
+    (launch,), _ = _jobs.read_launches(wd)
+    assert _until(lambda: _jobs.ended_locally(launch), 60)
+    return launch
+
+
+@pytest.fixture
+def jobs_only(tmp_path, monkeypatch):
+    """A folder holding `_mushin_jobs_only` (`tasks.returns_a_jobs_only_type`),
+    on the jobs' PYTHONPATH and not on this process's sys.path."""
+    folder = tmp_path / "jobs_only"
+    folder.mkdir()
+    (folder / "_mushin_jobs_only.py").write_text(
+        "class Metrics(dict):\n    pass\n", encoding="utf-8"
+    )
+    path = [str(folder), os.environ.get("PYTHONPATH", "")]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(p for p in path if p))
+    yield folder
+    # A test that imported it must not leave it to the next test this
+    # worker runs, which would then load the results it means not to.
+    sys.modules.pop("_mushin_jobs_only", None)
+
+
+# Jobs of two tasks: their cells' completed records cannot stand for a
+# result `_wait` could not read, so a misread result would fail them.
+_TWO_TASKS = dict(
+    launcher="submitit_local", launcher_config={"timeout_min": 1, "tasks_per_node": 2}
+)
+
+
+def test_collect_where_a_result_cannot_be_loaded_writes_nothing(
+    tmp_path, jobs_only, left
+):
+    """A result this process cannot unpickle (its type comes from a module
+    only the jobs import) stops collect before it records a cell. Read as a
+    job that gave no result, it rewrote the completed cells of a job of
+    several tasks as failed, deleted their metrics files and cache entries,
+    and removed the launch files, so the run could not be collected again
+    (review of #414)."""
+    wd = tmp_path / "s"
+    sweep = dict(seed=multirun([0, 1]), on_error="nan", cache_dir=str(tmp_path / "c"))
+    _detach(tasks.returns_a_jobs_only_type, wd, left, **sweep, **_TWO_TASKS)
+    launch = _ended(wd)
+    assert [_status(wd / n) for n in "01"] == ["completed", "completed"]
+    before = _tree(tmp_path)
+    error = _attempt(lambda: mushin.collect(wd))
+    # Records, metrics files, cache entries and launch files as they were.
+    assert _tree(tmp_path) == before
+    assert _launches(wd) == [launch.path.name]
+    assert isinstance(error, RuntimeError), error
+    message = str(error)
+    # The second task's: the first's loads.
+    assert f"{launch.cells[0].job_id}_1_result.pkl" in message
+    assert "ModuleNotFoundError" in message and "_mushin_jobs_only" in message
+
+
+def test_a_result_collect_could_not_load_is_collected_where_it_loads(
+    tmp_path, monkeypatch, jobs_only, left
+):
+    """Once collect runs where the jobs' result types import, it gets what
+    a waited run gets: the failed collect before it changed nothing."""
+    wd, waited = tmp_path / "s", tmp_path / "waited"
+    sweep = dict(seed=multirun([0, 1]), on_error="nan", **_TWO_TASKS)
+    _detach(tasks.returns_a_jobs_only_type, wd, left, **sweep)
+    _ended(wd)
+    first = _attempt(lambda: mushin.collect(wd))
+    monkeypatch.syspath_prepend(str(jobs_only))
+    wf = MultiRunMetricsWorkflow().collect(wd)
+    collected = _comparable(wd, wf, wf.to_xarray(), "several-tasks")
+    ds = tasks.returns_a_jobs_only_type.run(working_dir=str(waited), **sweep)
+    wf = tasks.returns_a_jobs_only_type.workflow
+    assert collected == _comparable(waited, wf, ds, "several-tasks")
+    assert ds["v"].values.tolist() == [0.0, 1.0]
+    assert isinstance(first, RuntimeError), first
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "copied",
+        "copied, its launch file naming the copy's jobs' files",
+        "moved",
+        "relative working_dir, collected from another dir",
+    ],
+)
+def test_collect_writes_only_into_the_dir_the_run_was_submitted_in(
+    tmp_path, monkeypatch, left, shape
+):
+    """A run's launch file names its jobs' folder, and its jobs' submission
+    the dir their cells are in, so a copy or a move of a sweep dir, or a
+    relative `working_dir` collected from another dir, would read the jobs
+    of one dir and record cells in another. Collect refuses such a run
+    before it writes anything (review of #414). The copy's name begins
+    with the original's, so a check by text prefix would let it through."""
+    orig, given = tmp_path / "sweep-orig", tmp_path / "sweep"
+    sweep = dict(seed=multirun([0, 1, 2]), on_error="nan", **LOCAL)
+    if shape.startswith("relative"):
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        monkeypatch.chdir(tmp_path / "a")
+        orig = given = tmp_path / "a" / "sweep"
+        summary = tasks.die_on_two.run(working_dir="sweep", wait=False, **sweep)
+        left.extend((orig, job_id) for job_id in summary["job_ids"])
+    else:
+        _detach(tasks.die_on_two, orig, left, **sweep)
+    launch = _ended(orig)
+    if shape == "moved":
+        orig.rename(given)
+    elif shape.startswith("copied"):
+        import shutil
+
+        shutil.copytree(orig, given, symlinks=True)
+    if shape.startswith("copied, "):
+        # The copy's jobs' files are the copy's own: only the dir its jobs'
+        # submission names is the original's.
+        path = given / "mushin_jobs" / launch.path.name
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("folder", "submitit_folder"):
+            data[key] = data[key].replace(str(orig), str(given))
+        path.write_text(json.dumps(data), encoding="utf-8")
+    if shape.startswith("relative"):
+        monkeypatch.chdir(tmp_path / "b")
+    before = _tree(tmp_path)
+    error = _attempt(lambda: mushin.collect(given))
+    assert _tree(tmp_path) == before
+    assert isinstance(error, RuntimeError), error
+    assert "was submitted in" in str(error), error
+    assert "nothing was written" in str(error)
+
+
+_LIVE_DRIVER = """\
+import json, sys, time
+import _submitit_tasks as tasks
+from mushin import multirun
+summary = tasks.record_pid.run(
+    seed=multirun([0, 1]), working_dir=sys.argv[1], wait=False,
+    launcher="submitit_local", launcher_config={"timeout_min": 1},
+)
+print(json.dumps(summary), flush=True)
+time.sleep(120)  # alive, not reaping its jobs' processes
+"""
+
+
+def test_another_process_collects_while_the_submitting_one_lives(tmp_path, left):
+    """A local job's process is a child of the driver that submitted it,
+    which does not reap it while it sleeps: once it exits it is a zombie,
+    which counts as ended, so another process on the host collects the run
+    while the driver lives (review of #414)."""
+    import subprocess
+
+    from mushin import _jobs
+
+    wd = tmp_path / "s"
+    with open(tmp_path / "driver.err", "w", encoding="utf-8") as err:
+        driver = subprocess.Popen(
+            [sys.executable, "-c", _LIVE_DRIVER, str(wd)],
+            stdout=subprocess.PIPE,
+            stderr=err,
+            text=True,
+            encoding="utf-8",
+        )
+    try:
+        line = driver.stdout.readline()
+        while line and not line.startswith("{"):
+            line = driver.stdout.readline()
+        assert line, (tmp_path / "driver.err").read_text(encoding="utf-8")
+        summary = json.loads(line)
+        left.extend((wd, job_id) for job_id in summary["job_ids"])
+        pids = [int(job_id) for job_id in summary["job_ids"]]
+
+        def zombies() -> bool:
+            found = _jobs._processes(pids) or {}
+            return len(found) == len(pids) and all(
+                state.startswith("Z") for state, _ in found.values()
+            )
+
+        assert _until(zombies, 60)
+        ds = mushin.collect(wd)
+        assert driver.poll() is None  # collected while the driver lives
+    finally:
+        driver.kill()
+        driver.wait()
+    assert ds["v"].values.tolist() == [0.0, 1.0]
+    assert _launches(wd) == []

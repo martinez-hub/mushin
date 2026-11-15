@@ -121,10 +121,17 @@ sweep. Some details:
   `sacct`. A job `sacct` does not report reads `UNKNOWN`, which also refuses:
   `sacct` may be missing here, may not list the job yet, or may not see the
   job's cluster.
-- `collect` loads the jobs' submission files under `<working_dir>/.submitit/`
-  and imports your task's code, as the jobs did: keep that folder until you
-  have collected, run `collect` where the code imports as in the jobs, and
-  only on a `working_dir` you trust.
+- `collect` loads the jobs' submission and result files under
+  `<working_dir>/.submitit/` and imports your task's code, as the jobs did:
+  keep that folder until you have collected, run `collect` where the code
+  and the types your task returns import as in the jobs, and only on a
+  `working_dir` you trust. A result that does not load stops `collect`, with
+  nothing written.
+- Collect a run in the dir it was submitted in: the jobs' files name that
+  dir, so `collect` refuses a copy or a move of it, and a run whose
+  `submitit_folder` lies outside its `working_dir` (once its jobs have ended,
+  a `resume=True` run reuses the cells they completed). With a relative
+  `working_dir`, collect from the directory `run()` was called in.
 - `on_error` works as in a waited run. Under `"raise"`, `collect` records
   every cell and raises the first failed cell's own error, with no manifest;
   a second `collect` then reloads the sweep, the failed cell NaN. Under
@@ -140,9 +147,7 @@ sweep. Some details:
 - Collecting a run collected already, or run with the default `wait=True`,
   only reloads it (`load_from_dir`), and writes nothing.
 - A `launcher="submitit_local"` job's id is a process id on the machine that
-  submitted it, so collect such a run there, from the process that submitted
-  it or once that process has exited: until then another process cannot tell
-  its exited jobs from running ones.
+  submitted it, so collect such a run on that host.
 - `wait` is `run()`'s own parameter. A task, `pre_task` or config field of
   that name takes its value as an override, `overrides=["++wait=..."]`;
   `run(wait=...)` for such a sweep raises a `ValueError` saying so.
