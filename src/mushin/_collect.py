@@ -343,7 +343,9 @@ def _refuse_unended(root: Path, launches, rebuilt, plugin) -> None:
     has ended once each of its tasks wrote its result or SLURM's accounting
     gives an end state (`_jobs._ENDED`; submitit's own test also takes, for
     one, SUSPENDED and other states a job resumes from); a local job, once
-    its process is no longer running, which only its host can tell."""
+    its process is no longer running, which only its host can tell. Counted
+    per job (``rebuilt``, one per job): a job of several cells
+    (``cells_per_job``, #348) is one job however many cells name it."""
     from collections import Counter
 
     from ._jobs import _ENDED, _local_state
@@ -352,7 +354,8 @@ def _refuse_unended(root: Path, launches, rebuilt, plugin) -> None:
     hosts = set()
     total = 0
     for launch in launches:
-        total += len(launch.cells)
+        jobs = rebuilt[launch.path]
+        total += len(jobs)
         if not launch.cells:
             continue
         if launch.executor == "local":
@@ -360,9 +363,9 @@ def _refuse_unended(root: Path, launches, rebuilt, plugin) -> None:
             if state == "unknown":
                 hosts.add(launch.host)
             elif state == "live":
-                states["RUNNING"] += len(launch.cells)
+                states["RUNNING"] += len(jobs)
             continue
-        for state in plugin.slurm_states(rebuilt[launch.path]):
+        for state in plugin.slurm_states(jobs):
             word = state.split()[0] if state.split() else "UNKNOWN"
             if state != "ENDED" and word not in _ENDED:
                 states[word] += 1

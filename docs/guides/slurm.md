@@ -399,6 +399,8 @@ the same dataset.
   submitted. A task count set another way (`additional_parameters` with
   `ntasks`) is not seen: do not combine it with `cells_per_job`.
 - `array_parallelism` caps how many jobs run at once, not cells.
+- With `wait=False`, `collect` counts each job once among those not yet
+  ended, and records its cells as a waiting `run()` would.
 - Choose `cells_per_job` so the number of jobs fits the cluster's
   `MaxArraySize` and your queue limit.
 

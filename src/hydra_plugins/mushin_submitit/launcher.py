@@ -716,19 +716,24 @@ if _plugin_launcher is not None:
 
     def rebuild_jobs(launch) -> list:
         """The submitit jobs of a detached ``launch`` (`mushin._jobs.Launch`),
-        one per cell in file order, rebuilt from their ids as submitit
-        builds them, with the launch's tasks per job: their paths, results
-        and logs are the jobs'. A SLURM job is registered with submitit's
-        shared sacct reader. A rebuilt local job has no process to poll, so
-        whether it has ended is told by its pid (`mushin._jobs`)."""
+        one per job, in the order its cells first name them, rebuilt from
+        their ids as submitit builds them, with the launch's tasks per job:
+        their paths, results and logs are the jobs'. The cells of a job of
+        several (``cells_per_job``, #348) all name its one id, and it is
+        rebuilt once: collect counts, asks the scheduler about and reads
+        each job once, and `collect_launch` hands its one object to each of
+        its cells, as `_wait` takes them. A SLURM job is registered with
+        submitit's shared sacct reader. A rebuilt local job has no process
+        to poll, so whether it has ended is told by its pid
+        (`mushin._jobs`)."""
         if launch.executor == "slurm":
             from submitit.slurm.slurm import SlurmJob as job_class
         else:
             from submitit.local.local import LocalJob as job_class
         tasks = range(launch.tasks)
         return [
-            job_class(folder=launch.submitit_folder, job_id=cell.job_id, tasks=tasks)
-            for cell in launch.cells
+            job_class(folder=launch.submitit_folder, job_id=job_id, tasks=tasks)
+            for job_id in dict.fromkeys(cell.job_id for cell in launch.cells)
         ]
 
     def slurm_states(jobs) -> list:
@@ -790,7 +795,14 @@ if _plugin_launcher is not None:
             path = job.paths.submitted_pickle
             try:
                 submitted = DelayedSubmission.load(path)
-                return submitted.function, submitted.args[4]
+                function, args = submitted.function, submitted.args
+                if isinstance(function, _CellGroup):
+                    # A job of several cells (#348), as submitted or as its
+                    # `checkpoint()` requeued it: a `_CellGroup` holding the
+                    # launcher, called with the list of its cells' args,
+                    # each what a one-cell job is called with.
+                    function, args = function.launcher, args[0][0]
+                return function, args[4]
             except Exception as exc:  # noqa: BLE001 - the next may load
                 errors.append(f"{path}: {exc!r}")
         raise RuntimeError(
@@ -889,10 +901,11 @@ if _plugin_launcher is not None:
             Singleton._instances, BaseContainer._resolvers = saved
 
     def collect_launch(launcher, state, launch, jobs) -> dict:
-        """The returns of ``launch``'s cells, by job number: its jobs' from
-        ``launcher``'s own `_wait` (a dead job's cell recorded as the driver
-        would have), and the cells the driver settled, composed as it
-        composed them, with what they returned."""
+        """The returns of ``launch``'s cells, by job number: its jobs'
+        (``jobs``, from `rebuild_jobs`) from ``launcher``'s own `_wait` (a
+        dead job's cell recorded as the driver would have), and the cells
+        the driver settled, composed as it composed them, with what they
+        returned."""
         from hydra.core.utils import JobStatus
 
         from mushin._sweep_io import read_metrics_sidecar
@@ -901,6 +914,10 @@ if _plugin_launcher is not None:
         returns = {}
         with _as_submitted(state):
             if launch.cells:
+                # Each cell's job, as the launch gave them to `_wait`: the
+                # cells of a job of several (#348) share its one object,
+                # whose result `_wait` reads once and splits per cell.
+                by_id = {str(job.job_id): job for job in jobs}
                 params = [
                     (
                         list(cell.overrides),
@@ -911,7 +928,8 @@ if _plugin_launcher is not None:
                     )
                     for cell in launch.cells
                 ]
-                waited = launcher._wait(jobs, params)
+                cells_jobs = [by_id[cell.job_id] for cell in launch.cells]
+                waited = launcher._wait(cells_jobs, params)
                 returns.update(zip([c.num for c in launch.cells], waited, strict=True))
             for cell in launch.settled:
                 with launcher._composed(

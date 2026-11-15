@@ -341,6 +341,25 @@ def test_an_ended_slurm_job_is_collected(tmp_path, sacct, state):
     assert path.exists() and _untouched(wd) == ["multirun.yaml", "mushin_jobs"]
 
 
+@needs_launchers
+def test_collect_counts_a_job_of_several_cells_once(tmp_path, sacct):
+    """A job of several cells (`cells_per_job`, #348) names one id for each
+    of its cells: collect rebuilds it once, asks sacct about it once, and
+    counts it once among the run's jobs."""
+    from mushin._collect import _plugin
+
+    wd = tmp_path / "s"
+    path = _detached(wd, [(0, "100_0"), (1, "100_1"), (2, "100_1")])
+    sacct.update({"100_0": "COMPLETED", "100_1": "RUNNING"})
+    with pytest.raises(RuntimeError, match="not ended") as caught:
+        mushin.collect(wd)
+    assert "1 of 2 jobs (RUNNING: 1)" in str(caught.value)
+    assert path.exists() and _untouched(wd) == ["multirun.yaml", "mushin_jobs"]
+    (launch,), _ = _jobs.read_launches(wd)
+    jobs = _plugin().rebuild_jobs(launch)
+    assert [str(job.job_id) for job in jobs] == ["100_0", "100_1"]
+
+
 # A stand-in for submitit's local controller, as in tests/test_guard.py: its
 # command line holds what the real one's does, and it runs until the file
 # its first argument names exists.

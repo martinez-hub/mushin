@@ -1267,6 +1267,20 @@ def _gate(monkeypatch, tmp_path, nums) -> Path:
     return gate
 
 
+def _gated(k: int = 1) -> dict:
+    """The launcher arguments of a sweep whose jobs wait at the gate (with
+    ``k`` cells per job, #348): 3 minutes per job, not `LOCAL`'s 1.
+    submitit's local controller signals a job 30 s (its `signal_delay_s`)
+    before its time limit: 30 s into a 1-minute job, which a job's start-up
+    and the gate's wait (up to 30 s) can pass on a loaded runner. The job
+    is then requeued and starts again, though it was only waiting, and may
+    end with no result."""
+    config = {"timeout_min": 3}
+    if k > 1:
+        config["cells_per_job"] = k
+    return dict(launcher="submitit_local", launcher_config=config)
+
+
 def _launches(wd: Path) -> list[str]:
     return sorted(p.name for p in (wd / "mushin_jobs").glob("*.json"))
 
@@ -1333,7 +1347,10 @@ def test_show_lists_queued_cells_of_a_live_sweep(tmp_path, monkeypatch, mushin_l
     gate = _gate(monkeypatch, tmp_path, [1, 2])
     seen = _watch(monkeypatch, mushin_local, wd, gate, ungated=[0])
     tasks.record_pid.run(
-        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **LOCAL
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        overrides=[tasks.GATE],
+        **_gated(),
     )
     run_id = json.loads((wd / "0" / "mushin_cell_status.json").read_text())["run_id"]
     assert seen["launches"] == [f"{run_id}.0.json"]
@@ -1351,7 +1368,10 @@ def test_show_lists_queued_cells_of_a_live_sweep(tmp_path, monkeypatch, mushin_l
 def test_resume_shows_a_resubmitted_cell_queued(tmp_path, monkeypatch, mushin_local):
     wd = tmp_path / "s"
     sweep = dict(
-        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **LOCAL
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        overrides=[tasks.GATE],
+        **_gated(),
     )
     monkeypatch.setenv("MUSHIN_TEST_DIE", "1")
     with pytest.warns(UserWarning, match="failed"):
@@ -1469,7 +1489,7 @@ def test_ctrl_c_leaves_the_launch(tmp_path, monkeypatch, mushin_local):
                 seed=multirun([0, 1]),
                 working_dir=str(wd),
                 overrides=[tasks.GATE],
-                **LOCAL,
+                **_gated(),
             )
         # Interrupted, the driver asks the scheduler nothing more.
         assert len(_launches(wd)) == 1 and asked == []
@@ -1513,7 +1533,7 @@ def test_cancel_leaves_a_local_launch_to_its_host(tmp_path, monkeypatch, mushin_
                 seed=multirun([0, 1]),
                 working_dir=str(wd),
                 overrides=[tasks.GATE],
-                **LOCAL,
+                **_gated(),
             )
         (launch,) = _launches(wd)
         with pytest.warns(UserWarning, match="process ids"):
@@ -1589,7 +1609,10 @@ def test_a_resume_is_refused_while_a_killed_drivers_jobs_run(
 
     monkeypatch.setattr(mushin_local.MushinLocalLauncher, "_wait", wait)
     sweep = dict(
-        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **LOCAL
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        overrides=[tasks.GATE],
+        **_gated(),
     )
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -1731,7 +1754,7 @@ def test_wait_false_returns_while_the_jobs_wait(tmp_path, monkeypatch, left):
         left,
         seed=multirun([0, 1, 2]),
         overrides=[tasks.GATE],
-        **LOCAL,
+        **_gated(),
     )
     (launch,) = _launches(wd)
     cells = json.loads((wd / "mushin_jobs" / launch).read_text())["cells"]
@@ -1818,6 +1841,10 @@ def _comparable(wd: Path, wf, ds, case: str) -> dict:
     }
 
 
+# Two cells per job (#348), for `_steps`' "groups" cases.
+_PAIRS = {"timeout_min": 1, "cells_per_job": 2}
+
+
 def _steps(case: str) -> list:
     """``case``'s runs, ``(sweep, run() keywords, environment)``; each but
     the last is waited on."""
@@ -1863,13 +1890,41 @@ def _steps(case: str) -> list:
                 {},
             )
         ]
+    if case == "groups":
+        # Two cells per job (#348): seed 1 raises in the first job, the
+        # second dies at seed 3 once seed 2 has finished, and seed 4 has a
+        # job of its own.
+        return [
+            (
+                tasks.fates,
+                dict(seed=multirun([0, 1, 2, 3, 4]), launcher_config=_PAIRS),
+                {"MUSHIN_TEST_DIE": "3"},
+            )
+        ]
+    if case == "groups-resume":
+        # The resume reuses cells 0, 2 and 4 in the driver and sends 1 and
+        # 3 to one job: settled cells and a job of two in one launch.
+        sweep = dict(seed=multirun([0, 1, 2, 3, 4]), launcher_config=_PAIRS)
+        return [
+            (tasks.fates, sweep, {"MUSHIN_TEST_DIE": "3"}),
+            (tasks.fates, {**sweep, "resume": True}, {}),
+        ]
     assert case == "unsaved-result"
     return [(tasks.unpicklable_result, dict(seed=multirun([0, 1])), {})]
 
 
 @pytest.mark.parametrize(
     "case",
-    ["fates", "sample", "resume", "interpolated", "several-tasks", "unsaved-result"],
+    [
+        "fates",
+        "sample",
+        "resume",
+        "interpolated",
+        "several-tasks",
+        "unsaved-result",
+        "groups",
+        "groups-resume",
+    ],
 )
 def test_wait_false_then_collect_matches_a_waited_run(
     tmp_path, monkeypatch, left, case
@@ -1878,9 +1933,11 @@ def test_wait_false_then_collect_matches_a_waited_run(
     `wait=False` and collected leaves the records, files, manifest and
     dataset a waited run of it leaves: cells completed, raised, dead while
     running, dead before starting in an earlier sweep's dir, left out by
-    `sample=`, reused by a resume, and a job of two tasks one of which
-    dies. Each run is driven from this process, as in a notebook, so a
-    dead job's process is this process's unreaped child."""
+    `sample=`, reused by a resume, a job of two tasks one of which dies,
+    and jobs of two cells (`cells_per_job`, #348), one of which dies after
+    its first cell, alone and beside cells a resume reuses. Each run is
+    driven from this process, as in a notebook, so a dead job's process is
+    this process's unreaped child."""
     import warnings
 
     from submitit.core import core
@@ -1898,8 +1955,25 @@ def test_wait_false_then_collect_matches_a_waited_run(
                 for key, value in env.items():
                     m.setenv(key, value)
                 if name == "detached" and i == len(steps) - 1:
-                    _detach(sweep, wd, left, **run)
+                    summary = _detach(sweep, wd, left, **run)
+                    if case.startswith("groups"):
+                        # Fewer jobs than cells: the cells were grouped.
+                        assert len(summary["job_ids"]) < summary["submitted"]
+                    if case == "groups-resume":
+                        # Cells 0, 2 and 4 settled in the driver.
+                        assert summary["submitted"] == 2
                     wf = _collect(lambda wd=wd: MultiRunMetricsWorkflow().collect(wd))
+                    if case == "groups":
+                        # The verdicts first, so two runs gone wrong alike
+                        # cannot pass: seed 1 raised, the second job died
+                        # at seed 3 and kept seed 2.
+                        assert [_status(wd / n) for n in "01234"] == [
+                            "completed",
+                            "failed",
+                            "completed",
+                            "failed",
+                            "completed",
+                        ]
                 else:
                     sweep.run(working_dir=str(wd), **run)
                     wf = sweep.workflow
@@ -2119,7 +2193,7 @@ def test_a_detached_runs_jobs_refuse_the_next_run(tmp_path, monkeypatch, left):
     (two drivers would write the same cells), and says to collect."""
     wd = tmp_path / "s"
     gate = _gate(monkeypatch, tmp_path, [0, 1])
-    sweep = dict(seed=multirun([0, 1]), overrides=[tasks.GATE], **LOCAL)
+    sweep = dict(seed=multirun([0, 1]), overrides=[tasks.GATE], **_gated())
     _detach(tasks.record_pid, wd, left, **sweep)
     with pytest.raises(ValueError, match=r"mushin\.collect"):
         tasks.record_pid.run(working_dir=str(wd), resume=True, **sweep)
@@ -2805,7 +2879,10 @@ def test_show_lists_the_cells_a_job_has_not_reached_as_queued(
         mushin_local.MushinLocalLauncher, "_wait", wait_noting_the_launch
     )
     tasks.record_pid.run(
-        seed=multirun([0, 1, 2]), working_dir=str(wd), overrides=[tasks.GATE], **GROUPS
+        seed=multirun([0, 1, 2]),
+        working_dir=str(wd),
+        overrides=[tasks.GATE],
+        **_gated(3),
     )
     (launch,) = seen["launch"]
     assert [c["num"] for c in launch["cells"]] == [0, 1, 2]
@@ -2867,3 +2944,44 @@ def test_a_cell_keeps_its_own_return_when_the_next_reuses_the_object(tmp_path):
         seed=multirun([0, 1, 2]), working_dir=str(tmp_path / "s"), **GROUPS
     )
     assert ds["v"].values.tolist() == [0.0, 1.0, 2.0]
+
+
+# `wait=False` with `cells_per_job` (#345 with #348): collect rebuilds a job
+# of several cells once, from the `_CellGroup` it was submitted as, and
+# waits on it with the launcher's own `_wait`, which splits its result per
+# cell. The equivalence with a waited run is `_steps`' "groups" cases.
+
+
+def test_collect_waits_on_a_job_of_several_cells_once(tmp_path, monkeypatch, left):
+    """The launch file of a detached run of two cells per job names each
+    cell with its job's id and what collect needs; collect counts each job
+    once while they wait, then builds the dataset a waited run gives."""
+    wd = tmp_path / "s"
+    gate = _gate(monkeypatch, tmp_path, [0, 1, 2, 3])
+    summary = _detach(
+        tasks.record_pid,
+        wd,
+        left,
+        seed=multirun([0, 1, 2, 3]),
+        overrides=[tasks.GATE],
+        **_gated(2),
+    )
+    (name,) = _launches(wd)
+    launch = json.loads((wd / "mushin_jobs" / name).read_text())
+    cells = launch["cells"]
+    ids = [cell["job_id"] for cell in cells]
+    assert ids[0] == ids[1] != ids[2] == ids[3]
+    assert summary["submitted"] == 4 and summary["job_ids"] == [ids[0], ids[2]]
+    assert launch["detached"] is True
+    assert launch["sweep_dir"] == str(wd.resolve())
+    assert [cell["num"] for cell in cells] == [0, 1, 2, 3]
+    assert all(f"+seed={cell['num']}" in cell["overrides"] for cell in cells)
+    with pytest.raises(RuntimeError, match=r"2 of 2 jobs \(RUNNING: 2\)"):
+        mushin.collect(wd)
+    assert _launches(wd) == [name]
+    gate.touch()
+    ds = _collect(lambda: mushin.collect(wd))
+    assert ds["v"].values.tolist() == [0.0, 1.0, 2.0, 3.0]
+    pids = ds["pid"].values.tolist()
+    assert pids[0] == pids[1] != pids[2] == pids[3]
+    assert _launches(wd) == []
