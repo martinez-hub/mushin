@@ -702,6 +702,28 @@ def test_started_matched_by_job_id(tmp_path):
     assert _statuses(tmp_path) == [(0.2, "running")]
 
 
+def test_the_cells_a_job_has_not_reached_are_queued(tmp_path):
+    """Cells that share one job id (a job that runs several cells in turn):
+    the record of the cell the job is running names that id, but it says
+    only that cell's job ran, so the cells after it are still queued."""
+    _put_record(
+        tmp_path,
+        "1",
+        run=R1,
+        combo={"lr": 0.2},
+        num=1,
+        job_id="100_0",
+        status="running",
+        at=T + 5 * S,
+    )
+    _put_launch(
+        tmp_path,
+        run=R1,
+        cells=[(n, "100_0", {"lr": lr}) for n, lr in ((1, 0.2), (2, 0.3), (3, 0.4))],
+    )
+    assert _statuses(tmp_path) == [(0.2, "running"), (0.3, "queued"), (0.4, "queued")]
+
+
 def test_records_scoped_out_still_count(tmp_path):
     """A later run of a narrower grid makes `show` drop the leftover
     launch's cell 2 as stale; its record still says the job ran."""

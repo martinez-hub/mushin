@@ -72,11 +72,13 @@ _EXECUTORS = frozenset({"slurm", "local"})
 
 @dataclass(frozen=True)
 class LaunchCell:
-    """One job a launch submitted: the cell's Hydra job number ``num``, the
-    scheduler's ``job_id``, and ``combo``, the cell's swept params as its
-    overrides give them (for display; a record's combo may differ, as a
-    typed field converts a value). A detached launch also keeps the cell's
-    Hydra ``overrides``, which collect composes the cell from."""
+    """One cell a launch submitted: the cell's Hydra job number ``num``, the
+    scheduler's ``job_id`` of the job that runs it, and ``combo``, the
+    cell's swept params as its overrides give them (for display; a record's
+    combo may differ, as a typed field converts a value). A job that runs
+    several cells in turn names one ``job_id`` for each of them, so the
+    cells, not the ids, are one per entry. A detached launch also keeps the
+    cell's Hydra ``overrides``, which collect composes the cell from."""
 
     num: int
     job_id: str

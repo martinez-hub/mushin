@@ -182,8 +182,15 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
     mtime, by the later file name, so the result is deterministic. For that
     launch L (of run R, written at t) and its cell (job number n, job id j):
 
-    1. A record of run R naming job j or number n (any of ``records``)
-       means L's job ran: no queued row, and that record's row stands.
+    1. A record of run R naming number n, or job j when L names j for this
+       cell alone (any of ``records``), means L's job ran: no queued row,
+       and that record's row stands. A job that runs several cells in turn
+       gives them one id, which then says only that the job started, not
+       which of its cells it reached: those cells are matched by number. A
+       record that names such an id but no number (one whose config-group
+       choices could not be recorded) retires none of them, and rule 2
+       reads only other runs' records, so its cell is listed queued beside
+       that record's row.
     2. The cell's records of other runs: those in dir ``n`` that name number
        n, and, for a custom ``hydra.sweep.subdir``, those whose combo is the
        launch's under `_loose_key`. Only other runs': the combo could match
@@ -200,7 +207,7 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
     A launch is not read when its cells' dirs nest below the root (`_scan`
     reads direct children only), nor when it is local, from this host, and
     none of its jobs' processes lives (a killed driver's)."""
-    from collections import defaultdict
+    from collections import Counter, defaultdict
 
     from ._jobs import ended_locally, read_launches
     from ._resume import STATUS_FILE
@@ -221,6 +228,13 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
                 newest[cell.num] = (launch, cell)
     if not newest:
         return [], set()
+    # The job ids each launch names for more than one of its cells, counted
+    # over all of them (not only the cells it decides), for rule 1.
+    shared: dict = {}
+    for launch, _ in newest.values():
+        if id(launch) not in shared:
+            counts = Counter(c.job_id for c in launch.cells)
+            shared[id(launch)] = {j for j, n in counts.items() if n > 1}
 
     # Indexed, as a launch and the records can each name thousands of cells.
     ran, in_own_dir, by_key = set(), defaultdict(list), defaultdict(list)
@@ -247,7 +261,10 @@ def _queued(root, cells: list[dict], records: list[dict]) -> tuple[list[dict], s
     rows, replaced = [], set()
     for num in sorted(newest):
         launch, cell = newest[num]
-        if (launch.run_id, cell.job_id) in ran or (launch.run_id, num) in ran:
+        by_job = cell.job_id not in shared[id(launch)] and (
+            (launch.run_id, cell.job_id) in ran
+        )
+        if by_job or (launch.run_id, num) in ran:
             continue  # rule 1
         key = _loose_key_or_none(cell.combo)
         mine = in_own_dir[num] + (by_key[key] if key is not None else [])
