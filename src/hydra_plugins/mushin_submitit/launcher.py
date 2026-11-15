@@ -315,8 +315,8 @@ if _plugin_launcher is not None:
             by job number), the launch is detached (`run(wait=False)`): the
             file also holds what `mushin.collect` needs, each cell's
             overrides (from ``job_overrides``, numbered from
-            ``initial_job_idx``), what each settled cell returned, and
-            submitit's folder."""
+            ``initial_job_idx``), what each settled cell returned,
+            submitit's folder, and the sweep dir as resolved here."""
             runner = self.task_function
             run_id = getattr(runner, "run_id", None)
             if not getattr(runner, "_mushin_collects_dead_jobs", False) or not run_id:
@@ -354,8 +354,9 @@ if _plugin_launcher is not None:
                 folder = JobPaths.get_first_id_independent_folder(
                     self.params["submitit_folder"]
                 )
+                root = Path(str(self.config.hydra.sweep.dir))
                 return record_launch(
-                    Path(str(self.config.hydra.sweep.dir)),
+                    root,
                     run_id=run_id,
                     executor=self._EXECUTOR,
                     folder=str(folder),
@@ -378,6 +379,11 @@ if _plugin_launcher is not None:
                     if detached
                     else None,
                     settled=kept,
+                    # The dir the cells are in, as this process resolved
+                    # `hydra.sweep.dir`: collect, in another process, may
+                    # resolve an interpolation in it (`${oc.env:...}`) or a
+                    # relative one to another dir, or none (review of #414).
+                    sweep_dir=str(root.resolve()) if detached else None,
                 )
             except Exception as exc:  # noqa: BLE001 - the sweep goes on
                 log.warning(
@@ -683,9 +689,43 @@ if _plugin_launcher is not None:
         """The ``hydra.sweep.dir`` ``launcher`` was sent with, resolved as
         `_composed` resolves it for a cell, under the Hydra state it was sent
         with: a dead or settled cell's dir starts with it. Relative when
-        ``run()`` was given a relative ``working_dir``."""
+        ``run()`` was given a relative ``working_dir``. For a launch file
+        from before its ``sweep_dir``, which collect pins instead
+        (`pin_sweep_dir`)."""
         with _as_submitted(state):
             return str(OmegaConf.select(launcher.config, "hydra.sweep.dir"))
+
+    def pin_sweep_dir(launcher, path: str) -> None:
+        """Make ``path`` the sweep dir of ``launcher`` and of every cell it
+        composes: the dir the driver resolved ``hydra.sweep.dir`` to, as
+        the launch file records it (review of #414). Otherwise collect
+        resolves the submitted value again, in this process: an
+        interpolation (``${oc.env:SWEEP_ROOT}``) may give another dir here
+        or none, and a relative one names a dir under this process's
+        working directory. `_composed` builds each cell's config anew from
+        the launcher's Hydra overrides (`load_sweep_config`), not from its
+        config, so the ``hydra.sweep.dir`` override is replaced too, not
+        only the config's node."""
+        from mushin.workflows import _to_override_element
+
+        config = launcher.config
+        key = "hydra.sweep.dir"
+        # The `hydra` node is read-only: Hydra's `HydraConfig.set_config`
+        # made it so in the driver, and the pickle kept the flag.
+        with read_write(config.hydra):
+            OmegaConf.update(config, key, path, merge=False)
+            # As written, as `load_sweep_config` reads them: an override
+            # holding `${...}` is an interpolation to OmegaConf, which
+            # iterating the list would resolve, here.
+            overrides = [
+                text
+                for text in OmegaConf.to_container(
+                    config.hydra.overrides.hydra, resolve=False
+                )
+                if text.partition("=")[0].strip().lstrip("+~") != key
+            ]
+            overrides.append(f"{key}={_to_override_element(path)}")
+            config.hydra.overrides.hydra = overrides
 
     def load_results(jobs) -> None:
         """Load every result file the tasks of ``jobs`` wrote, and raise,

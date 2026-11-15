@@ -2229,18 +2229,21 @@ def test_a_result_collect_could_not_load_is_collected_where_it_loads(
         "copied",
         "copied, its launch file naming the copy's jobs' files",
         "moved",
-        "relative working_dir, collected from another dir",
+        "relative working_dir, its launch file from before sweep_dir, collected "
+        "from another dir",
     ],
 )
 def test_collect_writes_only_into_the_dir_the_run_was_submitted_in(
     tmp_path, monkeypatch, left, shape
 ):
-    """A run's launch file names its jobs' folder, and its jobs' submission
-    the dir their cells are in, so a copy or a move of a sweep dir, or a
-    relative `working_dir` collected from another dir, would read the jobs
-    of one dir and record cells in another. Collect refuses such a run
-    before it writes anything (review of #414). The copy's name begins
-    with the original's, so a check by text prefix would let it through."""
+    """A run's launch file names its jobs' folder and the dir their cells
+    are in, so a copy or a move of a sweep dir would read the jobs of one
+    dir and record cells in another. So would a relative `working_dir`
+    collected from another dir, from a launch file written before it named
+    that dir: its jobs' submission names the dir as `run()` was given it.
+    Collect refuses such a run before it writes anything (review of #414).
+    The copy's name begins with the original's, so a check by text prefix
+    would let it through."""
     orig, given = tmp_path / "sweep-orig", tmp_path / "sweep"
     sweep = dict(seed=multirun([0, 1, 2]), on_error="nan", **LOCAL)
     if shape.startswith("relative"):
@@ -2260,14 +2263,21 @@ def test_collect_writes_only_into_the_dir_the_run_was_submitted_in(
 
         shutil.copytree(orig, given, symlinks=True)
     if shape.startswith("copied, "):
-        # The copy's jobs' files are the copy's own: only the dir its jobs'
-        # submission names is the original's.
+        # The copy's jobs' files are the copy's own: only the dir its cells
+        # are in is the original's.
         path = given / "mushin_jobs" / launch.path.name
         data = json.loads(path.read_text(encoding="utf-8"))
         for key in ("folder", "submitit_folder"):
             data[key] = data[key].replace(str(orig), str(given))
         path.write_text(json.dumps(data), encoding="utf-8")
     if shape.startswith("relative"):
+        # As a launch file from before the field leaves it: one that names
+        # the dir is collected from anywhere
+        # (`test_a_sweep_dir_that_resolves_elsewhere_is_collected_where_it_ran`).
+        path = launch.path
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data.pop("sweep_dir") == str(orig)
+        path.write_text(json.dumps(data), encoding="utf-8")
         monkeypatch.chdir(tmp_path / "b")
     before = _tree(tmp_path)
     error = _attempt(lambda: mushin.collect(given))
@@ -2348,3 +2358,59 @@ def test_a_run_whose_jobs_keep_their_files_elsewhere_collects(tmp_path, left):
     )
     ds = _collect(lambda: mushin.collect(wd))
     assert ds["v"].values.tolist() == [0.0, 1.0]
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "its variable names another dir",
+        "its variable is unset",
+        "relative, collected from another dir",
+    ],
+)
+def test_a_sweep_dir_that_resolves_elsewhere_is_collected_where_it_ran(
+    tmp_path, monkeypatch, left, where
+):
+    """`working_dir="${oc.env:...}"` (or a relative one) names the dir the
+    driver resolved it to. Collect records the cells there, as the launch
+    file names it, in a process where the variable names another dir or
+    none, or whose working directory is another: resolving the submitted
+    `hydra.sweep.dir` again there recorded a dead job's cell in the other
+    dir, or raised (review of #414). What it leaves is what a waited run
+    leaves."""
+    from submitit.core import core
+
+    # Both wait for the dead job's result file; shortened, for both alike.
+    monkeypatch.setattr(core.Job, "_results_timeout_s", 2)
+    a, other = tmp_path / "a", tmp_path / "other"
+    a.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(a)
+    sweep = dict(seed=multirun([0, 1, 2]), on_error="nan", **LOCAL)
+
+    def run(wd: Path, **kwargs):
+        if where.startswith("relative"):
+            return tasks.die_on_two.run(working_dir=wd.name, **sweep, **kwargs)
+        monkeypatch.setenv("MUSHIN_TEST_SWEEP", str(wd))
+        working_dir = "${oc.env:MUSHIN_TEST_SWEEP}"
+        return tasks.die_on_two.run(working_dir=working_dir, **sweep, **kwargs)
+
+    waited, wd = a / "waited", a / "s"
+    with pytest.warns(UserWarning, match=r"failed: \['seed=2'\]"):
+        ds = run(waited)
+    expected = _comparable(waited, tasks.die_on_two.workflow, ds, where)
+    summary = run(wd, wait=False)
+    left.extend((wd, job_id) for job_id in summary["job_ids"])
+    assert summary["working_dir"] == str(wd.resolve())
+    _ended(wd)
+    if where.startswith("relative"):
+        monkeypatch.chdir(other)
+    elif where.endswith("unset"):
+        monkeypatch.delenv("MUSHIN_TEST_SWEEP")
+    else:
+        monkeypatch.setenv("MUSHIN_TEST_SWEEP", str(other))
+    with pytest.warns(UserWarning, match=r"failed: \['seed=2'\]"):
+        wf = MultiRunMetricsWorkflow().collect(wd)
+    assert _comparable(wd, wf, wf.to_xarray(), where) == expected
+    assert _status(wd / "2") == "failed" and _launches(wd) == []
+    assert list(other.iterdir()) == []

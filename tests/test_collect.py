@@ -258,6 +258,8 @@ def _detached(wd: Path, cells, *, executor="slurm", host="login1", detached=True
         ],
         detached=detached,
         submitit_folder=str(wd / ".submitit" / "%j"),
+        # As the launcher records it: only for a detached launch.
+        sweep_dir=str(wd.resolve()) if detached else None,
     )
 
 
@@ -448,3 +450,22 @@ def test_a_detached_launch_file_round_trips(tmp_path):
     data["settled"][0]["value"] = "other"
     path.write_text(json.dumps(data))
     assert len(_jobs.read_launches(wd)[1]) == 1
+
+
+def test_a_detached_launch_file_records_its_sweep_dir(tmp_path):
+    """The sweep dir as the driver resolved it, where collect records the
+    cells (review of #414). A file from before the field reads None, and
+    one naming a relative dir, or not a path, is not a launch file."""
+    wd = tmp_path / "s"
+    path = _detached(wd, [(0, "100_0")])
+    (read,), bad = _jobs.read_launches(wd)
+    assert bad == [] and read.sweep_dir == str(wd.resolve())
+    data = json.loads(path.read_text())
+    del data["sweep_dir"]
+    path.write_text(json.dumps(data))
+    (read,), bad = _jobs.read_launches(wd)
+    assert bad == [] and read.sweep_dir is None
+    for value in ("s", "", 1, ["/s"]):
+        data["sweep_dir"] = value
+        path.write_text(json.dumps(data))
+        assert _jobs.read_launches(wd) == ([], [path]), value

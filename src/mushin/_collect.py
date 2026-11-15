@@ -67,11 +67,8 @@ def collect(working_dir, metrics_filename="mushin_metrics.json"):
         host. Or the jobs' files cannot be loaded here: their submissions,
         or a result whose type does not import here (nothing is written;
         collect where it does). Or ``working_dir`` is not the dir the run
-        was submitted in (a copy or a move of it), the run's
-        ``submitit_folder`` lies outside it, or the run's ``working_dir``
-        was relative and this process's working directory is not the one
-        ``run()`` was called in (nothing is written). Or,
-        under ``on_error="raise"``, a cell failed: its own error is
+        was submitted in, but a copy or a move of it (nothing is written).
+        Or, under ``on_error="raise"``, a cell failed: its own error is
         raised, once every cell is recorded, as a waited run raises it.
     ImportError
         The ``slurm`` extra is not installed.
@@ -179,8 +176,18 @@ def collect_into(wf, working_dir, metrics_filename):
     }
     # Where a dead or settled cell is recorded: with the jobs' files moved
     # into this dir by hand, still the original.
-    for launcher, state in loaded.values():
-        _refuse_elsewhere(root, plugin.sweep_dir(launcher, state))
+    for launch in ours:
+        if launch.sweep_dir is not None:
+            _refuse_elsewhere(root, launch.sweep_dir)
+            if launch.path in loaded:
+                # Composed in the dir the driver resolved, before any cell
+                # is: the submitted `hydra.sweep.dir` may resolve to another
+                # dir here, or to none (review of #414).
+                plugin.pin_sweep_dir(loaded[launch.path][0], launch.sweep_dir)
+        elif launch.path in loaded:
+            # A launch file from before the sweep dir was recorded: the dir
+            # as the submission names it, resolved here, as before.
+            _refuse_elsewhere(root, plugin.sweep_dir(*loaded[launch.path]))
     # And every result: one that does not load here would be read as a job
     # that gave none, and a completed cell recorded failed.
     plugin.load_results([job for jobs in rebuilt.values() for job in jobs])
@@ -273,15 +280,17 @@ def _run_id(root: Path) -> str | None:
 
 
 def _refuse_elsewhere(root: Path, path: str) -> None:
-    """Raise, writing nothing, unless ``path``, the run's sweep dir as its
-    jobs' submission names it, lies under ``root``. The submission names it
-    as ``run()`` was given it, and collect, recording a cell there, makes it
-    absolute against this process's working directory, so ``path`` is
-    resolved that way. In a copy of the dir a run was submitted in, it names
-    the original, and for a relative ``working_dir`` collected from another
-    dir, a dir under that one: collect would read one dir's jobs and record
-    their cells in another. Compared by path components, not by text:
-    ``sweep-orig`` is not under ``sweep``."""
+    """Raise, writing nothing, unless ``path``, the run's sweep dir, lies
+    under ``root``. A launch file names it as the driver resolved it,
+    absolute; one from before that field leaves it to the jobs' submission,
+    which names it as ``run()`` was given it, and collect, recording a cell
+    there, makes it absolute against this process's working directory, so
+    ``path`` is resolved that way. In a copy of the dir a run was submitted
+    in, it names the original (and, from an older launch file, for a
+    relative ``working_dir`` collected from another dir, a dir under that
+    one): collect would read one dir's jobs and record their cells in
+    another. Compared by path components, not by text: ``sweep-orig`` is
+    not under ``sweep``."""
     where = Path(path).resolve()
     if where.is_relative_to(root):
         return

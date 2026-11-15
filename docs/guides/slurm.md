@@ -127,7 +127,7 @@ sweep. Some details:
   and the types your task returns import as in the jobs, and only on a
   `working_dir` you trust. A result that does not load stops `collect`, with
   nothing written.
-- Collect a run in the dir it was submitted in: the jobs' submission names
+- Collect a run in the dir it was submitted in: the run's launch file names
   that dir, so `collect` refuses a copy or a move of it. A `submitit_folder`
   outside the `working_dir` is fine. With a relative `working_dir`, collect
   from the directory `run()` was called in.

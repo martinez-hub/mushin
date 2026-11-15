@@ -24,7 +24,8 @@ A run submitted with ``wait=False`` leaves its files for `mushin.collect`,
 which finishes the run once its jobs have ended: such a launch is
 ``detached``, and its file also holds what collect needs to wait on the jobs
 as the driver would have (each cell's overrides, the cells the driver
-settled without a job, and submitit's folder).
+settled without a job, submitit's folder, and the sweep dir as the driver
+resolved it).
 
 Standard library only: the launcher imports this module in the driver, `show`
 on a login node, and `import mushin` loads it for `cancel`.
@@ -114,9 +115,11 @@ class Launch:
     parts), the file's ``mtime_ns``, its ``cells``, and the ``tasks`` of each
     job (1 for a file from before the field). A launch of ``run(wait=False)``
     is ``detached``, and also names submitit's ``submitit_folder`` (the
-    template its jobs' paths come from, ``%j`` and all) and the cells the
-    driver ``settled`` without a job; one whose cells all settled names no
-    job (``cells`` is empty), only those."""
+    template its jobs' paths come from, ``%j`` and all), the cells the
+    driver ``settled`` without a job (one whose cells all settled names no
+    job: ``cells`` is empty), and the ``sweep_dir`` the driver resolved
+    ``hydra.sweep.dir`` to, absolute, in which collect records the cells
+    (None for a file from before the field)."""
 
     path: Path
     run_id: str
@@ -131,6 +134,7 @@ class Launch:
     detached: bool = False
     submitit_folder: str | None = None
     settled: tuple[SettledCell, ...] = ()
+    sweep_dir: str | None = None
 
 
 def record_launch(
@@ -147,6 +151,7 @@ def record_launch(
     detached: bool = False,
     submitit_folder: str | None = None,
     settled: Iterable[SettledCell] = (),
+    sweep_dir: str | None = None,
 ) -> Path:
     """Write the launch file for ``cells``, the jobs one submission sent, in
     submission order, and return its path. Named by the first job's number
@@ -189,6 +194,8 @@ def record_launch(
             {"num": c.num, "overrides": list(c.overrides), "value": c.value}
             for c in settled
         ]
+    if sweep_dir is not None:
+        payload["sweep_dir"] = sweep_dir
     first = cells[0].num if cells else settled[0].num
     path = Path(root) / JOBS_DIR / f"{run_id}.{first}.json"
     _atomic_write_json(path, payload)
@@ -254,6 +261,8 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
     detached = data.get("detached", False)
     submitit_folder = data.get("submitit_folder")
     settled = data.get("settled", [])
+    # Nor its sweep dir, which came later (review of #414).
+    sweep_dir = data.get("sweep_dir")
     if not (
         type(tasks) is int
         and tasks >= 1
@@ -271,6 +280,7 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
             submitit_folder is None
             or (isinstance(submitit_folder, str) and _absolute(submitit_folder))
         )
+        and (sweep_dir is None or (isinstance(sweep_dir, str) and _absolute(sweep_dir)))
         and isinstance(settled, list)
         and isinstance(cells, list)
         # Only a detached launch names no job: one whose cells all settled.
@@ -328,6 +338,7 @@ def _launch(path: Path, data: Any, mtime_ns: int, restore) -> Launch | None:
         detached=detached,
         submitit_folder=submitit_folder,
         settled=tuple(kept),
+        sweep_dir=sweep_dir,
     )
 
 
