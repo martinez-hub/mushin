@@ -1,0 +1,114 @@
+name: Dependabot auto-merge
+
+# Turns on GitHub auto-merge for a Dependabot PR whose largest update is a patch
+# release, so it squash-merges by itself once the required `ci-ok` check passes.
+# Minor and major bumps still wait for a person: #154's "minor" ruff 0.16 bump
+# needed fixes across 54 files, and #238's omegaconf bump quietly moved
+# hydra-core to a pre-release. A grouped PR counts as its largest bump.
+#
+# Action bumps arrive as majors (the workflows pin `@v7`-style tags), so they
+# always wait for review too. That matters because PR CI never runs the actions
+# only docs.yml, publish.yml and paper-pdf.yml use: a broken major of one would
+# surface at deploy or release time, not on its PR.
+#
+# Every event re-decides, and turns auto-merge off when a PR stops qualifying:
+# someone pushed their own commits (they are fixing or reviewing it, so it
+# merges when they say), or a Dependabot rebase grew a patch PR into a minor one.
+#
+# Needs "Allow auto-merge" in the repository settings; without it the merge
+# step fails rather than merging. Branch protection on main requires `ci-ok`,
+# which is what makes `--auto` wait for CI instead of merging at once.
+#
+# A merge done with the GITHUB_TOKEN starts no `push` workflows, so main's CI
+# run and the docs deploy are skipped for these merges; the next merge by a
+# person runs both. Dependabot's runs cannot read Actions secrets, which rules
+# out the usual workaround of an App token.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+# One decision per PR at a time: the newest push's decision is the one that
+# stands, so a Dependabot rebase and a person's push cannot race.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    name: Turn auto-merge on or off
+    if: >-
+      github.repository == 'martinez-hub/mushin'
+      && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # GitHub's documented scope for `gh pr merge --auto`
+      pull-requests: write # to turn auto-merge on or off on the PR
+    steps:
+      # Its outputs exist only while the PR holds nothing but Dependabot's own
+      # verified commits, and it fails otherwise, which here means someone
+      # pushed to the PR. `update-type` is the largest semver change in the PR.
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        continue-on-error: true
+
+      # A package locked more than once in uv.lock (numpy is one: an entry for
+      # 3.11 and another for 3.12+) collapses to a single version when
+      # Dependabot bumps it, which can downgrade the 3.12+ entry while CI stays
+      # green (see the note in .github/dependabot.yml). Such a PR waits for a
+      # person.
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          META_OUTCOME: ${{ steps.meta.outcome }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          reason=
+          if [ "$META_OUTCOME" != success ]; then
+            reason="it holds commits that are not Dependabot's"
+          elif [ "$UPDATE_TYPE" != version-update:semver-patch ]; then
+            reason="its largest update is ${UPDATE_TYPE:-unknown}"
+          else
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$REPO/contents/uv.lock?ref=$BASE_SHA" > "$RUNNER_TEMP/base.lock"
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$REPO/contents/uv.lock?ref=$HEAD_SHA" > "$RUNNER_TEMP/head.lock"
+            collapsed=$(python3 - "$RUNNER_TEMP/base.lock" "$RUNNER_TEMP/head.lock" <<'PY'
+          import sys, tomllib
+          from collections import Counter
+
+          def entries(path):
+              with open(path, "rb") as f:
+                  return Counter(p["name"] for p in tomllib.load(f)["package"])
+
+          base, head = entries(sys.argv[1]), entries(sys.argv[2])
+          print(" ".join(sorted(n for n, k in base.items() if k > 1 and head[n] < k)))
+          PY
+            )
+            if [ -n "$collapsed" ]; then
+              reason="uv.lock collapses the entries of: $collapsed"
+            fi
+          fi
+          if [ -n "$reason" ]; then
+            echo "::notice::Left for review: $reason"
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          ELIGIBLE: ${{ steps.decide.outputs.eligible }}
+        run: |
+          enabled=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          if [ "$ELIGIBLE" = true ] && [ "$enabled" = false ]; then
+            gh pr merge --auto --squash "$PR_URL"
+          elif [ "$ELIGIBLE" = false ] && [ "$enabled" = true ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi

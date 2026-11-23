@@ -162,6 +162,12 @@ local pass therefore does not cover them, and you should not claim it does.
   `uv lock` (or `uv sync`) and commit both. Never edit the lockfile by hand. CI
   does not check that the lock is current: its `uv sync` re-resolves a stale
   lock without failing.
+- **Patch-only Dependabot PRs merge themselves.**
+  `.github/workflows/dependabot-auto-merge.yml` turns on auto-merge for a
+  Dependabot PR whose largest bump is a patch, unless its `uv.lock` collapses a
+  package locked more than once, and the PR merges when `ci-ok` passes. Pushing
+  your own commit to a Dependabot PR turns auto-merge off, so it then merges
+  only when someone merges it.
 - **Public API** is the top-level `mushin` namespace plus the documented
   `mushin.workflows`, `mushin.benchmark` and `mushin.llm` symbols. Underscore
   modules are internal. The project is pre-1.0: a breaking change goes in a
