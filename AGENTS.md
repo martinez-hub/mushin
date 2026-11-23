@@ -141,7 +141,9 @@ local pass therefore does not cover them, and you should not claim it does.
   venv holding exactly that, so the line must cover every import. Outputs are
   committed; the `nbstripout` hook runs with `--keep-output --keep-id`. Execute
   a notebook against a clean, committed tree so its provenance records
-  `dirty=false`.
+  `dirty=false`. After each release,
+  `.github/workflows/notebooks-refresh.yml` re-runs the notebooks that have
+  outputs at the release tag and opens the PR with their new outputs.
 
 ## Conventions
 
