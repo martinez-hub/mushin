@@ -5,8 +5,9 @@ silently when forgotten. The Prepare release workflow runs `prepare`, and the
 Tag and release workflow runs `notes`; both work the same way locally.
 
     python scripts/release.py prepare {patch,minor,major,X.Y.Z}
-        Builds the CHANGELOG.md section from changes/ (towncrier, which also
-        deletes the fragments), sets the version in pyproject.toml and uv.lock
+        Numbers each `+<slug>` fragment after the PR that added it, builds the
+        CHANGELOG.md section from changes/ (towncrier, which also deletes the
+        fragments), sets the version in pyproject.toml and uv.lock
         (`uv version --no-sync`), and brings CITATION.cff, the README's BibTeX
         block and the CHANGELOG.md footer links to the new version, so
         tests/test_release_metadata.py passes. Prints the new version.
@@ -66,6 +67,35 @@ def check_fragments(fragments: list[str], current: str, new: str) -> None:
             f"{', '.join(removed)} removes something, which needs a minor "
             f"release, not {new}"
         )
+
+
+def number_fragments(root: Path = ROOT) -> list[tuple[str, str]]:
+    """Rename each `+<slug>.<type>.md` fragment to `<PR>.<type>.md`, so the
+    changelog entry carries its PR number. The PR is the one whose squash merge
+    added the fragment: its subject ends in `(#123)`. A fragment with no such
+    commit, or whose numbered name is already taken, keeps its slug. Returns
+    the (old, new) name pairs."""
+    renamed = []
+    for path in sorted((root / "changes").glob("+*.md")):
+        subjects = subprocess.run(
+            ["git", "log", "--diff-filter=A", "--format=%s", "--", path.name],
+            cwd=path.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        match = re.search(r"\(#(\d+)\)$", subjects[0]) if subjects else None
+        target = match and path.with_name(f"{match[1]}.{path.name.split('.')[-2]}.md")
+        if target is None or target.exists():
+            why = "its name is taken" if target else "no PR number found"
+            print(f"{path.name}: {why}, so it keeps its slug", file=sys.stderr)
+            continue
+        # `git mv`, so towncrier's later `git rm` of the fragment still works.
+        subprocess.run(
+            ["git", "mv", path.name, target.name], cwd=path.parent, check=True
+        )
+        renamed.append((path.name, target.name))
+    return renamed
 
 
 def update_citation(text: str, version: str, date: str) -> str:
@@ -136,6 +166,8 @@ def prepare(spec: str) -> str:
     pyproject = tomllib.loads(_read("pyproject.toml"))
     current = pyproject["project"]["version"]
     new = next_version(current, spec)
+    for old, renamed in number_fragments():
+        print(f"{old} -> {renamed}", file=sys.stderr)
     fragments = sorted(
         p.name for p in (ROOT / "changes").iterdir() if p.name != "README.md"
     )

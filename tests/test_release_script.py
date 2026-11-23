@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -120,3 +121,36 @@ def test_release_notes_are_one_section_without_its_heading():
 def test_release_notes_refuse_an_unknown_version():
     with pytest.raises(SystemExit, match="no section"):
         release.release_notes(_read("CHANGELOG.md"), "9.8.7")
+
+
+def test_number_fragments_takes_the_pr_from_the_commit_that_added_it(tmp_path):
+    changes = tmp_path / "changes"
+    changes.mkdir()
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+
+    def add(name, subject):
+        (changes / name).write_text("", encoding="utf-8")
+        git("add", f"changes/{name}")
+        git("commit", "-q", "-m", subject)
+
+    git("init", "-q")
+    add("+one.fixed.md", "fix: one (#12)")
+    add("+two.misc.md", "ci: pushed straight to main, no PR")
+    add("13.added.md", "feat: three (#13)")
+    add("+four.added.md", "feat: a second fragment of #13 (#13)")
+
+    assert release.number_fragments(tmp_path) == [("+one.fixed.md", "12.fixed.md")]
+    # No PR number to take, and a numbered name already in use: both keep slugs.
+    assert sorted(p.name for p in changes.iterdir()) == [
+        "+four.added.md",
+        "+two.misc.md",
+        "12.fixed.md",
+        "13.added.md",
+    ]

@@ -16,6 +16,8 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
    ```
 2. In the Actions tab, run **Prepare release** with `patch`, `minor`, `major`
    or an exact `X.Y.Z`. It runs `scripts/release.py prepare`, which:
+   - renames each `+<slug>` fragment after the PR whose squash merge added it,
+     so its entry carries the PR number;
    - builds the new `CHANGELOG.md` section from `changes/` (towncrier) and
      deletes the consumed fragments;
    - sets the version in `pyproject.toml` and `uv.lock`;

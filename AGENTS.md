@@ -148,9 +148,11 @@ local pass therefore does not cover them, and you should not claim it does.
 
 - **Every PR adds a news fragment** under `changes/`, named
   `<PR-number>.<type>.md` with `<type>` one of `added`, `changed`, `fixed`,
-  `removed`, `deprecated`, `misc`. Before the PR exists, use `+<slug>.<type>.md`
-  and rename it to the number once it does. A `misc` fragment (CI, refactor,
-  typo; nothing user-facing) is an empty file. See `changes/README.md`.
+  `removed`, `deprecated`, `misc`. Before the PR exists, use `+<slug>.<type>.md`;
+  there is no need to rename it afterwards, because the release numbers it from
+  the merge commit that added it (`scripts/release.py`). A `misc` fragment (CI,
+  refactor, typo; nothing user-facing) is an empty file. See
+  `changes/README.md`.
 - **Never edit `CHANGELOG.md` directly.** CI rejects it unless the PR has the
   `changelog-exempt` label, which only release PRs use (`RELEASING.md`).
 - **Commit messages** use conventional prefixes, as in `git log`: `feat:`,
