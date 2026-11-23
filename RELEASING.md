@@ -36,7 +36,10 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
    if `main` has moved on), creates the GitHub Release with that version's
    `CHANGELOG.md` section as its notes, and starts `publish.yml` on the tag,
    which checks `tag == version`, builds and smoke-tests the wheel, and
-   publishes to PyPI. Watch both runs in the Actions tab.
+   publishes to PyPI. It also starts **Refresh notebook outputs**, which
+   re-runs the example notebooks at the tag and opens a `docs: refresh the
+   notebook outputs for X.Y.Z` PR; approve its CI runs and merge it like the
+   release PR. Watch the runs in the Actions tab.
 
 ### By hand
 

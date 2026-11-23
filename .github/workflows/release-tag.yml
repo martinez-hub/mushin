@@ -9,7 +9,8 @@ name: Tag and release
 # A release created with the GITHUB_TOKEN raises no `release` event for other
 # workflows, so this starts publish.yml directly: `workflow_dispatch` is the
 # one trigger the GITHUB_TOKEN can fire. PyPI's trusted publisher names
-# publish.yml, which still does the publishing.
+# publish.yml, which still does the publishing. For the same reason it starts
+# notebooks-refresh.yml, which re-runs the example notebooks at the new tag.
 
 on:
   pull_request:
@@ -35,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the tag and create the GitHub Release
-      actions: write # start publish.yml on the tag
+      actions: write # start publish.yml and notebooks-refresh.yml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,3 +58,8 @@ jobs:
           gh release create "v$version" --verify-tag --title "v$version" \
             --notes-file "$RUNNER_TEMP/notes.md"
           gh workflow run publish.yml --ref "v$version"
+          # Only once notebooks-refresh.yml is on main; until then a release
+          # still publishes, and its notebooks are refreshed by hand.
+          if gh workflow view notebooks-refresh.yml > /dev/null 2>&1; then
+            gh workflow run notebooks-refresh.yml -f tag="v$version"
+          fi

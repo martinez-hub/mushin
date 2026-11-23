@@ -40,7 +40,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
+      # No cache: PR runs can write the uv cache, and this job holds a write
+      # token, so it installs from the package index instead.
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: false
 
       # towncrier comes from the dev group, at the version uv.lock pins.
       # --only-group installs that group without mushin and its torch stack.
