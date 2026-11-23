@@ -52,7 +52,7 @@ repos:
           ^(src/|tests/|examples/|plugins/|\.claude-plugin/|changes/|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|RELEASING\.md|AGENTS\.md|CLAUDE\.md|docs/llms\.txt|pyproject\.toml)
 
   - repo: https://github.com/kynan/nbstripout
-    rev: 0.9.1
+    rev: 0.9.2
     hooks:
       - id: nbstripout
         # --keep-id: without it nbstripout renumbers cell ids sequentially, so
