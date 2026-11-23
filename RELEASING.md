@@ -53,9 +53,8 @@ git switch -c release/X.Y.Z && git commit -am "release: X.Y.Z"
 gh pr create --title "release: X.Y.Z" --label changelog-exempt ...
 ```
 
-Apply the label when you create the PR: the gate reads the labels from the
-event that started the run, and re-running a job replays that event, so a label
-added later is never seen (close and reopen the PR if you forget). A PR titled
+The changelog gate reads the PR's labels when it runs, so a label added after
+the PR opened counts once the `changelog` job is re-run. A PR titled
 `release: X.Y.Z` with that label still runs Tag and release when it merges. If
 that run fails, tag and publish from the release merge commit yourself:
 
