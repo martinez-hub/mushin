@@ -1,0 +1,65 @@
+name: Tag and release
+
+# Finishes a release when its PR merges: tags the merge commit (even if main has
+# moved on), creates the GitHub Release with that version's CHANGELOG.md
+# section as notes, and starts publish.yml on the tag. A release PR is one
+# titled `release: X.Y.Z` with the `changelog-exempt` label, as the Prepare
+# release workflow opens it; the title must match the merged pyproject.toml.
+#
+# A release created with the GITHUB_TOKEN raises no `release` event for other
+# workflows, so this starts publish.yml directly: `workflow_dispatch` is the
+# one trigger the GITHUB_TOKEN can fire. PyPI's trusted publisher names
+# publish.yml, which still does the publishing. For the same reason it starts
+# notebooks-refresh.yml, which re-runs the example notebooks at the new tag.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Actions are pinned by SHA here, unlike the tag pins elsewhere: this job holds
+# a write token and can publish a release. Dependabot keeps the pins current.
+jobs:
+  release:
+    name: Tag, release and publish
+    if: >-
+      github.event.pull_request.merged
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && startsWith(github.event.pull_request.title, 'release: ')
+      && contains(github.event.pull_request.labels.*.name, 'changelog-exempt')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag and create the GitHub Release
+      actions: write # start publish.yml and notebooks-refresh.yml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.pull_request.title }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$TITLE" != "release: $version" ]; then
+            echo "::error::PR title '$TITLE' does not match the merged version $version"
+            exit 1
+          fi
+          python3 scripts/release.py notes "$version" > "$RUNNER_TEMP/notes.md"
+          git tag "v$version" "$SHA"
+          git push origin "v$version"
+          gh release create "v$version" --verify-tag --title "v$version" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+          gh workflow run publish.yml --ref "v$version"
+          # Only once notebooks-refresh.yml is on main; until then a release
+          # still publishes, and its notebooks are refreshed by hand.
+          if gh workflow view notebooks-refresh.yml > /dev/null 2>&1; then
+            gh workflow run notebooks-refresh.yml -f tag="v$version"
+          fi
