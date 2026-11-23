@@ -5,7 +5,7 @@ HYPOTHESIS_PROFILE ?= fast
 PYTHON ?= 3.11
 
 .DEFAULT_GOAL := help
-.PHONY: help sync test test-fast test-py test-lowest lint format format-check spell check all changelog changelog-draft docs docs-build
+.PHONY: help sync test test-fast test-py test-lowest lint format format-check spell lock-check check all changelog changelog-draft docs docs-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -47,7 +47,10 @@ format-check: ## Check formatting without modifying files
 spell: ## Spell-check with codespell
 	uv run codespell src tests examples plugins .claude-plugin/marketplace.json plugins/mushin/.claude-plugin/plugin.json README.md CHANGELOG.md CONTRIBUTING.md RELEASING.md AGENTS.md CLAUDE.md docs/llms.txt pyproject.toml changes
 
-check: lint format-check spell test ## Run all checks (what CI runs)
+lock-check: ## Check that uv.lock matches pyproject.toml
+	uv lock --check
+
+check: lint format-check spell lock-check test ## Run all checks (what CI runs)
 
 all: check ## Alias for `check`
 

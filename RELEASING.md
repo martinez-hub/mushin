@@ -22,7 +22,8 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 3. Bump the version in `pyproject.toml` to `X.Y.Z`, then `uv sync` to update
    `uv.lock`. Also bump `version:`/`date-released:` in `CITATION.cff` and the
    `version = {...}` in the README BibTeX block — these are what researchers
-   cite, and they go stale silently.
+   cite. `tests/test_release_metadata.py` fails until all of them, and the
+   footer in step 4, name the new version.
 4. Update the `[Unreleased]`/version link-reference footer at the bottom of
    `CHANGELOG.md`.
 5. Commit on a branch and open a PR. Because this PR rewrites `CHANGELOG.md`
@@ -47,10 +48,7 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
    ```
    Don't use `--notes-from-tag`. A plain `git tag` is lightweight, so the notes
    would be the tagged commit's message, `release: X.Y.Z (#N)`.
-   Publishing the release triggers `publish.yml`. Don't merge anything else
-   into `main` until the release commit's CI run finishes: CI cancels
-   in-progress runs on the same branch, which would leave the tagged commit
-   with a cancelled run.
+   Publishing the release triggers `publish.yml`.
 
 ## Trusted Publishing setup (one-time, already configured)
 

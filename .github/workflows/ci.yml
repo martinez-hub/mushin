@@ -11,11 +11,13 @@ on:
 permissions:
   contents: read
 
-# Cancel a superseded run on the same ref (e.g. when a PR branch is updated)
-# instead of letting redundant matrices pile up.
+# Cancel a superseded run on the same PR (e.g. when its branch is updated)
+# instead of letting redundant matrices pile up. Runs on main always finish:
+# cancelling there left a release commit with a cancelled run whenever another
+# PR merged before its CI was done, which RELEASING.md used to forbid by hand.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Detect whether the change touches code, so docs-only PRs can skip the heavy
@@ -65,6 +67,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      # Before the sync: `uv sync` re-resolves a stale lock instead of failing,
+      # so a pyproject.toml change committed without its uv.lock would pass.
+      - name: Check uv.lock is current
+        run: make lock-check
       - name: Sync dev environment
         run: uv sync
       - name: Ruff lint

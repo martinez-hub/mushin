@@ -22,7 +22,7 @@ pre-commit install      # optional but recommended (see below)
 Before opening a PR, please run the same checks CI runs:
 
 ```bash
-make check              # lint + format-check + spell + tests
+make check              # lint + format-check + spell + lock-check + tests
 ```
 
 Or individually:
@@ -36,7 +36,8 @@ make test-py PYTHON=3.12 # run the suite on a specific Python version
 ```
 
 We also provide [pre-commit](https://pre-commit.com/) hooks that run ruff and
-codespell on changed files automatically:
+codespell on changed files automatically. They run from the dev environment
+(`uv run`), so they use the same versions CI does; `uv sync` first:
 
 ```bash
 pre-commit install      # then hooks run on every `git commit`
