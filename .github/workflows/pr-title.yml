@@ -1,0 +1,32 @@
+name: PR title
+
+# A squash merge makes the PR title the commit subject on main, so the title
+# must carry one of the conventional prefixes AGENTS.md lists. Nine of the last
+# 300 subjects on main did not ("PR-2: ...", "Add ..."), and nothing caught
+# them before the merge. Dependabot's "build(deps): ..." and the release
+# workflows' "release: X.Y.Z" titles pass as they are.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: Check the PR title
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|test|ci|build|chore|release|refactor|perf)(\([a-z0-9._/-]+\))?!?: [^ ]'
+          if [[ ! "$TITLE" =~ $pattern ]]; then
+            echo "::error::PR title '$TITLE' needs a conventional prefix, e.g. 'fix: ...' or 'build(deps): ...'; see the commit-message convention in AGENTS.md. The squash merge uses the title as the commit subject."
+            exit 1
+          fi
+          echo "PR title OK: $TITLE"

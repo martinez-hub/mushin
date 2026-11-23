@@ -1,0 +1,83 @@
+name: Link check
+
+# Checks the external links in the README, the contributor docs, the docs site
+# pages, docs/llms.txt and the agent guide. `mkdocs build --strict` checks the
+# links between pages but never fetches a URL, so a page that moved or vanished
+# elsewhere goes unnoticed until a reader follows the link.
+#
+# Deliberately NOT part of CI, like latest-deps.yml: a site going down is not
+# this repository's change and must never block a merge. It runs weekly and
+# files an issue instead.
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: link-check
+  cancel-in-progress: true
+
+jobs:
+  links:
+    name: Check external links
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # to create its label and file/update the report (last step)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # http(s) only: links between files are the strict docs build's job.
+      # 403 and 429 count as reachable: sites answer automated requests with
+      # them while the page is fine, and a dead page answers 404 or 410.
+      # The token raises GitHub's rate limit for the github.com links.
+      - id: lychee
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress --max-retries 3
+            --scheme https --scheme http
+            --accept '100..=103,200..=299,403,429'
+            README.md CONTRIBUTING.md RELEASING.md
+            'docs/**/*.md' docs/llms.txt src/mushin/agent_guide.md
+          output: ${{ runner.temp }}/links.md
+          token: ${{ github.token }}
+
+      - name: Report broken links as an issue
+        if: failure() && steps.lychee.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT: ${{ runner.temp }}/links.md
+        run: |
+          gh label create broken-links --force --color B60205 \
+            --description "An external link in the docs no longer resolves"
+          if [ -s "$REPORT" ]; then
+            report=$(cat "$REPORT")
+          else
+            report="lychee wrote no report, so it most likely failed to run. Read the run log."
+          fi
+          existing=$(gh issue list --state open --label broken-links \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$(printf '%s\n' \
+              "Still failing: $RUN_URL" "" "$report")"
+          else
+            gh issue create --title "Broken external links in the docs" \
+              --label broken-links \
+              --body "$(printf '%s\n' \
+                "The weekly \`Link check\` run found links that no longer resolve." \
+                "" \
+                "$report" \
+                "" \
+                "Run: $RUN_URL" \
+                "" \
+                "A link that works in a browser may be refusing automated requests; check it by hand before editing the docs." \
+                "" \
+                "This issue is reused while it stays open, so it will be commented on rather than duplicated.")"
+          fi
