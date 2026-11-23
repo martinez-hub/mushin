@@ -72,6 +72,7 @@ local pass therefore does not cover them, and you should not claim it does.
 | `docs/notebooks/` | Example notebooks with committed outputs; CI re-executes them. |
 | `docs/superpowers/` | Internal design specs and plans. Excluded from the site; never link to it from published docs. |
 | `docs/llms.txt` | The LLM-facing index of the docs site, served at <https://martinez-hub.github.io/mushin/llms.txt>. |
+| `scripts/release.py` | Prepares a release's files (changelog, version, `uv.lock`, citation metadata) and prints a version's release notes; the Prepare release and Tag and release workflows run it (`RELEASING.md`). |
 | `scripts/llms_full.py` | An mkdocs hook (`hooks:` in `mkdocs.yml`) that writes `llms-full.txt`, every page but the contributing guide and the changelog as one Markdown file, into the built site next to `docs/llms.txt` on every build. |
 | `changes/` | Towncrier news fragments (see below). |
 | `paper/` | The paper source (LaTeX); built by `.github/workflows/paper-pdf.yml`. |

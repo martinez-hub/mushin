@@ -7,52 +7,73 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 
 ## Cutting a release
 
-1. Choose the next version `X.Y.Z` (SemVer; `0.x` keeps breaking changes in the
-   minor slot, so a pending `changes/*.removed.md` fragment means a minor).
-2. Assemble the changelog from news fragments:
-   ```bash
-   make changelog VERSION=X.Y.Z
-   ```
-   This rewrites `CHANGELOG.md` (a new `## [X.Y.Z] - <today>` section under the
-   towncrier marker) and deletes the consumed fragments. Review the diff and
-   tidy wording if needed. Preview any time without consuming fragments:
+1. Choose the bump (SemVer; `0.x` keeps breaking changes in the minor slot, so
+   a pending `changes/*.removed.md` fragment means a minor, and the workflow
+   refuses a patch release then). Preview the changelog section any time,
+   without consuming fragments:
    ```bash
    make changelog-draft VERSION=X.Y.Z
    ```
-3. Bump the version in `pyproject.toml` to `X.Y.Z`, then `uv sync` to update
-   `uv.lock`. Also bump `version:`/`date-released:` in `CITATION.cff` and the
-   `version = {...}` in the README BibTeX block — these are what researchers
-   cite, and they go stale silently.
-4. Update the `[Unreleased]`/version link-reference footer at the bottom of
-   `CHANGELOG.md`.
-5. Commit on a branch and open a PR. Because this PR rewrites `CHANGELOG.md`
-   directly, it needs the **`changelog-exempt`** label so the changelog gate
-   allows it (normal PRs must use `changes/` fragments instead). Apply the label
-   when you create the PR:
-   ```bash
-   gh pr create --label changelog-exempt ...
-   ```
-   The gate reads the labels from the event that started the run, and
-   re-running a job replays that event, so a label added later is never seen.
-   If you forget, close and reopen the PR. Merge once CI is green.
-6. Tag the release merge commit and publish a GitHub Release `vX.Y.Z` (the tag
-   must equal the `pyproject` version, prefixed `v`). Write the release notes
-   to a file first, from the new `CHANGELOG.md` section:
-   ```bash
-   git fetch origin
-   sha=$(gh pr view <release-PR-number> --json mergeCommit --jq .mergeCommit.oid)
-   git tag vX.Y.Z "$sha"   # the release merge commit, even if main has moved on
-   git push origin vX.Y.Z
-   gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
-   ```
-   Don't use `--notes-from-tag`. A plain `git tag` is lightweight, so the notes
-   would be the tagged commit's message, `release: X.Y.Z (#N)`.
-   Publishing the release triggers `publish.yml`. Don't merge anything else
-   into `main` until the release commit's CI run finishes: CI cancels
-   in-progress runs on the same branch, which would leave the tagged commit
-   with a cancelled run.
+2. In the Actions tab, run **Prepare release** with `patch`, `minor`, `major`
+   or an exact `X.Y.Z`. It runs `scripts/release.py prepare`, which:
+   - builds the new `CHANGELOG.md` section from `changes/` (towncrier) and
+     deletes the consumed fragments;
+   - sets the version in `pyproject.toml` and `uv.lock`;
+   - sets `version:` and `date-released:` in `CITATION.cff` and the `version`
+     and `year` of the README BibTeX block, which are what researchers cite;
+   - points the `[Unreleased]` link at the bottom of `CHANGELOG.md` at the new
+     version and adds the new version's link.
 
-## Trusted Publishing setup (one-time, already configured)
+   It then opens a `release: X.Y.Z` PR with the **`changelog-exempt`** label,
+   which the changelog gate needs because the PR rewrites `CHANGELOG.md`.
+3. Review the PR, and tidy the changelog wording by pushing to its branch if
+   needed. GitHub holds the CI runs of a PR that a workflow opened: approve
+   them on the PR. Merge once CI is green. Don't merge anything else into
+   `main` until the release commit's CI run finishes: CI cancels in-progress
+   runs on the same branch, which would leave the tagged commit with a
+   cancelled run.
+4. Merging runs **Tag and release**. It tags the merge commit `vX.Y.Z` (even
+   if `main` has moved on), creates the GitHub Release with that version's
+   `CHANGELOG.md` section as its notes, and starts `publish.yml` on the tag,
+   which checks `tag == version`, builds and smoke-tests the wheel, and
+   publishes to PyPI. Watch both runs in the Actions tab.
+
+### By hand
+
+The workflows only automate these steps, so each can be done locally:
+
+```bash
+uv run python scripts/release.py prepare patch   # step 2's edits; prints X.Y.Z
+git switch -c release/X.Y.Z && git commit -am "release: X.Y.Z"
+gh pr create --title "release: X.Y.Z" --label changelog-exempt ...
+```
+
+Apply the label when you create the PR: the gate reads the labels from the
+event that started the run, and re-running a job replays that event, so a label
+added later is never seen (close and reopen the PR if you forget). A PR titled
+`release: X.Y.Z` with that label still runs Tag and release when it merges. If
+that run fails, tag and publish from the release merge commit yourself:
+
+```bash
+sha=$(gh pr view <release-PR-number> --json mergeCommit --jq .mergeCommit.oid)
+git tag vX.Y.Z "$sha"   # the release merge commit, even if main has moved on
+git push origin vX.Y.Z
+python scripts/release.py notes X.Y.Z > notes.md
+gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
+```
+
+Don't use `--notes-from-tag`: a plain `git tag` is lightweight, so the notes
+would be the tagged commit's message. A release published by a person triggers
+`publish.yml` itself.
+
+## One-time setup
+
+Prepare release needs **Allow GitHub Actions to create and approve pull
+requests**, under Settings, Actions, General, Workflow permissions. Without it
+the workflow pushes the release branch but fails to open the PR; open it by
+hand as above.
+
+### Trusted Publishing (already configured)
 
 The PyPI publisher is registered against the `pypi` GitHub Environment. For
 reference (or to re-register), the publisher is:

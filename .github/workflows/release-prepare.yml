@@ -1,0 +1,83 @@
+name: Prepare release
+
+# Opens the release PR that RELEASING.md used to build by hand: run it from the
+# Actions tab with `patch`, `minor`, `major` or an exact X.Y.Z. It builds the
+# CHANGELOG.md section from changes/ and brings pyproject.toml, uv.lock,
+# CITATION.cff, the README's BibTeX block and the CHANGELOG.md footer to the
+# new version (scripts/release.py), then opens `release: X.Y.Z` with the
+# `changelog-exempt` label the changelog gate needs. Merging that PR runs the
+# Tag and release workflow.
+#
+# Needs "Allow GitHub Actions to create and approve pull requests" in the
+# repository's Actions settings. GitHub holds the CI runs of a PR opened by a
+# workflow until someone approves them on the PR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "patch, minor, major, or an exact X.Y.Z"
+        required: true
+        default: patch
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Actions are pinned by SHA here, unlike the tag pins elsewhere: this job holds
+# a write token and prepares a release. Dependabot keeps the pins current.
+jobs:
+  prepare:
+    name: Open the release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release branch
+      pull-requests: write # open and label the release PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      # towncrier comes from the dev group, at the version uv.lock pins.
+      # --only-group installs that group without mushin and its torch stack.
+      - name: Install the dev tools
+        run: uv sync --only-group dev --frozen
+
+      - id: prepare
+        name: Update the release files
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          version=$(uv run --no-sync python scripts/release.py prepare "$VERSION_INPUT")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          uv run --no-sync python scripts/release.py notes "$version" > "$RUNNER_TEMP/notes.md"
+
+      - name: Open the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          branch="release/$VERSION"
+          git switch -c "$branch"
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "release: $VERSION"
+          git push origin "$branch"
+          {
+            echo "Release $VERSION, prepared by the Prepare release workflow."
+            echo
+            echo "- Review the wording of the new CHANGELOG.md section; edit it on this branch if needed."
+            echo "- Approve this PR's CI runs: GitHub holds them because a workflow opened the PR."
+            echo "- Merging tags the merge commit as v$VERSION, creates the GitHub Release with the notes below, and publishes to PyPI."
+            echo
+            echo "## Release notes"
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --base main --head "$branch" --title "release: $VERSION" \
+            --label changelog-exempt --body-file "$RUNNER_TEMP/body.md"
