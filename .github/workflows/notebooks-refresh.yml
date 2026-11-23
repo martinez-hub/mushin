@@ -16,7 +16,10 @@ name: Refresh notebook outputs
 # release workflow dispatches it, since a release created with the
 # GITHUB_TOKEN raises no `release` event. Opening the PR needs "Allow GitHub
 # Actions to create and approve pull requests", and GitHub holds its CI runs
-# until someone approves them.
+# until someone approves them. The PR changes only outputs, so it merges itself
+# once those runs pass (auto-merge, squash). A merge made with the
+# GITHUB_TOKEN starts no push workflows, so docs.yml's daily check, not the
+# merge, deploys the new outputs.
 
 on:
   release:
@@ -42,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the refresh branch
-      pull-requests: write # open the refresh PR
+      pull-requests: write # open the refresh PR and turn on its auto-merge
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
@@ -130,6 +133,8 @@ jobs:
             echo "records a clean tree and names $version. Prepared by the Refresh notebook outputs workflow."
             echo
             echo "GitHub holds the CI runs of a PR that a workflow opened: approve them on this PR."
+            echo "The PR merges itself once they pass, and the docs site picks up the new outputs"
+            echo "within a day (the Deploy docs workflow's daily check)."
           } > "$RUNNER_TEMP/body.md"
           url=$(gh pr create --base main --head "$branch" \
             --title "docs: refresh the notebook outputs for $version" \
@@ -138,3 +143,8 @@ jobs:
           git mv "changes/+notebooks-$version.misc.md" "changes/$number.misc.md"
           git commit -m "chore: number the changelog fragment now that the PR is #$number"
           git push origin "$branch"
+          # Turned on after the last push, with the squash commit's message set
+          # here so it doesn't list the two bot commits.
+          gh pr merge "$url" --auto --squash \
+            --subject "docs: refresh the notebook outputs for $version (#$number)" \
+            --body "Re-executed at $TAG by the Refresh notebook outputs workflow."
