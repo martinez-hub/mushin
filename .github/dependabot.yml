@@ -58,9 +58,10 @@ updates:
       github-actions:
         patterns: ["*"]
 
-  # pre-commit hook revisions (.pre-commit-config.yaml). Without this the hook
-  # pins drift from the dev-group pins the "uv" ecosystem keeps current — the
-  # ruff hook sat 15 patch releases behind the ruff CI lints with.
+  # pre-commit hook revisions (.pre-commit-config.yaml): the general file
+  # checks and nbstripout. ruff and codespell are not pinned there; their hooks
+  # run the dev-group versions this file's "uv" ecosystem keeps current, which
+  # are the ones CI runs.
   - package-ecosystem: "pre-commit"
     directory: "/"
     schedule:

@@ -26,14 +26,14 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
    - points the `[Unreleased]` link at the bottom of `CHANGELOG.md` at the new
      version and adds the new version's link.
 
+   `tests/test_release_metadata.py` fails until all of these name the new
+   version.
+
    It then opens a `release: X.Y.Z` PR with the **`changelog-exempt`** label,
    which the changelog gate needs because the PR rewrites `CHANGELOG.md`.
 3. Review the PR, and tidy the changelog wording by pushing to its branch if
    needed. GitHub holds the CI runs of a PR that a workflow opened: approve
-   them on the PR. Merge once CI is green. Don't merge anything else into
-   `main` until the release commit's CI run finishes: CI cancels in-progress
-   runs on the same branch, which would leave the tagged commit with a
-   cancelled run.
+   them on the PR. Merge once CI is green.
 4. Merging runs **Tag and release**. It tags the merge commit `vX.Y.Z` (even
    if `main` has moved on), creates the GitHub Release with that version's
    `CHANGELOG.md` section as its notes, and starts `publish.yml` on the tag,

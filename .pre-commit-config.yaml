@@ -1,9 +1,12 @@
 # See https://pre-commit.com. Install with `pre-commit install`.
 # Hook versions are bumped by Dependabot (see .github/dependabot.yml); run
-# `pre-commit autoupdate` for a manual bump. Keep the ruff-pre-commit `rev` in
-# step with the `ruff` pin in pyproject.toml's dev group — CI lints with the
-# latter (`uv run ruff check .`), so a skew lets local commits pass hooks that
-# CI then rejects.
+# `pre-commit autoupdate` for a manual bump. ruff and codespell are the
+# exception: they run from the dev environment (`uv run`), so they are the
+# versions uv.lock pins and CI runs. A hook pinned separately drifted (the ruff
+# hook once sat 15 patch releases behind) and arrived in its own Dependabot PR,
+# apart from the uv.lock bump, so the two could disagree between merges and
+# local commits could pass a hook that CI then rejected. Run `uv sync` before
+# the first commit so the environment exists.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -15,25 +18,32 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.5
+  - repo: local
     hooks:
       # types_or adds markdown AND jupyter: ruff formats python code blocks
       # inside .md and code cells inside .ipynb, and CI runs `ruff format
       # --check .` over the whole tree — without these the hook passes locally
       # on a doc snippet or a notebook cell that CI then rejects. Both gaps have
       # bitten: markdown once, then notebooks when 08_llm_examples was added.
+      # --force-exclude applies ruff's excludes to the files pre-commit passes,
+      # as the upstream ruff-pre-commit hooks do.
       - id: ruff-check     # lint
-        args: ["--fix"]
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix
+        language: system
         types_or: [python, pyi, markdown, jupyter]
+        require_serial: true
       - id: ruff-format    # format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
         types_or: [python, pyi, markdown, jupyter]
-
-  - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.3
-    hooks:
+        require_serial: true
       - id: codespell
-        additional_dependencies: ["tomli"]
+        name: codespell
+        entry: uv run codespell
+        language: system
+        types: [text]
         # Mirrors the Makefile's `spell` target, which CI runs. Left unscoped
         # the hook also reads notebook output cells and archived plans under
         # docs/, which are full of false positives CI never sees — so

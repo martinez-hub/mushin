@@ -20,7 +20,7 @@ pre-commit install  # recommended: runs ruff + codespell on each commit
 Before opening a PR, run the same checks CI runs:
 
 ```bash
-make check   # lint + format-check + spell + tests
+make check   # lint + format-check + spell + lock-check + tests
 ```
 
 Individual shortcuts: `make lint`, `make format`, `make spell`, `make test`,

@@ -21,10 +21,11 @@ the targets.
 
 ```bash
 uv sync --extra eval      # dev environment (same as `make sync`)
-make check                # lint + format-check + spell + tests: what CI runs
+make check                # lint + format-check + spell + lock-check + tests: what CI runs
 make lint                 # uv run ruff check .
 make format               # uv run ruff format .
 make spell                # codespell over the CI scope
+make lock-check           # uv lock --check: uv.lock matches pyproject.toml
 make test                 # full suite, fast hypothesis profile
 make docs-build           # mkdocs build --strict (CI fails on any warning)
 ```
@@ -108,8 +109,17 @@ local pass therefore does not cover them, and you should not claim it does.
   though no comment says so. The docs group's `mkdocs-material < 10` and
   `mkdocstrings[python] < 2` constrain only the docs build. Ask the maintainer
   before adding or removing a cap.
+- **`uv.lock` is generated and must be current.** Change dependencies in
+  `pyproject.toml`, then run `uv lock` (or `uv sync`) and commit both. Never
+  edit the lockfile by hand. CI's lint job runs `uv lock --check`
+  (`make lock-check`) and fails on a lock that no longer matches.
 - **Python 3.11 is the floor** (`target-version = "py311"`); 3.11 to 3.15 are
   the supported, CI-required versions.
+- **The citable version is the package version.** `CITATION.cff`'s `version`
+  and `date-released`, the README's BibTeX `version`, the newest
+  `CHANGELOG.md` section and its footer links must all name the version in
+  `pyproject.toml` (`tests/test_release_metadata.py`), so a release bumps them
+  together.
 - **Documented numbers can be pinned by tests.** `tests/test_docs_claims.py`
   checks that thresholds quoted in `docs/guides/statistics.md` match the code.
   If you change one side, change the other; do not just edit the test.
@@ -166,10 +176,6 @@ local pass therefore does not cover them, and you should not claim it does.
 - **No AI attribution.** Commits, PR bodies, code and docs carry no
   `Co-Authored-By:` trailers, "Generated with" footers or session links for AI
   tools.
-- **`uv.lock` is generated.** Change dependencies in `pyproject.toml`, then run
-  `uv lock` (or `uv sync`) and commit both. Never edit the lockfile by hand. CI
-  does not check that the lock is current: its `uv sync` re-resolves a stale
-  lock without failing.
 - **Patch-only Dependabot PRs merge themselves.**
   `.github/workflows/dependabot-auto-merge.yml` turns on auto-merge for a
   Dependabot PR whose largest bump is a patch, unless its `uv.lock` collapses a
