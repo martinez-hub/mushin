@@ -50,7 +50,11 @@ spell: ## Spell-check with codespell
 lock-check: ## Check that uv.lock matches pyproject.toml
 	uv lock --check
 
-check: lint format-check spell lock-check test ## Run all checks (what CI runs)
+# lock-check runs first, and alone: the others' `uv run` re-locks a stale
+# uv.lock, after which the check would pass. As a prerequisite it finishes
+# before the recipe starts, under `make -j` too.
+check: lock-check ## Run all checks (what CI runs)
+	$(MAKE) lint format-check spell test
 
 all: check ## Alias for `check`
 

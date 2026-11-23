@@ -12,12 +12,14 @@ permissions:
   contents: read
 
 # Cancel a superseded run on the same PR (e.g. when its branch is updated)
-# instead of letting redundant matrices pile up. Runs on main always finish:
-# cancelling there left a release commit with a cancelled run whenever another
-# PR merged before its CI was done, which RELEASING.md used to forbid by hand.
+# instead of letting redundant matrices pile up. Every other run (each push to
+# main) gets a group of its own, so it always finishes: sharing one cancelled a
+# release commit's run whenever another PR merged before it was done, which
+# RELEASING.md used to forbid by hand. Turning cancel-in-progress off is not
+# enough, because a newer run still cancels a *pending* one in its group.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   # Detect whether the change touches code, so docs-only PRs can skip the heavy
