@@ -154,7 +154,10 @@ local pass therefore does not cover them, and you should not claim it does.
   `changelog-exempt` label, which only release PRs use (`RELEASING.md`).
 - **Commit messages** use conventional prefixes, as in `git log`: `feat:`,
   `fix:`, `docs:`, `test:`, `ci:`, `build:`, `build(deps):`, `chore:`,
-  `release:`. The subject says what changed; the body says why.
+  `refactor:`, `perf:`, `release:`. The subject says what changed; the body
+  says why. A squash merge makes the PR title the subject on `main`, so
+  `.github/workflows/pr-title.yml` checks the PR title for one of these
+  prefixes.
 - **No AI attribution.** Commits, PR bodies, code and docs carry no
   `Co-Authored-By:` trailers, "Generated with" footers or session links for AI
   tools.

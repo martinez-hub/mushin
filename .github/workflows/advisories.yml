@@ -1,0 +1,107 @@
+name: Advisories
+
+# Audits every version uv.lock pins against PyPI's vulnerability data (pip-audit)
+# and files an issue when one has a known advisory. Dependabot's security
+# updates cover most packages, but not the ones .github/dependabot.yml ignores:
+# setuptools is ignored there because the uv updater cannot edit
+# [build-system], and GHSA-xmj3-9gf7-h52w sat open on its locked version for a
+# week. The audit covers every group and extra, and every Python and platform
+# the lock resolves for, so a dev or docs tool counts as much as a runtime
+# dependency.
+#
+# Deliberately NOT part of CI, like latest-deps.yml: a new advisory is someone
+# else's publication and must never block a merge. It runs on a schedule and
+# files an issue instead.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: advisories
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit uv.lock
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # to create its label and file/update the report (last step)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+
+      # pip-audit evaluates environment markers for the Python it runs on, so a
+      # package locked twice (numpy: one version for 3.11, another for 3.12+)
+      # would have one version skipped; and it refuses two pins of one name in
+      # a file. So the markers go, and each version lands in its own file.
+      - id: audit
+        name: Audit every locked version
+        run: |
+          uv export --frozen --all-extras --all-groups --no-hashes --no-emit-project \
+            -o "$RUNNER_TEMP/requirements.txt"
+          python3 - "$RUNNER_TEMP/requirements.txt" "$RUNNER_TEMP" <<'PY'
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          pins = defaultdict(list)
+          for line in Path(sys.argv[1]).read_text().splitlines():
+              line = line.split(";")[0].strip()
+              if line and not line.startswith(("#", "-")):
+                  name = line.split("==")[0].lower()
+                  if line not in pins[name]:
+                      pins[name].append(line)
+          for i in range(max(len(v) for v in pins.values())):
+              part = sorted(v[i] for v in pins.values() if len(v) > i)
+              Path(sys.argv[2], f"audit-{i + 1}.txt").write_text("\n".join(part) + "\n")
+          PY
+          status=0
+          for part in "$RUNNER_TEMP"/audit-*.txt; do
+            uvx "pip-audit>=2.10,<3" -r "$part" --no-deps --disable-pip \
+              --progress-spinner off --desc off --format markdown \
+              >> "$RUNNER_TEMP/report.md" || status=1
+          done
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # A scheduled job whose failure only appears in the Actions tab is a job
+      # nobody reads. File an issue, and reuse the open one rather than posting
+      # a duplicate every day until it is fixed.
+      - name: Report advisories as an issue
+        if: failure() && steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create advisories --force --color B60205 \
+            --description "A locked dependency version has a known advisory"
+          if [ -s "$RUNNER_TEMP/report.md" ]; then
+            report=$(cat "$RUNNER_TEMP/report.md")
+          else
+            report="pip-audit reported no table, so it most likely failed to run. Read the run log."
+          fi
+          existing=$(gh issue list --state open --label advisories \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$(printf '%s\n' \
+              "Still failing: $RUN_URL" "" "$report")"
+          else
+            gh issue create --title "Known advisories in uv.lock" --label advisories \
+              --body "$(printf '%s\n' \
+                "The scheduled \`Advisories\` run found locked versions with known advisories." \
+                "" \
+                "$report" \
+                "" \
+                "Run: $RUN_URL" \
+                "" \
+                "Fix: \`uv lock --upgrade-package <name>\` to a fixed version, then open a PR. For a package \`dependabot.yml\` ignores (setuptools), this is the only route." \
+                "" \
+                "This issue is reused while it stays open, so it will be commented on rather than duplicated.")"
+          fi
