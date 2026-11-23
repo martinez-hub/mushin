@@ -7,15 +7,18 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 
 ## Cutting a release
 
-1. Choose the bump (SemVer; `0.x` keeps breaking changes in the minor slot, so
-   a pending `changes/*.removed.md` fragment means a minor, and the workflow
-   refuses a patch release then). Preview the changelog section any time,
-   without consuming fragments:
+1. Preview the changelog section any time, without consuming fragments:
    ```bash
    make changelog-draft VERSION=X.Y.Z
    ```
-2. In the Actions tab, run **Prepare release** with `patch`, `minor`, `major`
-   or an exact `X.Y.Z`. It runs `scripts/release.py prepare`, which:
+2. In the Actions tab, run **Prepare release**. Its version defaults to
+   `auto`, which picks a minor release when a pending fragment adds, changes,
+   removes or deprecates something, and a patch release when every fragment
+   is a fix or misc; every release from 0.15.0 to 0.20.0 followed that rule.
+   `patch`, `minor`, `major` or an exact `X.Y.Z` overrides it (SemVer; `0.x`
+   keeps breaking changes in the minor slot, so a patch release carrying a
+   `changes/*.removed.md` fragment is refused). It runs
+   `scripts/release.py prepare`, which:
    - renames each `+<slug>` fragment after the PR whose squash merge added it,
      so its entry carries the PR number;
    - builds the new `CHANGELOG.md` section from `changes/` (towncrier) and
@@ -48,7 +51,7 @@ verifies `tag == version`, builds the sdist + wheel, and publishes to PyPI.
 The workflows only automate these steps, so each can be done locally:
 
 ```bash
-uv run python scripts/release.py prepare patch   # step 2's edits; prints X.Y.Z
+uv run python scripts/release.py prepare auto    # step 2's edits; prints X.Y.Z
 git switch -c release/X.Y.Z && git commit -am "release: X.Y.Z"
 gh pr create --title "release: X.Y.Z" --label changelog-exempt ...
 ```

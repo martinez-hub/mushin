@@ -73,6 +73,63 @@ def test_a_removal_needs_a_minor_release():
     release.check_fragments(["+slug.misc.md"], "1.4.2", "1.4.3")
 
 
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("12.fixed.md", "fixed"),
+        ("+some-slug.added.md", "added"),
+        ("12.fixed.1.md", "fixed"),
+        ("418.misc.md", "misc"),
+    ],
+)
+def test_fragment_type(name, expected):
+    assert release.fragment_type(name) == expected
+
+
+def test_fragment_type_refuses_a_name_without_a_type():
+    with pytest.raises(SystemExit, match="not a fragment name"):
+        release.fragment_type("notes.md")
+
+
+@pytest.mark.parametrize(
+    "fragments, expected",
+    [
+        (["12.fixed.md", "13.misc.md"], "patch"),
+        (["13.misc.md"], "patch"),
+        (["12.fixed.md", "+slug.added.md"], "minor"),
+        (["12.changed.md"], "minor"),
+        (["12.deprecated.md"], "minor"),
+        (["12.removed.md", "13.fixed.md"], "minor"),
+    ],
+)
+def test_suggest_bump(fragments, expected):
+    assert release.suggest_bump(fragments) == expected
+
+
+def test_every_fragment_type_has_a_bump():
+    # A new towncrier type must be sorted into minor or patch on purpose:
+    # anything outside MINOR_TYPES silently counts as a patch.
+    types = {t["directory"] for t in release._towncrier_types()}
+    assert types - release.MINOR_TYPES == {"fixed", "misc"}
+
+
+def test_list_fragments_skips_the_readme_and_hidden_files(tmp_path):
+    changes = tmp_path / "changes"
+    changes.mkdir()
+    for name in ["README.md", ".gitkeep", "12.fixed.md", "+slug.added.md"]:
+        (changes / name).write_text("", encoding="utf-8")
+    assert release.list_fragments(tmp_path) == ["+slug.added.md", "12.fixed.md"]
+    # What changes/ holds right now is all fragments the type check accepts.
+    for name in release.list_fragments():
+        release.fragment_type(name)
+
+
+def test_auto_never_picks_a_release_check_fragments_refuses():
+    fragments = ["12.removed.md", "13.fixed.md"]
+    new = release.next_version("1.4.2", release.suggest_bump(fragments))
+    release.check_fragments(fragments, "1.4.2", new)
+
+
 def test_update_citation_sets_only_version_and_date():
     before = _read("CITATION.cff")
     after = release.update_citation(before, "9.8.7", "2031-02-03")
