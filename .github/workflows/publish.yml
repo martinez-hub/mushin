@@ -6,6 +6,10 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # The Tag and release workflow starts it this way, on the new tag: a release
+  # created with the GITHUB_TOKEN raises no `release` event. The tag check
+  # below refuses a run started on anything but the matching tag.
+  workflow_dispatch:
 
 # Default to read-only; the `publish` job elevates to id-token: write for
 # Trusted Publishing (see its own permissions block below).
@@ -21,6 +25,10 @@ jobs:
 
       - name: Verify tag matches package version
         run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::Run this on a release tag (vX.Y.Z), not on $GITHUB_REF_TYPE $GITHUB_REF_NAME"
+            exit 1
+          fi
           TAG="${GITHUB_REF_NAME#v}"
           PKG=$(uv version --short)
           echo "tag=$TAG package=$PKG"

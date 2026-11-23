@@ -233,6 +233,10 @@ jobs:
     # PRs only (the check diffs the base branch); never on push to main, and
     # exempt Dependabot (lockfile/deps PRs carry no user-facing fragment).
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+      issues: read            # the PR's current labels (last step but one)
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -247,10 +251,23 @@ jobs:
       # fragment gate. Reject direct CHANGELOG.md edits unless the PR carries the
       # `changelog-exempt` label — used by release PRs (which rewrite it via
       # `make changelog`) and the one-time bootstrap PR that adds the marker.
+      # The labels are read from the API, as they are now, not from the event
+      # that started the run: `gh pr create --label` (as the Prepare release
+      # workflow opens its PR) adds them in a second call after opening the
+      # PR, and a re-run replays the original event. So a label added late
+      # counts once the job is re-run.
       - name: Disallow direct CHANGELOG.md edits (use a changes/ fragment)
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-exempt') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD -- CHANGELOG.md | grep -q .; then
+          labels=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name')
+          if grep -qx changelog-exempt <<< "$labels"; then
+            echo "The PR has the changelog-exempt label, so CHANGELOG.md may be edited."
+            exit 0
+          fi
+          if git diff --name-only "origin/$BASE_REF...HEAD" -- CHANGELOG.md | grep -q .; then
             echo "::error::CHANGELOG.md is assembled from changes/ fragments at release time — don't edit it directly. Add a changes/<id>.<type>.md fragment instead (see changes/README.md). Release PRs (or the towncrier bootstrap): apply the 'changelog-exempt' label."
             exit 1
           fi

@@ -73,6 +73,7 @@ local pass therefore does not cover them, and you should not claim it does.
 | `docs/notebooks/` | Example notebooks with committed outputs; CI re-executes them. |
 | `docs/superpowers/` | Internal design specs and plans. Excluded from the site; never link to it from published docs. |
 | `docs/llms.txt` | The LLM-facing index of the docs site, served at <https://martinez-hub.github.io/mushin/llms.txt>. |
+| `scripts/release.py` | Prepares a release's files (changelog, version, `uv.lock`, citation metadata) and prints a version's release notes; the Prepare release and Tag and release workflows run it (`RELEASING.md`). |
 | `scripts/llms_full.py` | An mkdocs hook (`hooks:` in `mkdocs.yml`) that writes `llms-full.txt`, every page but the contributing guide and the changelog as one Markdown file, into the built site next to `docs/llms.txt` on every build. |
 | `changes/` | Towncrier news fragments (see below). |
 | `paper/` | The paper source (LaTeX); built by `.github/workflows/paper-pdf.yml`. |
@@ -151,23 +152,36 @@ local pass therefore does not cover them, and you should not claim it does.
   venv holding exactly that, so the line must cover every import. Outputs are
   committed; the `nbstripout` hook runs with `--keep-output --keep-id`. Execute
   a notebook against a clean, committed tree so its provenance records
-  `dirty=false`.
+  `dirty=false`. After each release,
+  `.github/workflows/notebooks-refresh.yml` re-runs the notebooks that have
+  outputs at the release tag and opens the PR with their new outputs.
 
 ## Conventions
 
 - **Every PR adds a news fragment** under `changes/`, named
   `<PR-number>.<type>.md` with `<type>` one of `added`, `changed`, `fixed`,
-  `removed`, `deprecated`, `misc`. Before the PR exists, use `+<slug>.<type>.md`
-  and rename it to the number once it does. A `misc` fragment (CI, refactor,
-  typo; nothing user-facing) is an empty file. See `changes/README.md`.
+  `removed`, `deprecated`, `misc`. Before the PR exists, use `+<slug>.<type>.md`;
+  there is no need to rename it afterwards, because the release numbers it from
+  the merge commit that added it (`scripts/release.py`). A `misc` fragment (CI,
+  refactor, typo; nothing user-facing) is an empty file. See
+  `changes/README.md`.
 - **Never edit `CHANGELOG.md` directly.** CI rejects it unless the PR has the
   `changelog-exempt` label, which only release PRs use (`RELEASING.md`).
 - **Commit messages** use conventional prefixes, as in `git log`: `feat:`,
   `fix:`, `docs:`, `test:`, `ci:`, `build:`, `build(deps):`, `chore:`,
-  `release:`. The subject says what changed; the body says why.
+  `refactor:`, `perf:`, `release:`. The subject says what changed; the body
+  says why. A squash merge makes the PR title the subject on `main`, so
+  `.github/workflows/pr-title.yml` checks the PR title for one of these
+  prefixes.
 - **No AI attribution.** Commits, PR bodies, code and docs carry no
   `Co-Authored-By:` trailers, "Generated with" footers or session links for AI
   tools.
+- **Patch-only Dependabot PRs merge themselves.**
+  `.github/workflows/dependabot-auto-merge.yml` turns on auto-merge for a
+  Dependabot PR whose largest bump is a patch, unless its `uv.lock` collapses a
+  package locked more than once, and the PR merges when `ci-ok` passes. Pushing
+  your own commit to a Dependabot PR turns auto-merge off, so it then merges
+  only when someone merges it.
 - **Public API** is the top-level `mushin` namespace plus the documented
   `mushin.workflows`, `mushin.benchmark` and `mushin.llm` symbols. Underscore
   modules are internal. The project is pre-1.0: a breaking change goes in a

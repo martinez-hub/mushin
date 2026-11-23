@@ -1,0 +1,140 @@
+name: Refresh notebook outputs
+
+# After a release, re-runs at the release tag every example notebook that has
+# committed outputs (08 ships without them) and opens a PR with the new
+# outputs: the "docs: refresh the notebook outputs for X.Y.Z" PR that followed
+# releases by hand. The docs render the committed outputs (mkdocs-jupyter,
+# execute: false), whose provenance names the version that produced them.
+#
+# Each notebook runs from inside the checkout, so its provenance records the
+# tag's commit, and writes its executed copy outside it, so the tree stays
+# clean and every run records dirty=false; a notebook that leaves files behind
+# fails the run instead of dirtying the ones after it. Python 3.11, the oldest
+# supported version, as the hand refreshes used.
+#
+# Runs when a release is published, and on dispatch with a tag: the Tag and
+# release workflow dispatches it, since a release created with the
+# GITHUB_TOKEN raises no `release` event. Opening the PR needs "Allow GitHub
+# Actions to create and approve pull requests", and GitHub holds its CI runs
+# until someone approves them.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to re-run the notebooks at, e.g. v0.20.0"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: notebooks-refresh
+  cancel-in-progress: false
+
+# Actions are pinned by SHA here, unlike the tag pins elsewhere: this job holds
+# a write token. Dependabot keeps the pins current.
+jobs:
+  refresh:
+    name: Re-run the notebooks and open a PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the refresh branch
+      pull-requests: write # open the refresh PR
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          fetch-depth: 0
+      # No cache: PR runs can write the uv cache, and this job holds a write
+      # token, so it installs from the package index instead.
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.11"
+          enable-cache: false
+
+      # The extras the CI `notebooks` job installs, so every notebook runs.
+      - name: Install the notebooks' environment
+        run: |
+          uv sync --extra eval --extra viz --extra netcdf
+          uv run --no-sync python -m ipykernel install --user --name python3
+
+      - name: Re-run every notebook that has outputs
+        run: |
+          out="$RUNNER_TEMP/notebooks"
+          mkdir -p "$out"
+          for nb in docs/notebooks/*.ipynb; do
+            if ! grep -q '"output_type"' "$nb"; then
+              echo "Skipping $nb: it has no committed outputs"
+              continue
+            fi
+            uv run --no-sync jupyter nbconvert --to notebook --execute "$nb" --output-dir "$out"
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "::error::$nb left files in the checkout, so the next notebook's provenance would record dirty=true:"
+              git status --porcelain
+              exit 1
+            fi
+          done
+          uv run --no-sync nbstripout --keep-output --keep-id "$out"/*.ipynb
+
+      # The outputs come from the tag; the PR goes to main. Copying them over a
+      # notebook whose cells changed on main since the tag would revert that
+      # change, and copying one main has since deleted would bring it back, so
+      # both are left to a person. Only cell types and sources are compared:
+      # outputs are what this replaces.
+      - name: Open the refresh PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${TAG#v}"
+          branch="docs/notebook-outputs-$version"
+          git switch -c "$branch" origin/main
+          python3 - "$TAG" "$RUNNER_TEMP/notebooks" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          tag, out = sys.argv[1], Path(sys.argv[2])
+
+          def cells(path):
+              return [(c["cell_type"], "".join(c["source"]))
+                      for c in json.loads(path.read_text(encoding="utf-8"))["cells"]]
+
+          changed = [
+              nb.name for nb in sorted(out.glob("*.ipynb"))
+              if not (Path("docs/notebooks") / nb.name).exists()
+              or cells(nb) != cells(Path("docs/notebooks") / nb.name)
+          ]
+          if changed:
+              print(f"::error::{', '.join(changed)} changed or went away on main "
+                    f"since {tag}; refresh by hand")
+              sys.exit(1)
+          PY
+          cp "$RUNNER_TEMP"/notebooks/*.ipynb docs/notebooks/
+          if git diff --quiet -- docs/notebooks; then
+            echo "::notice::The notebook outputs are already current for $version"
+            exit 0
+          fi
+          : > "changes/+notebooks-$version.misc.md"
+          git add docs/notebooks "changes/+notebooks-$version.misc.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "docs: refresh the notebook outputs for $version"
+          git push origin "$branch"
+          {
+            echo "Re-executed the example notebooks that have outputs at the $TAG tag (Python 3.11),"
+            echo "with each executed copy written outside the checkout, so every run's provenance"
+            echo "records a clean tree and names $version. Prepared by the Refresh notebook outputs workflow."
+            echo
+            echo "GitHub holds the CI runs of a PR that a workflow opened: approve them on this PR."
+          } > "$RUNNER_TEMP/body.md"
+          url=$(gh pr create --base main --head "$branch" \
+            --title "docs: refresh the notebook outputs for $version" \
+            --body-file "$RUNNER_TEMP/body.md")
+          number="${url##*/}"
+          git mv "changes/+notebooks-$version.misc.md" "changes/$number.misc.md"
+          git commit -m "chore: number the changelog fragment now that the PR is #$number"
+          git push origin "$branch"

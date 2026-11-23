@@ -35,8 +35,8 @@ Every user-facing PR needs a news fragment in `changes/`:
 changes/<id>.<type>.md
 ```
 
-Where `<id>` is the GitHub issue or PR number (or a short slug for pre-issue
-work), and `<type>` is one of `added`, `changed`, `fixed`, `removed`,
+Where `<id>` is the GitHub issue or PR number (or `+` and a short slug for
+pre-issue work, which the release renames after the PR that added it), and `<type>` is one of `added`, `changed`, `fixed`, `removed`,
 `deprecated`, or `misc`. The fragment body is a single plain-English sentence
 describing the change. The exception is `misc`, the escape hatch for PRs with nothing
 user-facing, which renders without that text (see
