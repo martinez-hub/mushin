@@ -154,7 +154,8 @@ local pass therefore does not cover them, and you should not claim it does.
   a notebook against a clean, committed tree so its provenance records
   `dirty=false`. After each release,
   `.github/workflows/notebooks-refresh.yml` re-runs the notebooks that have
-  outputs at the release tag and opens the PR with their new outputs.
+  outputs at the release tag and opens the PR with their new outputs, which
+  merges itself once its CI runs are approved and pass.
 
 ## Conventions
 
@@ -181,7 +182,9 @@ local pass therefore does not cover them, and you should not claim it does.
   Dependabot PR whose largest bump is a patch, unless its `uv.lock` collapses a
   package locked more than once, and the PR merges when `ci-ok` passes. Pushing
   your own commit to a Dependabot PR turns auto-merge off, so it then merges
-  only when someone merges it.
+  only when someone merges it. A merge made this way starts no workflows on
+  `main` (no CI run, no docs deploy); `.github/workflows/docs.yml` checks once
+  a day and deploys when the site is behind `main`.
 - **Public API** is the top-level `mushin` namespace plus the documented
   `mushin.workflows`, `mushin.benchmark` and `mushin.llm` symbols. Underscore
   modules are internal. The project is pre-1.0: a breaking change goes in a

@@ -4,9 +4,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # A merge made with a workflow's GITHUB_TOKEN (Dependabot's auto-merge, the
+  # notebook refresh PR) starts no workflows, so the push above never fires
+  # for it. Once a day, deploy if the site is behind main.
+  schedule:
+    - cron: "37 4 * * *"
 
 permissions:
   contents: read
+  deployments: read # the scheduled check reads the last Pages deployment
   pages: write
   id-token: write
 
@@ -15,7 +21,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  behind:
+    name: Is the site behind main?
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      behind: ${{ steps.check.outputs.behind }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read -r id sha < <(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=1" \
+            --jq '.[0] | "\(.id) \(.sha)"')
+          state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses?per_page=1" --jq '.[0].state')
+          if [ "$sha" = "$GITHUB_SHA" ] && [ "$state" = success ]; then
+            echo "The site was deployed from $GITHUB_SHA, main's head"
+            echo "behind=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "The site is from $sha ($state); main is at $GITHUB_SHA"
+            echo "behind=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: behind
+    # On push and dispatch, `behind` is skipped and the build always runs.
+    if: ${{ !cancelled() && (needs.behind.result == 'skipped' || needs.behind.outputs.behind == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
