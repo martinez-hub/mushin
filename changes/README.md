@@ -21,6 +21,11 @@ release is prepared, it is renamed after the PR whose squash merge added it
 | `deprecated` | Deprecated | soon-to-be-removed features |
 | `misc` | Misc | CI/refactor/typo PRs with nothing user-facing |
 
+The types also pick the next version when a release is prepared with the
+default `auto`: any `added`, `changed`, `removed` or `deprecated` fragment
+makes it a minor release, and only `fixed` and `misc` fragments a patch
+release (`RELEASING.md`).
+
 The file holds one line of Markdown describing the change, written for users.
 For example, `changes/123.fixed.md` containing:
 

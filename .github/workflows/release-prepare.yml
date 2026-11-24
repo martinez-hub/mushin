@@ -1,7 +1,9 @@
 name: Prepare release
 
 # Opens the release PR that RELEASING.md used to build by hand: run it from the
-# Actions tab with `patch`, `minor`, `major` or an exact X.Y.Z. It builds the
+# Actions tab. The default, `auto`, picks a minor release when a fragment adds,
+# changes, removes or deprecates something and a patch release otherwise;
+# `patch`, `minor`, `major` or an exact X.Y.Z overrides it. It builds the
 # CHANGELOG.md section from changes/ and brings pyproject.toml, uv.lock,
 # CITATION.cff, the README's BibTeX block and the CHANGELOG.md footer to the
 # new version (scripts/release.py), then opens `release: X.Y.Z` with the
@@ -16,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "patch, minor, major, or an exact X.Y.Z"
+        description: "auto (minor or patch, from the fragments), patch, minor, major, or an exact X.Y.Z"
         required: true
-        default: patch
+        default: auto
         type: string
 
 permissions: {}
@@ -67,6 +69,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.prepare.outputs.version }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           branch="release/$VERSION"
           git switch -c "$branch"
@@ -78,6 +81,10 @@ jobs:
           {
             echo "Release $VERSION, prepared by the Prepare release workflow."
             echo
+            if [ "$VERSION_INPUT" = auto ]; then
+              echo "The workflow picked this version from the fragments: a minor release when one adds, changes, removes or deprecates something, a patch release otherwise. For another version, close this PR and run Prepare release with that version."
+              echo
+            fi
             echo "- Review the wording of the new CHANGELOG.md section; edit it on this branch if needed."
             echo "- Approve this PR's CI runs: GitHub holds them because a workflow opened the PR."
             echo "- Merging tags the merge commit as v$VERSION, creates the GitHub Release with the notes below, and publishes to PyPI."

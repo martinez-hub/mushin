@@ -4,13 +4,16 @@
 silently when forgotten. The Prepare release workflow runs `prepare`, and the
 Tag and release workflow runs `notes`; both work the same way locally.
 
-    python scripts/release.py prepare {patch,minor,major,X.Y.Z}
-        Numbers each `+<slug>` fragment after the PR that added it, builds the
-        CHANGELOG.md section from changes/ (towncrier, which also deletes the
-        fragments), sets the version in pyproject.toml and uv.lock
-        (`uv version --no-sync`), and brings CITATION.cff, the README's BibTeX
-        block and the CHANGELOG.md footer links to the new version, so
-        tests/test_release_metadata.py passes. Prints the new version.
+    python scripts/release.py prepare {auto,patch,minor,major,X.Y.Z}
+        `auto` picks the bump from the fragments in changes/: minor when one
+        adds, changes, removes or deprecates something, patch when all are
+        fixes or misc. Numbers each `+<slug>` fragment after the PR that
+        added it, builds the CHANGELOG.md section from changes/ (towncrier,
+        which also deletes the fragments), sets the version in pyproject.toml
+        and uv.lock (`uv version --no-sync`), and brings CITATION.cff, the
+        README's BibTeX block and the CHANGELOG.md footer links to the new
+        version, so tests/test_release_metadata.py passes. Prints the new
+        version.
 
     python scripts/release.py notes X.Y.Z
         Prints that version's CHANGELOG.md section, without its heading, as
@@ -55,13 +58,39 @@ def next_version(current: str, spec: str) -> str:
     return new
 
 
+def fragment_type(name: str) -> str:
+    """The type of a towncrier fragment: `12.fixed.md`, `+slug.fixed.md`, or
+    `12.fixed.1.md` (a PR's second `fixed` entry) are all `fixed`. Like
+    towncrier, it takes the last dotted part that names a configured type."""
+    types = {t["directory"] for t in _towncrier_types()}
+    for part in reversed(name.split(".")):
+        if part in types:
+            return part
+    raise SystemExit(f"changes/{name}: not a fragment name (<id>.<type>.md)")
+
+
+# Pre-1.0, anything that adds, changes, removes or deprecates behavior has
+# shipped as a minor release, and fixes alone as a patch: every release from
+# 0.15.0 to 0.20.0 follows this rule. Older ones sometimes shipped an addition
+# in a patch.
+MINOR_TYPES = frozenset({"added", "changed", "removed", "deprecated"})
+
+
+def suggest_bump(fragments: list[str]) -> str:
+    """`minor` when a fragment adds, changes, removes or deprecates something,
+    `patch` when every fragment is a fix or misc. Never `major`: that stays a
+    person's call."""
+    types = {fragment_type(f) for f in fragments}
+    return "minor" if types & MINOR_TYPES else "patch"
+
+
 def check_fragments(fragments: list[str], current: str, new: str) -> None:
     """Refuse a release with nothing to announce, and a patch release carrying a
     removal: the project is pre-1.0, so breaking changes take a minor bump
     (RELEASING.md)."""
     if not fragments:
         raise SystemExit("changes/ holds no fragments: there is nothing to release")
-    removed = [f for f in fragments if f.split(".")[-2] == "removed"]
+    removed = [f for f in fragments if fragment_type(f) == "removed"]
     if removed and _parse(new)[:2] == _parse(current)[:2]:
         raise SystemExit(
             f"{', '.join(removed)} removes something, which needs a minor "
@@ -162,16 +191,36 @@ def _write(name: str, text: str) -> None:
     (ROOT / name).write_text(text, encoding="utf-8")
 
 
+def list_fragments(root: Path = ROOT) -> list[str]:
+    """The fragment names in changes/: everything but README.md and hidden
+    files such as .gitkeep, which towncrier skips too. Counting .gitkeep would
+    let a release with nothing in it past the "nothing to release" check."""
+    return sorted(
+        p.name
+        for p in (root / "changes").iterdir()
+        if p.name != "README.md" and not p.name.startswith(".")
+    )
+
+
+def _towncrier_types() -> list[dict]:
+    return tomllib.loads(_read("pyproject.toml"))["tool"]["towncrier"]["type"]
+
+
 def prepare(spec: str) -> str:
     pyproject = tomllib.loads(_read("pyproject.toml"))
     current = pyproject["project"]["version"]
+    fragments = list_fragments()
+    if spec == "auto":
+        spec = suggest_bump(fragments)
+        types = ", ".join(sorted({fragment_type(f) for f in fragments}))
+        print(
+            f"auto: a {spec} release, from {types or 'no'} fragments", file=sys.stderr
+        )
     new = next_version(current, spec)
+    # Checked before numbering, so a refused release renames nothing.
+    check_fragments(fragments, current, new)
     for old, renamed in number_fragments():
         print(f"{old} -> {renamed}", file=sys.stderr)
-    fragments = sorted(
-        p.name for p in (ROOT / "changes").iterdir() if p.name != "README.md"
-    )
-    check_fragments(fragments, current, new)
 
     # towncrier writes today's date into the heading and `git rm`s the
     # fragments; CITATION.cff then takes its date from that heading. Their
